@@ -12,6 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use crate::brief;
+use crate::cadence::Cadence;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -240,23 +241,25 @@ impl Issue {
         Some((number, to, filing))
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> Cadence {
+        let mut cadence = Cadence::default();
         let Some((inner, room)) = brief::room(over) else {
-            return;
+            return cadence;
         };
         let dim = Style::new().add_modifier(Modifier::DIM);
         let typed = |style| menu::wrap(&format!("› {}", self.typed), inner, style);
-        let (mut lines, keys) = match &self.stage {
+        let (mut lines, keys, spinner) = match &self.stage {
             Stage::Listing => {
-                let mut lines = menu::waiting(LISTING, inner, dim, sidebar::frame(now));
+                let mut lines = menu::waiting(LISTING, inner, dim, sidebar::frame(wall));
+                let spinner = (!lines.is_empty()).then_some(0);
                 if !self.typed.is_empty() {
                     lines.push(Line::default());
                     lines.extend(typed(dim));
                 }
-                (lines, vec![(Hint::Esc, "Close")])
+                (lines, vec![(Hint::Esc, "Close")], spinner)
             },
             Stage::Nowhere(why) => {
-                (brief::paragraphs(why, inner, Style::new()), vec![(Hint::Esc, "Close")])
+                (brief::paragraphs(why, inner, Style::new()), vec![(Hint::Esc, "Close")], None)
             },
             Stage::Found { remotes, at, picking: true } => {
                 let mut lines = brief::paragraphs(WHICH, inner, dim);
@@ -270,7 +273,11 @@ impl Issue {
                     lines.push(Line::default());
                     lines.extend(typed(dim));
                 }
-                (lines, vec![(Hint::Moves, "Move"), (Hint::Enter, "Pick"), (Hint::Esc, "Close")])
+                (
+                    lines,
+                    vec![(Hint::Moves, "Move"), (Hint::Enter, "Pick"), (Hint::Esc, "Close")],
+                    None,
+                )
             },
             Stage::Found { remotes, at, picking: false } => {
                 let says = format!(
@@ -287,13 +294,14 @@ impl Issue {
                     keys.push((Hint::Tab, "Repository"));
                 }
                 keys.push((Hint::Esc, "Close"));
-                (lines, keys)
+                (lines, keys, None)
             },
         };
         let footer = [Line::default(), menu::keys_line(inner, &keys)];
         let lines_room = room.saturating_sub(footer.len());
-        if lines.len() > lines_room {
-            lines.drain(..lines.len() - lines_room);
+        let drained = lines.len().saturating_sub(lines_room);
+        if drained > 0 {
+            lines.drain(..drained);
         }
         lines.extend(footer);
         let named = self.picked().map_or_else(|| self.repository.name.clone(), ToString::to_string);
@@ -302,6 +310,10 @@ impl Issue {
             Machine::Remote(on) => format!("{named} on {on}"),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
+        if inner > 0 && lines_room > 0 && spinner.is_some_and(|at| at >= drained) {
+            cadence.spin();
+        }
+        cadence
     }
 }
 

@@ -172,7 +172,8 @@ impl ReviewPane {
         }
     }
 
-    pub fn loaded(&mut self, response: Result<Arc<LoadedDiff>, String>, revision: NonZeroU64) {
+    #[must_use]
+    pub fn loaded(&mut self, response: Result<Arc<LoadedDiff>, String>, revision: NonZeroU64) -> bool {
         let current_revision = match &self.state {
             PaneState::Loading => None,
             PaneState::Failed { revision, .. } | PaneState::Loaded { revision, .. } => {
@@ -180,7 +181,7 @@ impl ReviewPane {
             }
         };
         if current_revision.is_some_and(|current| revision < current) {
-            return;
+            return false;
         }
         match response {
             Ok(diff) => {
@@ -230,6 +231,7 @@ impl ReviewPane {
                 }
             },
         }
+        true
     }
 
     #[must_use]
@@ -1550,7 +1552,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     #[test]
     fn draws_split_view_with_unicode_fallback_and_kitty_overlay() {
         let mut pane = ReviewPane::loading();
-        pane.loaded(Ok(loaded_diff(SAMPLE)), rev(1));
+        assert!(pane.loaded(Ok(loaded_diff(SAMPLE)), rev(1)));
         assert_eq!(pane.tab_label(), "review +1 -1");
 
         let area = Rect::new(0, 0, 110, 10);
@@ -1589,14 +1591,14 @@ diff --git a/src/lib.rs b/src/lib.rs
 +b
 +c
 ";
-        pane.loaded(Ok(loaded_diff(newer)), rev(5));
+        assert!(pane.loaded(Ok(loaded_diff(newer)), rev(5)));
         assert_eq!(pane.tab_label(), "review +2 -0");
-        pane.loaded(Ok(loaded_diff(SAMPLE)), rev(4));
+        assert!(!pane.loaded(Ok(loaded_diff(SAMPLE)), rev(4)));
         assert_eq!(pane.tab_label(), "review +2 -0");
 
         let mut failed_pane = ReviewPane::loading();
-        failed_pane.loaded(Err("newer failure".to_owned()), rev(5));
-        failed_pane.loaded(Ok(loaded_diff(SAMPLE)), rev(4));
+        assert!(failed_pane.loaded(Err("newer failure".to_owned()), rev(5)));
+        assert!(!failed_pane.loaded(Ok(loaded_diff(SAMPLE)), rev(4)));
         assert!(matches!(
             failed_pane.state,
             PaneState::Failed { revision, .. } if revision == rev(5)
@@ -1606,7 +1608,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     #[test]
     fn keys_drive_explain_ask_and_narrow_pane_never_disagrees_on_layout() {
         let mut pane = ReviewPane::loading();
-        pane.loaded(Ok(loaded_diff(SAMPLE)), rev(1));
+        assert!(pane.loaded(Ok(loaded_diff(SAMPLE)), rev(1)));
         let area = Rect::new(0, 0, 110, 10);
         let mut buf = Buffer::empty(area);
         pane.draw(&mut buf, area, true, None);
@@ -1651,7 +1653,7 @@ diff --git a/crates/a/two.rs b/crates/a/two.rs
 +more();
 ";
         let mut pane = ReviewPane::loading();
-        pane.loaded(Ok(loaded_diff(patch)), rev(1));
+        assert!(pane.loaded(Ok(loaded_diff(patch)), rev(1)));
         let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         pane.draw(&mut buf, area, true, None);

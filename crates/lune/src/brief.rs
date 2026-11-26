@@ -17,6 +17,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
+use crate::cadence::Cadence;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
@@ -519,37 +520,47 @@ impl Briefing {
         self.written.is_some()
     }
 
+    #[cfg(test)]
     pub fn turning(&self) -> bool {
         self.written.is_none()
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, over: Rect, now: SystemTime) {
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> Cadence {
+        let mut cadence = Cadence::default();
         let Some((inner, room)) = room(over) else {
-            return;
+            return cadence;
         };
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let (mut lines, keys, at) = match &self.written {
+        let (mut lines, keys, at, spinner) = match &self.written {
             None => {
                 let asking = format!("Asking {MODEL}…");
-                let asking = menu::waiting(&asking, inner, dim, sidebar::frame(now));
-                (asking, (Hint::Esc, "Close"), None)
+                let asking = menu::waiting(&asking, inner, dim, sidebar::frame(wall));
+                let spinner = (!asking.is_empty()).then_some(0);
+                (asking, (Hint::Esc, "Close"), None, spinner)
             },
             Some(Written { at, said }) => {
                 let lines = match said {
                     Ok(said) => paragraphs(said, inner, Style::new()),
                     Err(why) => paragraphs(why, inner, Style::new().fg(moonlight::RED)),
                 };
-                (lines, (Hint::AnyKey, "Close"), at.as_ref().map(|at| format!("at {at}")))
+                (lines, (Hint::AnyKey, "Close"), at.as_ref().map(|at| format!("at {at}")), None)
             },
         };
         let footer = [Line::default(), menu::keys_line(inner, &[keys])];
         let lines_room = room.saturating_sub(footer.len());
+        let mut kept_spinner = inner > 0 && spinner.is_some_and(|index| index < lines_room);
         if lines.len() > lines_room {
-            lines.truncate(lines_room.saturating_sub(1));
+            let kept = lines_room.saturating_sub(1);
+            lines.truncate(kept);
+            kept_spinner = inner > 0 && spinner.is_some_and(|index| index < kept);
             lines.extend((lines_room > 0).then(|| Line::styled(" …", dim)));
         }
         lines.extend(footer);
         boxed(buffer, over, &self.title, at.as_deref().unwrap_or(""), &lines);
+        if kept_spinner {
+            cadence.spin();
+        }
+        cadence
     }
 }
 
@@ -1078,5 +1089,22 @@ Its transcript is unknown: Claude Code names none for it.
         let why = "brief: claude is not on the PATH".to_owned();
         briefing.written(Written { at: Some("18:42".to_owned()), said: Err(why) });
         assert_eq!(shown(&briefing, 40, 8)[2], "│ brief: claude is not on the PATH     │");
+    }
+
+    #[test]
+    fn a_waiting_brief_spins_only_when_the_waiting_line_fits_in_the_box() {
+        let briefing = asked(1, "Brief of every session");
+        let drawn = crate::clock::Moment {
+            steady: std::time::Instant::now(),
+            system: SystemTime::UNIX_EPOCH,
+        };
+        let paint = |width: u16, height: u16| {
+            let area = Rect::new(0, 0, width, height);
+            let mut buffer = Buffer::empty(area);
+            briefing.draw(&mut buffer, area, drawn.system)
+        };
+        assert_eq!(paint(40, 4).wait(drawn, drawn), None, "height 4 leaves zero body lines");
+        assert_eq!(paint(2, 8).wait(drawn, drawn), None, "zero inner width draws no spinner");
+        assert_eq!(paint(40, 5).wait(drawn, drawn), Some(sidebar::SPIN), "height 5 draws the waiting spinner");
     }
 }

@@ -10,6 +10,7 @@ mod bridge;
 mod brief;
 mod browse;
 mod browser;
+mod cadence;
 mod checks;
 mod clipboard;
 mod clock;

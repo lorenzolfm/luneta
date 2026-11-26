@@ -53,6 +53,7 @@ use crate::attached;
 use crate::agents::{self, Kept};
 use crate::brief::{self, Asking, Briefing, Written};
 use crate::browser::Browser;
+use crate::cadence::Cadence;
 use crate::checks;
 use crate::clock::Moment;
 use crate::close::Act;
@@ -77,12 +78,12 @@ use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
 use crate::review::{self, LoadedDiff, ReviewAction, RibbonCacheKey, RibbonOverlay};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat,
-    Sidebar, Sitting, ViewKey,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar,
+    SidebarView, Sitting, ViewKey,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
-use crate::spots::{Burst, Drawn, Hit, Settling};
+use crate::spots::{Burst, Drawn, DrawnHover, Hit, Settling};
 use crate::state;
 use crate::projected::{self, Projected};
 use crate::viewed::{self, Across, Heeded, Viewed};
@@ -216,6 +217,11 @@ pub enum Event {
 }
 
 const TICK: Duration = Duration::from_secs(1);
+
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+
+const _: () = assert!(FRAME_INTERVAL.as_millis() > 0);
+const _: () = assert!(FRAME_INTERVAL.as_millis() < sidebar::SCROLL.as_millis());
 
 const FRAME_EVENTS_MAX: usize = 256;
 
@@ -426,7 +432,7 @@ enum Right {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Homed {
-    Named,
+    Named { changed: bool },
     Unknown,
     Gone { on: Machine },
 }
@@ -550,6 +556,52 @@ impl DiffFetch {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Hover {
+    link: Option<attached::Selection>,
+    pointer_shape: Option<embedded::PointerShape>,
+    drawn: DrawnHover,
+    aloud: Option<Rect>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageKey {
+    Unhandled,
+    Handled { dirty: bool },
+}
+
+#[derive(Debug)]
+struct Painted {
+    at: Moment,
+    cadence: Cadence,
+    sidebar_view: SidebarView,
+}
+
+#[derive(Debug, Default)]
+enum Pacing {
+    #[default]
+    Unpainted,
+    Drawn {
+        dirty: bool,
+        painted: Painted,
+    },
+}
+
+impl Pacing {
+    fn mark_dirty(&mut self) {
+        if let Pacing::Drawn { dirty, .. } = self {
+            *dirty = true;
+        }
+    }
+
+    fn clean(&self) -> Option<&Painted> {
+        match self {
+            Pacing::Drawn { dirty: false, painted } => Some(painted),
+            Pacing::Unpainted | Pacing::Drawn { dirty: true, .. } => None,
+        }
+    }
+}
+
 pub struct App {
     right: Option<Right>,
     homes: home::Homes,
@@ -578,6 +630,7 @@ pub struct App {
     window_pixels: Option<WindowPixels>,
     cursor: Option<(CursorShape, bool)>,
     title: Option<String>,
+    pacing: Pacing,
     colours: Colours,
     briefs: u64,
     asks: u64,
@@ -871,7 +924,7 @@ impl App {
         let (agent, agent_unread) = Kept::shared(state_folder);
         let agent_watched =
             agent.file().map(|file| agents::watch(file, events.clone())).transpose();
-        let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
+        let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name(), SystemTime::now());
         if let Some(why) = unkept {
             sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
         }
@@ -906,7 +959,7 @@ impl App {
         let daemon = match folder {
             Ok(folder) => Some(folder),
             Err(why) => {
-                sidebar.lost(why);
+                let _ = sidebar.lost(why);
                 None
             },
         };
@@ -968,6 +1021,7 @@ impl App {
             window_pixels,
             cursor: None,
             title: None,
+            pacing: Pacing::default(),
             colours,
             briefs: 0,
             asks: 0,
@@ -1130,21 +1184,18 @@ impl Stopped {
     }
 }
 
-fn run_loop(
-    terminal: &mut DefaultTerminal,
+fn run_loop<W: io::Write>(
+    terminal: &mut Terminal<CrosstermBackend<W>>,
     app: &mut App,
     inbox: &mut Inbox,
 ) -> io::Result<()> {
+    assert!(!app.quit_asked, "a new run loop starts before quit is asked");
+    let now = Moment::now();
+    app.tick(now);
+    app.draw_due(terminal, now)?;
     loop {
-        let wait = if app.sidebar.scrolling() {
-            sidebar::SCROLL
-        } else if app.turning() {
-            sidebar::SPIN
-        } else {
-            TICK
-        };
-        let due = app.due().map(|due| due.saturating_duration_since(Instant::now()));
-        let wait = due.map_or(wait, |due| wait.min(due));
+        assert!(!app.quit_asked, "the run loop exits as soon as quit is asked");
+        let wait = app.wait(Moment::now());
         match inbox.next(wait) {
             Ok(event) => app.handle(event, terminal)?,
             Err(RecvTimeoutError::Timeout) => {},
@@ -1166,10 +1217,8 @@ fn run_loop(
             return Ok(());
         }
         let now = Moment::now();
-        app.ticked(now.steady);
-        app.alerting(now.steady);
-        app.sidebar.ticked(now, app.focused);
-        app.draw(terminal)?;
+        app.tick(now);
+        app.draw_due(terminal, now)?;
     }
 }
 
@@ -1191,37 +1240,62 @@ fn window(area: Rect) -> Size {
 }
 
 impl App {
-    fn handle(&mut self, event: Event, terminal: &mut DefaultTerminal) -> io::Result<()> {
+    fn handle<W: io::Write>(
+        &mut self,
+        event: Event,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+    ) -> io::Result<()> {
+        self.handle_at(event, terminal, Moment::now())
+    }
+
+    fn handle_at<W: io::Write>(
+        &mut self,
+        event: Event,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+        now: Moment,
+    ) -> io::Result<()> {
         let relists = matches!(
             event,
             Event::Daemon(_) | Event::Shown(_, luned::Heard::Laid(_))
         );
-        match event {
-            Event::Input(input) => self.input(input),
+        let mut dirty = match event {
+            Event::Input(input) => self.input(input, now),
             Event::Answered(answer) => self.answered(answer, terminal)?,
             Event::InputEnded(error) => return Err(error),
             Event::Shown(number, heard) => {
-                if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
+                let dirty = if let Some(right) = self.viewed_mut().filter(|it| it.number() == number)
+                {
                     let heeded = right.heard(heard);
-                    self.heeded(heeded);
-                }
+                    self.heeded(heeded)
+                } else {
+                    false
+                };
                 self.maybe_fetch_diff(false);
+                dirty
             },
             Event::Seen { number, watcher, seen } => {
                 if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
                     let heeded = right.seen(watcher, seen);
-                    self.heeded(heeded);
+                    self.heeded(heeded)
+                } else {
+                    false
                 }
             },
             Event::Browser { number, view, heard } => {
                 if let Some(right) = self.viewed_mut().filter(|it| it.number() == number) {
                     let heeded = right.browser(view, heard);
-                    self.heeded(heeded);
+                    self.heeded(heeded)
+                } else {
+                    false
                 }
             },
             Event::Work { number, listed } => {
+                let shown = self.home().is_some_and(|home| home.number() == number);
                 if let Some(home) = self.homes.iter_mut().find(|it| it.number() == number) {
-                    home.listed(listed, Instant::now());
+                    home.listed(listed, now.steady);
+                    shown
+                } else {
+                    false
                 }
             },
             Event::DiffLoaded { on, worktree, revision, loaded } => {
@@ -1235,70 +1309,92 @@ impl App {
                     },
                     FetchFlight::Idle | FetchFlight::InFlight { .. } => false,
                 };
-                if let Some(right) = self.viewed_mut()
+                let dirty = if let Some(right) = self.viewed_mut()
                     && *right.machine() == on
                     && right.worktree() == worktree
                 {
-                    right.diff_loaded(worktree, &loaded, revision);
-                }
+                    right.diff_loaded(worktree, &loaded, revision)
+                } else {
+                    false
+                };
                 self.maybe_fetch_diff(refetch);
+                dirty
             },
             Event::Daemon(Ok(host)) => {
                 self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
                     log::say(&format!("luned's projects: {why}"));
                     Projected::default()
                 });
+                let mut changed = false;
                 if let Some(Right::Worktree(right)) = &mut self.right {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
-                    right.tabs(tabs, titles);
+                    changed |= right.tabs(tabs, titles);
                 }
-                if let Some(Homed::Gone { on }) = self.name_home() {
-                    self.go_other_than(&on, None);
+                match self.name_home() {
+                    Some(Homed::Named { changed: named }) => changed |= named,
+                    Some(Homed::Gone { on }) => {
+                        self.go_other_than(&on, None);
+                        changed = true;
+                    },
+                    Some(Homed::Unknown) | None => {},
                 }
                 let projected = &self.projected;
                 self.homes.forget(|home| gone(projected, home));
                 let review_status = self.review_git_status(&host);
-                self.sidebar.heard(host);
+                self.sidebar.heard(host, now.system);
                 self.seat();
                 if review_status != self.diff.git_status {
                     self.diff.git_status = review_status;
                     self.maybe_fetch_diff(true);
                 }
                 if let Some(machines) = self.sidebar.reaches() {
-                    let acts = self.alerts.heard(machines, Instant::now());
+                    let acts = self.alerts.heard(machines, now.steady);
                     self.alert(acts);
                 }
                 if let Some(sayings) = self.sidebar.sayings() {
                     self.aloud.hear(sayings, self.desktop.reads_aloud());
                 }
+                changed
+                    || matches!(self.focus.over, Some(Over::Picker(_)))
+                    || self.sidebar_changed()
             },
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
-            Event::Notice(notice) => self.sidebar.notify(notice),
+            Event::Notice(notice) => {
+                self.sidebar.notify(notice);
+                true
+            },
             Event::Unclosed { on, act, ticket, unchanged } => {
                 self.sidebar.unclosed(&on, &act, ticket, unchanged);
+                true
             },
-            Event::Moved { ticket, kept } => self.sidebar.moved(ticket, kept),
+            Event::Moved { ticket, kept } => {
+                self.sidebar.moved(ticket, kept);
+                self.sidebar_changed()
+            },
             Event::Unmoved { on, ticket, order, unmoved } => {
                 let note = unmoved.said("not moved", "the rows may have moved");
                 self.sidebar.unmoved(&on, ticket, &order, note);
+                self.sidebar_changed()
             },
-            Event::Copy(clip) => self.clip(terminal, clip)?,
+            Event::Copy(clip) => self.clip(terminal, clip, now.steady)?,
             Event::Image(went) => self.image_went(went),
             Event::ImageSlow(on) => self.sidebar.image_going(Some(on)),
-            Event::Folds => self.sidebar.refold(),
+            Event::Folds => self.sidebar.refold() && self.sidebar_changed(),
             Event::Alerted(read) => {
                 if self.alerts.read(&read) {
                     self.desktop.post(read.alert);
                 }
+                false
             },
             Event::Clicked(key) => self.clicked(&key),
             #[cfg(not(target_os = "macos"))]
             Event::IssueClicked(desktop::Came::Filed(link)) => {
-                self.browse_link(&link);
+                self.browse_link(&link, now.steady)
             },
             #[cfg(not(target_os = "macos"))]
             Event::IssueClicked(desktop::Came::Unfiled) => {
                 desktop::raise(self.title.as_deref());
+                false
             },
             Event::Peers(heard) => {
                 if self.desktop.heard(heard, self.focused) {
@@ -1306,40 +1402,53 @@ impl App {
                     self.alert(acts);
                 }
                 self.focus_alerts();
-                self.sidebar.unsay(peers::NO_READER);
+                let dirty = self.sidebar.unsay(peers::NO_READER);
                 self.hold_aloud();
+                dirty
             },
             Event::Skills { menu, agent, skills } => self.sidebar.found(menu, agent, skills),
-            Event::Named(made) => self.named(made),
+            Event::Named(made) => {
+                self.named(made);
+                true
+            },
             Event::Pulled { menu, found } => {
                 let asked = self.sidebar.pulled(menu, found);
                 self.follow(asked);
+                true
             },
             Event::Printed { menu, printed } => {
                 let asked = self.sidebar.printed(menu, printed);
                 self.follow(asked);
+                true
             },
             Event::Checks { menu, checks } => {
                 let asked = self.sidebar.checks(menu, checks);
                 self.follow(asked);
+                true
             },
             Event::Rebased { menu, rebased } => {
                 let asked = self.sidebar.rebased(menu, rebased);
                 self.follow(asked);
+                true
             },
             Event::Prunes { menu, plan } => {
                 let asked = self.sidebar.prunes(menu, plan);
                 self.follow(asked);
+                true
             },
             Event::Pruned { menu, pruned } => {
                 let asked = self.sidebar.pruned(menu, pruned);
                 self.follow(asked);
+                true
             },
             Event::Briefed { number, written } => {
                 if let Some(Over::Brief(briefing)) = &mut self.focus.over
                     && briefing.number() == number
                 {
                     briefing.written(written);
+                    true
+                } else {
+                    false
                 }
             },
             Event::Heard { number, heard } => {
@@ -1347,8 +1456,19 @@ impl App {
                     && ask.number() == number
                 {
                     ask.heard(heard);
-                } else if let Some(ask) = self.homes.iter_mut().find_map(|home| home.ask_numbered(number)) {
+                    true
+                } else if let Some(Right::Home(shown)) = &self.right
+                    && let Some(ask) = self.homes.shown_mut(shown).ask_numbered(number)
+                {
                     ask.heard(heard);
+                    true
+                } else if let Some(ask) =
+                    self.homes.iter_mut().find_map(|home| home.ask_numbered(number))
+                {
+                    ask.heard(heard);
+                    false
+                } else {
+                    false
                 }
             },
             Event::Remotes { number, remotes } => {
@@ -1357,68 +1477,112 @@ impl App {
                     && issue.number() == number
                 {
                     issue.listed(remotes);
+                    true
+                } else {
+                    false
                 }
             },
             Event::Filed { number, repository, to, words, filed } => {
                 self.sidebar.filed(number, &to.to_string(), &filed);
                 self.desktop.tell(Told::issue(&to.to_string(), &filed));
                 match filed {
-                    Ok(filed) => self.clip(terminal, Clip::Filed(filed))?,
+                    Ok(filed) => {
+                        let _ = self.clip(terminal, Clip::Filed(filed), now.steady)?;
+                    },
                     Err(_) => self.unfiled.keep(number, repository, to, words),
                 }
+                true
             },
             Event::Picker { number, heard } => {
                 if let Some(Over::Picker(picker)) = &mut self.focus.over
                     && picker.number() == number
                 {
                     let did = picker.heard(heard);
-                    self.picked(did);
+                    self.picked(did, now.system);
+                    true
+                } else {
+                    false
                 }
             },
             Event::Spoken { number, spoken } => {
                 if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
                     && dictation.number() == number
-                    && let Some(dictated) = dictation.spoken(spoken, Instant::now())
                 {
-                    self.undictate(Some(dictated));
+                    if let Some(dictated) = dictation.spoken(spoken, now.steady) {
+                        self.undictate(Some(dictated));
+                    }
+                    true
+                } else {
+                    false
                 }
             },
             Event::Nameable { number, skills } => {
+                let mut dirty = false;
                 if let Err(why) = &skills {
                     self.sidebar.notify(why.clone());
+                    dirty = true;
                 }
                 if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
                     && dictation.number() == number
-                    && let Some(dictated) = dictation.found(skills)
                 {
-                    self.undictate(Some(dictated));
+                    if let Some(dictated) = dictation.found(skills) {
+                        self.undictate(Some(dictated));
+                    }
+                    dirty = true;
                 }
+                dirty
             },
             Event::Fetched(fetched) => self.fetched(&fetched),
             Event::Voiced { number, ended } => {
                 if let Some(why) = self.aloud.ended(number, ended) {
                     self.sidebar.notify(why);
+                    true
+                } else {
+                    false
                 }
             },
             Event::VoiceFetched(fetched) => {
                 if let Some(why) = self.aloud.fetch_went(fetched) {
                     self.sidebar.notify(why);
+                    true
+                } else {
+                    false
                 }
             },
             Event::ReadAloud { from, selected } => {
                 if let Err(aloud::NothingToRead) = self.aloud.key(Some(&selected)) {
                     self.desktop.nothing_to_read(from);
                 }
+                false
             },
-            Event::StopAloud => self.aloud.press(aloud::Button::Stop),
-            Event::News => self.sidebar.reread(),
-            Event::Agent => self.sidebar.reagent(),
-        }
+            Event::StopAloud => {
+                self.aloud.press(aloud::Button::Stop);
+                false
+            },
+            Event::News => self.sidebar.reread() && self.sidebar_changed(),
+            Event::Agent => {
+                self.sidebar.reagent();
+                false
+            },
+        };
         if relists {
             self.relist();
         }
-        self.settle();
+        dirty |= self.settle();
+        dirty |= !self.pending_graphics.is_empty()
+            || self.viewed().is_some_and(Viewed::has_pending_graphics);
+        if dirty {
+            self.pacing.mark_dirty();
+        }
         Ok(())
+    }
+
+    fn sidebar_changed(&self) -> bool {
+        let Some(painted) = self.pacing.clean() else {
+            return false;
+        };
+        let collapsed = self.focus.side == Side::Collapsed;
+        painted.sidebar_view != self.sidebar.view(collapsed)
     }
 
     fn relist(&mut self) {
@@ -1431,28 +1595,83 @@ impl App {
         }
     }
 
-    fn turning(&self) -> bool {
-        let over = match &self.focus.over {
-            Some(Over::Brief(briefing)) => briefing.turning(),
-            Some(Over::Ask(ask)) => ask.turning(),
-            Some(Over::Dictation(dictation, under)) => {
-                dictation.turning() || matches!(under, Where::Issue(issue) if issue.turning())
+    fn wait(&self, now: Moment) -> Duration {
+        let painted = match &self.pacing {
+            Pacing::Unpainted => return Duration::ZERO,
+            Pacing::Drawn { dirty: true, painted } => {
+                assert!(now.steady >= painted.at.steady, "steady clock does not move backward");
+                return (painted.at.steady + FRAME_INTERVAL).saturating_duration_since(now.steady);
             },
-            Some(Over::Issue(issue)) => issue.turning(),
-            Some(Over::Picker(_)) | None => false,
+            Pacing::Drawn { dirty: false, painted } => {
+                assert!(now.steady >= painted.at.steady, "steady clock does not move backward");
+                painted
+            },
         };
-        let home = self.home().is_some_and(Home::turning);
-        over || home || self.sidebar.turning()
+        let mut wait = TICK;
+        if let Some(due) = self.sidebar.scroll_due(now.steady) {
+            wait = wait.min(due.saturating_duration_since(now.steady));
+        }
+        if let Some(next) = painted.cadence.wait(painted.at, now) {
+            wait = wait.min(next);
+        }
+        if let Some(due) = self.due(now) {
+            wait = wait.min(due.saturating_duration_since(now.steady));
+        }
+        assert!(wait <= TICK, "event wait stays bounded by the tick interval");
+        wait
     }
 
-    fn due(&self) -> Option<Instant> {
+    fn due(&self, now: Moment) -> Option<Instant> {
         let picker = match &self.focus.over {
             Some(Over::Picker(picker)) => picker.due(),
             _ => None,
         };
-        let shows = self.sidebar.due(Instant::now());
+        let shows = self.sidebar.due(now);
         let home = self.home().and_then(Home::due);
         picker.into_iter().chain(self.alerts.due()).chain(shows).chain(home).min()
+    }
+
+    fn tick(&mut self, now: Moment) {
+        self.ticked(now.steady);
+        self.alerting(now.steady);
+        let mut dirty = self.sidebar.ticked(now, self.focused);
+        dirty |= self.sync_aloud();
+        if let Some(painted) = self.pacing.clean()
+            && painted.cadence.due(painted.at, now)
+        {
+            dirty = true;
+        }
+        if dirty {
+            self.pacing.mark_dirty();
+        }
+    }
+
+    #[must_use]
+    fn sync_aloud(&mut self) -> bool {
+        self.sidebar.aloud(self.aloud.shown())
+    }
+
+    fn hover(&self) -> Hover {
+        let Some(pointer) = self.pointer else {
+            return Hover {
+                link: None,
+                pointer_shape: None,
+                drawn: DrawnHover::None,
+                aloud: None,
+            };
+        };
+        let (_, right) = self.areas;
+        let spot = (!self.covered() && right.contains(pointer))
+            .then(|| attached::Spot { row: pointer.y - right.y, column: pointer.x - right.x });
+        let link = spot.and_then(|spot| self.viewed().and_then(|viewed| viewed.pointed(spot)));
+        let pointer_shape =
+            self.viewed().and_then(|viewed| viewed.pointer_shape(spot)).cloned();
+        Hover {
+            link,
+            pointer_shape,
+            drawn: self.drawn.hovered(pointer),
+            aloud: self.sidebar.aloud_buttons().hovered(pointer),
+        }
     }
 
     fn alerting(&mut self, now: Instant) {
@@ -1482,17 +1701,19 @@ impl App {
         }
     }
 
-    fn clicked(&mut self, key: &alerts::Key) {
+    #[must_use]
+    fn clicked(&mut self, key: &alerts::Key) -> bool {
         let Some(place) = self.alerts.clicked(key) else {
-            return;
+            return false;
         };
         self.desktop.close(key.clone());
         if self.desktop.hand(key) {
-            return;
+            return false;
         }
         desktop::raise(self.title.as_deref());
         self.go(&key.on, &Place::View(place));
         self.leave();
+        true
     }
 
     fn ticked(&mut self, now: Instant) {
@@ -1516,9 +1737,12 @@ impl App {
         }
     }
 
-    fn settle(&mut self) {
+    #[must_use]
+    fn settle(&mut self) -> bool {
         self.ask_picker();
+        let dirty = self.sync_aloud();
         self.tell();
+        dirty
     }
 
     fn watch(&mut self) {
@@ -1527,7 +1751,8 @@ impl App {
         }
     }
 
-    fn input(&mut self, input: Input) {
+    #[must_use]
+    fn input(&mut self, input: Input, now: Moment) -> bool {
         let heard = match &input {
             Input::Key(key) => key.kind != KeyEventKind::Release,
             Input::Mouse(mouse) => mouse.kind != MouseEventKind::Moved,
@@ -1538,17 +1763,33 @@ impl App {
             self.inputs += 1;
         }
         match input {
-            Input::Key(key) => self.key(&key),
-            Input::Mouse(mouse) => self.mouse(mouse),
+            Input::Key(key) => self.key(&key, now),
+            Input::Mouse(mouse) => {
+                let moved = mouse.kind == MouseEventKind::Moved;
+                let hover_before = moved.then(|| self.hover());
+                let was_pressed = self.sidebar.pressed() || matches!(self.held, Held::Edge { .. });
+                self.mouse(mouse, now);
+                !moved || was_pressed || Some(self.hover()) != hover_before
+            },
             Input::Paste(text) => match &mut self.focus.over {
-                Some(Over::Ask(ask)) => ask.paste(&text),
-                Some(Over::Issue(issue)) => issue.paste(&text),
-                Some(Over::Picker(picker)) => picker.paste(&text),
-                Some(Over::Brief(_) | Over::Dictation(..)) => {},
+                Some(Over::Ask(ask)) => {
+                    ask.paste(&text);
+                    true
+                },
+                Some(Over::Issue(issue)) => {
+                    issue.paste(&text);
+                    true
+                },
+                Some(Over::Picker(picker)) => {
+                    picker.paste(&text);
+                    true
+                },
+                Some(Over::Brief(_) | Over::Dictation(..)) => false,
                 None => match self.holder() {
                     Holder::Sidebar(_) => {
                         let asked = self.sidebar.paste(&text);
                         self.follow(asked);
+                        true
                     },
                     Holder::Terminal => self.paste(&text),
                     Holder::Box(_) => unreachable!("a box takes the paste"),
@@ -1556,43 +1797,44 @@ impl App {
             },
             Input::FocusGained => self.focus_window(true),
             Input::FocusLost => self.focus_window(false),
-            Input::Resize(..) => {},
+            Input::Resize(..) => true,
         }
-        self.settle();
     }
 
-    fn key(&mut self, key: &KeyEvent) {
-        let now = Instant::now();
-        let key = self.repeats.read(*key, now);
-        let key = &self.aloud_repeats.read(key, now);
+    #[must_use]
+    fn key(&mut self, key: &KeyEvent, now: Moment) -> bool {
+        let key = self.repeats.read(*key, now.steady);
+        let key = &self.aloud_repeats.read(key, now.steady);
         if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
-            match dictation.key(key, now) {
-                dictation::Keyed::Nothing => {},
-                dictation::Keyed::Close => self.undictate(None),
+            return match dictation.key(key, now.steady) {
+                dictation::Keyed::Nothing => false,
+                dictation::Keyed::Changed => true,
+                dictation::Keyed::Close => {
+                    self.undictate(None);
+                    true
+                },
                 dictation::Keyed::Dictate => {
                     self.undictate(None);
-                    self.dictate();
+                    self.dictate(now.steady);
+                    true
                 },
-            }
-            return;
+            };
         }
         let chord = (key.code, key.modifiers);
         if key.kind == KeyEventKind::Release
             || (key.kind == KeyEventKind::Repeat
                 && (chord == dictation::KEY || chord == aloud::KEY))
         {
-            return;
+            return false;
         }
-        if chord == dictation::KEY && self.dictate() {
-            return;
+        if chord == dictation::KEY && self.dictate(now.steady) {
+            return true;
         }
         if chord == aloud::KEY {
-            self.read_aloud();
-            return;
+            return self.read_aloud();
         }
         if aloud::stops(chord) {
-            self.stop_aloud();
-            return;
+            return self.stop_aloud();
         }
         match &mut self.focus.over {
             Some(Over::Ask(ask)) => {
@@ -1601,7 +1843,7 @@ impl App {
                     Keyed::Send => self.converse(),
                     Keyed::Close | Keyed::Interrupt => self.give(Focus::on(self.focus.side)),
                 }
-                return;
+                return true;
             },
             Some(Over::Issue(issue)) => {
                 match issue.key(key) {
@@ -1609,56 +1851,63 @@ impl App {
                     issue::Keyed::File => self.file_issue(),
                     issue::Keyed::Close => self.close_issue(),
                 }
-                return;
+                return true;
             },
             Some(Over::Picker(picker)) => {
                 let did = picker.key(key);
-                self.picked(did);
-                return;
+                self.picked(did, now.system);
+                return true;
             },
             Some(Over::Brief(briefing)) => {
                 if briefing.closes(key) {
                     self.give(Focus::on(self.focus.side));
+                    return true;
                 }
-                return;
+                return false;
             },
-            Some(Over::Dictation(..)) => return,
+            Some(Over::Dictation(..)) => return false,
             None => {},
         }
+        let mut dirty = false;
         match self.sidebar.floating() {
             Some(Floating::Menu(_)) => {
                 if chord == MENU {
                     self.sidebar.close_menu();
                 } else {
-                    let asked = self.sidebar.key(key, Moment::at(now));
+                    let asked = self.sidebar.key(key, now);
                     self.follow(asked);
                 }
-                return;
+                return true;
             },
             Some(Floating::Note(_)) => {
                 if key.kind == KeyEventKind::Repeat {
-                    return;
+                    return false;
                 }
                 self.sidebar.close_note();
+                dirty = true;
                 if chord != MENU {
-                    return;
+                    return true;
                 }
             },
             None => {},
         }
         if self.chord(chord) {
-            return;
+            return true;
         }
         match self.holder() {
             Holder::Terminal if !self.sidebar.pressed() => {
-                if chord == images::KEY && self.key_for_image(key) {
-                    return;
+                if chord == images::KEY {
+                    match self.key_for_image(key) {
+                        ImageKey::Handled { dirty: image_dirty } => return dirty || image_dirty,
+                        ImageKey::Unhandled => {},
+                    }
                 }
-                self.key_to_session(key);
+                dirty || self.key_to_session(key)
             },
             Holder::Terminal | Holder::Sidebar(_) => {
-                let asked = self.sidebar.key(key, Moment::at(now));
+                let asked = self.sidebar.key(key, now);
                 self.follow(asked);
+                true
             },
             Holder::Box(_) => unreachable!("a box takes the key"),
         }
@@ -1728,29 +1977,44 @@ impl App {
         Palette { aim, origin }
     }
 
-    fn key_to_session(&mut self, key: &KeyEvent) {
-        let (heeded, action) = match &mut self.right {
-            Some(Right::Worktree(right)) => right.key(key, self.inputs),
+    #[must_use]
+    fn key_to_session(&mut self, key: &KeyEvent) -> bool {
+        let (heeded, action, home_dirty) = match &mut self.right {
+            Some(Right::Worktree(right)) => {
+                let (heeded, action) = right.key(key, self.inputs);
+                (heeded, action, false)
+            },
             Some(Right::Home(shown)) => {
                 self.homes.shown_mut(shown).key(key, &mut self.asks, &self.events);
-                (Heeded::Quiet, ReviewAction::None)
+                (Heeded::Quiet, ReviewAction::None, true)
             },
-            None => (Heeded::Quiet, ReviewAction::None),
+            None => (Heeded::Quiet, ReviewAction::None, false),
         };
-        self.heeded(heeded);
+        let mut dirty = home_dirty | self.heeded(heeded);
         match action {
             ReviewAction::None => {},
             ReviewAction::Reload => self.fetch_diff(),
-            ReviewAction::Explain(excerpt) => self.open_review_ask(&excerpt, true),
-            ReviewAction::Ask(excerpt) => self.open_review_ask(&excerpt, false),
+            ReviewAction::Explain(excerpt) => {
+                self.open_review_ask(&excerpt, true);
+                dirty = true;
+            },
+            ReviewAction::Ask(excerpt) => {
+                self.open_review_ask(&excerpt, false);
+                dirty = true;
+            },
         }
+        dirty
     }
 
-    fn paste(&mut self, text: &str) {
+    #[must_use]
+    fn paste(&mut self, text: &str) -> bool {
         match &mut self.right {
             Some(Right::Worktree(right)) => right.paste(text),
-            Some(Right::Home(shown)) => self.homes.shown_mut(shown).paste(text),
-            None => {},
+            Some(Right::Home(shown)) => {
+                self.homes.shown_mut(shown).paste(text);
+                true
+            },
+            None => false,
         }
     }
 
@@ -1815,7 +2079,7 @@ impl App {
         }
         self.right = Some(Right::Home(key));
         let homed = self.name_home();
-        let fresh = matches!(homed, Some(Homed::Named | Homed::Unknown));
+        let fresh = matches!(homed, Some(Homed::Named { .. } | Homed::Unknown));
         assert!(fresh, "a home just shown was made now or held while its project was: {homed:?}");
         self.seat();
     }
@@ -1828,8 +2092,8 @@ impl App {
         let home = self.homes.shown_mut(shown);
         match self.projected.project(&shown.on, shown.project) {
             Some(project) => {
-                home.named(project.name.as_str(), &project.dir);
-                Some(Homed::Named)
+                let changed = home.named(project.name.as_str(), &project.dir);
+                Some(Homed::Named { changed })
             },
             None if gone(&self.projected, home) => Some(Homed::Gone { on: shown.on.clone() }),
             None => Some(Homed::Unknown),
@@ -1856,45 +2120,55 @@ impl App {
         }
     }
 
-    fn key_for_image(&mut self, key: &KeyEvent) -> bool {
+    fn key_for_image(&mut self, key: &KeyEvent) -> ImageKey {
         let Some(on) = self.sidebar.far_agent() else {
-            return false;
+            return ImageKey::Unhandled;
         };
         if desktop::elsewhere() {
-            return false;
+            return ImageKey::Unhandled;
         }
-        if self.image.send(on.clone(), *key, &self.events) {
-            self.sidebar.clear_notice();
-        }
-        true
+        let dirty = self.image.send(on.clone(), *key, &self.events) && self.sidebar.clear_notice();
+        ImageKey::Handled { dirty }
     }
 
-    fn clip(&mut self, terminal: &mut DefaultTerminal, clip: Clip) -> io::Result<()> {
+    fn clip<W: io::Write>(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+        clip: Clip,
+        steady: Instant,
+    ) -> io::Result<bool> {
         if let Some(copied) = self.copies.clip(terminal.backend_mut(), clip)? {
-            self.sidebar.copied(copied, Instant::now());
+            self.sidebar.copied(copied, steady);
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
-    fn image_went(&mut self, went: Went) {
+    #[must_use]
+    fn image_went(&mut self, went: Went) -> bool {
         self.image.heard();
-        self.sidebar.image_going(None);
+        let mut dirty = self.sidebar.image_going(None);
         match went {
             Went::NoImage { key, on } => {
                 let on_terminal = matches!(self.holder(), Holder::Terminal);
                 if on_terminal && self.sidebar.far_agent() == Some(&on) {
-                    self.key_to_session(&key);
+                    dirty |= self.key_to_session(&key);
                 }
             },
             Went::Kept { on, path } => {
                 if matches!(self.sidebar.on(), Machine::Remote(there) if *there == on) {
-                    self.paste(&path);
+                    dirty |= self.paste(&path);
                 } else {
                     self.image_not_pasted(&format!("lune left {on}, where it is at {path}"));
+                    dirty = true;
                 }
             },
-            Went::Failed(why) => self.image_not_pasted(&why),
+            Went::Failed(why) => {
+                self.image_not_pasted(&why);
+                dirty = true;
+            },
         }
+        dirty
     }
 
     fn image_not_pasted(&mut self, why: &str) {
@@ -1909,7 +2183,7 @@ impl App {
         }
     }
 
-    fn mouse(&mut self, mouse: MouseEvent) {
+    fn mouse(&mut self, mouse: MouseEvent, now: Moment) {
         let at = Position::new(mouse.column, mouse.row);
         self.pointer = Some(at);
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
@@ -1926,14 +2200,14 @@ impl App {
         if down {
             self.last_press = LastPress::Elsewhere;
             self.sidebar.unsweep();
-            if self.burst.as_mut().is_some_and(|burst| burst.takes(at, Instant::now())) {
+            if self.burst.as_mut().is_some_and(|burst| burst.takes(at, now.steady)) {
                 self.held = Held::Taken;
                 return;
             }
             self.burst = None;
-            if self.settling.takes(at, Instant::now()) {
+            if self.settling.takes(at, now.steady) {
                 self.held = Held::Taken;
-                self.burst = Some(Burst::new(at, Instant::now()));
+                self.burst = Some(Burst::new(at, now.steady));
                 return;
             }
         }
@@ -1944,8 +2218,8 @@ impl App {
             self.let_go();
             self.sidebar.let_go();
             self.held = Held::Taken;
-            self.burst = Some(Burst::new(at, Instant::now()));
-            self.hit(hit);
+            self.burst = Some(Burst::new(at, now.steady));
+            self.hit(hit, now);
             return;
         }
         let wheel = match mouse.kind {
@@ -2042,7 +2316,7 @@ impl App {
         if self.focus.side == Side::Collapsed {
             if down {
                 self.give(Focus::on(Side::Session));
-                self.burst = Some(Burst::new(at, Instant::now()));
+                self.burst = Some(Burst::new(at, now.steady));
             }
             return;
         }
@@ -2056,14 +2330,14 @@ impl App {
         self.follow(asked);
     }
 
-    fn hit(&mut self, hit: Hit) {
+    fn hit(&mut self, hit: Hit, now: Moment) {
         match hit {
             Hit::Keys(keyed, key) => {
-                let asked = self.sidebar.keys_clicked(keyed, &key, Moment::now());
+                let asked = self.sidebar.keys_clicked(keyed, &key, now);
                 self.follow(asked);
             },
             Hit::Menu(menu, choice) if self.focus.over.is_none() => {
-                let asked = self.sidebar.chose(menu, choice, Moment::now());
+                let asked = self.sidebar.chose(menu, choice, now);
                 self.follow(asked);
             },
             Hit::Picker(number, pick) => {
@@ -2071,7 +2345,7 @@ impl App {
                     && picker.number() == number
                 {
                     let did = picker.click(pick);
-                    self.picked(did);
+                    self.picked(did, now.system);
                 }
             },
             Hit::Number(link) => {
@@ -2116,7 +2390,7 @@ impl App {
                 true
             },
             (MouseEventKind::Down(_), _) => {
-                own.unselect();
+                let _ = own.unselect();
                 false
             },
             (MouseEventKind::Drag(_), Held::Selecting) => {
@@ -2171,7 +2445,9 @@ impl App {
             Asked::CopyText(excerpt) => {
                 let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
             },
-            Asked::Browse(link) => self.browse_link(&link),
+            Asked::Browse(link) => {
+                let _ = self.browse_link(&link, Instant::now());
+            },
             Asked::Go { on, place } => {
                 self.go(&on, &place);
                 self.leave();
@@ -2398,21 +2674,26 @@ impl App {
         }
     }
 
-    fn browse_link(&mut self, link: &crate::pull::Link) {
+    #[must_use]
+    fn browse_link(&mut self, link: &crate::pull::Link, steady: Instant) -> bool {
         if self.can_embed_browser() && self.viewed().is_some() {
             match BrowserUrl::parse(&link.url()) {
                 Ok(url) => {
                     self.shown().open_browser(Some(url));
                     self.leave();
-                    return;
+                    return true;
                 },
                 Err(why) => {
                     log::say(&format!("pull link did not parse as browser URL: {why}"));
                 },
             }
         }
-        if let Err(why) = self.browser.open(link, &self.events, Instant::now()) {
-            self.sidebar.notify(why);
+        match self.browser.open(link, &self.events, steady) {
+            Ok(()) => false,
+            Err(why) => {
+                self.sidebar.notify(why);
+                true
+            },
         }
     }
 
@@ -2558,7 +2839,7 @@ impl App {
         self.give(Focus { side: self.focus.side, over: Some(Over::Picker(picker)) });
     }
 
-    fn picked(&mut self, picked: Picked) {
+    fn picked(&mut self, picked: Picked, wall: SystemTime) {
         match picked {
             Picked::Nothing => {},
             Picked::Close => self.give(Focus::on(self.focus.side)),
@@ -2582,7 +2863,7 @@ impl App {
                 let plan = self.sidebar.plan(&on, &session, scope);
                 if let Some(Over::Picker(picker)) = &mut self.focus.over {
                     let did = picker.planned(plan);
-                    self.picked(did);
+                    self.picked(did, wall);
                 }
             },
             Picked::Act { on, act } => {
@@ -2593,8 +2874,12 @@ impl App {
             Picked::Chord(chord) => {
                 self.give(Focus::on(self.focus.side));
                 match chord {
-                    aloud::KEY => self.read_aloud(),
-                    chord if aloud::stops(chord) => self.stop_aloud(),
+                    aloud::KEY => {
+                        let _ = self.read_aloud();
+                    },
+                    chord if aloud::stops(chord) => {
+                        let _ = self.stop_aloud();
+                    },
                     chord => {
                         let ran = self.chord(chord);
                         assert!(ran, "every chord the palette lists is one App::chord runs");
@@ -2613,7 +2898,7 @@ impl App {
             },
             Picked::Row { target, action } => {
                 self.give(Focus::on(self.focus.side));
-                let asked = self.sidebar.act_on_row(&target, action, SystemTime::now());
+                let asked = self.sidebar.act_on_row(&target, action, wall);
                 self.follow(asked);
             },
             Picked::Done { done, origin } => {
@@ -2650,7 +2935,7 @@ impl App {
         self.give(Focus::on(self.focus.side));
     }
 
-    fn dictate(&mut self) -> bool {
+    fn dictate(&mut self, now: Instant) -> bool {
         let on_session = matches!(self.holder(), Holder::Terminal);
         let under = match self.focus.over.take() {
             None if on_session => Where::Session(self.sidebar.here_agent()),
@@ -2670,7 +2955,7 @@ impl App {
             }
             let speech = self.speech.get_or_insert_with(Speech::start);
             let listening = speech.listen(number, &self.events);
-            Dictation::hearing(number, listening, skills, self.releases, Instant::now())
+            Dictation::hearing(number, listening, skills, self.releases, now)
         } else {
             let events = &self.events;
             let fetching = || Fetch { _asking: speech::fetch(events), got: 0 };
@@ -2690,26 +2975,37 @@ impl App {
         Skills::Finding
     }
 
-    fn read_aloud(&mut self) {
-        self.sidebar.clear_notice();
+    #[must_use]
+    fn read_aloud(&mut self) -> bool {
+        let mut dirty = self.sidebar.clear_notice();
         match self.desktop.reader() {
             Reader::This => {
                 if let Err(nothing) = self.aloud.key(self.copies.excerpt()) {
                     self.sidebar.notify(nothing.to_string());
+                    dirty = true;
                 }
             },
             Reader::Another(holder) => holder.selected(self.copies.excerpt().unwrap_or_default()),
-            Reader::Nobody(why) => self.sidebar.notify(why.to_owned()),
+            Reader::Nobody(why) => {
+                self.sidebar.notify(why.to_owned());
+                dirty = true;
+            },
         }
+        dirty
     }
 
-    fn stop_aloud(&mut self) {
-        self.sidebar.clear_notice();
+    #[must_use]
+    fn stop_aloud(&mut self) -> bool {
+        let mut dirty = self.sidebar.clear_notice();
         match self.desktop.reader() {
             Reader::This => self.aloud.press(aloud::Button::Stop),
             Reader::Another(holder) => holder.stopped(),
-            Reader::Nobody(why) => self.sidebar.notify(why.to_owned()),
+            Reader::Nobody(why) => {
+                self.sidebar.notify(why.to_owned());
+                dirty = true;
+            },
         }
+        dirty
     }
 
     fn hold_aloud(&mut self) {
@@ -2735,10 +3031,10 @@ impl App {
                 let Dictated { written, sends, .. } = dictated;
                 let harness = agent.map_or(agents::Harness::ClaudeCode, |agent| agent.harness);
                 for paste in pastes(&written, harness) {
-                    self.paste(&paste);
+                    let _ = self.paste(&paste);
                 }
                 if sends {
-                    self.key_to_session(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    let _ = self.key_to_session(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                 }
             },
             Where::Ask(mut ask) => {
@@ -2763,7 +3059,9 @@ impl App {
         }
     }
 
-    fn fetched(&mut self, fetched: &Fetched) {
+    #[must_use]
+    fn fetched(&mut self, fetched: &Fetched) -> bool {
+        let mut dirty = false;
         match fetched {
             Fetched::Got(got) => {
                 if let Some(fetch) = &mut self.fetching {
@@ -2775,12 +3073,15 @@ impl App {
                 let shown = matches!(self.focus.over, Some(Over::Dictation(..)));
                 if let (Err(why), false) = (ended, shown) {
                     self.sidebar.notify(format!("the speech model did not come: {why}"));
+                    dirty = true;
                 }
             },
         }
         if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
             dictation.fetched(fetched);
+            dirty = true;
         }
+        dirty
     }
 
     fn step(&mut self, direction: Direction) {
@@ -2816,21 +3117,26 @@ impl App {
         assert!(held, "the sidebar holds the keys past the project's left edge");
     }
 
-    fn cross(&mut self, across: Across) {
+    #[must_use]
+    fn cross(&mut self, across: Across) -> bool {
         if !matches!(self.holder(), Holder::Terminal) {
-            return;
+            return false;
         }
         let Some(right) = self.viewed() else {
-            return;
+            return false;
         };
         let on = right.machine().clone();
         let (before, after) = self.projected.tabs_beside(&on, right.worktree());
         match (across, before, after) {
             (Across::Before, Some(beside), _) | (Across::After, _, Some(beside)) => {
                 self.go_worktree(&on, beside, None);
+                true
             },
-            (Across::Before, None, _) => self.step_to_sidebar(),
-            (Across::After, _, None) => {},
+            (Across::Before, None, _) => {
+                self.step_to_sidebar();
+                true
+            },
+            (Across::After, _, None) => false,
         }
     }
 
@@ -2914,7 +3220,7 @@ impl App {
         assert_eq!(right.worktree(), worktree, "lune shows the worktree it went to");
         let (tabs, titles) = self.projected.tabs(on, worktree);
         let right = self.shown();
-        right.tabs(tabs, titles);
+        let _ = right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
             right.ask(luned::Asked::Focus(terminal));
         }
@@ -2980,42 +3286,62 @@ impl App {
         self.sidebar.sit(Seat { on, project: project.id, at });
     }
 
-    fn heeded(&mut self, heeded: Heeded) {
-        match heeded {
-            Heeded::Quiet => {},
+    #[must_use]
+    fn heeded(&mut self, heeded: Heeded) -> bool {
+        let dirty = match heeded {
+            Heeded::Quiet => return false,
+            Heeded::Changed => true,
             Heeded::Followed => {
                 let right = self.shown();
                 let (on, worktree) = (right.machine().clone(), right.worktree());
                 let (tabs, titles) = self.projected.tabs(&on, worktree);
-                self.shown().tabs(tabs, titles);
+                let _ = self.shown().tabs(tabs, titles);
+                true
             },
             Heeded::Edged(across) => self.cross(across),
             Heeded::Sent(worktree) => {
                 let Some(right) = self.viewed() else {
-                    return;
+                    return false;
                 };
                 let on = right.machine().clone();
                 self.go_worktree(&on, worktree, None);
+                true
             },
-            Heeded::Note(note) => self.sidebar.notify(note),
+            Heeded::Note(note) => {
+                self.sidebar.notify(note);
+                true
+            },
             Heeded::Copy(text) => {
                 if let Some(excerpt) = Excerpt::of(text) {
                     let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
                 }
+                false
             },
             Heeded::OpenOsBrowser(url) => {
-                if let Err(why) = self.browser.open_url(&url, &self.events, Instant::now()) {
-                    self.sidebar.notify(why);
+                match self.browser.open_url(&url, &self.events, Instant::now()) {
+                    Ok(()) => false,
+                    Err(why) => {
+                        self.sidebar.notify(why);
+                        true
+                    },
                 }
             },
-            Heeded::Emptied => self.leave_view(),
+            Heeded::Emptied => {
+                self.leave_view();
+                true
+            },
             Heeded::Forgotten(why) => {
                 self.leave_view();
                 self.sidebar.notify(format!("luned's layout: {why}"));
+                true
             },
-            Heeded::Lost(why) => self.sidebar.notify(format!("luned's layout: {why}")),
-        }
+            Heeded::Lost(why) => {
+                self.sidebar.notify(format!("luned's layout: {why}"));
+                true
+            },
+        };
         self.seat();
+        dirty
     }
 
     fn make_worktree(
@@ -3179,27 +3505,39 @@ impl App {
         }
     }
 
-    fn focus_window(&mut self, focused: bool) {
+    #[must_use]
+    fn focus_window(&mut self, focused: bool) -> bool {
         self.focused = focused;
         self.desktop.focus(focused);
         self.focus_alerts();
-        if !focused && let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
-            dictation.unfocused();
+        let mut dirty = false;
+        if !focused
+            && let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
+            && dictation.unfocused()
+        {
+            dirty = true;
         }
         if !focused {
+            let hover_before = self.hover();
+            let was_pressed = self.sidebar.pressed();
             self.pointer = None;
             self.sidebar.let_go();
+            if was_pressed || self.hover() != hover_before {
+                dirty = true;
+            }
         }
         if self.reported == Reported::Focused {
             self.tell_focus(focused);
         }
+        dirty
     }
 
     fn answered<W: io::Write>(
         &mut self,
         answer: Answer,
         terminal: &mut Terminal<CrosstermBackend<W>>,
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
+        let mut dirty = false;
         match answer {
             Answer::Foreground(_) | Answer::Background(_) => {
                 self.colours.hear(answer);
@@ -3231,24 +3569,59 @@ impl App {
                 }
             },
             Answer::Graphics => {
+                dirty = self.graphics != Graphics::Kitty;
                 self.graphics = Graphics::Kitty;
                 self.ribbons.enable();
             },
             Answer::Device | Answer::Kitty => {},
         }
-        Ok(())
+        Ok(dirty)
     }
 
     fn failure(&self) -> Option<String> {
         self.gave_up.as_ref().map(|why| format!("lune: {why}"))
     }
 
-    fn draw(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        self.sidebar.aloud(self.aloud.shown());
-        whole(terminal, |terminal| self.frame(terminal))
+    fn draw_due<W: io::Write>(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+        now: Moment,
+    ) -> io::Result<()> {
+        match &self.pacing {
+            Pacing::Unpainted => {},
+            Pacing::Drawn { dirty: false, painted } => {
+                assert!(now.steady >= painted.at.steady, "steady clock does not move backward");
+                return Ok(());
+            },
+            Pacing::Drawn { dirty: true, painted } => {
+                assert!(now.steady >= painted.at.steady, "steady clock does not move backward");
+                if now.steady.saturating_duration_since(painted.at.steady) < FRAME_INTERVAL {
+                    return Ok(());
+                }
+            },
+        }
+        let painted = self.draw_at(terminal, now)?;
+        self.pacing = Pacing::Drawn { dirty: false, painted };
+        Ok(())
     }
 
-    fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+    fn draw_at<W: io::Write>(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+        now: Moment,
+    ) -> io::Result<Painted> {
+        assert!(
+            !self.sidebar.aloud(self.aloud.shown()),
+            "aloud state is synced before drawing"
+        );
+        whole(terminal, |terminal| self.frame_at(terminal, now))
+    }
+
+    fn frame_at<W: io::Write>(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<W>>,
+        now: Moment,
+    ) -> io::Result<Painted> {
         let mut graphics = std::mem::take(&mut self.pending_graphics);
         if let Some(right) = self.viewed_mut() {
             graphics.extend(right.drain_graphics());
@@ -3256,12 +3629,16 @@ impl App {
         if !graphics.is_empty() {
             terminal.backend_mut().write_all(&graphics)?;
         }
-        terminal.draw(|frame| self.paint(frame))?;
+        let mut painted = None;
+        terminal.draw(|frame| {
+            painted = Some(self.paint_at(frame, now));
+        })?;
+        let painted = painted.expect("terminal.draw invokes its closure before returning Ok");
         self.paint_graphics(terminal.backend_mut())?;
         let cursor = self.viewed().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
-            self.cursor = Some(cursor);
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
+            self.cursor = Some(cursor);
         }
         let (_, right_area) = self.areas;
         let covered = self.covered();
@@ -3284,7 +3661,7 @@ impl App {
             execute!(terminal.backend_mut(), SetTitle(title))?;
             self.title = Some(title.to_owned());
         }
-        Ok(())
+        Ok(painted)
     }
 
     fn paint_graphics(&mut self, out: &mut impl io::Write) -> io::Result<()> {
@@ -3336,7 +3713,12 @@ impl App {
     }
 
     pub fn paint(&mut self, frame: &mut Frame<'_>) {
-        let now = Moment::now();
+        let painted = self.paint_at(frame, Moment::now());
+        self.pacing = Pacing::Drawn { dirty: false, painted };
+    }
+
+    fn paint_at(&mut self, frame: &mut Frame<'_>, now: Moment) -> Painted {
+        let mut cadence = Cadence::default();
         let collapsed = self.focus.side == Side::Collapsed;
         let own = if collapsed { sidebar::COLLAPSED } else { self.width.columns() };
         let frame_area = frame.area();
@@ -3347,7 +3729,9 @@ impl App {
                 self.sidebar.draw_collapsed(buffer, sidebar, now);
                 Drawn::Nothing
             } else {
-                self.sidebar.draw(buffer, sidebar, now)
+                let (drawn, sidebar_cadence) = self.sidebar.draw(buffer, sidebar, now);
+                cadence.merge(sidebar_cadence);
+                drawn
             };
             (sidebar, beside)
         });
@@ -3367,7 +3751,8 @@ impl App {
             Some(Right::Worktree(shown)) => shown.draw(right_clean, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
                 let (buffer, right) = right_clean.into_buffer();
-                self.homes.shown(shown).draw(buffer, right, now.system);
+                let home = self.homes.shown(shown);
+                cadence.merge(home.draw(buffer, right, now.system));
                 (None, Vec::new())
             },
             None => {
@@ -3380,29 +3765,37 @@ impl App {
         let buffer = frame.buffer_mut();
         let drawn = match &self.focus.over {
             Some(Over::Brief(briefing)) => {
-                briefing.draw(buffer, right, now.system);
+                cadence.merge(briefing.draw(buffer, right, now.system));
                 Drawn::Nothing
             },
             Some(Over::Ask(ask)) => {
-                ask.draw(buffer, right, now.system);
+                cadence.merge(ask.draw(buffer, right, now.system));
                 Drawn::Nothing
             },
             Some(Over::Issue(issue)) => {
-                issue.draw(buffer, right, now.system);
+                cadence.merge(issue.draw(buffer, right, now.system));
                 Drawn::Nothing
             },
-            Some(Over::Picker(picker)) => picker.draw(buffer, right, now.system),
+            Some(Over::Picker(picker)) => {
+                let (drawn, picker_cadence) = picker.draw(buffer, right, now.system);
+                cadence.merge(picker_cadence);
+                drawn
+            },
             Some(Over::Dictation(dictation, under)) => {
                 match under {
-                    Where::Ask(ask) => ask.draw(buffer, right, now.system),
-                    Where::Issue(issue) => issue.draw(buffer, right, now.system),
+                    Where::Ask(ask) => cadence.merge(ask.draw(buffer, right, now.system)),
+                    Where::Issue(issue) => cadence.merge(issue.draw(buffer, right, now.system)),
                     Where::Session(_) => {},
                 }
-                dictation.draw(buffer, right, now);
+                cadence.merge(dictation.draw(buffer, right, now));
                 Drawn::Nothing
             },
             None => match self.sidebar.floating() {
-                Some(Floating::Menu(menu)) => menu.draw(buffer, right, now.system),
+                Some(Floating::Menu(menu)) => {
+                    let (drawn, menu_cadence) = menu.draw(buffer, right, now.system);
+                    cadence.merge(menu_cadence);
+                    drawn
+                },
                 Some(Floating::Note(note)) => {
                     menu::draw_note(buffer, right, note);
                     Drawn::Nothing
@@ -3420,17 +3813,21 @@ impl App {
             frame.set_cursor_position(cursor);
         }
         self.drawn = drawn;
+        Painted { at: now, cadence, sidebar_view: self.sidebar.view(collapsed) }
     }
 }
 
-fn whole<W: io::Write>(
+fn whole<W: io::Write, T>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
-    draw: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> io::Result<()>,
-) -> io::Result<()> {
+    draw: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> io::Result<T>,
+) -> io::Result<T> {
     queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
     let drawn = draw(terminal);
     let ended = execute!(terminal.backend_mut(), EndSynchronizedUpdate);
-    drawn.and(ended)
+    match (drawn, ended) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+    }
 }
 
 fn pastes(written: &named::Written, harness: agents::Harness) -> Vec<String> {
@@ -3496,7 +3893,7 @@ mod tests {
         let project = ProjectId::of(3).unwrap();
         let named = |on: Machine| {
             let mut home = Home::new(1, 1, on, project);
-            home.named("lune", &lune_domain::projects::Dir::parse("/w/lune").unwrap());
+            let _ = home.named("lune", &lune_domain::projects::Dir::parse("/w/lune").unwrap());
             home
         };
         assert!(gone(&projected, &named(Machine::Local)));
@@ -3716,13 +4113,410 @@ mod tests {
         let viewport = Viewport::Fixed(Rect::new(0, 0, 120, 40));
         let backend = CrosstermBackend::new(Writes::default());
         let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
-        app.answered(Answer::CellSize(exact), &mut terminal).unwrap();
+        assert!(!app.answered(Answer::CellSize(exact), &mut terminal).unwrap());
         assert_eq!(app.cell, exact);
-        app.answered(
-            Answer::WindowPixels(WindowPixels { width: nz(1200), height: nz(800) }),
-            &mut terminal,
-        )
-        .unwrap();
+        assert!(
+            !app.answered(
+                Answer::WindowPixels(WindowPixels { width: nz(1200), height: nz(800) }),
+                &mut terminal,
+            )
+            .unwrap()
+        );
         assert_eq!(app.cell, exact, "late WindowPixels must not clobber exact CellSize");
+    }
+
+    type Written = Rc<RefCell<Vec<Vec<u8>>>>;
+
+    type TestTerminal = Terminal<CrosstermBackend<Writes>>;
+
+    fn test_terminal(columns: u16, rows: u16) -> (TestTerminal, Written) {
+        let viewport = Viewport::Fixed(Rect::new(0, 0, columns, rows));
+        let writes = Writes::default();
+        let written = Rc::clone(&writes.written);
+        let backend = CrosstermBackend::new(writes);
+        let terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
+        (terminal, written)
+    }
+
+    fn test_app(columns: u16, rows: u16) -> (App, Inbox, tempfile::TempDir) {
+        let state = tempfile::tempdir().unwrap();
+        let launch = Launch {
+            folder: Err("none".to_owned()),
+            dir: state.path().to_owned(),
+            columns,
+            rows,
+        };
+        let (app, inbox) = App::open(launch, state.path());
+        (app, inbox, state)
+    }
+
+    fn busy_host(views: u32, topic: &str) -> Host {
+        use luned::api::{self, agent::Status as Reported, projects, Harness, Status};
+        let made_at = Some(prost_types::Timestamp::default());
+        let terminals: Vec<api::Terminal> = (1..=views)
+            .map(|id| api::Terminal {
+                id: u64::from(id),
+                found: Some(api::terminal::Found::Key(api::TerminalKey { id, made_at })),
+                folder: "/w/lune".to_owned(),
+                command: Some("claude".to_owned()),
+                ..api::Terminal::default()
+            })
+            .collect();
+        let worktree = api::Worktree {
+            id: 100,
+            name: "main".to_owned(),
+            folder: "/w/lune".to_owned(),
+            seen: Some(api::worktree::Seen::Unread(())),
+            terminals,
+            arranged: Some(api::Arrangement::Tabs.into()),
+            ..api::Worktree::default()
+        };
+        let project = api::Project {
+            id: 1,
+            name: "lune".to_owned(),
+            dir: "/w/lune".to_owned(),
+            missing: false,
+            holds: Some(api::project::Holds::Clone(api::project::Clone {
+                worktrees: vec![worktree],
+                listing: None,
+            })),
+        };
+        let kept = projects::Kept { projects: vec![project], version: None };
+        let agent = api::Agent {
+            pid: views,
+            harness: Some(Harness::ClaudeCode.into()),
+            cwd: "/w/lune".to_owned(),
+            status: Some(Reported::KnownStatus(Status::Busy.into())),
+            status_since: None,
+            terminal: Some(api::TerminalKey { id: views, made_at }),
+            topic: Some(topic.to_owned()),
+            ..api::Agent::default()
+        };
+        Host {
+            projects: Some(api::Projects { held: Some(projects::Held::Kept(kept)) }),
+            agents: vec![agent],
+            ..Host::default()
+        }
+    }
+
+    fn drew(app: &mut App, terminal: &mut TestTerminal, written: &Written, now: Moment) -> bool {
+        let before = written.borrow().len();
+        app.draw_due(terminal, now).unwrap();
+        written.borrow().len() > before
+    }
+
+    #[test]
+    fn an_idle_app_with_a_busy_agent_off_screen_draws_no_frames() {
+        let (mut terminal, written) = test_terminal(80, 8);
+        let (mut app, _inbox, _state) = test_app(80, 8);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |offset| Moment { steady: start + offset, system: system + offset };
+
+        app.handle_at(Event::Daemon(Ok(busy_host(8, "step 1"))), &mut terminal, at(Duration::ZERO))
+            .unwrap();
+        app.tick(at(Duration::ZERO));
+        assert!(drew(&mut app, &mut terminal, &written, at(Duration::ZERO)));
+        written.borrow_mut().clear();
+
+        assert_eq!(app.wait(at(Duration::ZERO)), TICK, "busy agent below the viewport does not spin");
+
+        for step in 1..=20 {
+            let offset = Duration::from_millis(step * 100);
+            app.tick(at(offset));
+            assert!(!drew(&mut app, &mut terminal, &written, at(offset)));
+        }
+        assert!(written.borrow().is_empty(), "idle ticks drew no frames");
+
+        let later = Duration::from_secs(3);
+        app.handle_at(Event::Daemon(Ok(busy_host(8, "step 2"))), &mut terminal, at(later))
+            .unwrap();
+        app.tick(at(later));
+        assert!(!drew(&mut app, &mut terminal, &written, at(later)));
+        assert!(written.borrow().is_empty(), "off-screen busy update drew no frames");
+
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None);
+        app.give(Focus::on(Side::Collapsed));
+        app.pacing.mark_dirty();
+        let collapsed_at = Duration::from_secs(4);
+        assert!(drew(&mut app, &mut terminal, &written, at(collapsed_at)));
+        written.borrow_mut().clear();
+
+        assert_eq!(app.wait(at(collapsed_at)), TICK, "collapsed sidebar never spins");
+        for step in 1..=10 {
+            let offset = collapsed_at + Duration::from_millis(step * 100);
+            app.handle_at(
+                Event::Daemon(Ok(busy_host(8, &format!("step {}", step + 2)))),
+                &mut terminal,
+                at(offset),
+            )
+            .unwrap();
+            app.tick(at(offset));
+            assert!(!drew(&mut app, &mut terminal, &written, at(offset)));
+        }
+        assert!(written.borrow().is_empty(), "collapsed busy agent drew no frames");
+
+        let (mut tall, tall_written) = test_terminal(80, 20);
+        app.give(Focus::on(Side::Sidebar));
+        app.pacing.mark_dirty();
+        let shown_at = Duration::from_secs(10);
+        assert!(drew(&mut app, &mut tall, &tall_written, at(shown_at)));
+        tall_written.borrow_mut().clear();
+
+        assert_eq!(app.wait(at(shown_at)), sidebar::SPIN, "on-screen busy agent spins");
+        let same_frame = shown_at + Duration::from_millis(50);
+        app.tick(at(same_frame));
+        assert!(!drew(&mut app, &mut tall, &tall_written, at(same_frame)));
+        let next_frame = shown_at + sidebar::SPIN;
+        app.tick(at(next_frame));
+        assert!(drew(&mut app, &mut tall, &tall_written, at(next_frame)));
+        assert!(!tall_written.borrow().is_empty());
+    }
+
+    #[test]
+    fn rapid_updates_draw_at_most_once_per_frame_interval() {
+        let (mut terminal, written) = test_terminal(80, 12);
+        let (mut app, _inbox, _state) = test_app(80, 12);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |offset| Moment { steady: start + offset, system: system + offset };
+
+        app.tick(at(Duration::ZERO));
+        assert!(drew(&mut app, &mut terminal, &written, at(Duration::ZERO)));
+        written.borrow_mut().clear();
+
+        let mut draws = 0;
+        for step in 1..=20 {
+            let offset = Duration::from_millis(step * 4);
+            let now = at(offset);
+            app.handle_at(Event::Notice(format!("line {step}")), &mut terminal, now).unwrap();
+            app.tick(now);
+            if drew(&mut app, &mut terminal, &written, now) {
+                draws += 1;
+            } else if step < 4 {
+                assert_eq!(app.wait(now), FRAME_INTERVAL.saturating_sub(offset));
+            }
+        }
+        assert_eq!(draws, 5, "80 ms of 4 ms updates drew once per 16 ms frame");
+
+        let trailing = Duration::from_millis(84);
+        app.handle_at(Event::Notice("final".to_owned()), &mut terminal, at(trailing)).unwrap();
+        app.tick(at(trailing));
+        assert!(!drew(&mut app, &mut terminal, &written, at(trailing)));
+        assert_eq!(app.wait(at(trailing)), Duration::from_millis(12));
+
+        let due = Duration::from_millis(96);
+        app.tick(at(due));
+        assert!(drew(&mut app, &mut terminal, &written, at(due)));
+    }
+
+    #[test]
+    fn mouse_moved_and_key_release_draw_only_when_visible_state_changes() {
+        let (mut terminal, written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |offset| Moment { steady: start + offset, system: system + offset };
+
+        app.tick(at(Duration::ZERO));
+        assert!(drew(&mut app, &mut terminal, &written, at(Duration::ZERO)));
+        written.borrow_mut().clear();
+
+        let mut step = 1u64;
+        let send = |app: &mut App,
+                    terminal: &mut TestTerminal,
+                    written: &Written,
+                    step: &mut u64,
+                    event: Event|
+         -> bool {
+            let offset = Duration::from_secs(*step);
+            *step += 1;
+            let now = at(offset);
+            app.handle_at(event, terminal, now).unwrap();
+            app.tick(now);
+            drew(app, terminal, written, now)
+        };
+
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert!(!send(&mut app, &mut terminal, &written, &mut step, Event::Input(Input::Key(release))));
+        assert!(
+            !send(
+                &mut app,
+                &mut terminal,
+                &written,
+                &mut step,
+                Event::Daemon(Err("none".to_owned())),
+            ),
+            "same error stays quiet"
+        );
+        assert!(send(
+            &mut app,
+            &mut terminal,
+            &written,
+            &mut step,
+            Event::Daemon(Err("down".to_owned())),
+        ));
+        assert!(!send(
+            &mut app,
+            &mut terminal,
+            &written,
+            &mut step,
+            Event::Daemon(Err("down".to_owned())),
+        ));
+
+        let question = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(send(&mut app, &mut terminal, &written, &mut step, Event::Input(Input::Key(question))));
+        let spot = (0..20)
+            .flat_map(|y| (0..80).map(move |x| Position::new(x, y)))
+            .find(|pos| app.drawn.at(*pos).is_some())
+            .expect("the legend draws a clickable spot");
+
+        let moved = |x, y| {
+            Event::Input(Input::Mouse(MouseEvent {
+                kind: MouseEventKind::Moved,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }))
+        };
+        assert!(!send(&mut app, &mut terminal, &written, &mut step, moved(0, 0)));
+        assert!(!send(&mut app, &mut terminal, &written, &mut step, moved(1, 0)));
+        assert!(
+            send(&mut app, &mut terminal, &written, &mut step, moved(spot.x, spot.y)),
+            "entering a spot draws its highlight"
+        );
+        assert!(
+            !send(&mut app, &mut terminal, &written, &mut step, moved(spot.x + 1, spot.y)),
+            "staying on the same spot stays quiet"
+        );
+        assert!(
+            send(&mut app, &mut terminal, &written, &mut step, moved(0, 0)),
+            "leaving a spot clears its highlight"
+        );
+        assert!(send(
+            &mut app,
+            &mut terminal,
+            &written,
+            &mut step,
+            Event::Input(Input::Resize(90, 24)),
+        ));
+
+        let (listening, _stop) = speech::Listening::new();
+        let now = at(Duration::from_secs(step));
+        let dictation = Dictation::hearing(1, listening, Skills::Found(Vec::new()), true, now.steady);
+        app.focus.over = Some(Over::Dictation(dictation, Where::Session(None)));
+        app.pacing.mark_dirty();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        step += 1;
+
+        let other_release = KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert!(!send(
+            &mut app,
+            &mut terminal,
+            &written,
+            &mut step,
+            Event::Input(Input::Key(other_release)),
+        ));
+        let hold_release = KeyEvent::new_with_kind(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+            KeyEventKind::Release,
+        );
+        assert!(send(
+            &mut app,
+            &mut terminal,
+            &written,
+            &mut step,
+            Event::Input(Input::Key(hold_release)),
+        ));
+    }
+
+    #[test]
+    fn wall_clock_step_backward_dirties_and_wakes_immediately_when_spinner_is_shown() {
+        let (mut terminal, written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let first = Moment { steady: start, system };
+
+        app.handle_at(Event::Daemon(Ok(busy_host(1, "work"))), &mut terminal, first).unwrap();
+        app.tick(first);
+        assert!(drew(&mut app, &mut terminal, &written, first));
+        assert_eq!(app.wait(first), sidebar::SPIN);
+
+        let stepped_back = Moment {
+            steady: start + FRAME_INTERVAL,
+            system: system - Duration::from_secs(5),
+        };
+        assert_eq!(app.wait(stepped_back), Duration::ZERO);
+        app.tick(stepped_back);
+        assert!(drew(&mut app, &mut terminal, &written, stepped_back));
+    }
+
+    #[test]
+    fn public_paint_commits_complete_pacing_state_before_tick() {
+        let (mut terminal, _written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let now = Moment::now();
+        app.handle_at(Event::Daemon(Ok(busy_host(1, "work"))), &mut terminal, now).unwrap();
+        terminal.draw(|frame| app.paint(frame)).unwrap();
+
+        let later = Moment::now();
+        assert!(app.wait(later) <= sidebar::SPIN);
+        app.tick(later);
+    }
+
+    struct FailingAfterFlush {
+        fail_on_flush: Rc<RefCell<Option<usize>>>,
+        flushes: usize,
+    }
+
+    impl io::Write for FailingAfterFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if *self.fail_on_flush.borrow() == Some(self.flushes) {
+                return Err(io::Error::other("broken pipe"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mid_frame_write_error_does_not_split_pacing_state() {
+        let fail_on_flush = Rc::new(RefCell::new(Some(2)));
+        let backend = CrosstermBackend::new(FailingAfterFlush {
+            fail_on_flush: Rc::clone(&fail_on_flush),
+            flushes: 0,
+        });
+        let viewport = Viewport::Fixed(Rect::new(0, 0, 80, 20));
+        let mut terminal = Terminal::with_options(backend, TerminalOptions { viewport }).unwrap();
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let first = Moment { steady: start, system };
+
+        app.handle_at(Event::Daemon(Ok(busy_host(1, "work"))), &mut terminal, first).unwrap();
+        app.tick(first);
+        assert!(app.draw_due(&mut terminal, first).is_err());
+
+        let retry = Moment { steady: start + Duration::from_millis(5), system };
+        assert_eq!(app.wait(retry), Duration::ZERO);
+        app.tick(retry);
+
+        *fail_on_flush.borrow_mut() = None;
+        app.draw_due(&mut terminal, retry).unwrap();
+        assert_eq!(app.wait(retry), sidebar::SPIN);
     }
 }

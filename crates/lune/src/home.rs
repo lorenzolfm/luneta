@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::ask::{self, Ask};
+use crate::cadence::Cadence;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
@@ -119,18 +120,22 @@ impl Home {
         }
     }
 
-    pub fn named(&mut self, name: &str, dir: &Dir) {
+    #[must_use]
+    pub fn named(&mut self, name: &str, dir: &Dir) -> bool {
         match &mut self.named {
             Named::Not { asks } => {
                 let ask = Ask::homed(*asks, &self.on, dir, name);
                 self.named = Named::As { name: name.to_owned(), dir: dir.clone(), ask };
+                true
             },
             Named::As { name: named, dir: homed, ask } => {
                 if named != name || homed != dir {
                     name.clone_into(named);
                     dir.clone_into(homed);
                     ask.rehome(&self.on, dir, name);
+                    return true;
                 }
+                false
             },
         }
     }
@@ -277,7 +282,8 @@ impl Home {
         matches!(&self.named, Named::As { ask, .. } if ask.turning())
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, area: Rect, now: SystemTime) {
+    pub fn draw(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
+        let mut cadence = Cadence::default();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 if let Some(cell) = buffer.cell_mut((x, y)) {
@@ -287,17 +293,21 @@ impl Home {
         }
         let Some(inner) = area.width.checked_sub(2).map(usize::from).filter(|inner| *inner > 0)
         else {
-            return;
+            return cadence;
         };
         let Named::As { dir, ask, .. } = &self.named else {
-            return self.draw_lists(buffer, area);
+            self.draw_lists(buffer, area);
+            return cadence;
         };
         let most = (area.height / 2).max(ASK_ROWS_MIN).min(area.height);
         let room = usize::from(most.saturating_sub(3));
-        let mut talk = ask.talked(inner, now);
+        let (mut talk, spinner) = ask.talked(inner, wall);
+        let mut kept_spinner = spinner.is_some_and(|at| at < room);
         if talk.len() > room {
             let kept = room.saturating_sub(1);
-            talk.drain(..talk.len() - kept);
+            let drained = talk.len() - kept;
+            kept_spinner = spinner.is_some_and(|at| at >= drained);
+            talk.drain(..drained);
             if room > 0 {
                 talk.insert(0, Line::styled(" …", Style::new().add_modifier(Modifier::DIM)));
             }
@@ -313,6 +323,10 @@ impl Home {
         menu::boxed(buffer, asked, &menu::rule(ASK_TITLE, &right, inner), &talk);
         let lists = Rect::new(area.x, area.y, area.width, area.height - rows);
         self.draw_lists(buffer, lists);
+        if kept_spinner {
+            cadence.spin();
+        }
+        cadence
     }
 
     fn hints(&self) -> Vec<(Hint, &'static str)> {
@@ -538,7 +552,7 @@ mod tests {
 
     fn home() -> Home {
         let mut home = Home::new(1, 1, Machine::Local, ProjectId::of(3).unwrap());
-        home.named("lune", &Dir::parse("/w/lune").unwrap());
+        let _ = home.named("lune", &Dir::parse("/w/lune").unwrap());
         home
     }
 
@@ -726,7 +740,7 @@ mod tests {
         let unnamed = shown(&home, 60, 14);
         assert_eq!(unnamed[..3], [" …", "", "   asking gh for the open issues and pull requests…"]);
         assert!(unnamed[3..].iter().all(String::is_empty), "and no prompt shows: {unnamed:?}");
-        home.named("lune", &Dir::parse("/w/lune").unwrap());
+        let _ = home.named("lune", &Dir::parse("/w/lune").unwrap());
         assert_eq!((home.known(), home.ask_numbered(1).is_some()), (true, true));
         assert!(home.ask_numbered(2).is_none(), "a prompt is heard only by its own number");
         let named = shown(&home, 60, 14);

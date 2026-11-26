@@ -1225,6 +1225,14 @@ impl Browsers {
         }
     }
 
+    #[must_use]
+    pub fn has_pending_graphics(&self) -> bool {
+        let BrowsersMode::Supported(state) = &self.mode else {
+            return false;
+        };
+        !state.pending_deletes.is_empty() || !state.pending_transmits.is_empty()
+    }
+
     pub fn drain_graphics(&mut self) -> Vec<u8> {
         let BrowsersMode::Supported(state) = &mut self.mode else {
             return Vec::new();

@@ -120,11 +120,13 @@ impl<'a> Clean<'a> {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Glyph {
     pub(crate) shows: Shows,
     style: Style,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Row {
     glyphs: Vec<Glyph>,
     ending: Ending,
@@ -138,6 +140,38 @@ impl Row {
 
     fn wraps(&self) -> bool {
         self.ending != Ending::Here
+    }
+
+    fn matches(&self, line: &Line) -> bool {
+        if self.columns != line.columns()
+            || self.wraps() != line.wraps()
+            || (self.ending == Ending::WrapsWide) != line.wraps_wide()
+            || self.glyphs.len() != line.glyphs().len()
+        {
+            return false;
+        }
+        let mut last = (frames::Style::PLAIN, PLAIN);
+        for (current, incoming) in self.glyphs.iter().zip(line.glyphs()) {
+            let style = if incoming.style == last.0 {
+                last.1
+            } else {
+                let drawn = styled(&incoming.style);
+                last = (incoming.style, drawn);
+                drawn
+            };
+            if current.shows != incoming.shows || current.style != style {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn replace_if_changed(&mut self, line: Line) -> bool {
+        if self.matches(&line) {
+            return false;
+        }
+        self.replace(line);
+        true
     }
 
     fn replace(&mut self, line: Line) {
@@ -175,9 +209,17 @@ impl From<Line> for Row {
 pub(crate) enum Applied {
     Resized,
     Kept,
+    Unchanged,
     Ignored,
 }
 
+impl Applied {
+    pub(crate) fn changed(self) -> bool {
+        matches!(self, Applied::Resized | Applied::Kept)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Screen {
     size: Size,
     lines: Vec<Row>,
@@ -210,6 +252,15 @@ impl Screen {
         let Parts { terminal, size, rows, cursor, tracks_mouse } = frame.into_parts();
         match rows {
             Rows::Whole(lines) => {
+                if let Some(previous) = screens.get(&terminal)
+                    && previous.size == size
+                    && previous.cursor == cursor
+                    && previous.tracks_mouse == tracks_mouse
+                    && previous.lines.len() == lines.len()
+                    && previous.lines.iter().zip(&lines).all(|(row, line)| row.matches(line))
+                {
+                    return Ok(Applied::Unchanged);
+                }
                 let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
                 let screen = Screen { size, lines, cursor, tracks_mouse };
                 let was = screens.insert(terminal, screen).map(|old| old.size);
@@ -224,12 +275,14 @@ impl Screen {
                     let (had, sides) = (sides(screen.size), sides(size));
                     return Err(format!("a frame of {sides} changes the rows of {had}"));
                 }
+                let mut changed =
+                    screen.cursor != cursor || screen.tracks_mouse != tracks_mouse;
                 for (index, line) in rows {
-                    screen.lines[usize::from(index)].replace(line);
+                    changed |= screen.lines[usize::from(index)].replace_if_changed(line);
                 }
                 screen.cursor = cursor;
                 screen.tracks_mouse = tracks_mouse;
-                Ok(Applied::Kept)
+                Ok(if changed { Applied::Kept } else { Applied::Unchanged })
             },
         }
     }
@@ -1285,6 +1338,14 @@ mod tests {
         let same_size =
             Frame::new(key, size(1, 1), Rows::Whole(vec![one("b")]), None, false).unwrap();
         assert_eq!(Screen::apply(&mut screens, same_size), Ok(Applied::Kept));
+
+        let same_whole =
+            Frame::new(key, size(1, 1), Rows::Whole(vec![one("b")]), None, false).unwrap();
+        assert_eq!(Screen::apply(&mut screens, same_whole), Ok(Applied::Unchanged));
+
+        let same_delta =
+            Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("b"))]), None, false).unwrap();
+        assert_eq!(Screen::apply(&mut screens, same_delta), Ok(Applied::Unchanged));
 
         let delta =
             Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("c"))]), None, true).unwrap();
