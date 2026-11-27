@@ -3418,16 +3418,36 @@ mod tests {
         });
     }
 
-    fn write_until_heard(what: &str, watches: &Watches, tree: &TreeWatch, file: &AbsPath) {
+    fn write_until_heard_tree(
+        what: &str,
+        watches: &Watches,
+        woken: &mpsc::Receiver<()>,
+        tree: &TreeWatch,
+        file: &AbsPath,
+    ) {
+        assert!(!what.is_empty(), "wait description must be non-empty");
+        assert!(
+            file.as_path().parent().is_some_and(Path::is_dir),
+            "target parent directory must exist before probing: {}",
+            file.display()
+        );
         let mut written = 0_u32;
+        let mut heard = false;
+        let mut woke = false;
         lune_waits::eventually(what, || {
-            if watches.take_heard().contains_tree(tree) {
-                return Some(());
+            if written > 0 {
+                heard |= watches.take_heard().contains_tree(tree);
+                woke |= woken.try_recv().is_ok();
+                if heard && woke {
+                    return Some(());
+                }
             }
-            written += 1;
+            written = written.checked_add(1).expect("probe write count fits u32");
             fs::write(file.as_path(), format!("{written}\n")).unwrap();
             None
         });
+        assert!(written > 0, "at least one write must occur before hearing {what}");
+        assert!(file.as_path().is_file(), "probed file must exist: {}", file.display());
     }
 
     #[test]
@@ -4410,7 +4430,13 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        write_until_heard("recursive parent watches newly created nested dir", &watches, &tree, &feat.join("branch"));
+        write_until_heard_tree(
+            "recursive parent watches newly created nested dir",
+            &watches,
+            &woken,
+            &tree,
+            &feat.join("branch"),
+        );
 
         watches.remove_outside(outside).synced.unwrap();
         assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
@@ -4436,7 +4462,13 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        write_until_heard("recursive parent hears write inside new nested dir", &watches, &tree, &other.join("tip"));
+        write_until_heard_tree(
+            "recursive parent hears write inside new nested dir",
+            &watches,
+            &woken,
+            &tree,
+            &other.join("tip"),
+        );
 
         watches.remove_tree(tree).unwrap();
         assert!(watches.active().unwrap().is_empty());
