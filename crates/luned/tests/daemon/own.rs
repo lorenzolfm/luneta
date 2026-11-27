@@ -20,7 +20,7 @@ use tonic::Status;
 use tonic_prost::ProstCodec;
 
 use crate::demand::build_of;
-use crate::host::{script, start, start_as, Daemon, Host, Running, LUNED};
+use crate::host::{script, start, start_as, Daemon, Host, Running, Slot, LUNED};
 
 const STAND_IN_MUX: &str = "LUNE_TEST_STAND_IN_MUX_FOLDER";
 
@@ -426,7 +426,7 @@ fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     assert_eq!(second.code(), Some(i32::from(server::ANOTHER_RUNS)));
 }
 
-pub fn the_daemon_runs_on_while_a_terminal_does() {
+pub fn the_daemon_runs_on_while_a_terminal_does(_: Slot) {
     let mut owned = Owned::new();
     let program = built_server();
     let mut mux = owned.host.vars().command(program.to_str().unwrap());

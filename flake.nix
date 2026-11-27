@@ -314,13 +314,19 @@
                 fi
                 case "''${NIX_BUILD_CORES:-}" in
                   "" | *[!0-9]* | 0*)
-                    echo "luned-tested: NIX_BUILD_CORES must be a positive integer, got ''${NIX_BUILD_CORES:-}" >&2
+                    echo "luned-tested: NIX_BUILD_CORES must be a positive integer, got ''${NIX_BUILD_CORES:-<unset>}" >&2
                     exit 1
+                    ;;
+                  [1-7])
+                    test_threads=$((NIX_BUILD_CORES * 3))
+                    ;;
+                  *)
+                    test_threads=24
                     ;;
                 esac
                 export PATH="${localToolchain}/bin:${pkgs.lib.makeBinPath testTools}:$PATH"
                 ${pkgs.lib.getExe nextest} --cargo-profile "${checksProfile}" --profile ci \
-                  --test-threads "$NIX_BUILD_CORES"
+                  --test-threads "$test_threads"
                 cargoWithProfile test --doc --locked ${testRun}
               '';
               postBuild = ''

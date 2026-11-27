@@ -30,7 +30,10 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tokio_stream::{pending, StreamExt as _};
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::host::{answered, folder_in, info, install, script, start, start_as, Host, Running, Vars, LUNE, LUNED, PATIENT, SOCKET};
+use crate::host::{
+    answered, folder_in, info, install, script, side_by_side, start, start_as, Host, Running, Slot,
+    Vars, Waits, LUNE, LUNED, PATIENT, SOCKET,
+};
 use crate::terminate::gone;
 
 const OLDER: &str = "0.0.1";
@@ -775,31 +778,24 @@ impl Daemon for StandIn {
 
 #[test]
 fn the_waits_of_half_a_minute_hold_side_by_side() {
-    let waits: [(&str, fn()); 5] = [
-        ("the daemon ends alone", the_daemon_ends_once_nothing_has_kept_it_for_a_while),
-        ("a terminal keeps the daemon", crate::own::the_daemon_runs_on_while_a_terminal_does),
-        ("a client keeps the daemon", the_daemon_runs_on_while_a_client_watches_it),
-        (
-            "a client keeps the machines it watches",
-            crate::remote::a_daemon_a_client_keeps_keeps_the_machines_it_watches_running,
-        ),
-        (
-            "two daemons that watch each other end",
-            crate::remote::two_daemons_that_watch_each_other_and_nothing_else_end,
-        ),
-    ];
-    let failed: Vec<&str> = thread::scope(|scope| {
-        let running = waits.map(|(name, wait)| {
-            let named = thread::Builder::new().name(name.to_owned());
-            (name, named.spawn_scoped(scope, wait).unwrap())
-        });
-        let ended = running.map(|(name, it)| (name, it.join()));
-        ended.into_iter().filter(|(_, ended)| ended.is_err()).map(|(name, _)| name).collect()
+    side_by_side(const {
+        Waits::of([
+            ("the daemon ends alone", the_daemon_ends_once_nothing_has_kept_it_for_a_while),
+            ("a terminal keeps the daemon", crate::own::the_daemon_runs_on_while_a_terminal_does),
+            ("a client keeps the daemon", the_daemon_runs_on_while_a_client_watches_it),
+            (
+                "a client keeps the machines it watches",
+                crate::remote::a_daemon_a_client_keeps_keeps_the_machines_it_watches_running,
+            ),
+            (
+                "two daemons that watch each other end",
+                crate::remote::two_daemons_that_watch_each_other_and_nothing_else_end,
+            ),
+        ])
     });
-    assert_eq!(failed, [] as [&str; 0]);
 }
 
-fn the_daemon_ends_once_nothing_has_kept_it_for_a_while() {
+fn the_daemon_ends_once_nothing_has_kept_it_for_a_while(_: Slot) {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
     host.host();
@@ -817,7 +813,7 @@ fn the_daemon_ends_once_nothing_has_kept_it_for_a_while() {
     daemon.says("the daemon says why it ends", |line| line.contains(&none));
 }
 
-fn the_daemon_runs_on_while_a_client_watches_it() {
+fn the_daemon_runs_on_while_a_client_watches_it(_: Slot) {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();

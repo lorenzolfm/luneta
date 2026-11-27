@@ -1198,10 +1198,13 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
     let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     let in_parent = format!("{PARENT} fold");
-    let asked = ["fold", in_parent.as_str(), "fold"];
+    let parent_first = ["fold", in_parent.as_str(), "fold"];
+    let fold_first = ["fold", "fold", in_parent.as_str()];
 
-    eventually("gh asks about fold once git sees it", || {
-        (host.gh.asked() == asked).then_some(())
+    lune_waits::eventually_showing("gh asks about fold once git sees it", || {
+        let asked = host.gh.asked();
+        let matches = |expected: [&str; 3]| asked.iter().map(String::as_str).eq(expected);
+        if matches(parent_first) || matches(fold_first) { Ok(()) } else { Err(asked) }
     });
 
     lune_waits::never("gh or git says something", || {

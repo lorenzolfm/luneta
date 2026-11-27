@@ -659,9 +659,10 @@ fn a_home_s_talk_goes_on_while_lune_shows_a_worktree_and_esc_stops_only_its_turn
     let claude = format!(
         r#"n=$(cat "{at}/turns" 2>/dev/null || echo 0)
 n=$((n + 1))
-echo "$n" > "{at}/turns"
 echo "$@" > "{at}/args-$n"
 echo "${{LUNE_TURN_BEFORE:-none}}" > "{at}/before-$n"
+echo "$n" > "{at}/turns.tmp"
+mv "{at}/turns.tmp" "{at}/turns"
 cat > /dev/null
 echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
 case "$n" in

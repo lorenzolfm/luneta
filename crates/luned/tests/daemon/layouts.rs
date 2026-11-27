@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 use std::fs;
 use std::iter;
@@ -7,7 +8,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
 use lune_domain::projects::{Opens, Size, ViewId, WorktreeId};
-use lune_waits::{eventually, shell, Patience, Span, QUIET};
+use lune_waits::{eventually, eventually_showing, shell, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
 use luned::api::change_projects_request::{
@@ -33,7 +34,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
-use crate::host::{folder_in, script, start, Host, PATIENT};
+use crate::host::{folder_in, script, side_by_side, start, Host, Slot, Waits, PATIENT};
 use crate::own::{self, Owned};
 use crate::projects::{self, asked, command, kept, project, running, worktree};
 use crate::remote::{hosts, reached, skills_on, FakeSsh};
@@ -1005,32 +1006,52 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
         assert!(refused.message().contains("changed since"), "{}", refused.message());
     }
     assert_eq!(watched(&owned, closing).len(), 2, "a close refused as stale closes none");
+    let listing = owned.listing();
+    let mux_id_of = |terminal| {
+        tagged(&listing, terminal)
+            .and_then(|it| it.key)
+            .expect("the mux holds the worktree's terminal")
+            .id
+    };
+    let mux_ids = terminals.map(mux_id_of);
     let stalled = owned.stall_mux();
     let unclosed = asked(&owned.host, close()).unwrap_err();
     assert_eq!(unclosed.code(), Code::Unavailable, "{unclosed:?}");
     let said = unclosed.message();
-    assert!(said.starts_with("lune-mux: it did not answer in 1.5s, and terminal "), "{said}");
-    assert!(said.ends_with(" may close still"), "{said}");
+    let timed_out_mux = said
+        .strip_prefix("lune-mux: it did not answer in 1.5s, and terminal ")
+        .and_then(|rest| rest.strip_suffix(" may close still"))
+        .and_then(|id| id.parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("unexpected timeout message: {said}"));
+    let surviving = if timed_out_mux == mux_ids[0] {
+        terminals[1]
+    } else if timed_out_mux == mux_ids[1] {
+        terminals[0]
+    } else {
+        panic!("timed-out mux terminal {timed_out_mux} not in {mux_ids:?}");
+    };
+    let all_open: BTreeSet<u64> = terminals.into_iter().collect();
+    let only_surviving: BTreeSet<u64> = [surviving].into_iter().collect();
     assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
     drop(stalled);
-    let closed_at_last = eventually("the worktree closes, with what the close in doubt left", || {
+    let made = eventually_showing("the worktree closes, whichever of its terminals are left", || {
         let left: Vec<u64> = watched(&owned, closing).iter().map(|it| it.id).collect();
-        assert!(!left.is_empty(), "only the close in doubt may have taken a terminal");
-        assert!(left.len() <= terminals.len(), "no extra terminal appears: {left:?}");
+        let left_set: BTreeSet<u64> = left.iter().copied().collect();
+        assert_eq!(left_set.len(), left.len(), "duplicate terminal ids in {left:?}");
         assert!(
-            left.iter().all(|id| terminals.contains(id)),
-            "only the worktree's terminals may remain: {left:?}"
+            left_set == all_open || left_set == only_surviving,
+            "unexpected remaining terminals {left:?}; expected {all_open:?} or {only_surviving:?}"
         );
         match asked(&owned.host, closed(&left)) {
-            Ok(made) => Some(made),
+            Ok(made) => Ok(made),
             Err(stale) if stale.code() == Code::Aborted => {
-                assert!(stale.message().contains("changed since"), "{stale:?}");
-                None
+                assert!(stale.message().contains("changed since"), "{}", stale.message());
+                Err(stale)
             },
-            Err(other) => panic!("a close lune-mux answers is refused as stale alone: {other:?}"),
+            Err(other) => panic!("a worktree close failed once the mux answered: {other:?}"),
         }
     });
-    assert_eq!(closed_at_last, None);
+    assert_eq!(made, None);
     eventually("the worktree's terminals leave the mux", || {
         let listing = owned.listing();
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
@@ -1320,7 +1341,26 @@ fn a_layout_restores_its_terminals_when_the_mux_s_socket_goes() {
 }
 
 #[test]
-fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash() {
+fn the_restores_that_wait_out_their_pause_hold_side_by_side() {
+    side_by_side(const {
+        Waits::of([
+            (
+                "a closed terminal stays closed at a second crash",
+                a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash,
+            ),
+            (
+                "a terminal whose mux keeps ending is given up",
+                a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost,
+            ),
+            (
+                "a restored line outlives a restart",
+                a_line_typed_by_a_restore_outlives_a_restart_of_luned,
+            ),
+        ])
+    });
+}
+
+fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash(_: Slot) {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
@@ -1355,8 +1395,7 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     }
 }
 
-#[test]
-fn a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost() {
+fn a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost(_: Slot) {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);
@@ -1376,8 +1415,7 @@ fn a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost() {
     assert!(lost(&shown.until("the terminal still lost", |_| true).views[0]));
 }
 
-#[test]
-fn a_line_typed_by_a_restore_outlives_a_restart_of_luned() {
+fn a_line_typed_by_a_restore_outlives_a_restart_of_luned(_: Slot) {
     let mut owned = Owned::new();
     let worktree = worktree_in_home(&owned);
     let mut shown = Shown::new(&owned, worktree, 80, 24);

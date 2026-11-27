@@ -33,7 +33,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status};
 
 use crate::demand::{bridged_stand_in, stop, Detached};
-use crate::host::{answered, folder_in, script, shared_script, start, start_as, Host, Vars, LUNE, LUNED, PATIENT};
+use crate::host::{
+    answered, folder_in, script, shared_script, start, start_as, Host, Slot, Vars, LUNE, LUNED,
+    PATIENT,
+};
 use crate::projects::project;
 use crate::worktree::{cloned_as_wt, git};
 
@@ -630,7 +633,7 @@ fn watch_through(host: &Host, span: Span) {
     });
 }
 
-pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
+pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running(_: Slot) {
     let here = Host::new();
     let far = Host::new();
     let ssh = FakeSsh::new(here.bin());
@@ -645,7 +648,7 @@ pub fn a_daemon_a_client_keeps_keeps_the_machines_it_watches_running() {
     assert_eq!(ssh.bridges("far").len(), 1);
 }
 
-pub fn two_daemons_that_watch_each_other_and_nothing_else_end() {
+pub fn two_daemons_that_watch_each_other_and_nothing_else_end(_: Slot) {
     let here = Host::new();
     let far = Host::new();
     let to_far = FakeSsh::new(here.bin());
