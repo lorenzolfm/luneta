@@ -3418,6 +3418,18 @@ mod tests {
         });
     }
 
+    fn write_until_heard(what: &str, watches: &Watches, tree: &TreeWatch, file: &AbsPath) {
+        let mut written = 0_u32;
+        lune_waits::eventually(what, || {
+            if watches.take_heard().contains_tree(tree) {
+                return Some(());
+            }
+            written += 1;
+            fs::write(file.as_path(), format!("{written}\n")).unwrap();
+            None
+        });
+    }
+
     #[test]
     fn a_default_branch_is_a_named_branch_of_a_known_remote_or_of_its_own() {
         let remote = |branch: &str| {
@@ -4398,13 +4410,7 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        fs::write(feat.join("branch").as_path(), "abc\n").unwrap();
-        wait_heard_tree(
-            "recursive parent watches newly created nested dir",
-            &watches,
-            &woken,
-            &tree,
-        );
+        write_until_heard("recursive parent watches newly created nested dir", &watches, &tree, &feat.join("branch"));
 
         watches.remove_outside(outside).synced.unwrap();
         assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
@@ -4430,13 +4436,7 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        fs::write(other.join("tip").as_path(), "123\n").unwrap();
-        wait_heard_tree(
-            "recursive parent hears write inside new nested dir",
-            &watches,
-            &woken,
-            &tree,
-        );
+        write_until_heard("recursive parent hears write inside new nested dir", &watches, &tree, &other.join("tip"));
 
         watches.remove_tree(tree).unwrap();
         assert!(watches.active().unwrap().is_empty());

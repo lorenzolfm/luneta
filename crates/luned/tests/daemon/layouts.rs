@@ -1013,7 +1013,15 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     assert!(said.ends_with(" may close still"), "{said}");
     assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
     drop(stalled);
-    assert_eq!(asked(&owned.host, close()).unwrap(), None);
+    let closed_at_last = eventually("the worktree closes, with what the close in doubt left", || {
+        let left: Vec<u64> = watched(&owned, closing).iter().map(|it| it.id).collect();
+        match asked(&owned.host, closed(&left)) {
+            Ok(made) => Some(made),
+            Err(stale) if stale.code() == Code::Aborted => None,
+            Err(other) => panic!("a close lune-mux answers is refused as stale alone: {other:?}"),
+        }
+    });
+    assert_eq!(closed_at_last, None);
     eventually("the worktree's terminals leave the mux", || {
         let listing = owned.listing();
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())

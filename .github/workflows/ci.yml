@@ -349,7 +349,39 @@ jobs:
           | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Build and test the daemon
-        run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
+        shell: bash
+        run: >-
+          nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
+          2>&1 | tee "$RUNNER_TEMP/daemon.log"
+
+      - name: Name the tests that passed only on a retry
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/daemon.log"
+          if [[ ! -f $log ]]; then
+            exit 0
+          fi
+          plain="$(sed -E $'s/\x1b\\[[0-9;]*m//g' "$log")"
+          flaky="$(sed -nE 's#^[^>]*> +FLAKY ([0-9]+)/([0-9]+) \[[^]]*\] +(\([^)]*\) +)?(.*[^ ]) *$#\4, which passed on try \1 of \2#p' <<<"$plain" | sort -u)"
+          if [[ -z $flaky ]]; then
+            if grep -qE '> +Summary \[.*[0-9]+ flaky' <<<"$plain"; then
+              echo "::warning title=Flaky tests, unnamed::nextest counted flaky tests and none of its FLAKY lines was read, so find them in the log"
+            fi
+            exit 0
+          fi
+          {
+            echo "### Flaky tests on $RUNNER_OS $RUNNER_ARCH"
+            echo
+            echo "Each failed and then passed on a retry, so the job went on. One that is here again after its fix is a real failure."
+            echo
+            while IFS= read -r test; do
+              echo "- \`${test/,/\`,}"
+            done <<<"$flaky"
+          } >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r test; do
+            echo "::warning title=Flaky test on $RUNNER_OS $RUNNER_ARCH::$test"
+          done <<<"$flaky"
 
       - *attic-push
 
