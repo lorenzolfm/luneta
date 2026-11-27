@@ -5,6 +5,7 @@ valid:
   - "#[cfg(feature = \"testing\")] fn testing_feature() {}"
   - "#[allow(clippy::test_attr_in_doctest)] fn allowed() {}"
   - "mod inner { fn helper() {} }"
+  - "const S: &str = include_str!(\"x.txt\");"
 invalid:
   - "#[test] fn unit() {}"
   - "#[::core::prelude::v1::test] fn core_unit() {}"
@@ -17,3 +18,5 @@ invalid:
   - "#[cfg_attr(test, allow(dead_code))] fn helper() {}"
   - "mod helper;"
   - "#[path = \"other.rs\"] mod other;"
+  - "include!(\"tests.rs\");"
+  - "std::include!(\"tests.rs\");"
