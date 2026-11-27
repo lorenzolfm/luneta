@@ -825,6 +825,8 @@ struct CiProfile {
     _slow_timeout: Option<toml::Value>,
     #[serde(default, rename = "failure-output")]
     _failure_output: Option<String>,
+    #[serde(default, rename = "final-status-level")]
+    _final_status_level: Option<String>,
     #[serde(default, rename = "junit")]
     _junit: Option<toml::Value>,
     #[serde(default)]
