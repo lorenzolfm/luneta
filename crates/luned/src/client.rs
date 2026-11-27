@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use hyper_util::rt::TokioIo;
 use lune_protocol::socket::SocketId;
+use lune_protocol::watch::{HostVersion, VersionedHost, WatchedAfter};
 use rustix::process::Pid;
 use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
 use tokio::net::UnixStream;
@@ -42,7 +43,10 @@ pub(crate) const ROUND_TRIP: RoundTrip = RoundTrip::of(Duration::from_secs(5));
 
 const QUIET: Duration = Duration::from_secs(3);
 
+const WATCH_PACE: Duration = Duration::from_millis(250);
+
 const _: () = assert!(QUIET.as_millis() < ANSWER.waits().as_millis());
+const _: () = assert!(WATCH_PACE.as_millis() < crate::WATCH.as_millis());
 
 const KEPT_MAX: usize = 16;
 
@@ -314,16 +318,24 @@ impl std::error::Error for Unasked {
 #[derive(Debug)]
 pub enum WatchError {
     Unasked(Unasked),
-    Unversioned,
+    Unread(&'static str),
+}
+
+impl WatchError {
+    #[must_use]
+    pub fn said(&self, on: Option<&remote::Destination>) -> String {
+        match self {
+            WatchError::Unasked(unasked) => unasked.said(on),
+            WatchError::Unread(why) => format!("{why}, which this lune does not read"),
+        }
+    }
 }
 
 impl fmt::Display for WatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WatchError::Unasked(unasked) => unasked.fmt(f),
-            WatchError::Unversioned => {
-                f.write_str("an answer with no version, which this lune does not read")
-            },
+            WatchError::Unread(why) => write!(f, "{why}, which this lune does not read"),
         }
     }
 }
@@ -332,7 +344,7 @@ impl std::error::Error for WatchError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             WatchError::Unasked(unasked) => unasked.source(),
-            WatchError::Unversioned => None,
+            WatchError::Unread(_) => None,
         }
     }
 }
@@ -350,10 +362,17 @@ impl LocalWatch {
             LocalWatch::Window => true,
         }
     }
+
+    const fn waiter(self) -> api::ClientWaiter {
+        match self {
+            LocalWatch::Client => api::ClientWaiter::Client,
+            LocalWatch::Window => api::ClientWaiter::Window,
+        }
+    }
 }
 
 pub struct WatchedHost {
-    pub version: api::Version,
+    pub version: HostVersion,
     pub host: api::Host,
 }
 
@@ -416,25 +435,74 @@ pub struct Watching {
     daemon: Daemon,
     gone: Gone,
     answer: Answer,
-    shown: bool,
-    after: Option<api::Version>,
+    kind: LocalWatch,
+    after: Option<HostVersion>,
     _permit: OwnedSemaphorePermit,
 }
 
 impl Watching {
     pub async fn next(&mut self) -> Result<WatchedHost, WatchError> {
-        let request = api::WatchRequest { after: self.after, kept: None, shown: self.shown };
-        let host = self.call(request).await.map_err(WatchError::Unasked)?;
-        let version = host.version.ok_or(WatchError::Unversioned)?;
-        self.after = Some(version);
-        Ok(WatchedHost { version, host })
+        loop {
+            let asked_at = Instant::now();
+            let request = api::WatchChangesRequest {
+                after: self.after.map(HostVersion::to_api),
+                waiter: self.kind.waiter().into(),
+            };
+            let response = self.call_changes(request).await.map_err(WatchError::Unasked)?;
+            let next = match self.after {
+                None => response.read_host().map(Some),
+                Some(seen) => response.read_after(seen).map(|watched| match watched {
+                    WatchedAfter::Host(host) => Some(host),
+                    WatchedAfter::Unchanged => None,
+                }),
+            }
+            .map_err(WatchError::Unread)?;
+            match next {
+                Some(host) => {
+                    let (version, host) = host.into_parts();
+                    self.after = Some(version);
+                    return Ok(WatchedHost { version, host });
+                },
+                None => tokio::time::sleep_until(asked_at + WATCH_PACE).await,
+            }
+        }
     }
 
-    pub async fn once(mut self, after: api::Version) -> Result<api::Host, Unasked> {
-        self.call(api::WatchRequest { after: Some(after), kept: None, shown: self.shown }).await
+    pub async fn once(mut self, after: HostVersion) -> Result<VersionedHost, WatchError> {
+        let request = api::WatchRequest {
+            after: Some(after.to_api()),
+            kept: None,
+            shown: self.kind.shown(),
+        };
+        let host = self.call_legacy(request).await.map_err(WatchError::Unasked)?;
+        VersionedHost::of_api(Box::new(host)).map_err(WatchError::Unread)
     }
 
-    async fn call(&mut self, request: api::WatchRequest) -> Result<api::Host, Unasked> {
+    pub async fn once_changes(mut self, after: HostVersion) -> Result<WatchedAfter, WatchError> {
+        let request = api::WatchChangesRequest {
+            after: Some(after.to_api()),
+            waiter: self.kind.waiter().into(),
+        };
+        let response = self.call_changes(request).await.map_err(WatchError::Unasked)?;
+        response.read_after(after).map_err(WatchError::Unread)
+    }
+
+    async fn call_changes(
+        &mut self,
+        request: api::WatchChangesRequest,
+    ) -> Result<api::WatchResponse, Unasked> {
+        let wait = self.answer.waits();
+        assert!(!wait.is_zero(), "a watch waits some time for its answer");
+        if self.gone.is() {
+            return Err(Unasked::Unsent(Unsent::ChannelGone));
+        }
+        match tokio::time::timeout(wait, self.daemon.watch_changes(request)).await {
+            Ok(watched) => watched.map(Response::into_inner).map_err(Unasked::Asked),
+            Err(_) => Err(Unasked::Asked(Status::deadline_exceeded(unanswered(wait)))),
+        }
+    }
+
+    async fn call_legacy(&mut self, request: api::WatchRequest) -> Result<api::Host, Unasked> {
         let wait = self.answer.waits();
         assert!(!wait.is_zero(), "a watch waits some time for its answer");
         if self.gone.is() {
@@ -537,15 +605,36 @@ impl Shared {
             daemon: self.daemon(answer),
             gone: self.gone.clone(),
             answer,
-            shown: kind.shown(),
+            kind,
             after: None,
             _permit: permit,
         })
     }
 
-    pub async fn snapshot(&self, answer: Answer, shown: bool) -> Result<api::Host, Unasked> {
-        let request = api::WatchRequest { after: None, kept: None, shown };
-        self.ask_unary(answer, |mut daemon| async move { daemon.watch(request).await }).await
+    pub async fn snapshot(
+        &self,
+        answer: Answer,
+        kind: LocalWatch,
+    ) -> Result<VersionedHost, WatchError> {
+        let request = api::WatchChangesRequest { after: None, waiter: kind.waiter().into() };
+        let response = self
+            .ask_unary(answer, |mut daemon| async move { daemon.watch_changes(request).await })
+            .await
+            .map_err(WatchError::Unasked)?;
+        response.read_host().map_err(WatchError::Unread)
+    }
+
+    pub async fn snapshot_legacy(
+        &self,
+        answer: Answer,
+        kind: LocalWatch,
+    ) -> Result<VersionedHost, WatchError> {
+        let request = api::WatchRequest { after: None, kept: None, shown: kind.shown() };
+        let host = self
+            .ask_unary(answer, |mut daemon| async move { daemon.watch(request).await })
+            .await
+            .map_err(WatchError::Unasked)?;
+        VersionedHost::of_api(Box::new(host)).map_err(WatchError::Unread)
     }
 
     pub async fn list_agents(&self, answer: Answer) -> Result<api::ListAgentsResponse, Unasked> {
@@ -1420,7 +1509,8 @@ mod tests {
         PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
         ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse, SayRequest, ShowRequest,
         ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest,
-        WaitingResponse, WatchRequest,
+        WaitingResponse, WatchChangesRequest, WatchLocalChangesRequest, WatchLocalResponse,
+        WatchRequest,
     };
     use crate::folder::{self, Folder};
     use crate::mux::own::api::ToViewer;
@@ -1444,6 +1534,7 @@ mod tests {
         contents: String,
         watch_seq: Arc<AtomicU64>,
         watch_versioned: Arc<AtomicBool>,
+        watch_unchanged: Arc<AtomicUsize>,
         watch_afters: Arc<Mutex<Vec<Option<api::Version>>>>,
     }
 
@@ -1459,6 +1550,7 @@ mod tests {
                 contents: "x".repeat(32 * 1024),
                 watch_seq: Arc::new(AtomicU64::new(0)),
                 watch_versioned: Arc::new(AtomicBool::new(true)),
+                watch_unchanged: Arc::new(AtomicUsize::new(0)),
                 watch_afters: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -1586,6 +1678,41 @@ mod tests {
                 api::Version { pid: self.pid, seq }
             });
             Ok(GrpcResponse::new(api::Host { version, ..api::Host::default() }))
+        }
+
+        async fn watch_changes(
+            &self,
+            request: GrpcRequest<WatchChangesRequest>,
+        ) -> Result<GrpcResponse<api::WatchResponse>, Status> {
+            let after = request.into_inner().after;
+            self.watch_afters.lock().unwrap_or_else(PoisonError::into_inner).push(after);
+            if let Some(after) = after
+                && self
+                    .watch_unchanged
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1))
+                    .is_ok()
+            {
+                let response = api::WatchResponse {
+                    answer: Some(api::watch_response::Answer::Unchanged(after)),
+                };
+                return Ok(GrpcResponse::new(response));
+            }
+            let version = self.watch_versioned.load(Ordering::Relaxed).then(|| {
+                let seq = self.watch_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                api::Version { pid: self.pid, seq }
+            });
+            let host = api::Host { version, ..api::Host::default() };
+            let response = api::WatchResponse {
+                answer: Some(api::watch_response::Answer::Host(Box::new(host))),
+            };
+            Ok(GrpcResponse::new(response))
+        }
+
+        async fn watch_local_changes(
+            &self,
+            _: GrpcRequest<WatchLocalChangesRequest>,
+        ) -> Result<GrpcResponse<WatchLocalResponse>, Status> {
+            Err(unserved())
         }
 
         async fn list_contents(
@@ -1965,13 +2092,14 @@ mod tests {
             };
             let mut watching = shared.watching(ANSWER, LocalWatch::Client).unwrap();
             let first = watching.next().await.unwrap();
+            stub.watch_unchanged.store(1, Ordering::Relaxed);
             let second = watching.next().await.unwrap();
             assert_eq!(
                 *stub.watch_afters.lock().unwrap(),
-                vec![None, Some(first.version)],
-                "Watching::next parks past the last seen version on every call after the first"
+                vec![None, Some(first.version.to_api()), Some(first.version.to_api())],
+                "Watching::next skips Unchanged and keeps asking past the last seen version"
             );
-            assert!(second.version.seq > first.version.seq);
+            assert!(second.version.seq() > first.version.seq());
 
             let mut held = Vec::new();
             for _ in 0..(HELD_MAX - 1) {
@@ -2016,7 +2144,7 @@ mod tests {
             stub.watch_versioned.store(false, Ordering::Relaxed);
             let mut unversioned = shared.watching(ANSWER, LocalWatch::Window).unwrap();
             assert!(
-                matches!(unversioned.next().await, Err(WatchError::Unversioned)),
+                matches!(unversioned.next().await, Err(WatchError::Unread(_))),
                 "Watching::next rejects an answer with no version"
             );
         });

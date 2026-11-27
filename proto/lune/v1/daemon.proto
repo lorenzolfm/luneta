@@ -11,6 +11,8 @@ service Daemon {
   rpc Info(google.protobuf.Empty) returns (InfoResponse);
   rpc ListAgents(google.protobuf.Empty) returns (ListAgentsResponse);
   rpc Watch(WatchRequest) returns (Host);
+  rpc WatchChanges(WatchChangesRequest) returns (WatchResponse);
+  rpc WatchLocalChanges(WatchLocalChangesRequest) returns (WatchLocalResponse);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
   rpc KeepChecks(KeepChecksRequest) returns (stream KeepChecksResponse);
   rpc KeepPrinted(KeepPrintedRequest) returns (KeepPrintedResponse);
@@ -224,6 +226,53 @@ message WatchRequest {
   Version after = 1;
   optional bool kept = 2;
   bool shown = 3;
+}
+
+enum ClientWaiter {
+  CLIENT_WAITER_UNSPECIFIED = 0;
+  CLIENT_WAITER_CLIENT = 1;
+  CLIENT_WAITER_WINDOW = 2;
+}
+
+message WatchChangesRequest {
+  Version after = 1;
+  ClientWaiter waiter = 2;
+}
+
+enum DaemonStanding {
+  DAEMON_STANDING_UNSPECIFIED = 0;
+  DAEMON_STANDING_IDLE = 1;
+  DAEMON_STANDING_KEPT = 2;
+  DAEMON_STANDING_WINDOW = 3;
+}
+
+message LocalVersion {
+  uint32 pid = 1;
+  uint64 seq = 2;
+}
+
+message WatchLocalChangesRequest {
+  LocalVersion after = 1;
+  DaemonStanding standing = 2;
+}
+
+message WatchResponse {
+  oneof answer {
+    Host host = 1;
+    Version unchanged = 2;
+  }
+}
+
+message LocalHost {
+  LocalVersion version = 1;
+  Remote.Host host = 2;
+}
+
+message WatchLocalResponse {
+  oneof answer {
+    LocalHost host = 1;
+    LocalVersion unchanged = 2;
+  }
 }
 
 message Version {

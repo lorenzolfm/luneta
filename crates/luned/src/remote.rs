@@ -6,6 +6,7 @@ use std::fs;
 use std::io::{self, BufRead as _, BufReader, ErrorKind, PipeWriter, Read as _};
 use std::iter;
 use std::net::IpAddr;
+use std::num::NonZeroU32;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command as Process;
@@ -15,6 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use lune_protocol::watch::{LocalVersion, WatchedLocalAfter};
 use notify::RecursiveMode;
 use tokio::sync::mpsc as wakes;
 use tokio::sync::oneshot;
@@ -39,6 +41,10 @@ pub const THIS_MACHINE: &str = "it is this machine, which lune lists first";
 pub const HELD_MAX: usize = 12;
 
 const AGAIN_MAX: Duration = Duration::from_secs(30);
+
+const WATCH_PACE: Duration = Duration::from_millis(250);
+
+const _: () = assert!(WATCH_PACE.as_millis() < crate::daemon::WATCH.as_millis());
 
 const SAID_MAX: u64 = 4096;
 
@@ -177,22 +183,25 @@ pub enum Reached {
 }
 
 impl Reached {
-    pub fn to_api(&self, destination: &Destination) -> api::Remote {
+    pub fn into_api(self, destination: &Destination) -> api::Remote {
+        assert!(!destination.0.is_empty(), "a remote destination is not blank");
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(()),
-            Reached::Host(host) => remote::Reached::Host(host.clone()),
+            Reached::Host(host) => remote::Reached::Host(host),
             Reached::Unreached { since, failed, projects } => {
                 let (stopped, ssh_said) = failed.stopped.to_api();
                 remote::Reached::Unreached(remote::Unreached {
-                    since: Some((*since).into()),
-                    why: failed.why.clone(),
+                    since: Some(since.into()),
+                    why: failed.why,
                     stopped: Some(stopped),
-                    projects: projects.clone(),
+                    projects,
                     ssh_said,
                 })
             },
         };
-        api::Remote { destination: destination.0.clone(), reached: Some(reached) }
+        let remote = api::Remote { destination: destination.0.clone(), reached: Some(reached) };
+        assert!(remote.reached.is_some());
+        remote
     }
 }
 
@@ -257,17 +266,14 @@ impl Bridged {
 
     fn agree(&self, seen: &Seen, daemon: Option<&client::Daemon>) {
         let kept = match (seen, daemon) {
-            (Seen::Answered { .. } | Seen::Broke { .. }, Some(daemon)) => {
-                Kept::Daemon(daemon.clone())
-            },
-            (Seen::Answered { .. } | Seen::Broke { .. }, None)
-            | (Seen::Reaching { .. } | Seen::Unreached { .. }, _) => Kept::None,
+            (Seen::Following(_), Some(daemon)) => Kept::Daemon(daemon.clone()),
+            (Seen::Following(_), None) | (Seen::Initial(_), _) => Kept::None,
         };
         self.keep(kept);
     }
 
     fn coming(&self, seen: &Seen) {
-        if let Seen::Broke { .. } = seen {
+        if let Seen::Following(FollowingSeen::Broke { .. }) = seen {
             self.keep(Kept::Coming);
         }
     }
@@ -336,11 +342,41 @@ fn misread(byte: u8) -> bool {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Named {
-    pub lines: Vec<Line>,
-    pub unread: u32,
+    lines: Vec<Line>,
+    unread: u32,
 }
 
 impl Named {
+    pub fn new(lines: Vec<Line>, unread: u32) -> Result<Self, &'static str> {
+        if lines.len() > HOSTS_MAX {
+            return Err("too many machines named");
+        }
+        let mut unique = HashSet::with_capacity(lines.len());
+        if !lines.iter().all(|line| unique.insert(line.destination())) {
+            return Err("a machine is named twice");
+        }
+        Ok(Self { lines, unread })
+    }
+
+    #[must_use]
+    pub fn unread(unread: u32) -> Self {
+        Self { lines: Vec::new(), unread }
+    }
+
+    #[must_use]
+    pub fn with_unread(&self, unread: u32) -> Self {
+        Self { lines: self.lines.clone(), unread }
+    }
+
+    #[must_use]
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<Line>, u32) {
+        (self.lines, self.unread)
+    }
+
     fn far(&self) -> impl Iterator<Item = &Destination> {
         self.lines.iter().filter_map(|line| match line {
             Line::Far(destination) => Some(destination),
@@ -452,10 +488,30 @@ impl Standing {
         }
     }
 
+    pub fn parse_api(said: i32) -> Result<Self, &'static str> {
+        match api::DaemonStanding::try_from(said) {
+            Ok(api::DaemonStanding::Idle) => Ok(Standing::Idle),
+            Ok(api::DaemonStanding::Kept) => Ok(Standing::Kept),
+            Ok(api::DaemonStanding::Window) => Ok(Standing::Window),
+            Ok(api::DaemonStanding::Unspecified) | Err(_) => Err("unknown daemon standing"),
+        }
+    }
+
     #[must_use]
-    pub fn question(self, after: Option<api::Version>) -> api::WatchRequest {
-        let shown = self == Standing::Window;
-        api::WatchRequest { after, kept: Some(self != Standing::Idle), shown }
+    pub const fn to_api(self) -> api::DaemonStanding {
+        match self {
+            Standing::Idle => api::DaemonStanding::Idle,
+            Standing::Kept => api::DaemonStanding::Kept,
+            Standing::Window => api::DaemonStanding::Window,
+        }
+    }
+
+    #[must_use]
+    pub fn question(self, after: Option<LocalVersion>) -> api::WatchLocalChangesRequest {
+        api::WatchLocalChangesRequest {
+            after: after.map(LocalVersion::to_api),
+            standing: self.to_api().into(),
+        }
     }
 }
 
@@ -470,7 +526,7 @@ pub fn follow(
         Ok(file) => file,
         Err(unset) => {
             log::say(&format!("no other machine is watched: {unset}"));
-            let _ = core.send(Command::Hosts(Named { lines: Vec::new(), unread: 1 }));
+            let _ = core.send(Command::Hosts(Named::unread(1)));
             return Ok(());
         },
     };
@@ -487,7 +543,7 @@ pub fn follow(
     let tell = move |named: Option<Named>| {
         let named = match named {
             Some(named) => named,
-            None => Named { lines: told.lines.clone(), unread: 1 },
+            None => told.with_unread(1),
         };
         if named != told {
             if core.send(Command::Hosts(named.clone())).is_err() {
@@ -598,119 +654,210 @@ async fn watched(
     folder: PathBuf,
 ) {
     let destination = bridged.destination.clone();
-    let mut connected = None;
-    let mut seen = Seen::Reaching { since: SystemTime::now() };
+    let mut connected: Option<client::Daemon> = None;
+    let mut seen = Seen::Initial(InitialSeen::Reaching { since: SystemTime::now() });
     let said = Arc::default();
     loop {
-        if standing.wait_for(|standing| *standing != Standing::Idle).await.is_err() {
-            return;
-        }
+        let current = {
+            let Ok(standing) = standing.wait_for(|standing| *standing != Standing::Idle).await
+            else {
+                return;
+            };
+            *standing
+        };
         bridged.awake();
-        let question = standing.borrow().question(seen.after());
-        let asked = asked(&bridged, &seen, &mut connected, question, &said, &folder).await;
-        let (version, host) = match asked {
-            Ok(answered) => answered,
+        let asked_at = tokio::time::Instant::now();
+        let mut daemon = match connect(&bridged, &seen, connected.take(), &said, &folder).await {
+            Ok(daemon) => daemon,
             Err(failed) => {
-                let logged = match &seen {
-                    Seen::Unreached { failed: logged, .. } => logged.why == failed.why,
-                    Seen::Reaching { .. } | Seen::Answered { .. } | Seen::Broke { .. } => false,
-                };
-                seen = seen.failed(failed);
-                bridged.agree(&seen, connected.as_ref());
-                if let Seen::Unreached { failed, .. } = &seen
-                    && !logged
-                {
-                    log::say(&format!("{destination}: unreached: {}", failed.why));
-                }
-                if let Some(reached) = seen.unreached()
-                    && !told(&core, &destination, reached)
-                {
+                if !handle_failure(&destination, &mut seen, failed, &mut bridged, &core).await {
                     return;
                 }
-                bridged.waits(again(seen.failures())).await;
                 continue;
             },
         };
-        if let Seen::Unreached { since, .. } = &seen {
-            let unreached_for = since.elapsed().unwrap_or_default().as_secs();
-            log::say(&format!("{destination}: reached, after {unreached_for}s unreached"));
-        }
-        let told_already = seen.after() == Some(version);
-        let projects = host.projects.clone();
-        seen = Seen::Answered { after: version, at: SystemTime::now(), projects };
-        bridged.agree(&seen, connected.as_ref());
-        if told_already {
-            continue;
-        }
-        let api::Host {
-            version: _,
-            git_statuses,
-            mut agents,
-            unread,
-            pull_requests,
-            unread_files,
-            remotes: _,
-            unread_hosts: _,
-            sayings,
-            projects,
-        } = host;
+        let mut host = match seen {
+            Seen::Initial(initial) => {
+                let question = current.question(None);
+                match ask_watch(&mut daemon, question, api::WatchLocalResponse::read_host).await {
+                    Ok(local) => {
+                        if let InitialSeen::Unreached { since, .. } = initial {
+                            let unreached_for = since.elapsed().unwrap_or_default().as_secs();
+                            log::say(&format!(
+                                "{destination}: reached, after {unreached_for}s unreached"
+                            ));
+                        }
+                        let (version, host) = local.into_parts();
+                        seen = Seen::Following(FollowingSeen::Answered {
+                            after: version,
+                            at: SystemTime::now(),
+                            projects: host.projects.clone(),
+                        });
+                        bridged.agree(&seen, Some(&daemon));
+                        connected = Some(daemon);
+                        host
+                    },
+                    Err(failed) => {
+                        seen = Seen::Initial(initial);
+                        if !handle_failure(&destination, &mut seen, failed, &mut bridged, &core)
+                            .await
+                        {
+                            return;
+                        }
+                        continue;
+                    },
+                }
+            },
+            Seen::Following(following) => {
+                let after = following.after();
+                let question = current.question(Some(after));
+                match ask_watch(&mut daemon, question, |response| response.read_after(after)).await {
+                    Ok(WatchedLocalAfter::Unchanged) => {
+                        seen = Seen::Following(following.unchanged(SystemTime::now()));
+                        bridged.agree(&seen, Some(&daemon));
+                        connected = Some(daemon);
+                        tokio::time::sleep_until(asked_at + WATCH_PACE).await;
+                        continue;
+                    },
+                    Ok(WatchedLocalAfter::Host(local)) => {
+                        let (version, host) = local.into_parts();
+                        let told_already = after == version;
+                        seen = Seen::Following(FollowingSeen::Answered {
+                            after: version,
+                            at: SystemTime::now(),
+                            projects: host.projects.clone(),
+                        });
+                        bridged.agree(&seen, Some(&daemon));
+                        connected = Some(daemon);
+                        if told_already {
+                            tokio::time::sleep_until(asked_at + WATCH_PACE).await;
+                            continue;
+                        }
+                        host
+                    },
+                    Err(failed) => {
+                        seen = Seen::Following(following);
+                        if !handle_failure(&destination, &mut seen, failed, &mut bridged, &core)
+                            .await
+                        {
+                            return;
+                        }
+                        continue;
+                    },
+                }
+            },
+        };
         lune_protocol::program_status::bound_fair(
-            &mut agents,
+            &mut host.agents,
             |agent| Some(&mut agent.subagents),
             |subagent| prost::Message::encoded_len(subagent).saturating_add(16),
             lune_protocol::HOST_SUBAGENTS_BYTES_MAX,
         );
-        let host = remote::Host {
-            git_statuses,
-            agents,
-            unread,
-            pull_requests,
-            unread_files,
-            sayings,
-            projects,
-        };
         if !told(&core, &destination, Reached::Host(host)) {
             return;
         }
     }
 }
 
-enum Seen {
-    Reaching { since: SystemTime },
-    Answered { after: api::Version, at: SystemTime, projects: Option<api::Projects> },
-    Broke { after: api::Version, at: SystemTime, projects: Option<api::Projects> },
-    Unreached { since: SystemTime, failures: u32, failed: Failed, projects: Option<api::Projects> },
+async fn handle_failure(
+    destination: &Destination,
+    seen: &mut Seen,
+    failed: Failed,
+    bridged: &mut Bridged,
+    core: &SyncSender<Command>,
+) -> bool {
+    let logged = match seen {
+        Seen::Initial(InitialSeen::Unreached { failed: logged, .. }) => logged.why == failed.why,
+        Seen::Initial(InitialSeen::Reaching { .. }) | Seen::Following(_) => false,
+    };
+    let next = std::mem::replace(
+        seen,
+        Seen::Initial(InitialSeen::Reaching { since: SystemTime::now() }),
+    )
+    .failed(failed);
+    *seen = next;
+    bridged.agree(seen, None);
+    if let Seen::Initial(InitialSeen::Unreached { failed, .. }) = seen
+        && !logged
+    {
+        log::say(&format!("{destination}: unreached: {}", failed.why));
+    }
+    if let Some(reached) = seen.unreached()
+        && !told(core, destination, reached)
+    {
+        return false;
+    }
+    bridged.waits(again(seen.failures())).await;
+    true
 }
 
-impl Seen {
-    fn after(&self) -> Option<api::Version> {
+enum Seen {
+    Initial(InitialSeen),
+    Following(FollowingSeen),
+}
+
+enum InitialSeen {
+    Reaching { since: SystemTime },
+    Unreached { since: SystemTime, failures: NonZeroU32, failed: Failed, projects: Option<api::Projects> },
+}
+
+enum FollowingSeen {
+    Answered { after: LocalVersion, at: SystemTime, projects: Option<api::Projects> },
+    Broke { after: LocalVersion, at: SystemTime, projects: Option<api::Projects> },
+}
+
+impl FollowingSeen {
+    const fn after(&self) -> LocalVersion {
         match self {
-            Seen::Answered { after, .. } | Seen::Broke { after, .. } => Some(*after),
-            Seen::Reaching { .. } | Seen::Unreached { .. } => None,
+            FollowingSeen::Answered { after, .. } | FollowingSeen::Broke { after, .. } => *after,
         }
     }
 
+    fn unchanged(self, at: SystemTime) -> FollowingSeen {
+        let (after, projects) = match self {
+            FollowingSeen::Answered { after, projects, .. }
+            | FollowingSeen::Broke { after, projects, .. } => (after, projects),
+        };
+        FollowingSeen::Answered { after, at, projects }
+    }
+}
+
+impl Seen {
     fn failures(&self) -> u32 {
         match self {
-            Seen::Reaching { .. } | Seen::Answered { .. } => 0,
-            Seen::Broke { .. } => 1,
-            Seen::Unreached { failures, .. } => *failures,
+            Seen::Initial(InitialSeen::Reaching { .. })
+            | Seen::Following(FollowingSeen::Answered { .. }) => 0,
+            Seen::Following(FollowingSeen::Broke { .. }) => 1,
+            Seen::Initial(InitialSeen::Unreached { failures, .. }) => failures.get(),
         }
     }
 
     fn failed(self, failed: Failed) -> Seen {
-        let failures = self.failures().saturating_add(1);
         match self {
-            Seen::Answered { after, at, projects } => Seen::Broke { after, at, projects },
-            Seen::Reaching { since } => Seen::Unreached { since, failures, failed, projects: None },
-            Seen::Broke { at: since, projects, .. } | Seen::Unreached { since, projects, .. } => {
-                Seen::Unreached { since, failures, failed, projects }
+            Seen::Following(FollowingSeen::Answered { after, at, projects }) => {
+                Seen::Following(FollowingSeen::Broke { after, at, projects })
+            },
+            Seen::Initial(InitialSeen::Reaching { since }) => {
+                Seen::Initial(InitialSeen::Unreached {
+                    since,
+                    failures: NonZeroU32::MIN,
+                    failed,
+                    projects: None,
+                })
+            },
+            Seen::Following(FollowingSeen::Broke { at: since, projects, .. }) => {
+                let failures = NonZeroU32::MIN.saturating_add(1);
+                Seen::Initial(InitialSeen::Unreached { since, failures, failed, projects })
+            },
+            Seen::Initial(InitialSeen::Unreached { since, failures, projects, .. }) => {
+                let failures = failures.saturating_add(1);
+                Seen::Initial(InitialSeen::Unreached { since, failures, failed, projects })
             },
         }
     }
 
     fn unreached(&self) -> Option<Reached> {
-        let Seen::Unreached { since, failed, projects, .. } = self else {
+        let Seen::Initial(InitialSeen::Unreached { since, failed, projects, .. }) = self else {
             return None;
         };
         let (since, failed, projects) = (*since, failed.clone(), projects.clone());
@@ -723,34 +870,30 @@ fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached)
     tokio::task::block_in_place(|| core.send(command)).is_ok()
 }
 
-async fn asked(
+async fn connect(
     bridged: &Bridged,
     seen: &Seen,
-    connected: &mut Option<client::Daemon>,
-    question: api::WatchRequest,
+    connected: Option<client::Daemon>,
     said: &Arc<Mutex<Said>>,
     folder: &Path,
-) -> Result<(api::Version, api::Host), Failed> {
-    let daemon = if let Some(daemon) = connected {
-        daemon
-    } else {
-        bridged.coming(seen);
-        let daemon = connected.insert(matched(&bridged.destination, said, folder).await?);
-        bridged.agree(seen, Some(&*daemon));
-        daemon
-    };
-    let watched = daemon.watch(question).await;
-    let answered = watched.map_err(|status| unreached(&status)).and_then(|host| {
-        let host = host.into_inner();
-        let unversioned = "an answer with no version, which this luned does not read";
-        let version =
-            host.version.ok_or_else(|| Failed::of(unversioned.to_owned(), Stopped::Lost))?;
-        Ok((version, host))
-    });
-    if answered.is_err() {
-        *connected = None;
+) -> Result<client::Daemon, Failed> {
+    if let Some(daemon) = connected {
+        return Ok(daemon);
     }
-    answered
+    bridged.coming(seen);
+    let daemon = matched(&bridged.destination, said, folder).await?;
+    bridged.agree(seen, Some(&daemon));
+    Ok(daemon)
+}
+
+async fn ask_watch<T>(
+    daemon: &mut client::Daemon,
+    question: api::WatchLocalChangesRequest,
+    read: impl FnOnce(api::WatchLocalResponse) -> Result<T, &'static str>,
+) -> Result<T, Failed> {
+    let response = daemon.watch_local_changes(question).await.map_err(|status| unreached(&status))?;
+    read(response.into_inner())
+        .map_err(|why| Failed::of(format!("{why}, which this luned does not read"), Stopped::Lost))
 }
 
 async fn matched(
@@ -893,7 +1036,8 @@ mod tests {
     }
 
     fn answered_with(projects: Option<api::Projects>) -> Seen {
-        Seen::Answered { after: api::Version { pid: 1, seq: 1 }, at: SystemTime::now(), projects }
+        let after = LocalVersion::new(NonZeroU32::new(1).unwrap(), 1);
+        Seen::Following(FollowingSeen::Answered { after, at: SystemTime::now(), projects })
     }
 
     fn refused() -> Failed {
@@ -902,7 +1046,12 @@ mod tests {
     }
 
     fn lost() -> Seen {
-        Seen::Unreached { since: SystemTime::now(), failures: 2, failed: refused(), projects: None }
+        Seen::Initial(InitialSeen::Unreached {
+            since: SystemTime::now(),
+            failures: NonZeroU32::new(2).unwrap(),
+            failed: refused(),
+            projects: None,
+        })
     }
 
     fn named_in(text: &str) -> (Vec<String>, u32) {
@@ -1093,7 +1242,7 @@ mod tests {
     #[test]
     fn a_machine_lost_keeps_the_projects_last_heard_and_one_never_reached_has_none() {
         let shown = |seen: &Seen| {
-            let reached = seen.unreached()?.to_api(&"nixos".parse().unwrap()).reached;
+            let reached = seen.unreached()?.into_api(&"nixos".parse().unwrap()).reached;
             let Some(remote::Reached::Unreached(unreached)) = reached else {
                 panic!("{reached:?} is not unreached");
             };
@@ -1107,11 +1256,21 @@ mod tests {
         assert_eq!(shown(&broke), None);
         let unreached = broke.failed(refused());
         assert_eq!(shown(&unreached), Some(heard.clone()));
-        assert_eq!(shown(&unreached.failed(refused())), Some(heard));
+        assert_eq!(shown(&unreached.failed(refused())), Some(heard.clone()));
 
-        let never = Seen::Reaching { since: SystemTime::now() }.failed(refused());
+        let never = Seen::Initial(InitialSeen::Reaching { since: SystemTime::now() }).failed(refused());
         assert_eq!(shown(&never), Some(None));
         assert_eq!(shown(&never.failed(refused())), Some(None));
+
+        let Seen::Following(broke) = answered_with(heard.clone()).failed(refused()) else {
+            panic!("first failure after answering moves to broke");
+        };
+        let recovered = broke.unchanged(SystemTime::now());
+        let FollowingSeen::Answered { after, projects, .. } = recovered else {
+            panic!("an unchanged watch recovers a broke watch to answered");
+        };
+        assert_eq!(after, LocalVersion::new(NonZeroU32::new(1).unwrap(), 1));
+        assert_eq!(projects, heard);
     }
 
     #[test]
