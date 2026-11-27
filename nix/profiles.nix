@@ -65,6 +65,8 @@ let
     checkDrv "checksDeps" checksProfile
     ++ checkDrv "tested" checksProfile
     ++ checkDrv "clippy" checksProfile
+    ++ checkDrv "clippyRelease" "release"
+    ++ checkDrv "clippyCrossRelease" "release"
     ++ checkDrv "releaseDeps" "release"
     ++ checkDrv "luned" "release";
   checksFailures =

@@ -78,7 +78,8 @@ pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE};
 pub use layouts::RESTORE_PAUSE;
 pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
 pub use shows::{
-    show, Asked, Beside, Direction, Found, Growth, Heard, Laid, View, Rect, Show, Shows, Where,
+    show, AskNumber, Beside, Direction, Echoed, FocusAsked, Found, Growth, Heard, Laid,
+    LayoutAsked, View, Rect, Show, Shows, Where,
 };
 pub use remote::{
     named_by as hosts_named, parsed as hosts_parsed, sharing, Destination, Line as HostsLine,

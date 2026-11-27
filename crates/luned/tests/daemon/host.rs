@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use std::thread;
 
 use lune_waits::{Patience, Span, PATIENCE};
-use luned::api::{self, WatchRequest};
+use luned::api;
 use luned::folder::{self, Folder};
 use luned::{Answer, RoundTrip};
 use tempfile::TempDir;
@@ -535,8 +535,11 @@ impl Host {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-            let asked = WatchRequest { after: None, kept: None, shown: false };
-            daemon.watch(asked).await.unwrap().into_inner()
+            let asked = api::WatchChangesRequest {
+                after: None,
+                waiter: api::ClientWaiter::Client.into(),
+            };
+            daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().into_host()
         })
     }
 }
