@@ -10,7 +10,6 @@
       url = "github:ghostty-org/ghostty/108cacb17ed8990840cd14abfce43d8ed8503ca1";
       flake = false;
     };
-    nixpkgs-zig.url = "github:nixos/nixpkgs/d4f25a3e562008648d45bcf2d70bcc7422cad84e";
   };
 
   outputs =
@@ -20,7 +19,6 @@
       rust-overlay,
       crane,
       ghostty,
-      nixpkgs-zig,
       ...
     }:
     let
@@ -178,6 +176,35 @@
             '';
           };
 
+          cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
+
+          gitHashes = {
+            "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" =
+              "sha256-VkLyG0Y3V8ugEl2emA7Zpe0StQnwqu8Ay2xMQWr8Kn8=";
+            "git+https://github.com/lorenzolfm/wt?rev=b73f7d36d8f6f6c9301da9568de82ec8bd917cce#b73f7d36d8f6f6c9301da9568de82ec8bd917cce" =
+              "sha256-KYTyp97dAhus2mzuvsvX4JbRilIbucNIBe7xR2xf+BE=";
+          };
+          unhashed = pkgs.lib.unique (
+            builtins.filter (source: pkgs.lib.hasPrefix "git+" source && !(gitHashes ? ${source})) (
+              map (crate: crate.source or "") cargoLock.package
+            )
+          );
+          linkedVendor =
+            pkgs.lib.throwIfNot (unhashed == [ ])
+              "gitHashes has no hash for ${pkgs.lib.concatStringsSep ", " unhashed}, so every evaluation would clone it"
+              (
+                craneLib.vendorCargoDeps {
+                  cargoLockParsed = cargoLock;
+                  outputHashes = gitHashes;
+                }
+              );
+          cargoVendorDir = pkgs.runCommand "lune-cargo-vendor" { } ''
+            cp -rL ${linkedVendor} "$out"
+            chmod u+w "$out" "$out/config.toml"
+            substituteInPlace "$out/config.toml" --replace-fail ${linkedVendor} "$out"
+            chmod a-w "$out" "$out/config.toml"
+          '';
+
           speechBuild = [
             pkgs.cmake
             pkgs.pkg-config
@@ -188,10 +215,9 @@
             "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" =
               "108cacb17ed8990840cd14abfce43d8ed8503ca1";
           };
-          ghosttySys =
-            pkgs.lib.findFirst (crate: crate.name == "libghostty-vt-sys")
-              (throw "Cargo.lock has no libghostty-vt-sys")
-              (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package;
+          ghosttySys = pkgs.lib.findFirst (
+            crate: crate.name == "libghostty-vt-sys"
+          ) (throw "Cargo.lock has no libghostty-vt-sys") cargoLock.package;
           ghosttySysRev =
             ghosttyRevs.${ghosttySys.source}
               or (throw "ghosttyRevs has no commit for libghostty-vt-sys from ${ghosttySys.source}");
@@ -199,14 +225,10 @@
             pkgs.lib.throwIfNot (ghostty.rev == ghosttySysRev)
               "the ghostty input is not ${ghosttySysRev}, which libghostty-vt-sys binds"
               (
-                (pkgs.lib.makeScope pkgs.newScope (_: {
-                  inherit (nixpkgs-zig.legacyPackages.${system}) zig_0_17;
-                })).callPackage
-                  "${ghostty}/nix/libghostty-vt.nix"
-                  {
-                    optimize = "ReleaseSafe";
-                    revision = ghostty.shortRev;
-                  }
+                pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
+                  optimize = "ReleaseSafe";
+                  revision = ghostty.shortRev;
+                }
               );
 
           inherit (cfg) ggmlCpu;
@@ -242,9 +264,6 @@
             pkgs.openssh
             pkgs.procps
           ];
-
-          cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
-
           daemon = {
             pname = "luned";
             inherit version src cargoVendorDir;
@@ -502,9 +521,8 @@
           };
 
           deny = craneLib.cargoDeny {
-            inherit (daemon) pname version;
+            inherit (daemon) pname version cargoVendorDir;
             src = denySrc;
-            inherit cargoVendorDir;
             cargoDenyExtraArgs = "--offline --locked";
           };
 
@@ -628,6 +646,17 @@
           inherit dev luned terminal-browser;
           flaky-report = flakyReport.bin;
 
+          cached = [
+            cargoVendorDir
+            checksDeps
+            releaseDeps
+            luned
+            clippyCrossDeps
+            clippyReleaseDeps
+            clippyCrossReleaseDeps
+            libghosttyVt
+          ];
+
           checks = lintChecks // {
             inherit lints;
             luned = tested;
@@ -666,5 +695,12 @@
       }) bySystem;
 
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
+
+      cached = nixpkgs.lib.mapAttrs (
+        _: built:
+        nixpkgs.lib.concatMap (drv: map (output: drv.${output}.outPath) drv.outputs) (
+          built.cached ++ builtins.attrValues (builtins.removeAttrs built.checks [ "lints" ])
+        )
+      ) bySystem;
     };
 }

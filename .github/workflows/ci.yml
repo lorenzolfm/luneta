@@ -206,7 +206,7 @@ jobs:
         run: nix run .#dev.commands.deny -- advisories
 
       - &attic-push
-        name: Push the store to the attic cache
+        name: Push what this job built to the attic cache
         if: ${{ !cancelled() && steps.tailscale.outcome == 'success' }}
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
@@ -217,7 +217,24 @@ jobs:
           fi
           attic="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#attic-client)/bin/attic"
           "$attic" login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
-          nix path-info --all | awk -v skip="${ATTIC_SKIP_PATH:-}" '!/\.drv$/ && (skip == "" || $0 != skip)' | "$attic" push homelab:main --stdin
+          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+          cached="$(nix eval --json ".#cached.$system")"
+          skip="${ATTIC_SKIP_PATH:-}"
+          built=()
+          while read -r path; do
+            if [[ -n $skip && $path == "$skip" ]]; then
+              continue
+            fi
+            if [[ -e $path ]]; then
+              built+=("$path")
+            fi
+          done < <(jq -r '.[]' <<<"$cached")
+          if [[ ${#built[@]} -eq 0 ]]; then
+            echo "This job built nothing the cache keeps."
+            exit 0
+          fi
+          printf '%s\n' "${built[@]}"
+          "$attic" push homelab:main "${built[@]}"
 
   breaking:
     needs: code
@@ -246,10 +263,7 @@ jobs:
           nix run .#dev.commands.lint -- --breaking
 
   tested:
-    needs: code
-    if: >-
-      fromJSON(needs.code.outputs.plan).kind == 'code'
-      && !github.event.pull_request.head.repo.fork
+    if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
