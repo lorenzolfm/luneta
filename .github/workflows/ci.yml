@@ -16,8 +16,7 @@ jobs:
   code:
     runs-on: ubuntu-latest
     outputs:
-      changed: ${{ steps.diff.outputs.changed }}
-      ios: ${{ steps.diff.outputs.ios }}
+      scope: ${{ steps.diff.outputs.scope }}
 
     steps:
       - name: actions/checkout v7
@@ -36,11 +35,6 @@ jobs:
             base="$BEFORE"
           fi
           files="$(git diff --no-renames --name-only "$base" HEAD)"
-          docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/lune/SKILL.md || true)"
-          changed=true
-          if [[ -n $files && $docs == "$files" ]]; then
-            changed=false
-          fi
           ios_dirs=(
             ios
             crates/phone
@@ -65,8 +59,8 @@ jobs:
               echo "::error::ios filter directory missing: $dir" >&2
               exit 1
             fi
-            if [[ ! $dir =~ ^[A-Za-z0-9_/-]+$ ]]; then
-              echo "::error::ios filter directory contains unsupported characters: $dir" >&2
+            if [[ ! $dir =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]]; then
+              echo "::error::ios filter directory is not a canonical relative path: $dir" >&2
               exit 1
             fi
             dir_args+=(-e "^$dir/")
@@ -77,35 +71,55 @@ jobs:
               echo "::error::ios filter file missing: $file" >&2
               exit 1
             fi
+            if [[ ! $file =~ ^\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*(/\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$ ]]; then
+              echo "::error::ios filter file is not a canonical relative path: $file" >&2
+              exit 1
+            fi
             file_args+=(-e "$file")
           done
-          ios=true
+          scope=all
           if [[ -n $files ]]; then
-            ios=false
             status=0
-            grep -qxF "${file_args[@]}" <<<"$files" || status=$?
+            non_docs="$(grep -vxE '.*\.md' <<<"$files")" || status=$?
             case "$status" in
-              0) ios=true ;;
+              0 | 1) ;;
+              *) exit "$status" ;;
+            esac
+            status=0
+            grep -qxF skills/lune/SKILL.md <<<"$files" || status=$?
+            case "$status" in
+              0) non_docs="${non_docs:+$non_docs$'\n'}skills/lune/SKILL.md" ;;
               1) ;;
               *) exit "$status" ;;
             esac
-            if [[ $ios == false ]]; then
+            if [[ -z $non_docs ]]; then
+              scope=none
+            else
+              scope=host
               status=0
-              grep -qE "${dir_args[@]}" <<<"$files" || status=$?
+              grep -qxF "${file_args[@]}" <<<"$non_docs" || status=$?
               case "$status" in
-                0) ios=true ;;
+                0) scope=all ;;
                 1) ;;
                 *) exit "$status" ;;
               esac
+              if [[ $scope == host ]]; then
+                status=0
+                grep -qE "${dir_args[@]}" <<<"$non_docs" || status=$?
+                case "$status" in
+                  0) scope=all ;;
+                  1) ;;
+                  *) exit "$status" ;;
+                esac
+              fi
             fi
           fi
           echo "$files"
-          echo "changed=$changed" | tee -a "$GITHUB_OUTPUT"
-          echo "ios=$ios" | tee -a "$GITHUB_OUTPUT"
+          echo "scope=$scope" | tee -a "$GITHUB_OUTPUT"
 
   clippy:
     needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    if: ${{ needs.code.outputs.scope == 'host' || needs.code.outputs.scope == 'all' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -186,7 +200,7 @@ jobs:
   breaking:
     needs: code
     if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      ${{ (needs.code.outputs.scope == 'host' || needs.code.outputs.scope == 'all')
       && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
@@ -211,7 +225,7 @@ jobs:
   tested:
     needs: code
     if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      ${{ (needs.code.outputs.scope == 'host' || needs.code.outputs.scope == 'all')
       && !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-latest
     permissions:
@@ -247,7 +261,9 @@ jobs:
   daemon:
     needs: [code, tested]
     if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      ${{ !cancelled() && needs.code.result == 'success'
+      && needs.tested.result != 'failure'
+      && (needs.code.outputs.scope == 'host' || needs.code.outputs.scope == 'all')
       && needs.tested.outputs.untested != '[]' }}
     strategy:
       fail-fast: false
@@ -315,9 +331,7 @@ jobs:
 
   ios:
     needs: code
-    if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && needs.code.outputs.ios != 'false' }}
+    if: ${{ needs.code.outputs.scope == 'all' }}
     runs-on: xcode-27
     timeout-minutes: 40
 
@@ -343,15 +357,20 @@ jobs:
           fi
           echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
 
-      - name: actions/cache v6.1.0, what cargo fetched and built
+      - name: actions/cache v6.1.0, cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/phone/Cargo.toml', 'crates/phone-bindgen/Cargo.toml', 'crates/protocol/Cargo.toml', 'rust-toolchain.toml', 'flake.lock') }}
+          key: cargo-registry-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: actions/cache v6.1.0, cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/phone/Cargo.toml', 'crates/phone-bindgen/Cargo.toml', 'crates/protocol/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', 'nix/dev/default.nix', 'nix/dev/commands/ios.nix', '.github/workflows/ci.yml') }}
 
       - name: Build the app for the simulator
         env:

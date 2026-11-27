@@ -39,6 +39,40 @@ let
     builtins.attrNames (builtins.readDir ./commands)
   );
 
+  enterCheckout =
+    {
+      label ? null,
+      fail ? null,
+    }:
+    let
+      report =
+        msg:
+        if fail != null then
+          ''${fail} "${msg}"''
+        else
+          ''printf '%s: %s\n' ${lib.escapeShellArg label} "${msg}" >&2'';
+    in
+    ''
+      root="$PWD"
+      while [ ! -f "$root/crates/luned/Cargo.toml" ]; do
+        if [ "$root" = / ] || [ -z "$root" ]; then
+          ${report "run this inside the lune checkout"}
+          exit 2
+        fi
+        root="''${root%/*}"
+        root="''${root:-/}"
+      done
+      for config in "''${root%/}/.cargo/config.toml" "''${root%/}/.cargo/config"; do
+        if [ -e "$config" ] || [ -L "$config" ]; then
+          ${report "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml"}
+          exit 2
+        fi
+      done
+      export DEV_HERE="$PWD"
+      export DEV_PATH="$PATH"
+      cd "$root"
+    '';
+
   command =
     record:
     pkgs.writeShellApplication {
@@ -50,6 +84,18 @@ let
         ${record.text}
       '';
     };
+
+  standalone =
+    record:
+    command (
+      record
+      // {
+        text = ''
+          ${enterCheckout { label = "dev-${record.name}"; }}
+          ${record.text}
+        '';
+      }
+    );
 
   signature = record: "dev ${record.name} ${record.usage}";
   width = lib.foldl' lib.max 0 (map (record: lib.stringLength (signature record)) records);
@@ -70,9 +116,9 @@ pkgs.writeShellApplication {
   name = "dev";
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
-    lint = command (import ./commands/lint.nix args);
-    clippy-cross = command (import ./commands/clippy.nix args).cross;
-    ios-build = command (import ./commands/ios.nix args).build;
+    lint = standalone (import ./commands/lint.nix args);
+    clippy-cross = standalone (import ./commands/clippy.nix args).cross;
+    ios-build = standalone (import ./commands/ios.nix args).build;
   };
   text = ''
     paint() {
@@ -101,20 +147,7 @@ pkgs.writeShellApplication {
     }
 
     enter_checkout() {
-      root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)" || root=""
-      if [ ! -f "$root/crates/luned/Cargo.toml" ]; then
-        error "run this inside the lune checkout"
-        exit 2
-      fi
-      for config in "$root/.cargo/config.toml" "$root/.cargo/config"; do
-        if [ -e "$config" ] || [ -L "$config" ]; then
-          error "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml"
-          exit 2
-        fi
-      done
-      export DEV_HERE="$PWD"
-      export DEV_PATH="$PATH"
-      cd "$root"
+      ${enterCheckout { fail = "error"; }}
     }
 
     cmd="''${1:-help}"

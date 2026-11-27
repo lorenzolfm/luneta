@@ -3,6 +3,12 @@ let
   ciPath = ".github/workflows/ci.yml";
   ci = builtins.readFile (root + "/${ciPath}");
 
+  isCanonicalDir = rel: builtins.match "[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*" rel != null;
+
+  isCanonicalFile =
+    rel:
+    builtins.match "\\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*(/\\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*)*" rel != null;
+
   entryKind =
     rel:
     let
@@ -12,46 +18,116 @@ let
     in
     if builtins.pathExists (root + "/${rel}") then (builtins.readDir dir).${base} or null else null;
 
+  extractUnique =
+    pattern: label:
+    let
+      matches = builtins.filter builtins.isList (builtins.split pattern ci);
+    in
+    if matches == [ ] then
+      {
+        raw = null;
+        errors = [ "${ciPath}: missing ${label}" ];
+      }
+    else if builtins.length matches > 1 then
+      {
+        raw = null;
+        errors = [ "${ciPath}: multiple ${label} blocks found" ];
+      }
+    else
+      {
+        raw = builtins.head (builtins.head matches);
+        errors = [ ];
+      };
+
   extractArray =
     name:
     let
-      matched = builtins.match ".*\n[ ]*${name}=\\(\n([^)]*)\\).*" ci;
+      found = extractUnique "\n[ ]*${name}=\\(\n([^)]*)\\)" "${name} array";
+      nonBlank =
+        if found.raw == null then
+          [ ]
+        else
+          builtins.filter (line: builtins.match "[ \t\r]*" line == null) (
+            builtins.filter builtins.isString (builtins.split "\n" found.raw)
+          );
+      parsed = map (
+        line:
+        let
+          m = builtins.match "[ \t]*([^ \t\r]+)[ \t\r]*" line;
+        in
+        if m == null then
+          {
+            item = null;
+            error = "${ciPath}: ${name} line must hold one path: ${line}";
+          }
+        else
+          {
+            item = builtins.head m;
+            error = null;
+          }
+      ) nonBlank;
+      items = map (p: p.item) (builtins.filter (p: p.item != null) parsed);
     in
-    if matched == null then
-      null
-    else
-      builtins.filter (item: item != "") (
-        map (
-          line:
-          let
-            trimmed = builtins.match "[ ]*([^ ]+)[ ]*" line;
-          in
-          if trimmed == null then "" else builtins.head trimmed
-        ) (builtins.filter builtins.isString (builtins.split "\n" (builtins.head matched)))
-      );
+    {
+      inherit items;
+      errors =
+        found.errors
+        ++ map (p: p.error) (builtins.filter (p: p.error != null) parsed)
+        ++ (if found.raw != null && items == [ ] then [ "${ciPath}: empty ${name} array" ] else [ ]);
+    };
+
+  extractCacheKey =
+    prefix:
+    let
+      found = extractUnique "key: ${prefix}[^\n]*hashFiles\\(([^)]*)\\)" "${prefix} cargo cache hashFiles(...)";
+      tokens =
+        if found.raw == null then
+          [ ]
+        else
+          builtins.filter builtins.isString (builtins.split "," found.raw);
+      parsed = map (
+        token:
+        let
+          m = builtins.match "[ ]*'([^']+)'[ ]*" token;
+        in
+        if m == null then
+          {
+            item = null;
+            error = "${ciPath}: unparseable ${prefix} hashFiles(...) entry: ${token}";
+          }
+        else
+          {
+            item = builtins.head m;
+            error = null;
+          }
+      ) tokens;
+      items = map (p: p.item) (builtins.filter (p: p.item != null) parsed);
+    in
+    {
+      inherit items;
+      errors =
+        found.errors
+        ++ map (p: p.error) (builtins.filter (p: p.error != null) parsed)
+        ++ (
+          if found.raw != null && items == [ ] && parsed == [ ] then
+            [ "${ciPath}: empty ${prefix} cargo cache hashFiles(...)" ]
+          else
+            [ ]
+        );
+    };
 
   iosDirs = extractArray "ios_dirs";
   iosFiles = extractArray "ios_files";
-
-  cacheKeyMatch = builtins.match ".*key: cargo-[^\n]*hashFiles\\(([^)]*)\\).*" ci;
-  cacheKeyFiles =
-    if cacheKeyMatch == null then
-      null
-    else
-      builtins.filter (item: item != "") (
-        map (
-          token:
-          let
-            unquoted = builtins.match "[ ]*'([^']+)'[ ]*" token;
-          in
-          if unquoted == null then "" else builtins.head unquoted
-        ) (builtins.filter builtins.isString (builtins.split "," (builtins.head cacheKeyMatch)))
-      );
+  registryCache = extractCacheKey "cargo-registry-";
+  targetCache = extractCacheKey "cargo-target-";
 
   crateEntries = builtins.readDir (root + "/crates");
   allCrateDirs = builtins.filter (name: crateEntries.${name} == "directory") (
     builtins.attrNames crateEntries
   );
+
+  rootManifest = builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"));
+  workspaceDeps = rootManifest.workspace.dependencies or { };
 
   depTablesOf =
     manifest:
@@ -65,36 +141,90 @@ let
     ++ map (target: target.dependencies or { }) targets
     ++ map (target: target.build-dependencies or { }) targets;
 
-  rawPathsOf =
+  depEntriesOf =
+    manifest:
+    builtins.concatLists (
+      map (
+        table:
+        map (name: {
+          inherit name;
+          spec = table.${name};
+        }) (builtins.attrNames table)
+      ) (depTablesOf manifest)
+    );
+
+  pathRefsOf =
     dir:
     let
       manifest = builtins.fromTOML (builtins.readFile (root + "/crates/${dir}/Cargo.toml"));
-      deps = builtins.concatLists (map builtins.attrValues (depTablesOf manifest));
+      classify =
+        entry:
+        let
+          inherit (entry) name spec;
+        in
+        if builtins.isAttrs spec && spec ? path then
+          {
+            kind = "crate";
+            inherit (spec) path;
+            error = null;
+          }
+        else if builtins.isAttrs spec && (spec.workspace or false) then
+          let
+            ws = workspaceDeps.${name} or null;
+          in
+          if ws == null then
+            {
+              kind = "error";
+              path = null;
+              error = "crates/${dir}/Cargo.toml: workspace dependency ${name} missing from Cargo.toml [workspace.dependencies]";
+            }
+          else if builtins.isAttrs ws && ws ? path then
+            {
+              kind = "workspace";
+              inherit (ws) path;
+              error = null;
+            }
+          else
+            null
+        else
+          null;
     in
-    map (dep: dep.path) (builtins.filter (dep: builtins.isAttrs dep && dep ? path) deps);
+    builtins.filter (item: item != null) (map classify (depEntriesOf manifest));
 
   addUnique = list: item: if builtins.elem item list then list else list ++ [ item ];
 
   stepClosure =
     state: _:
     let
-      paths = builtins.concatLists (map rawPathsOf state.dirs);
+      refs = builtins.concatLists (map pathRefsOf state.dirs);
       parsed = map (
-        path:
-        let
-          matched = builtins.match "\\.\\./([A-Za-z0-9_-]+)" path;
-        in
-        {
-          inherit path;
-          dir = if matched == null then null else builtins.head matched;
-        }
-      ) paths;
-      bad = map (item: "crates Cargo.toml path dependency ${item.path} is not ../<crate>") (
-        builtins.filter (item: item.dir == null || !(builtins.elem item.dir allCrateDirs)) parsed
-      );
-      found = map (item: item.dir) (
-        builtins.filter (item: item.dir != null && builtins.elem item.dir allCrateDirs) parsed
-      );
+        ref:
+        if ref.kind == "error" then
+          {
+            dir = null;
+            inherit (ref) error;
+          }
+        else
+          let
+            pattern =
+              if ref.kind == "workspace" then "crates/([A-Za-z0-9_-]+)" else "\\.\\./([A-Za-z0-9_-]+)";
+            expected = if ref.kind == "workspace" then "crates/<crate>" else "../<crate>";
+            matched = builtins.match pattern ref.path;
+            dir = if matched == null then null else builtins.head matched;
+          in
+          if dir == null || !(builtins.elem dir allCrateDirs) then
+            {
+              dir = null;
+              error = "Cargo.toml path dependency ${ref.path} is not ${expected}";
+            }
+          else
+            {
+              inherit dir;
+              error = null;
+            }
+      ) refs;
+      bad = map (item: item.error) (builtins.filter (item: item.error != null) parsed);
+      found = map (item: item.dir) (builtins.filter (item: item.dir != null) parsed);
     in
     {
       dirs = builtins.foldl' addUnique state.dirs found;
@@ -109,57 +239,61 @@ let
     errors = [ ];
   } allCrateDirs;
 
+  cargoBuildFiles = [
+    "Cargo.toml"
+    "Cargo.lock"
+    "rust-toolchain.toml"
+    "flake.nix"
+    "flake.lock"
+    "nix/dev/default.nix"
+    "nix/dev/commands/ios.nix"
+    ciPath
+  ];
+
   requiredDirs = [
     "ios"
     "proto"
   ]
   ++ map (dir: "crates/${dir}") closure.dirs;
 
-  requiredFiles = [
-    "Cargo.toml"
-    "Cargo.lock"
-    "rust-toolchain.toml"
-    "flake.nix"
-    "flake.lock"
-    "nix/ios.nix"
-    "nix/dev/default.nix"
-    "nix/dev/commands/ios.nix"
-    ciPath
-  ];
+  requiredFiles = cargoBuildFiles ++ [ "nix/ios.nix" ];
 
-  requiredCacheFiles = [
-    "Cargo.toml"
-    "Cargo.lock"
-    "rust-toolchain.toml"
-    "flake.lock"
-  ]
-  ++ map (dir: "crates/${dir}/Cargo.toml") closure.dirs;
+  requiredRegistryCacheFiles = [ "Cargo.lock" ];
 
-  dirsList = if iosDirs == null then [ ] else iosDirs;
-  filesList = if iosFiles == null then [ ] else iosFiles;
-  cacheList = if cacheKeyFiles == null then [ ] else cacheKeyFiles;
+  requiredTargetCacheFiles = cargoBuildFiles ++ map (dir: "crates/${dir}/Cargo.toml") closure.dirs;
+
+  validateFileEntries =
+    label: items:
+    map (file: "${ciPath}: ${label} entry ${file} is not a canonical relative path") (
+      builtins.filter (file: !(isCanonicalFile file)) items
+    )
+    ++ map (file: "${ciPath}: ${label} entry ${file} is not a regular file") (
+      builtins.filter (file: isCanonicalFile file && entryKind file != "regular") items
+    );
 in
 closure.errors
-++ (if dirsList == [ ] then [ "${ciPath}: missing or empty ios_dirs array" ] else [ ])
-++ (if filesList == [ ] then [ "${ciPath}: missing or empty ios_files array" ] else [ ])
-++ (
-  if cacheList == [ ] then [ "${ciPath}: missing or empty ios cargo cache hashFiles(...)" ] else [ ]
+++ iosDirs.errors
+++ iosFiles.errors
+++ registryCache.errors
+++ targetCache.errors
+++ map (dir: "${ciPath}: ios_dirs entry ${dir} is not a canonical relative path") (
+  builtins.filter (dir: !(isCanonicalDir dir)) iosDirs.items
 )
 ++ map (dir: "${ciPath}: ios_dirs entry ${dir} is not a directory") (
-  builtins.filter (dir: entryKind dir != "directory") dirsList
+  builtins.filter (dir: isCanonicalDir dir && entryKind dir != "directory") iosDirs.items
 )
-++ map (dir: "${ciPath}: ios_dirs entry ${dir} contains regex-unsafe characters") (
-  builtins.filter (dir: builtins.match "[A-Za-z0-9_/-]+" dir == null) dirsList
-)
-++ map (file: "${ciPath}: ios_files entry ${file} is not a regular file") (
-  builtins.filter (file: entryKind file != "regular") filesList
-)
+++ validateFileEntries "ios_files" iosFiles.items
+++ validateFileEntries "cargo-registry- hashFiles(...)" registryCache.items
+++ validateFileEntries "cargo-target- hashFiles(...)" targetCache.items
 ++ map (dir: "${ciPath}: ios_dirs is missing ${dir}") (
-  builtins.filter (dir: !(builtins.elem dir dirsList)) requiredDirs
+  builtins.filter (dir: !(builtins.elem dir iosDirs.items)) requiredDirs
 )
 ++ map (file: "${ciPath}: ios_files is missing ${file}") (
-  builtins.filter (file: !(builtins.elem file filesList)) requiredFiles
+  builtins.filter (file: !(builtins.elem file iosFiles.items)) requiredFiles
 )
-++ map (file: "${ciPath}: ios cargo cache hashFiles(...) is missing ${file}") (
-  builtins.filter (file: !(builtins.elem file cacheList)) requiredCacheFiles
+++ map (file: "${ciPath}: cargo-registry- hashFiles(...) is missing ${file}") (
+  builtins.filter (file: !(builtins.elem file registryCache.items)) requiredRegistryCacheFiles
+)
+++ map (file: "${ciPath}: cargo-target- hashFiles(...) is missing ${file}") (
+  builtins.filter (file: !(builtins.elem file targetCache.items)) requiredTargetCacheFiles
 )
