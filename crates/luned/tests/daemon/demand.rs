@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::num::NonZeroU32;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
@@ -8,19 +9,19 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
+use lune_protocol::watch::{HostVersion, LocalVersion, WatchedAfter};
 use lune_waits::{eventually, Began, Span};
 use luned::api::daemon_server::{Daemon, DaemonServer};
 use luned::api::{
-    self, AskRequest, AskResponse, FileIssueRequest, FileIssueResponse, IssueRepositoriesRequest,
-    IssueRepositoriesResponse, InfoResponse, KeepChecksRequest, KeepChecksResponse,
-    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
-    ListAgentsResponse, ListContentsRequest,
+    self, AnswerRequest, AskRequest, AskResponse, ClientWaiter, FileIssueRequest,
+    FileIssueResponse, InfoResponse, IssueRepositoriesRequest, IssueRepositoriesResponse,
+    KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse,
+    KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse, ListContentsRequest,
     ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest,
-    ListSkillsResponse,
-    PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
-    RebaseRequest, RebaseResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, Version, WaitingRequest, WaitingResponse,
-    WatchRequest, AnswerRequest,
+    ListSkillsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
+    PrunesResponse, RebaseRequest, RebaseResponse, TranscriptEndsRequest, TranscriptEndsResponse,
+    Version, WaitingRequest, WaitingResponse, WatchChangesRequest, WatchLocalChangesRequest,
+    WatchRequest,
 };
 use luned::{folder, release, Claim, ALONE, SWEEP};
 use prost::Message as _;
@@ -572,6 +573,22 @@ impl Daemon for StandIn {
         Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
     }
 
+    async fn watch_changes(
+        &self,
+        _: Request<WatchChangesRequest>,
+    ) -> Result<Response<api::WatchResponse>, Status> {
+        let version = HostVersion::new(NonZeroU32::new(self.pid).unwrap(), 0);
+        Ok(Response::new(api::WatchResponse::host(version, api::Host::default())))
+    }
+
+    async fn watch_local_changes(
+        &self,
+        _: Request<WatchLocalChangesRequest>,
+    ) -> Result<Response<api::WatchLocalResponse>, Status> {
+        let version = LocalVersion::new(NonZeroU32::new(self.pid).unwrap(), 0);
+        Ok(Response::new(api::WatchLocalResponse::host(version, api::remote::Host::default())))
+    }
+
     type KeepChecksStream = tokio_stream::Empty<Result<KeepChecksResponse, Status>>;
 
     async fn keep_checks(
@@ -807,11 +824,23 @@ fn the_daemon_runs_on_while_a_client_watches_it() {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let mut watching = luned::connect(&folder, PATIENT).await.unwrap();
-        let mut after = None;
+        let mut after: Option<HostVersion> = None;
         let watched = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
         lune_waits::repeated_through(watched, "the daemon answers a watch", async || {
-            let asked = watching.watch(WatchRequest { after, kept: None, shown: false }).await;
-            after = asked.expect("the daemon ended").into_inner().version;
+            let asked = watching
+                .watch_changes(WatchChangesRequest {
+                    after: after.map(HostVersion::to_api),
+                    waiter: ClientWaiter::Client.into(),
+                })
+                .await;
+            let response = asked.expect("the daemon ended").into_inner();
+            after = Some(match after {
+                None => response.read_host().unwrap().version(),
+                Some(seen) => match response.read_after(seen).unwrap() {
+                    WatchedAfter::Host(host) => host.version(),
+                    WatchedAfter::Unchanged => seen,
+                },
+            });
         })
         .await;
     });

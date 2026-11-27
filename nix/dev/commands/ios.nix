@@ -83,6 +83,7 @@ let
       fi
       ${macBuildEnv}
       cargo build --locked -p lune-phone --target ${lib.escapeShellArg p.target} --profile ${lib.escapeShellArg p.profile}
+      cargo clippy --locked -p lune-phone-bindgen --all-targets -- -D warnings
       cargo build --locked -p lune-phone-bindgen
       built="$(cargo metadata --locked --no-deps --format-version 1 | jq -er '.target_directory | strings')"
       if [ -z "$built" ] || [ ! -d "$built" ]; then

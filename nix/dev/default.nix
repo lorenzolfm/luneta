@@ -4,6 +4,7 @@
   buildTools,
   compileEnv,
   macBuildEnv,
+  cross,
   clippyRun,
   testRun,
   nextest,
@@ -28,6 +29,7 @@ let
       buildTools
       compileEnv
       macBuildEnv
+      cross
       clippyRun
       testRun
       nextest
@@ -35,67 +37,80 @@ let
       ;
   };
 
-  records = map (file: import (./commands + "/${file}") args) (
-    builtins.attrNames (builtins.readDir ./commands)
+  commandFiles = lib.filterAttrs (name: kind: kind == "regular" && lib.hasSuffix ".nix" name) (
+    builtins.readDir ./commands
   );
 
-  enterCheckout =
-    {
-      label ? null,
-      fail ? null,
-    }:
+  reserved = [
+    "help"
+    "-h"
+    "--help"
+  ];
+
+  loadCommand =
+    file:
     let
-      report =
-        msg:
-        if fail != null then
-          ''${fail} "${msg}"''
-        else
-          ''printf '%s: %s\n' ${lib.escapeShellArg label} "${msg}" >&2'';
+      stem = lib.removeSuffix ".nix" file;
+      record = import (./commands + "/${file}") args;
+      checks = [
+        {
+          ok = record.name == stem;
+          message = "nix/dev/commands/${file} sets name = ${builtins.toJSON record.name}, expected ${builtins.toJSON stem}";
+        }
+        {
+          ok = !(builtins.elem record.name reserved);
+          message = "nix/dev/commands/${file} shadows reserved dev command ${builtins.toJSON record.name}";
+        }
+        {
+          ok = builtins.match "[a-z][a-z0-9-]*" record.name != null;
+          message = "nix/dev/commands/${file} sets invalid command name ${builtins.toJSON record.name}";
+        }
+      ];
     in
-    ''
-      root="$(pwd -P)"
-      while [ ! -f "$root/crates/luned/Cargo.toml" ]; do
-        if [ -e "$root/.git" ] || [ "$root" = / ] || [ -z "$root" ]; then
-          ${report "run this inside the lune checkout"}
-          exit 2
-        fi
-        root="''${root%/*}"
-        root="''${root:-/}"
-      done
-      for config in "''${root%/}/.cargo/config.toml" "''${root%/}/.cargo/config"; do
-        if [ -e "$config" ] || [ -L "$config" ]; then
-          ${report "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml"}
-          exit 2
-        fi
-      done
-      export DEV_HERE="$PWD"
-      export DEV_PATH="$PATH"
-      cd "$root"
-    '';
+    lib.foldr (check: next: lib.throwIfNot check.ok check.message next) record checks;
+
+  records = map loadCommand (builtins.attrNames commandFiles);
 
   command =
     record:
+    let
+      qLabel = lib.escapeShellArg "dev-${record.name}";
+    in
     pkgs.writeShellApplication {
       name = "dev-${record.name}";
       runtimeInputs = record.tools;
       inheritPath = record.inheritPath or false;
       text = ''
+        enter_checkout() {
+          local root config
+          root="$(pwd -P)"
+          while [ ! -f "$root/crates/luned/Cargo.toml" ]; do
+            if [ -e "$root/.git" ] || [ "$root" = / ] || [ -z "$root" ]; then
+              printf '%s: run this inside the lune checkout\n' ${qLabel} >&2
+              exit 2
+            fi
+            root="''${root%/*}"
+            root="''${root:-/}"
+          done
+          for config in "''${root%/}/.cargo/config.toml" "''${root%/}/.cargo/config"; do
+            if [ -e "$config" ] || [ -L "$config" ]; then
+              printf '%s: %s\n' ${qLabel} "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml" >&2
+              exit 2
+            fi
+          done
+          export DEV_HERE="$PWD"
+          export DEV_PATH="''${DEV_PATH:-$PATH}"
+          cd "$root"
+        }
+        enter_checkout
         export PATH="$PATH:''${CARGO_HOME:-''${HOME:-}/.cargo}/bin"
         ${record.text}
       '';
     };
 
-  standalone =
-    record:
-    command (
-      record
-      // {
-        text = ''
-          ${enterCheckout { label = "dev-${record.name}"; }}
-          ${record.text}
-        '';
-      }
-    );
+  commands = lib.mapAttrs' (
+    file: _: lib.nameValuePair (lib.removeSuffix ".nix" file) (command (loadCommand file))
+  ) commandFiles;
 
   signature = record: "dev ${record.name} ${record.usage}";
   width = lib.foldl' lib.max 0 (map (record: lib.stringLength (signature record)) records);
@@ -107,8 +122,8 @@ let
 
   dispatch = lib.concatMapStringsSep "\n" (record: ''
     ${record.name})
-      enter_checkout
-      exec ${lib.getExe (command record)} "$@"
+      export DEV_PATH="$PATH"
+      exec ${lib.getExe commands.${record.name}} "$@"
       ;;
   '') records;
 in
@@ -116,9 +131,8 @@ pkgs.writeShellApplication {
   name = "dev";
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
-    lint = standalone (import ./commands/lint.nix args);
-    clippy-cross = standalone (import ./commands/clippy.nix args).cross;
-    ios-build = standalone (import ./commands/ios.nix args).build;
+    inherit (commands) lint deny;
+    ios-build = command (import ./commands/ios.nix args).build;
   };
   text = ''
     paint() {
@@ -144,10 +158,6 @@ pkgs.writeShellApplication {
     error() {
       paint 2
       printf '%sdev:%s %s\n' "$red" "$reset" "$1" >&2
-    }
-
-    enter_checkout() {
-      ${enterCheckout { fail = "error"; }}
     }
 
     cmd="''${1:-help}"

@@ -636,3 +636,410 @@ fn a_call_that_gets_through_wakes_a_backed_off_watch() {
     phone.block_on(phone.core.waiting(key)).unwrap();
     never("a call while stopped starts no watch", || phone.heard.try_recv().ok());
 }
+
+#[test]
+fn the_phone_falls_back_to_watch_against_an_older_luned_and_upgrades_on_reconnect() {
+    use std::num::NonZeroU32;
+    use std::os::unix::net::UnixListener as StdUnixListener;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
+
+    use lune_protocol::watch::HostVersion;
+    use luned::api::daemon_server::{Daemon, DaemonServer};
+    use luned::api::{
+        self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest,
+        ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
+        IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest,
+        KeepChecksResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest,
+        KeepPrintedResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
+        ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest, ListResumeResponse,
+        ListSkillsRequest, ListSkillsResponse,
+        ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
+        PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, ReadDiffRequest,
+        ReadDiffResponse, RebaseRequest, RebaseResponse, ReloadResumeRequest, ReloadResumeResponse,
+        SayRequest, ShowRequest, ShowResponse,
+        TranscriptEndsRequest, TranscriptEndsResponse, Version, WaitingRequest, WaitingResponse,
+        WatchChangesRequest, WatchLocalChangesRequest, WatchRequest,
+    };
+    use tokio::net::UnixListener;
+    use tokio::sync::{oneshot, watch};
+    use tokio_stream::wrappers::UnixListenerStream;
+    use tonic::transport::Server;
+    use tonic::{Request, Response, Status, Streaming};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Stage {
+        LegacyFirst,
+        LegacySecond,
+        Restarting,
+        Upgraded,
+    }
+
+    struct Upgrading {
+        stage: watch::Sender<Stage>,
+        watch_changes_calls: Arc<AtomicUsize>,
+        watch_calls: Arc<AtomicUsize>,
+        watch_calls_after_upgrade: Arc<AtomicUsize>,
+        unchanged_legacy_sent: Arc<AtomicBool>,
+        restart_sent: Arc<AtomicBool>,
+        upgraded_long_poll: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    fn host_named(pid: u32, seq: u64, name: &str) -> api::Host {
+        let project = api::Project {
+            id: 1,
+            name: name.to_owned(),
+            dir: "/w".to_owned(),
+            holds: Some(api::project::Holds::Folder(api::Worktree {
+                id: 1,
+                name: "main".to_owned(),
+                folder: "/w".to_owned(),
+                seen: Some(api::worktree::Seen::Unread(())),
+                ..api::Worktree::default()
+            })),
+            ..api::Project::default()
+        };
+        let kept = api::projects::Held::Kept(api::projects::Kept {
+            projects: vec![project],
+            version: None,
+        });
+        api::Host {
+            version: Some(Version { pid, seq }),
+            projects: Some(api::Projects { held: Some(kept) }),
+            ..api::Host::default()
+        }
+    }
+
+    #[tonic::async_trait]
+    impl Daemon for Upgrading {
+        async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
+            Err(Status::permission_denied("not served"))
+        }
+
+        async fn list_agents(&self, _: Request<()>) -> Result<Response<ListAgentsResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn watch(&self, request: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
+            let request = request.into_inner();
+            assert!(request.kept.is_none() && request.shown, "phone watches as a window: {request:?}");
+            self.watch_calls.fetch_add(1, Ordering::SeqCst);
+            if *self.stage.borrow() == Stage::Upgraded {
+                self.watch_calls_after_upgrade.fetch_add(1, Ordering::SeqCst);
+                return Err(Status::failed_precondition("legacy watch called after upgrade"));
+            }
+            match request.after {
+                None => Ok(Response::new(host_named(1, 1, "alpha"))),
+                Some(Version { pid: 1, seq: 1 }) => {
+                    if !self.unchanged_legacy_sent.swap(true, Ordering::SeqCst) {
+                        return Ok(Response::new(host_named(1, 1, "alpha")));
+                    }
+                    let mut stage = self.stage.subscribe();
+                    let _ = stage.wait_for(|current| *current != Stage::LegacyFirst).await;
+                    Ok(Response::new(host_named(1, 2, "beta")))
+                },
+                Some(Version { pid: 1, seq: 2 }) => {
+                    let mut stage = self.stage.subscribe();
+                    let _ = stage
+                        .wait_for(|current| matches!(current, Stage::Restarting | Stage::Upgraded))
+                        .await;
+                    if !self.restart_sent.swap(true, Ordering::SeqCst) {
+                        self.stage.send_replace(Stage::Upgraded);
+                        return Err(Status::unavailable("restarting"));
+                    }
+                    self.watch_calls_after_upgrade.fetch_add(1, Ordering::SeqCst);
+                    Err(Status::unavailable("restarting"))
+                },
+                Some(other) => Err(Status::invalid_argument(format!("unexpected after {other:?}"))),
+            }
+        }
+
+        async fn watch_changes(
+            &self,
+            request: Request<WatchChangesRequest>,
+        ) -> Result<Response<api::WatchResponse>, Status> {
+            self.watch_changes_calls.fetch_add(1, Ordering::SeqCst);
+            if *self.stage.borrow() != Stage::Upgraded {
+                return Err(Status::unimplemented(""));
+            }
+            let version = HostVersion::new(NonZeroU32::new(2).unwrap(), 1);
+            match request.into_inner().after {
+                None => Ok(Response::new(api::WatchResponse::host(
+                    version,
+                    host_named(2, 1, "gamma"),
+                ))),
+                Some(after) if after == version.to_api() => {
+                    if let Some(done) = self.upgraded_long_poll.lock().unwrap().take() {
+                        let _ = done.send(());
+                    }
+                    Ok(Response::new(api::WatchResponse::unchanged(version)))
+                },
+                Some(other) => Err(Status::invalid_argument(format!("unexpected after {other:?}"))),
+            }
+        }
+
+        async fn watch_local_changes(
+            &self,
+            _: Request<WatchLocalChangesRequest>,
+        ) -> Result<Response<api::WatchLocalResponse>, Status> {
+            Err(Status::permission_denied("not served"))
+        }
+
+        type KeepChecksStream = tokio_stream::Empty<Result<KeepChecksResponse, Status>>;
+
+        async fn keep_checks(
+            &self,
+            _: Request<KeepChecksRequest>,
+        ) -> Result<Response<Self::KeepChecksStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type FileIssueStream = tokio_stream::Empty<Result<FileIssueResponse, Status>>;
+
+        async fn file_issue(
+            &self,
+            _: Request<FileIssueRequest>,
+        ) -> Result<Response<Self::FileIssueStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn issue_repositories(
+            &self,
+            _: Request<IssueRepositoriesRequest>,
+        ) -> Result<Response<IssueRepositoriesResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn change_projects(
+            &self,
+            _: Request<ChangeProjectsRequest>,
+        ) -> Result<Response<ChangeProjectsResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type MakeWorktreeStream = tokio_stream::Empty<Result<MakeWorktreeResponse, Status>>;
+
+        async fn make_worktree(
+            &self,
+            _: Request<MakeWorktreeRequest>,
+        ) -> Result<Response<Self::MakeWorktreeStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type ListWorkStream = tokio_stream::Empty<Result<ListWorkResponse, Status>>;
+
+        async fn list_work(
+            &self,
+            _: Request<ListWorkRequest>,
+        ) -> Result<Response<Self::ListWorkStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type ReadDiffStream = tokio_stream::Empty<Result<ReadDiffResponse, Status>>;
+
+        async fn read_diff(
+            &self,
+            _: Request<ReadDiffRequest>,
+        ) -> Result<Response<Self::ReadDiffStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn list_skills(
+            &self,
+            _: Request<ListSkillsRequest>,
+        ) -> Result<Response<ListSkillsResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn list_repositories(
+            &self,
+            _: Request<ListRepositoriesRequest>,
+        ) -> Result<Response<ListRepositoriesResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn keep_printed(
+            &self,
+            _: Request<KeepPrintedRequest>,
+        ) -> Result<Response<KeepPrintedResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn list_contents(
+            &self,
+            _: Request<ListContentsRequest>,
+        ) -> Result<Response<ListContentsResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn transcript_ends(
+            &self,
+            _: Request<TranscriptEndsRequest>,
+        ) -> Result<Response<TranscriptEndsResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn waiting(&self, _: Request<WaitingRequest>) -> Result<Response<WaitingResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn answer(&self, _: Request<AnswerRequest>) -> Result<Response<()>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type AskStream = tokio_stream::Empty<Result<AskResponse, Status>>;
+
+        async fn ask(&self, _: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type PasteStream = tokio_stream::Empty<Result<PasteResponse, Status>>;
+
+        async fn paste(&self, _: Request<PasteRequest>) -> Result<Response<Self::PasteStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type PrunesStream = tokio_stream::Empty<Result<PrunesResponse, Status>>;
+
+        async fn prunes(
+            &self,
+            _: Request<PrunesRequest>,
+        ) -> Result<Response<Self::PrunesStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type PruneStream = tokio_stream::Empty<Result<PruneResponse, Status>>;
+
+        async fn prune(&self, _: Request<PruneRequest>) -> Result<Response<Self::PruneStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type RebaseStream = tokio_stream::Empty<Result<RebaseResponse, Status>>;
+
+        async fn rebase(
+            &self,
+            _: Request<RebaseRequest>,
+        ) -> Result<Response<Self::RebaseStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type KeepImageStream = tokio_stream::Empty<Result<KeepImageResponse, Status>>;
+
+        async fn keep_image(
+            &self,
+            _: Request<Streaming<KeepImageRequest>>,
+        ) -> Result<Response<Self::KeepImageStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn say(&self, _: Request<SayRequest>) -> Result<Response<()>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type ShowStream = tokio_stream::Empty<Result<ShowResponse, Status>>;
+
+        async fn show(&self, _: Request<Streaming<ShowRequest>>) -> Result<Response<Self::ShowStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type FramesStream = tokio_stream::Empty<Result<luned::mux::own::api::ToViewer, Status>>;
+
+        async fn frames(
+            &self,
+            _: Request<Streaming<FramesRequest>>,
+        ) -> Result<Response<Self::FramesStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn list_resume(
+            &self,
+            _: Request<ListResumeRequest>,
+        ) -> Result<Response<ListResumeResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn reload_resume(
+            &self,
+            _: Request<ReloadResumeRequest>,
+        ) -> Result<Response<ReloadResumeResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+    }
+
+    let scratch = tempfile::tempdir().unwrap();
+    let socket = scratch.path().join("legacy.sock");
+    let listener = StdUnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+
+    let (stage, _) = watch::channel(Stage::LegacyFirst);
+    let watch_changes_calls = Arc::new(AtomicUsize::new(0));
+    let watch_calls = Arc::new(AtomicUsize::new(0));
+    let watch_calls_after_upgrade = Arc::new(AtomicUsize::new(0));
+    let (upgraded_done_tx, upgraded_done_rx) = oneshot::channel();
+    let service = Upgrading {
+        stage: stage.clone(),
+        watch_changes_calls: Arc::clone(&watch_changes_calls),
+        watch_calls: Arc::clone(&watch_calls),
+        watch_calls_after_upgrade: Arc::clone(&watch_calls_after_upgrade),
+        unchanged_legacy_sent: Arc::new(AtomicBool::new(false)),
+        restart_sent: Arc::new(AtomicBool::new(false)),
+        upgraded_long_poll: Arc::new(Mutex::new(Some(upgraded_done_tx))),
+    };
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async move {
+            let incoming = UnixListenerStream::new(UnixListener::from_std(listener).unwrap());
+            let _ = Server::builder()
+                .add_service(DaemonServer::new(service))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+    });
+
+    let phone = Phone::watching(Core::over_socket(socket, TEST_PATIENCE, waits::again).unwrap());
+    let patience = Patience::begun();
+
+    let first = patience.heard("the phone falls back to legacy Watch without reporting a loss", &phone.heard);
+    let Heard::Changed(first) = first else {
+        panic!("expected initial model via Watch fallback, got {first:?}");
+    };
+    assert_eq!(names(&first), ["alpha"]);
+
+    stage.send_replace(Stage::LegacySecond);
+    let second = patience.heard("the phone receives the next update via legacy Watch", &phone.heard);
+    let Heard::Changed(second) = second else {
+        panic!("expected updated model via Watch without spurious loss, got {second:?}");
+    };
+    assert_eq!(names(&second), ["beta"]);
+    assert_eq!(
+        watch_changes_calls.load(Ordering::SeqCst),
+        1,
+        "legacy long-polling does not re-probe WatchChanges on every poll"
+    );
+    assert!(watch_calls.load(Ordering::SeqCst) >= 3);
+
+    stage.send_replace(Stage::Restarting);
+    let lost = patience.heard("the phone reports loss when the server restarts", &phone.heard);
+    let Heard::Lost(why) = lost else {
+        panic!("expected loss during restart, got {lost:?}");
+    };
+    assert_eq!(why, "restarting");
+
+    let upgraded = patience.heard("the phone re-probes WatchChanges after reconnect", &phone.heard);
+    let Heard::Changed(upgraded) = upgraded else {
+        panic!("expected model via WatchChanges after reconnect, got {upgraded:?}");
+    };
+    assert_eq!(names(&upgraded), ["gamma"]);
+
+    phone.block_on(patience.awaited("the phone long-polls WatchChanges after upgrading", upgraded_done_rx))
+        .unwrap();
+    assert!(watch_changes_calls.load(Ordering::SeqCst) >= 3);
+    assert_eq!(watch_calls_after_upgrade.load(Ordering::SeqCst), 0);
+
+    drop(phone);
+    let _ = shutdown_tx.send(());
+    server.join().unwrap();
+}

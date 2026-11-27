@@ -263,6 +263,7 @@ let
   cargoBuildFiles = [
     "Cargo.toml"
     "Cargo.lock"
+    "clippy.toml"
     "rust-toolchain.toml"
     "flake.nix"
     "flake.lock"

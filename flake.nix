@@ -24,11 +24,22 @@
       ...
     }:
     let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "aarch64-darwin"
-      ];
+      systemConfigs = {
+        x86_64-linux = {
+          crossTarget = "aarch64-apple-darwin";
+          ggmlCpu = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON";
+        };
+        aarch64-linux = {
+          crossTarget = "aarch64-apple-darwin";
+          ggmlCpu = "-DGGML_NATIVE=OFF";
+        };
+        aarch64-darwin = {
+          crossTarget = "x86_64-unknown-linux-gnu";
+          ggmlCpu = "-DGGML_NATIVE=OFF";
+        };
+      };
+
+      systems = builtins.attrNames systemConfigs;
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       toolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
@@ -44,6 +55,7 @@
       build =
         system:
         let
+          cfg = systemConfigs.${system};
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
@@ -138,12 +150,12 @@
             ];
           };
 
-          denySrc = pkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = pkgs.lib.fileset.unions [
-              cargoFiles
-              ./deny.toml
-            ];
+          denySrc = craneLib.mkDummySrc {
+            inherit src;
+            cleanCargoTomlFilter = _: true;
+            extraDummyScript = ''
+              cp ${./deny.toml} "$out/deny.toml"
+            '';
           };
 
           speechBuild = [
@@ -177,11 +189,7 @@
                   }
               );
 
-          ggmlCpu =
-            {
-              x86_64-linux = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON";
-            }
-            .${system} or "-DGGML_NATIVE=OFF";
+          inherit (cfg) ggmlCpu;
 
           buildTools = [
             localToolchain
@@ -205,9 +213,11 @@
 
           nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
 
+          cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+
           daemon = {
             pname = "luned";
-            inherit version src;
+            inherit version src cargoVendorDir;
             strictDeps = true;
 
             cargoExtraArgs = "--locked -p lune -p luned -p lune-mux";
@@ -264,6 +274,7 @@
           );
 
           clippyRun = "--all-targets --workspace";
+          vendoredClippyRun = "${clippyRun} --exclude lune-phone-bindgen";
 
           clippy = craneLib.cargoClippy (
             daemon
@@ -271,8 +282,59 @@
               src = lintSrc;
               cargoArtifacts = daemonDeps;
               cargoExtraArgs = "--locked";
-              cargoClippyExtraArgs = "${clippyRun} --exclude lune-phone-bindgen -- -D warnings";
+              cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
               doCheck = false;
+              doInstallCargoArtifacts = false;
+            }
+          );
+
+          cross =
+            let
+              target =
+                pkgs.lib.throwIfNot (cfg.crossTarget != pkgs.stdenv.hostPlatform.rust.rustcTarget)
+                  "clippy-cross target ${cfg.crossTarget} matches host ${pkgs.stdenv.hostPlatform.rust.rustcTarget}"
+                  cfg.crossTarget;
+            in
+            {
+              inherit target;
+              toolchain = toolchain.override { targets = [ target ]; };
+              buildScriptsSkipped = pkgs.writeText "clippy-cross.toml" ''
+                [target.${target}.transcribe]
+                rustc-link-lib = ["transcribe"]
+                [target.${target}.alsa]
+                rustc-link-lib = ["asound"]
+                [target.${target}.ghostty-vt]
+                rustc-link-lib = ["ghostty-vt"]
+              '';
+            };
+
+          craneCross = craneLib.overrideToolchain cross.toolchain;
+
+          clippyCrossArgs = {
+            pname = "luned-cross";
+            inherit version cargoVendorDir;
+            src = lintSrc;
+            strictDeps = true;
+
+            CARGO_PROFILE = "dev";
+            cargoExtraArgs = "--locked --config ${cross.buildScriptsSkipped} --target ${cross.target}";
+
+            nativeBuildInputs = [ pkgs.protobuf ];
+            doCheck = false;
+          };
+
+          clippyCrossDeps = craneCross.buildDepsOnly (
+            clippyCrossArgs
+            // {
+              buildPhaseCargoCommand = "cargoWithProfile check ${clippyCrossArgs.cargoExtraArgs} ${vendoredClippyRun}";
+            }
+          );
+
+          clippyCross = craneCross.cargoClippy (
+            clippyCrossArgs
+            // {
+              cargoArtifacts = clippyCrossDeps;
+              cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
               doInstallCargoArtifacts = false;
             }
           );
@@ -283,6 +345,7 @@
               toolchain
               buildTools
               macBuildEnv
+              cross
               clippyRun
               testRun
               nextest
@@ -300,6 +363,7 @@
           deny = craneLib.cargoDeny {
             inherit (daemon) pname version;
             src = denySrc;
+            inherit cargoVendorDir;
             cargoDenyExtraArgs = "--offline --locked";
           };
 
@@ -317,13 +381,10 @@
             '';
 
           terminal-browser = import ./nix/terminal-browser.nix { inherit pkgs; };
-        in
-        {
-          inherit dev luned terminal-browser;
 
-          checks = {
+          lintChecks = {
             inherit clippy deny;
-            luned = lunedWith { LUNE_BUILT = "1"; };
+            clippy-cross = clippyCross;
             statix = nixLint pkgs.statix "check .";
             swift =
               let
@@ -396,6 +457,18 @@
                   find . -name '*.ts' -print0 | ${pkgs.findutils}/bin/xargs -0 -r ${pkgs.lib.getExe typescript}
                   touch "$out"
                 '';
+          };
+
+          lints = pkgs.linkFarm "lune-lints" (
+            pkgs.lib.mapAttrsToList (name: path: { inherit name path; }) lintChecks
+          );
+        in
+        {
+          inherit dev luned terminal-browser;
+
+          checks = lintChecks // {
+            inherit lints;
+            luned = lunedWith { LUNE_BUILT = "1"; };
           };
 
           shell = pkgs.mkShell {
