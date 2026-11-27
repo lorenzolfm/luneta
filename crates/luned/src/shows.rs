@@ -19,6 +19,90 @@ use crate::tasks;
 
 const SAID_MAX: usize = 64;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AskNumber(NonZeroU64);
+
+impl AskNumber {
+    pub const HELLO: AskNumber = AskNumber(NonZeroU64::new(1).expect("hello ask number is 1"));
+
+    #[must_use]
+    pub const fn of(number: u64) -> Option<AskNumber> {
+        match NonZeroU64::new(number) {
+            Some(number) => Some(AskNumber(number)),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    #[must_use]
+    pub const fn wire(number: Option<AskNumber>) -> u64 {
+        match number {
+            Some(number) => number.get(),
+            None => 0,
+        }
+    }
+
+    fn next(self) -> AskNumber {
+        let next = self.0.checked_add(1).expect("asks fit in u64");
+        assert!(next.get() > Self::HELLO.get(), "awaited asks count up past hello");
+        AskNumber(next)
+    }
+}
+
+const _: () = assert!(AskNumber::HELLO.get() == 1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Echoed {
+    Unnumbered,
+    Through(AskNumber),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerEcho {
+    Unheard,
+    Unnumbered,
+    Numbered(AskNumber),
+}
+
+impl PeerEcho {
+    fn hear(&mut self, wire: u64, sent_max: AskNumber) -> Result<Echoed, String> {
+        match (*self, AskNumber::of(wire)) {
+            (PeerEcho::Unheard, None) => {
+                *self = PeerEcho::Unnumbered;
+                Ok(Echoed::Unnumbered)
+            },
+            (PeerEcho::Unheard, Some(number)) if number <= sent_max => {
+                *self = PeerEcho::Numbered(number);
+                Ok(Echoed::Through(number))
+            },
+            (PeerEcho::Unheard, Some(number)) => {
+                Err(format!("luned echoed heard {} past {}", number.get(), sent_max.get()))
+            },
+            (PeerEcho::Unnumbered, None) => Ok(Echoed::Unnumbered),
+            (PeerEcho::Unnumbered, Some(number)) => {
+                Err(format!("luned echoed heard {} after unnumbered response", number.get()))
+            },
+            (PeerEcho::Numbered(last), None) => {
+                Err(format!("luned echoed heard 0 after {}", last.get()))
+            },
+            (PeerEcho::Numbered(last), Some(number)) if number < last => {
+                Err(format!("luned echoed heard {} after {}", number.get(), last.get()))
+            },
+            (PeerEcho::Numbered(_), Some(number)) if number > sent_max => {
+                Err(format!("luned echoed heard {} past {}", number.get(), sent_max.get()))
+            },
+            (PeerEcho::Numbered(_), Some(number)) => {
+                *self = PeerEcho::Numbered(number);
+                Ok(Echoed::Through(number))
+            },
+        }
+    }
+}
+
 pub use lune_domain::projects::layout::{Direction, Growth, Rect};
 
 fn right(rect: Rect) -> u32 {
@@ -91,6 +175,7 @@ pub struct Laid {
     worktree: WorktreeId,
     size: Size,
     shown: Option<Showing>,
+    version: Option<api::Version>,
 }
 
 impl Laid {
@@ -102,6 +187,11 @@ impl Laid {
     #[must_use]
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    #[must_use]
+    pub fn version(&self) -> Option<api::Version> {
+        self.version
     }
 
     #[must_use]
@@ -167,10 +257,11 @@ impl Laid {
             let count = laid.views.len();
             return Err(format!("a layout of {count} views, over {LAYOUT_VIEWS_MAX}"));
         }
+        let version = laid.version;
         let mut before =
             laid.views.into_iter().map(heard_view).collect::<Result<Vec<View>, String>>()?;
         let (focused, shows) = match laid.shown {
-            None if before.is_empty() => return Ok(Laid { worktree, size, shown: None }),
+            None if before.is_empty() => return Ok(Laid { worktree, size, shown: None, version }),
             None => return Err("a layout of terminals focuses none".to_owned()),
             Some(Said::Tiled(focused)) => (focused, Shows::Tiled),
             Some(Said::Full(_)) if before.len() == 1 => {
@@ -185,7 +276,7 @@ impl Laid {
         let at = at.ok_or_else(unheld)?;
         let after = before.split_off(at + 1);
         let focused = before.pop().expect("the focused view is the last before those after it");
-        Ok(Laid { worktree, size, shown: Some(Showing { before, focused, after, shows }) })
+        Ok(Laid { worktree, size, shown: Some(Showing { before, focused, after, shows }), version })
     }
 }
 
@@ -259,11 +350,11 @@ fn tiles(views: &[View], size: Size, shows: Shows) -> Result<(), String> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    Laid(Laid),
-    Edged { worktree: WorktreeId, direction: Direction, step: NonZeroU64 },
+    Laid { laid: Laid, heard: Echoed },
+    Edged { worktree: WorktreeId, direction: Direction, step: NonZeroU64, heard: Echoed },
     Sent(WorktreeId),
     Left(WorktreeId),
-    Refused(String),
+    Refused { why: String, heard: Echoed },
     Forgotten(String),
     Lost(String),
 }
@@ -276,81 +367,101 @@ pub enum Beside {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Asked {
+pub enum LayoutAsked {
     Size(Size),
-    Go(WorktreeId),
-    Open { beside: Beside, opens: Opens },
-    Welcome,
-    Browser(Option<BrowserUrl>),
     Navigate { view: ViewId, url: Option<BrowserUrl> },
     BrowserTty { view: ViewId, tty: Option<String> },
-    Review,
-    Close(ViewId),
-    Focus(ViewId),
-    Step { direction: Direction, step: NonZeroU64 },
     Resize(Growth),
     Fullscreen,
     Arrange(Arranged),
 }
 
-impl Asked {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FocusAsked {
+    Go(WorktreeId),
+    Open { beside: Beside, opens: Opens },
+    Welcome,
+    Browser(Option<BrowserUrl>),
+    Review,
+    Close(ViewId),
+    Focus(ViewId),
+    Step { direction: Direction, step: NonZeroU64 },
+}
+
+enum Outgoing {
+    Layout(LayoutAsked),
+    Focus(AskNumber, FocusAsked),
+}
+
+impl Outgoing {
     fn said(self) -> api::ShowRequest {
         use show_request::Event;
-        let event = match self {
-            Asked::Size(size) => Event::Size(size_said(size)),
-            Asked::Go(worktree) => Event::Go(worktree.get()),
-            Asked::Open { beside, opens } => {
-                use show_request::open::Beside as Said;
-                let beside = match beside {
-                    Beside::Alone => Said::Alone(()),
-                    Beside::Largest => Said::Largest(()),
-                    Beside::Focused => Said::Focused(()),
+        let (asked_number, event) = match self {
+            Outgoing::Layout(asked) => {
+                let event = match asked {
+                    LayoutAsked::Size(size) => Event::Size(size_said(size)),
+                    LayoutAsked::Navigate { view, url } => Event::Navigate(show_request::Navigate {
+                        view: view.get(),
+                        url: url.map(|url| url.as_str().to_owned()),
+                    }),
+                    LayoutAsked::BrowserTty { view, tty } => {
+                        Event::BrowserTty(show_request::BrowserTty { view: view.get(), tty })
+                    },
+                    LayoutAsked::Resize(growth) => {
+                        let sides = Some(show_request::resize::Sides::Every(()));
+                        let growth = match growth {
+                            Growth::Grow => show_request::Growth::Grow,
+                            Growth::Shrink => show_request::Growth::Shrink,
+                        };
+                        Event::Resize(show_request::Resize { sides, growth: growth.into() })
+                    },
+                    LayoutAsked::Fullscreen => Event::Fullscreen(()),
+                    LayoutAsked::Arrange(arranged) => Event::Arrange(arranged.to_api().into()),
                 };
-                let (beside, opens) = (Some(beside), Some(opens.to_api()));
-                Event::Open(show_request::Open { beside, opens })
+                (None, event)
             },
-            Asked::Welcome => Event::Welcome(()),
-            Asked::Browser(url) => {
-                Event::Browser(show_request::Browser { url: url.map(|url| url.as_str().to_owned()) })
-            },
-            Asked::Navigate { view, url } => Event::Navigate(show_request::Navigate {
-                view: view.get(),
-                url: url.map(|url| url.as_str().to_owned()),
-            }),
-            Asked::BrowserTty { view, tty } => {
-                Event::BrowserTty(show_request::BrowserTty { view: view.get(), tty })
-            },
-            Asked::Review => Event::Review(()),
-            Asked::Close(view) => Event::Close(view.get()),
-            Asked::Focus(view) => {
-                let to = show_request::focus::To::View(view.get());
-                Event::Focus(show_request::Focus { to: Some(to), step: 0 })
-            },
-            Asked::Step { direction, step } => {
-                let to = show_request::focus::To::Direction(direction_said(direction).into());
-                Event::Focus(show_request::Focus { to: Some(to), step: step.get() })
-            },
-            Asked::Resize(growth) => {
-                let sides = Some(show_request::resize::Sides::Every(()));
-                let growth = match growth {
-                    Growth::Grow => show_request::Growth::Grow,
-                    Growth::Shrink => show_request::Growth::Shrink,
+            Outgoing::Focus(asked_number, asked) => {
+                let event = match asked {
+                    FocusAsked::Go(worktree) => Event::Go(worktree.get()),
+                    FocusAsked::Open { beside, opens } => {
+                        use show_request::open::Beside as Said;
+                        let beside = match beside {
+                            Beside::Alone => Said::Alone(()),
+                            Beside::Largest => Said::Largest(()),
+                            Beside::Focused => Said::Focused(()),
+                        };
+                        let (beside, opens) = (Some(beside), Some(opens.to_api()));
+                        Event::Open(show_request::Open { beside, opens })
+                    },
+                    FocusAsked::Welcome => Event::Welcome(()),
+                    FocusAsked::Browser(url) => Event::Browser(show_request::Browser {
+                        url: url.map(|url| url.as_str().to_owned()),
+                    }),
+                    FocusAsked::Review => Event::Review(()),
+                    FocusAsked::Close(view) => Event::Close(view.get()),
+                    FocusAsked::Focus(view) => {
+                        let to = show_request::focus::To::View(view.get());
+                        Event::Focus(show_request::Focus { to: Some(to), step: 0 })
+                    },
+                    FocusAsked::Step { direction, step } => {
+                        let to =
+                            show_request::focus::To::Direction(direction_said(direction).into());
+                        Event::Focus(show_request::Focus { to: Some(to), step: step.get() })
+                    },
                 };
-                Event::Resize(show_request::Resize { sides, growth: growth.into() })
+                (Some(asked_number), event)
             },
-            Asked::Fullscreen => Event::Fullscreen(()),
-            Asked::Arrange(arranged) => Event::Arrange(arranged.to_api().into()),
         };
-        api::ShowRequest { event: Some(event) }
+        api::ShowRequest { event: Some(event), asked: AskNumber::wire(asked_number) }
     }
 }
 
-fn edged_heard(edged: &show_response::Edged) -> Result<Heard, String> {
+fn edged_heard(edged: &show_response::Edged, heard: Echoed) -> Result<Heard, String> {
     let worktree = WorktreeId::of(edged.worktree).ok_or("an edge of worktree 0")?;
     let direction = crate::layouts::direction_of(edged.direction);
     let direction = direction.map_err(|why| format!("an edge: {why}"))?;
     let step = NonZeroU64::new(edged.step).ok_or("an edge of step 0")?;
-    Ok(Heard::Edged { worktree, direction, step })
+    Ok(Heard::Edged { worktree, direction, step, heard })
 }
 
 pub(crate) fn direction_said(direction: Direction) -> show_request::Direction {
@@ -369,12 +480,21 @@ fn size_said(size: Size) -> show_request::Size {
 }
 
 pub struct Show {
-    outbox: Outbox<Asked>,
+    outbox: Outbox<Outgoing>,
+    asked_last: AskNumber,
 }
 
 impl Show {
-    pub fn ask(&self, asked: Asked) {
-        self.outbox.say(asked);
+    pub fn ask(&self, asked: LayoutAsked) {
+        self.outbox.say(Outgoing::Layout(asked));
+    }
+
+    pub fn ask_focus(&mut self, asked: FocusAsked) -> AskNumber {
+        let next = self.asked_last.next();
+        assert!(next > self.asked_last, "awaited asks climb strictly");
+        self.asked_last = next;
+        self.outbox.say(Outgoing::Focus(next, asked));
+        next
     }
 }
 
@@ -423,13 +543,13 @@ pub fn show<Told: FnMut(Heard) + Send + 'static>(
             told_aside(last);
         }
     }));
-    Show { outbox }
+    Show { outbox, asked_last: AskNumber::HELLO }
 }
 
 async fn stream(
     folder: &Folder,
     hello: show_request::Hello,
-    inbox: Inbox<Asked>,
+    inbox: Inbox<Outgoing>,
     told: &mut impl FnMut(Heard),
 ) -> Result<Heard, Dropped> {
     let daemon = match crate::reach(folder).await {
@@ -438,7 +558,12 @@ async fn stream(
         Err(error) => return Ok(Heard::Lost(format!("luned is not reached: {error}"))),
     };
     let (sending, sent) = mpsc::channel(SAID_MAX);
-    let first = api::ShowRequest { event: Some(show_request::Event::Hello(hello)) };
+    let mut sent_max = AskNumber::HELLO;
+    let mut peer_echo = PeerEcho::Unheard;
+    let first = api::ShowRequest {
+        event: Some(show_request::Event::Hello(hello)),
+        asked: AskNumber::HELLO.get(),
+    };
     let said = tokio_stream::once(first).chain(ReceiverStream::new(sent));
     let hearing = match daemon.show(crate::ANSWER, said).await {
         Ok(hearing) => hearing,
@@ -455,21 +580,34 @@ async fn stream(
             },
             Some(Next::Untaken) => return Ok(Heard::Lost(untaken())),
             Some(Next::Dropped) => return Err(Dropped),
-            Some(Next::Said(asked)) => {
-                if let Err(TrySendError::Full(_)) = sending.try_send(asked.said()) {
+            Some(Next::Said(outgoing)) => {
+                if let Outgoing::Focus(asked_number, _) = &outgoing {
+                    assert!(
+                        *asked_number > sent_max,
+                        "awaited asks climb strictly on one stream",
+                    );
+                    sent_max = *asked_number;
+                }
+                if let Err(TrySendError::Full(_)) = sending.try_send(outgoing.said()) {
                     return Ok(Heard::Lost(untaken()));
                 }
                 continue;
             },
         };
+        let heard = match peer_echo.hear(said.heard, sent_max) {
+            Ok(heard) => heard,
+            Err(why) => {
+                return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
+            },
+        };
         match said.event {
             Some(show_response::Event::Laid(laid)) => match Laid::heard(laid) {
-                Ok(laid) => told(Heard::Laid(laid)),
+                Ok(laid) => told(Heard::Laid { laid, heard }),
                 Err(why) => {
                     return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
                 },
             },
-            Some(show_response::Event::Edged(edged)) => match edged_heard(&edged) {
+            Some(show_response::Event::Edged(edged)) => match edged_heard(&edged, heard) {
                 Ok(heard) => told(heard),
                 Err(why) => {
                     return Ok(Heard::Lost(format!("luned said what lune cannot follow: {why}")));
@@ -487,7 +625,7 @@ async fn stream(
                     return Ok(Heard::Lost("luned said lune's worktree 0 is gone".to_owned()));
                 },
             },
-            Some(show_response::Event::Refused(why)) => told(Heard::Refused(why)),
+            Some(show_response::Event::Refused(why)) => told(Heard::Refused { why, heard }),
             None => return Ok(Heard::Lost("luned said nothing to lune's layout".to_owned())),
         }
     }
@@ -536,6 +674,7 @@ mod tests {
             size: Some(show_request::Size { columns: 80, rows: 24 }),
             views,
             shown,
+            version: None,
         }
     }
 
@@ -596,13 +735,39 @@ mod tests {
         let edged =
             |worktree, direction, step| show_response::Edged { worktree, direction, step };
         let left = show_request::Direction::Left.into();
-        let heard = edged_heard(&edged(2, left, 5));
+        let ask = Echoed::Through(AskNumber::of(3).unwrap());
+        let heard = edged_heard(&edged(2, left, 5), ask);
         let (worktree, step) = (WorktreeId::of(2).unwrap(), NonZeroU64::new(5).unwrap());
-        assert_eq!(heard, Ok(Heard::Edged { worktree, direction: Direction::Left, step }));
-        assert!(edged_heard(&edged(0, left, 5)).is_err(), "worktree 0");
-        assert!(edged_heard(&edged(2, 0, 5)).is_err(), "no direction");
-        assert!(edged_heard(&edged(2, 9, 5)).is_err(), "an unknown direction");
-        assert!(edged_heard(&edged(2, left, 0)).is_err(), "step 0");
+        let expected = Heard::Edged { worktree, direction: Direction::Left, step, heard: ask };
+        assert_eq!(heard, Ok(expected));
+        assert!(edged_heard(&edged(0, left, 5), ask).is_err(), "worktree 0");
+        assert!(edged_heard(&edged(2, 0, 5), ask).is_err(), "no direction");
+        assert!(edged_heard(&edged(2, 9, 5), ask).is_err(), "an unknown direction");
+        assert!(edged_heard(&edged(2, left, 0), ask).is_err(), "step 0");
+    }
+
+    #[test]
+    fn heard_sequences_stay_monotonic_keep_their_mode_and_never_pass_what_was_sent() {
+        let one = AskNumber::HELLO;
+        let two = one.next();
+        assert_eq!(one.get(), 1);
+        assert_eq!(two.get(), 2);
+        assert_eq!(AskNumber::wire(None), 0);
+        assert_eq!(AskNumber::wire(Some(two)), 2);
+
+        let mut legacy = PeerEcho::Unheard;
+        assert_eq!(legacy.hear(0, one), Ok(Echoed::Unnumbered), "older daemon sends 0");
+        assert_eq!(legacy.hear(0, two), Ok(Echoed::Unnumbered), "older daemon stays unnumbered");
+        assert!(legacy.hear(2, two).is_err(), "unnumbered peer cannot switch to numbered");
+
+        let mut numbered = PeerEcho::Unheard;
+        assert!(numbered.hear(2, one).is_err(), "first heard cannot pass what was sent");
+        assert_eq!(numbered.hear(1, one), Ok(Echoed::Through(one)));
+        assert_eq!(numbered.hear(1, two), Ok(Echoed::Through(one)), "unchanged heard is valid");
+        assert_eq!(numbered.hear(2, two), Ok(Echoed::Through(two)));
+        assert!(numbered.hear(1, two).is_err(), "heard cannot go backward");
+        assert!(numbered.hear(0, two).is_err(), "heard cannot drop back to 0");
+        assert!(numbered.hear(3, two).is_err(), "heard cannot pass what was sent");
     }
 
     #[test]

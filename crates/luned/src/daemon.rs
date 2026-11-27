@@ -906,7 +906,8 @@ impl Daemon for Host {
     ) -> Result<Response<Self::ShowStream>, Status> {
         use crate::api::show_request::{Event, Hello};
         let mut heard = request.into_inner();
-        let Some(ShowRequest { event: Some(Event::Hello(hello)) }) = heard.message().await? else {
+        let Some(ShowRequest { event: Some(Event::Hello(hello)), asked }) = heard.message().await?
+        else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
         let Hello { worktree, size, runs_in, again, on } = hello;
@@ -915,12 +916,13 @@ impl Daemon for Host {
         }
         if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
             let hello = Hello { worktree, size, runs_in: None, again, on: None };
-            let first = ShowRequest { event: Some(Event::Hello(hello)) };
+            let first = ShowRequest { event: Some(Event::Hello(hello)), asked };
             let rest = heard.map_while(Result::ok);
             let answer = daemon.show(tokio_stream::once(first).chain(rest)).await?;
             let held = Held { stream: answer.into_inner(), _permit: permit };
             return Ok(Response::new(Box::pin(held)));
         }
+        let asked_number = crate::AskNumber::of(asked);
         let worktree = layouts::id("worktree", worktree).map(WorktreeId::new);
         let worktree = worktree.map_err(Status::invalid_argument)?;
         let size = layouts::size_of(size).map_err(Status::invalid_argument)?;
@@ -929,8 +931,15 @@ impl Daemon for Host {
         let (out, answers) = tokio::sync::mpsc::channel(layouts::ANSWERS_MAX);
         let layouts = self.layouts.clone();
         let came = task::spawn_blocking(move || {
-            let came =
-                |answer| layouts::Command::Came { worktree, size, runs_in, again, out, answer };
+            let came = |answer| layouts::Command::Came {
+                worktree,
+                size,
+                runs_in,
+                again,
+                asked_number,
+                out,
+                answer,
+            };
             layouts::ask(&layouts, came)
         });
         let came = came.await.map_err(|error| unfinished(&error))?;
@@ -938,14 +947,18 @@ impl Daemon for Host {
         let layouts = self.layouts.clone();
         tokio::spawn(async move {
             loop {
-                let asked = match heard.message().await {
-                    Ok(Some(ShowRequest { event: Some(event) })) => layouts::Asked::of_api(event),
-                    Ok(Some(ShowRequest { event: None })) => Err("a word says nothing".to_owned()),
+                let (asked_number, asked) = match heard.message().await {
+                    Ok(Some(ShowRequest { event: Some(event), asked })) => {
+                        (crate::AskNumber::of(asked), layouts::Asked::of_api(event))
+                    },
+                    Ok(Some(ShowRequest { event: None, asked })) => {
+                        (crate::AskNumber::of(asked), Err("a word says nothing".to_owned()))
+                    },
                     Ok(None) | Err(_) => break,
                 };
                 let layouts = layouts.clone();
                 let told = task::spawn_blocking(move || {
-                    layouts.send(layouts::Command::Asked { client, asked }).is_ok()
+                    layouts.send(layouts::Command::Asked { client, asked_number, asked }).is_ok()
                 });
                 if !matches!(told.await, Ok(true)) {
                     return;
