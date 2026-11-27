@@ -3356,6 +3356,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::ffi::OsStr;
     use std::fs::{self, File};
+    use std::num::NonZeroU32;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime};
@@ -3416,6 +3417,49 @@ mod tests {
             let _ = watches.take_heard();
             saw().then_some(())
         });
+    }
+
+    fn write_until_heard_tree(
+        what: &str,
+        watches: &Watches,
+        woken: &mpsc::Receiver<()>,
+        tree: &TreeWatch,
+        file: &AbsPath,
+    ) {
+        enum Probe {
+            Writing { attempt: NonZeroU32, woke: bool },
+            WaitingWake,
+        }
+
+        assert!(!what.is_empty(), "wait description must be non-empty");
+        assert!(
+            file.as_path().parent().is_some_and(Path::is_dir),
+            "target parent directory must exist before probing: {}",
+            file.display()
+        );
+        let write_probe = |attempt: NonZeroU32| {
+            fs::write(file.as_path(), format!("{attempt}\n")).unwrap();
+        };
+        write_probe(NonZeroU32::MIN);
+        let mut state = Probe::Writing { attempt: NonZeroU32::MIN, woke: false };
+        lune_waits::eventually(what, || match state {
+            Probe::Writing { attempt, woke } => {
+                let woke = woke || woken.try_recv().is_ok();
+                if watches.take_heard().contains_tree(tree) {
+                    if woke {
+                        return Some(());
+                    }
+                    state = Probe::WaitingWake;
+                    return None;
+                }
+                let next = attempt.checked_add(1).expect("probe write count fits u32");
+                write_probe(next);
+                state = Probe::Writing { attempt: next, woke };
+                None
+            },
+            Probe::WaitingWake => woken.try_recv().is_ok().then_some(()),
+        });
+        assert!(file.as_path().is_file(), "probed file must exist: {}", file.display());
     }
 
     #[test]
@@ -4398,12 +4442,12 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        fs::write(feat.join("branch").as_path(), "abc\n").unwrap();
-        wait_heard_tree(
+        write_until_heard_tree(
             "recursive parent watches newly created nested dir",
             &watches,
             &woken,
             &tree,
+            &feat.join("branch"),
         );
 
         watches.remove_outside(outside).synced.unwrap();
@@ -4430,12 +4474,12 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        fs::write(other.join("tip").as_path(), "123\n").unwrap();
-        wait_heard_tree(
+        write_until_heard_tree(
             "recursive parent hears write inside new nested dir",
             &watches,
             &woken,
             &tree,
+            &other.join("tip"),
         );
 
         watches.remove_tree(tree).unwrap();

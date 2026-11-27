@@ -43,6 +43,17 @@
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       toolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
+      nextestToml = builtins.fromTOML (builtins.readFile ./.config/nextest.toml);
+      ciProfile = nextestToml.profile.ci or (throw ".config/nextest.toml has no [profile.ci]");
+      ciRetriesRaw = ciProfile.retries or 0;
+      ciRetries =
+        if builtins.isInt ciRetriesRaw then
+          ciRetriesRaw
+        else
+          ciRetriesRaw.count or (throw ".config/nextest.toml [profile.ci].retries has no count");
+      ciJunitPath =
+        (ciProfile.junit or { }).path
+          or (throw ".config/nextest.toml has no [profile.ci.junit].path");
       inherit (cargoToml.workspace.package) version;
       rustVersion =
         cargoToml.workspace.package.rust-version
@@ -312,6 +323,14 @@
                   --test-threads "$NIX_BUILD_CORES"
                 cargoWithProfile test --doc --locked ${testRun}
               '';
+              postBuild = ''
+                junit="''${CARGO_TARGET_DIR:-target}/nextest/ci/"${pkgs.lib.escapeShellArg ciJunitPath}
+                test -f "$junit"
+                cp "$junit" "$TMPDIR/luned-junit.xml"
+              '';
+              postInstall = ''
+                install -Dm444 "$TMPDIR/luned-junit.xml" "$out/share/luned/junit.xml"
+              '';
             }
           );
 
@@ -497,12 +516,18 @@
             '';
 
           terminal-browser = import ./nix/terminal-browser.nix { inherit pkgs; };
+          flakyReport = import ./nix/flaky-report.nix {
+            inherit pkgs;
+            maxAttempts = ciRetries + 1;
+            derivationName = tested.pname;
+          };
 
           lintChecks = {
             inherit clippy deny;
             clippy-release = clippyRelease;
             clippy-cross = clippyCross;
             clippy-cross-release = clippyCrossRelease;
+            flaky-report = flakyReport.check;
             statix = nixLint pkgs.statix "check .";
             swift =
               let
@@ -595,6 +620,7 @@
         in
         {
           inherit dev luned terminal-browser;
+          flaky-report = flakyReport.bin;
 
           checks = lintChecks // {
             inherit lints;
@@ -624,7 +650,12 @@
       devShells = nixpkgs.lib.mapAttrs (_: built: { default = built.shell; }) bySystem;
 
       packages = nixpkgs.lib.mapAttrs (_: built: {
-        inherit (built) dev luned terminal-browser;
+        inherit (built)
+          dev
+          flaky-report
+          luned
+          terminal-browser
+          ;
         default = built.luned;
       }) bySystem;
 
