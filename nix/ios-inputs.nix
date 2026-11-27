@@ -79,12 +79,37 @@ let
   extractCacheKey =
     prefix:
     let
-      found = extractUnique "key: ${prefix}[^\n]*hashFiles\\(([^)]*)\\)" "${prefix} cargo cache hashFiles(...)";
-      tokens =
-        if found.raw == null then
+      lineFound = extractUnique "\n[ ]*key: (${prefix}[^\n]*)" "${prefix} cargo cache key";
+      hashCalls =
+        if lineFound.raw == null then
           [ ]
         else
-          builtins.filter builtins.isString (builtins.split "," found.raw);
+          builtins.filter builtins.isList (builtins.split "hashFiles\\(" lineFound.raw);
+      hashMatches =
+        if lineFound.raw == null then
+          [ ]
+        else
+          builtins.filter builtins.isList (builtins.split "hashFiles\\(([^)]*)\\)" lineFound.raw);
+      hashErrors =
+        if lineFound.raw == null then
+          [ ]
+        else if hashMatches == [ ] then
+          [ "${ciPath}: missing ${prefix} cargo cache hashFiles(...)" ]
+        else if builtins.length hashCalls > 1 || builtins.length hashMatches > 1 then
+          [ "${ciPath}: multiple ${prefix} cargo cache hashFiles(...) calls found" ]
+        else
+          [ ];
+      raw =
+        if hashErrors == [ ] && hashMatches != [ ] then
+          builtins.head (builtins.head hashMatches)
+        else
+          null;
+      isEmpty = raw != null && builtins.match "[ \t]*" raw != null;
+      tokens =
+        if raw == null || isEmpty then
+          [ ]
+        else
+          builtins.filter builtins.isString (builtins.split "," raw);
       parsed = map (
         token:
         let
@@ -106,14 +131,10 @@ let
     {
       inherit items;
       errors =
-        found.errors
-        ++ map (p: p.error) (builtins.filter (p: p.error != null) parsed)
-        ++ (
-          if found.raw != null && items == [ ] && parsed == [ ] then
-            [ "${ciPath}: empty ${prefix} cargo cache hashFiles(...)" ]
-          else
-            [ ]
-        );
+        lineFound.errors
+        ++ hashErrors
+        ++ (if isEmpty then [ "${ciPath}: empty ${prefix} cargo cache hashFiles(...)" ] else [ ])
+        ++ map (p: p.error) (builtins.filter (p: p.error != null) parsed);
     };
 
   iosDirs = extractArray "ios_dirs";

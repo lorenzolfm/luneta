@@ -53,9 +53,9 @@ let
           ''printf '%s: %s\n' ${lib.escapeShellArg label} "${msg}" >&2'';
     in
     ''
-      root="$PWD"
+      root="$(pwd -P)"
       while [ ! -f "$root/crates/luned/Cargo.toml" ]; do
-        if [ "$root" = / ] || [ -z "$root" ]; then
+        if [ -e "$root/.git" ] || [ "$root" = / ] || [ -z "$root" ]; then
           ${report "run this inside the lune checkout"}
           exit 2
         fi

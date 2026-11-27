@@ -34,7 +34,7 @@ jobs:
             git fetch --depth=1 origin "$BEFORE"
             base="$BEFORE"
           fi
-          files="$(git diff --no-renames --name-only "$base" HEAD)"
+          files="$(git -c core.quotepath=false diff --no-renames --name-only "$base" HEAD)"
           ios_dirs=(
             ios
             crates/phone
