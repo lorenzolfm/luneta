@@ -1,6 +1,6 @@
 use libghostty_vt::key::{self, Mods};
-use libghostty_vt::mouse::{self, EncoderSize, Position};
 use libghostty_vt::mode::Mode;
+use libghostty_vt::mouse::{self, EncoderSize, Position};
 use libghostty_vt::{Error, focus, paste};
 
 use super::Screen;
@@ -58,7 +58,9 @@ impl Screen {
         event.set_consumed_mods(Mods::empty()).set_utf8(text);
         event.set_unshifted_codepoint(unshifted.unwrap_or('\0'));
         let mut bytes = Vec::new();
-        encoders.keys.set_options_from_terminal(self.answering.terminal());
+        encoders
+            .keys
+            .set_options_from_terminal(self.answering.terminal());
         encoders.keys.encode_to_vec(&encoders.key, &mut bytes)?;
         Ok(bytes)
     }
@@ -127,8 +129,15 @@ impl Screen {
         };
         let middle = |cell: u16| (u32::from(cell) * CELL_PIXELS) as f32 + 0.5;
         let encoders = &mut self.input;
-        encoders.mouse.set_action(action).set_button(button).set_mods(mods);
-        encoders.mouse.set_position(Position { x: middle(column), y: middle(row) });
+        encoders
+            .mouse
+            .set_action(action)
+            .set_button(button)
+            .set_mods(mods);
+        encoders.mouse.set_position(Position {
+            x: middle(column),
+            y: middle(row),
+        });
         encoders
             .mice
             .set_options_from_terminal(terminal)
@@ -150,7 +159,7 @@ impl Screen {
                 let mut data = text.as_bytes().to_vec();
                 let written = paste::encode(&mut data, bracketed, &mut bytes)?;
                 bytes.truncate(written);
-            },
+            }
             Err(error) => return Err(error),
         }
         Ok(bytes)
@@ -160,7 +169,11 @@ impl Screen {
         if !self.answering.terminal().mode(Mode::FOCUS_EVENT)? {
             return Ok(Vec::new());
         }
-        let event = if focused { focus::Event::Gained } else { focus::Event::Lost };
+        let event = if focused {
+            focus::Event::Gained
+        } else {
+            focus::Event::Lost
+        };
         let mut bytes = [0; 8];
         let written = event.encode(&mut bytes)?;
         Ok(bytes[..written].to_vec())
@@ -193,23 +206,33 @@ mod tests {
         text: Option<&str>,
         unshifted: char,
     ) -> Vec<u8> {
-        screen.key(Action::Press, key, mods, text, Some(unshifted)).unwrap()
+        screen
+            .key(Action::Press, key, mods, text, Some(unshifted))
+            .unwrap()
     }
 
     #[test]
     fn keys_follow_the_programs_keyboard_mode() {
         let mut screen = screen();
-        assert_eq!(typed(&mut screen, Key::A, Mods::empty(), Some("a"), 'a'), b"a");
+        assert_eq!(
+            typed(&mut screen, Key::A, Mods::empty(), Some("a"), 'a'),
+            b"a"
+        );
         assert_eq!(typed(&mut screen, Key::A, Mods::CTRL, None, 'a'), b"\x01");
         assert_eq!(answered(&mut screen, b"\x1b[>1u"), b"");
-        assert_eq!(typed(&mut screen, Key::A, Mods::CTRL, None, 'a'), b"\x1b[97;5u");
+        assert_eq!(
+            typed(&mut screen, Key::A, Mods::CTRL, None, 'a'),
+            b"\x1b[97;5u"
+        );
     }
 
     #[test]
     fn arrows_follow_the_cursor_keys_mode() {
         let mut screen = screen();
         let up = |screen: &mut Screen| {
-            screen.key(Action::Press, Key::ArrowUp, Mods::empty(), None, None).unwrap()
+            screen
+                .key(Action::Press, Key::ArrowUp, Mods::empty(), None, None)
+                .unwrap()
         };
         assert_eq!(up(&mut screen), b"\x1b[A");
         assert_eq!(answered(&mut screen, b"\x1b[?1h"), b"");
@@ -230,7 +253,10 @@ mod tests {
         let click = Click::Press(mouse::Button::Left);
         assert_eq!(screen.mouse(click, Mods::empty(), 2, 1).unwrap(), b"");
         assert_eq!(answered(&mut screen, b"\x1b[?1000h\x1b[?1006h"), b"");
-        assert_eq!(screen.mouse(click, Mods::empty(), 2, 1).unwrap(), b"\x1b[<0;3;2M");
+        assert_eq!(
+            screen.mouse(click, Mods::empty(), 2, 1).unwrap(),
+            b"\x1b[<0;3;2M"
+        );
     }
 
     #[test]

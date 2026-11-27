@@ -3,9 +3,7 @@ use std::path::{Component, Path};
 
 use crate::said::Said;
 use crate::v1;
-use crate::{
-    PATCH_BYTES_MAX, UNTRACKED_BYTES_MAX, UNTRACKED_FILES_MAX, UNTRACKED_TOTAL_BYTES_MAX,
-};
+use crate::{PATCH_BYTES_MAX, UNTRACKED_BYTES_MAX, UNTRACKED_FILES_MAX, UNTRACKED_TOTAL_BYTES_MAX};
 
 pub const REF_LABEL_BYTES_MAX: usize = 1024;
 
@@ -42,7 +40,7 @@ impl RelativePath {
                 | Component::RootDir
                 | Component::Prefix(_) => {
                     return Err("untracked path is not a safe relative path".to_owned());
-                },
+                }
             }
         }
         if !has_normal {
@@ -95,7 +93,10 @@ impl UntrackedFile {
             ));
         }
         if content.as_bytes().contains(&0) {
-            return Err(format!("untracked file {} contains a NUL byte", path.as_str()));
+            return Err(format!(
+                "untracked file {} contains a NUL byte",
+                path.as_str()
+            ));
         }
         Ok(UntrackedFile { path, content })
     }
@@ -122,7 +123,9 @@ pub struct ReadDiff {
 
 fn parse_label(field: &str, raw: String) -> Result<Said, String> {
     if raw.len() > REF_LABEL_BYTES_MAX {
-        return Err(format!("diff {field} label exceeds {REF_LABEL_BYTES_MAX} bytes"));
+        return Err(format!(
+            "diff {field} label exceeds {REF_LABEL_BYTES_MAX} bytes"
+        ));
     }
     if raw.chars().any(char::is_control) {
         return Err(format!("diff {field} label contains a control character"));
@@ -155,7 +158,13 @@ impl ReadDiff {
                 ));
             }
         }
-        Ok(ReadDiff { base, head, patch, truncated, untracked })
+        Ok(ReadDiff {
+            base,
+            head,
+            patch,
+            truncated,
+            untracked,
+        })
     }
 
     pub fn of_api(raw: v1::ReadDiffResponse) -> Result<Self, String> {
@@ -279,11 +288,28 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_or_oversized_untracked_entries() {
-        for bad_path in ["", "/", "///", "./a.rs", "../a.rs", "a/../b.rs", "/etc/passwd", "a//b.rs", "a\0b", "a\nb"] {
-            assert!(RelativePath::parse(bad_path.to_owned()).is_err(), "{bad_path:?}");
+        for bad_path in [
+            "",
+            "/",
+            "///",
+            "./a.rs",
+            "../a.rs",
+            "a/../b.rs",
+            "/etc/passwd",
+            "a//b.rs",
+            "a\0b",
+            "a\nb",
+        ] {
+            assert!(
+                RelativePath::parse(bad_path.to_owned()).is_err(),
+                "{bad_path:?}"
+            );
         }
         for good_path in [".gitignore", "a..b.rs", "crates/diff/src/lib.rs"] {
-            assert!(RelativePath::parse(good_path.to_owned()).is_ok(), "{good_path:?}");
+            assert!(
+                RelativePath::parse(good_path.to_owned()).is_ok(),
+                "{good_path:?}"
+            );
         }
 
         let mut too_big = valid_response();

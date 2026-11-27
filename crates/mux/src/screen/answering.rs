@@ -22,7 +22,11 @@ pub struct Answers {
 impl Answers {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        assert_eq!(self.lengths.is_empty(), self.bytes.is_empty(), "answers of no bytes");
+        assert_eq!(
+            self.lengths.is_empty(),
+            self.bytes.is_empty(),
+            "answers of no bytes"
+        );
         self.lengths.is_empty()
     }
 
@@ -51,7 +55,11 @@ impl Answers {
     pub fn keep_newest(&mut self, most: usize) -> bool {
         let mut oldest = 0;
         while self.bytes.len() - oldest > most {
-            oldest += self.lengths.pop_front().expect("bytes over the bound are answers").get();
+            oldest += self
+                .lengths
+                .pop_front()
+                .expect("bytes over the bound are answers")
+                .get();
         }
         self.bytes.drain(..oldest);
         self.assert_whole();
@@ -59,15 +67,26 @@ impl Answers {
     }
 
     pub fn move_into(&mut self, sending: &mut Vec<u8>) {
-        assert!(sending.is_empty(), "answers moved behind {} bytes", sending.len());
+        assert!(
+            sending.is_empty(),
+            "answers moved behind {} bytes",
+            sending.len()
+        );
         std::mem::swap(sending, &mut self.bytes);
         self.lengths.clear();
     }
 
     fn assert_whole(&self) {
-        assert_eq!(self.lengths.is_empty(), self.bytes.is_empty(), "answers of no bytes");
+        assert_eq!(
+            self.lengths.is_empty(),
+            self.bytes.is_empty(),
+            "answers of no bytes"
+        );
         debug_assert_eq!(
-            self.lengths.iter().map(|length| length.get()).sum::<usize>(),
+            self.lengths
+                .iter()
+                .map(|length| length.get())
+                .sum::<usize>(),
             self.bytes.len(),
             "answers' lengths and bytes differ"
         );
@@ -76,7 +95,10 @@ impl Answers {
 
 impl Answering {
     pub(super) fn new(size: Size, scrollback_bytes: usize) -> Result<Answering, Error> {
-        assert!(scrollback_bytes <= SCROLLBACK_BYTES_MAX, "{scrollback_bytes} of scrollback");
+        assert!(
+            scrollback_bytes <= SCROLLBACK_BYTES_MAX,
+            "{scrollback_bytes} of scrollback"
+        );
         let (columns, rows) = size.get();
         let mut terminal = Terminal::new(columns, rows)?;
         terminal.set_scrollback_max_bytes(Some(scrollback_bytes))?;
@@ -91,7 +113,10 @@ impl Answering {
         &mut self,
         drive: impl FnOnce(&mut Terminal<'static, 'static>) -> T,
     ) -> (T, Answers) {
-        assert!(self.answers.borrow().is_empty(), "an answer outside a drive");
+        assert!(
+            self.answers.borrow().is_empty(),
+            "an answer outside a drive"
+        );
         let made = drive(&mut self.terminal);
         (made, self.answers.take())
     }

@@ -15,9 +15,7 @@ use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-use crate::host::{
-    LUNE_MUX, Server, Viewer, new_terminal, run, script, size, watched_until,
-};
+use crate::host::{LUNE_MUX, Server, Viewer, new_terminal, run, script, size, watched_until};
 
 fn sign_osc7577(body_without_mac: &str, token: &str) -> String {
     let mac = sha256_body_token_hex(body_without_mac.as_bytes(), token.as_bytes());
@@ -26,7 +24,10 @@ fn sign_osc7577(body_without_mac: &str, token: &str) -> String {
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 fn encode_argv(words: &[&str]) -> String {
@@ -152,8 +153,14 @@ fn osc_7577_token_is_unique_per_terminal_and_strips_inherited_token() {
         assert_ne!(tok_a, inherited);
         assert_ne!(tok_b, inherited);
         assert_ne!(tok_a, tok_b);
-        assert!(lune_protocol::program_resume::is_valid_token(&tok_a), "{tok_a:?}");
-        assert!(lune_protocol::program_resume::is_valid_token(&tok_b), "{tok_b:?}");
+        assert!(
+            lune_protocol::program_resume::is_valid_token(&tok_a),
+            "{tok_a:?}"
+        );
+        assert!(
+            lune_protocol::program_resume::is_valid_token(&tok_b),
+            "{tok_b:?}"
+        );
     });
 }
 
@@ -189,7 +196,13 @@ fn osc_7577_verifies_mac_persists_across_resets_and_clears_on_reject_clear_or_ex
             child_info.display(),
             child_exit.display(),
         );
-        let key = new_terminal(&mut mux, script(&body, api::Ends::Holds), b"r", size(80, 24)).await;
+        let key = new_terminal(
+            &mut mux,
+            script(&body, api::Ends::Holds),
+            b"r",
+            size(80, 24),
+        )
+        .await;
 
         let info_text = eventually_async("script reports pid and token", async || {
             fs::read_to_string(&info).ok()
@@ -206,7 +219,10 @@ fn osc_7577_verifies_mac_persists_across_resets_and_clears_on_reject_clear_or_ex
 
         let argv_b64 = encode_argv(&["nvim", "-S", "/tmp/a.vim"]);
         let cwd_b64 = encode_base64_standard(b"/tmp");
-        let valid_body = format!("pid={pid}:time={}:argv={argv_b64}:cwd={cwd_b64}", unix_now());
+        let valid_body = format!(
+            "pid={pid}:time={}:argv={argv_b64}:cwd={cwd_b64}",
+            unix_now()
+        );
         write_step("1", &sign_osc7577(&valid_body, token));
 
         let listing = watched_until(&mut watch, "valid osc 7577 record appears", |l| {
@@ -216,7 +232,10 @@ fn osc_7577_verifies_mac_persists_across_resets_and_clears_on_reject_clear_or_ex
         let rec = chosen_of(&listing, key).unwrap();
         assert_eq!(rec.pid, pid);
         assert_eq!(rec.argv, ["nvim", "-S", "/tmp/a.vim"]);
-        assert_eq!(rec.cwd, Some(api::resume_record::Cwd::ExplicitCwd("/tmp".to_owned())));
+        assert_eq!(
+            rec.cwd,
+            Some(api::resume_record::Cwd::ExplicitCwd("/tmp".to_owned()))
+        );
         assert_eq!(rec.placement(), api::ProcessPlacement::Root);
 
         let resets = "\x1bc\x1b[!p\x1b[?1049h\x1b[?1049l\x1b]133;A\x07\x1b]133;C\x07";
@@ -233,7 +252,10 @@ fn osc_7577_verifies_mac_persists_across_resets_and_clears_on_reject_clear_or_ex
         write_step("4", &sign_osc7577(&stale_body, token));
 
         let listing_after = mux.list(api::ListRequest {}).await.unwrap().into_inner();
-        assert_eq!(chosen_of(&listing_after, key).unwrap().argv, ["nvim", "-S", "/tmp/a.vim"]);
+        assert_eq!(
+            chosen_of(&listing_after, key).unwrap().argv,
+            ["nvim", "-S", "/tmp/a.vim"]
+        );
 
         let bad_payload = format!("pid={pid}:time={}:argv=!!!", unix_now());
         write_step("5", &sign_osc7577(&bad_payload, token));
@@ -242,7 +264,10 @@ fn osc_7577_verifies_mac_persists_across_resets_and_clears_on_reject_clear_or_ex
         })
         .await;
 
-        let valid_body2 = format!("pid={pid}:time={}:argv={argv_b64}:cwd={cwd_b64}", unix_now());
+        let valid_body2 = format!(
+            "pid={pid}:time={}:argv={argv_b64}:cwd={cwd_b64}",
+            unix_now()
+        );
         write_step("6", &sign_osc7577(&valid_body2, token));
         watched_until(&mut watch, "record restored after reject", |l| {
             chosen_of(l, key).is_some()
@@ -274,12 +299,17 @@ fn osc_7577_verifies_mac_persists_across_resets_and_clears_on_reject_clear_or_ex
             chosen_of(l, key).is_some_and(|r| r.pid == child_pid)
         })
         .await;
-        assert_ne!(chosen_of(&child_listing, key).unwrap().placement(), api::ProcessPlacement::Root);
+        assert_ne!(
+            chosen_of(&child_listing, key).unwrap().placement(),
+            api::ProcessPlacement::Root
+        );
 
         fs::write(&child_exit, "").unwrap();
-        watched_until(&mut watch, "exited descendant reaped after grace window", |l| {
-            resumes_of(l, key).is_none()
-        })
+        watched_until(
+            &mut watch,
+            "exited descendant reaped after grace window",
+            |l| resumes_of(l, key).is_none(),
+        )
         .await;
     });
 }
@@ -337,7 +367,10 @@ fn shell_hosted_resume_runs_hostile_argv_verbatim_bypasses_builtins_and_returns_
         if shells_to_test.is_empty() && Path::new("/bin/sh").is_file() {
             shells_to_test.push("/bin/sh".to_owned());
         }
-        assert!(!shells_to_test.is_empty(), "at least one supported shell must exist");
+        assert!(
+            !shells_to_test.is_empty(),
+            "at least one supported shell must exist"
+        );
 
         for (index, shell_path) in shells_to_test.iter().enumerate() {
             let record_out = scratch.path().join(format!("args_{index}"));
@@ -370,7 +403,9 @@ fn shell_hosted_resume_runs_hostile_argv_verbatim_bypasses_builtins_and_returns_
                 ends: api::Ends::Unspecified.into(),
                 resume_in_shell: Some(api::opens::ResumeInShell {
                     shell: shell_path.clone(),
-                    argv: Some(api::Program { argv: hostile_args.clone() }),
+                    argv: Some(api::Program {
+                        argv: hostile_args.clone(),
+                    }),
                 }),
             };
             let key = new_terminal(&mut mux, opens, b"h", size(80, 24)).await;
@@ -384,7 +419,10 @@ fn shell_hosted_resume_runs_hostile_argv_verbatim_bypasses_builtins_and_returns_
                 .flat_map(|a| a.as_bytes().iter().copied().chain(std::iter::once(0)))
                 .collect();
             assert_eq!(raw, expected, "shell {shell_path} mangled argv");
-            assert!(!pwned.exists(), "shell {shell_path} expanded command substitution");
+            assert!(
+                !pwned.exists(),
+                "shell {shell_path} expanded command substitution"
+            );
 
             eventually_async(
                 &format!("{shell_path} gives resumed child its own foreground process group"),
@@ -423,16 +461,28 @@ fn shell_hosted_resume_runs_hostile_argv_verbatim_bypasses_builtins_and_returns_
                     .await;
                 viewer.press_enter(key).await;
                 eventually_async("fish returned to interactive prompt", async || {
-                    fs::read_to_string(&ping).ok().filter(|s| s.trim() == marker)
+                    fs::read_to_string(&ping)
+                        .ok()
+                        .filter(|s| s.trim() == marker)
                 })
                 .await;
             } else {
                 let prompted = viewer.until_prompted(key.id).await;
-                let typed = viewer.type_at(key, &prompted, &format!("echo {marker}")).await;
+                let typed = viewer
+                    .type_at(key, &prompted, &format!("echo {marker}"))
+                    .await;
                 let said = viewer.until_said(key.id, &typed).await;
-                assert_eq!(said, [marker], "{shell_path} did not return to interactive prompt");
+                assert_eq!(
+                    said,
+                    [marker],
+                    "{shell_path} did not return to interactive prompt"
+                );
             }
-            let _ = mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await;
+            let _ = mux
+                .close_terminal(api::CloseTerminalRequest {
+                    terminal: Some(key),
+                })
+                .await;
             drop(viewer);
         }
 
@@ -454,7 +504,11 @@ fn shell_hosted_resume_runs_hostile_argv_verbatim_bypasses_builtins_and_returns_
         .await;
         assert_eq!(eval_raw, format!("touch {}\0", pwned.display()).as_bytes());
         assert!(!pwned.exists(), "shell builtin eval must not execute");
-        let _ = mux.close_terminal(api::CloseTerminalRequest { terminal: Some(eval_key) }).await;
+        let _ = mux
+            .close_terminal(api::CloseTerminalRequest {
+                terminal: Some(eval_key),
+            })
+            .await;
 
         let launch_root = runtime.path().join("lune/resume");
         assert!(launch_root.exists(), "resume staging directory must exist");

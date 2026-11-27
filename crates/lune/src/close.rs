@@ -82,7 +82,11 @@ pub fn unread_in<'a>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     View(ViewKey),
-    Worktree { worktree: WorktreeId, views: Vec<TerminalKey>, seen: Vec<ViewId> },
+    Worktree {
+        worktree: WorktreeId,
+        views: Vec<TerminalKey>,
+        seen: Vec<ViewId>,
+    },
     Project {
         session: SessionName,
         project: ProjectId,
@@ -158,7 +162,7 @@ impl Ending {
                 Doing::Busy => ending.busy += 1,
                 Doing::Waiting => ending.waiting += 1,
                 Doing::Unknown => ending.unknown += 1,
-                Doing::Idle => {},
+                Doing::Idle => {}
             }
             ending.agents += 1;
         }
@@ -223,7 +227,10 @@ mod tests {
 
     #[test]
     fn a_scope_closes_by_its_own_action() {
-        assert_eq!(Scope::View(ViewKey::terminal(4)).action(), Action::CloseView);
+        assert_eq!(
+            Scope::View(ViewKey::terminal(4)).action(),
+            Action::CloseView
+        );
         let worktree = WorktreeId::of(31).unwrap();
         assert_eq!(Scope::Worktree(worktree).action(), Action::CloseWorktree);
         assert_eq!(Scope::Project.action(), Action::CloseProject);
@@ -235,7 +242,12 @@ mod tests {
         let worktrees = vec![WorktreeId::of(31).unwrap()];
         let seen = vec![ViewId::of(4).unwrap()];
         let project = ProjectId::of(6).unwrap();
-        let act = Act::Project { session, project, worktrees, seen };
+        let act = Act::Project {
+            session,
+            project,
+            worktrees,
+            seen,
+        };
         let busy = planned(&act, &[(4, Doing::Busy)]).question();
         assert_eq!(busy.as_deref(), Some("Close project lune? 1 agent, 1 busy"));
         let idle = planned(&act, &[(4, Doing::Idle), (5, Doing::Shell)]).question();
@@ -248,10 +260,20 @@ mod tests {
     fn a_worktree_s_close_asks_first_only_for_an_agent_at_work_in_its_views() {
         let worktree = WorktreeId::of(31).unwrap();
         let seen = vec![ViewId::of(4).unwrap(), ViewId::of(5).unwrap()];
-        let act = Act::Worktree { worktree, views: vec![at(4), at(5)], seen };
-        assert_eq!(planned(&act, &[(6, Doing::Busy), (4, Doing::Idle)]).question(), None);
+        let act = Act::Worktree {
+            worktree,
+            views: vec![at(4), at(5)],
+            seen,
+        };
+        assert_eq!(
+            planned(&act, &[(6, Doing::Busy), (4, Doing::Idle)]).question(),
+            None
+        );
         let asks = planned(&act, &[(5, Doing::Waiting)]).question();
-        assert_eq!(asks.as_deref(), Some("Close the worktree? 1 agent, 1 waiting"));
+        assert_eq!(
+            asks.as_deref(),
+            Some("Close the worktree? 1 agent, 1 waiting")
+        );
     }
 
     #[test]
@@ -260,9 +282,16 @@ mod tests {
         let again = TerminalKey { made, ..at(4) };
         let view = Act::View(ViewKey::terminal(4));
         let worktree = WorktreeId::of(31).unwrap();
-        let views = Act::Worktree { worktree, views: vec![at(4)], seen: Vec::new() };
+        let views = Act::Worktree {
+            worktree,
+            views: vec![at(4)],
+            seen: Vec::new(),
+        };
         assert!(view.takes(at(4)) && views.takes(at(4)));
-        assert!(!view.takes(again) && !views.takes(again), "an id made again is another terminal");
+        assert!(
+            !view.takes(again) && !views.takes(again),
+            "an id made again is another terminal"
+        );
     }
 
     #[test]
@@ -276,7 +305,10 @@ mod tests {
         ];
         let question = |view| planned(&Act::View(ViewKey::terminal(view)), &agents).question();
         assert_eq!(question(4), None);
-        assert_eq!(question(7), Some("Close the view? 1 agent, 1 unknown".to_owned()));
+        assert_eq!(
+            question(7),
+            Some("Close the view? 1 agent, 1 unknown".to_owned())
+        );
         let untold = Plan::of(Act::View(ViewKey::terminal(4)), Err(Untold::Away)).question();
         let says = "Close the view? lune cannot tell which agents it ends: luned does not";
         assert!(untold.is_some_and(|asks| asks.starts_with(says)));

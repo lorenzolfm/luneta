@@ -45,7 +45,9 @@ impl Unread {
             return Err(Refused::Larger { bytes: bytes.len() });
         }
         if self.typed.len() + bytes.len() > TYPED_BYTES_MAX {
-            return Err(Refused::Behind { typed_bytes: self.typed.len() });
+            return Err(Refused::Behind {
+                typed_bytes: self.typed.len(),
+            });
         }
         self.typed.extend_from_slice(bytes);
         self.assert_bounded();
@@ -106,15 +108,29 @@ impl Unread {
     }
 
     fn assert_bounded(&self) {
-        assert!(self.typed.len() <= TYPED_BYTES_MAX, "{} typed bytes", self.typed.len());
+        assert!(
+            self.typed.len() <= TYPED_BYTES_MAX,
+            "{} typed bytes",
+            self.typed.len()
+        );
         let answered = self.answers.bytes().len();
         assert!(answered <= ANSWERS_BYTES_MAX, "{answered} bytes of answers");
-        assert!(self.sending.len() <= TYPED_BYTES_MAX, "{} bytes in flight", self.sending.len());
-        assert!(!self.losing || !self.answers.is_empty(), "answers lost with none waiting");
+        assert!(
+            self.sending.len() <= TYPED_BYTES_MAX,
+            "{} bytes in flight",
+            self.sending.len()
+        );
+        assert!(
+            !self.losing || !self.answers.is_empty(),
+            "answers lost with none waiting"
+        );
         if self.sending.is_empty() {
             assert_eq!(self.sent_bytes, 0, "bytes sent of nothing in flight");
         } else {
-            assert!(self.sent_bytes < self.sending.len(), "all in flight is sent but kept");
+            assert!(
+                self.sent_bytes < self.sending.len(),
+                "all in flight is sent but kept"
+            );
         }
     }
 }
@@ -145,7 +161,10 @@ mod tests {
     }
 
     fn kept(oldest: Oldest) -> Kept {
-        Kept { too_long: 0, oldest }
+        Kept {
+            too_long: 0,
+            oldest,
+        }
     }
 
     #[test]
@@ -171,7 +190,10 @@ mod tests {
         let answers = answers_to(&asked);
         assert_eq!(answers.bytes().len(), ANSWERS_BYTES_MAX + 4);
         assert_eq!(unread.answer(&answers), kept(Oldest::Lost));
-        assert_eq!(unread.answer(&answers_to(b"\x1b[6n")), kept(Oldest::StillLost));
+        assert_eq!(
+            unread.answer(&answers_to(b"\x1b[6n")),
+            kept(Oldest::StillLost)
+        );
         unread.type_in(b"typed").unwrap();
         let sent = sent_all(&mut unread);
         assert_eq!(&sent[..5], b"typed");
@@ -187,11 +209,23 @@ mod tests {
         let mut answers = Answers::default();
         answers.push(&vec![b'x'; ANSWERS_BYTES_MAX + 1]);
         answers.push(b"\x1b[0n");
-        assert_eq!(unread.answer(&answers), Kept { too_long: 1, oldest: Oldest::Kept });
+        assert_eq!(
+            unread.answer(&answers),
+            Kept {
+                too_long: 1,
+                oldest: Oldest::Kept
+            }
+        );
         assert_eq!(sent_all(&mut unread), b"\x1b[0n");
         let mut answers = Answers::default();
         answers.push(&vec![b'x'; ANSWERS_BYTES_MAX + 1]);
-        assert_eq!(unread.answer(&answers), Kept { too_long: 1, oldest: Oldest::Kept });
+        assert_eq!(
+            unread.answer(&answers),
+            Kept {
+                too_long: 1,
+                oldest: Oldest::Kept
+            }
+        );
         assert!(unread.is_empty());
         let flood = answers_to(&b"\x1b[5n".repeat(ANSWERS_BYTES_MAX / 4 + 1));
         assert_eq!(unread.answer(&flood), kept(Oldest::Lost));
@@ -203,7 +237,12 @@ mod tests {
         let answers = answers_to(&b"\x1b[5n".repeat(ANSWERS_BYTES_MAX));
         assert_eq!(unread.answer(&answers), kept(Oldest::Lost));
         unread.type_in(&vec![b'x'; TYPED_BYTES_MAX]).unwrap();
-        assert_eq!(unread.type_in(b"y"), Err(Refused::Behind { typed_bytes: TYPED_BYTES_MAX }));
+        assert_eq!(
+            unread.type_in(b"y"),
+            Err(Refused::Behind {
+                typed_bytes: TYPED_BYTES_MAX
+            })
+        );
         assert_eq!(unread.answer(&answers), kept(Oldest::StillLost));
         assert_eq!(unread.line_up().map(<[u8]>::len), Some(TYPED_BYTES_MAX));
         unread.type_in(b"y").unwrap();
@@ -216,7 +255,10 @@ mod tests {
     fn what_is_typed_past_the_bound_alone_is_refused_as_larger_even_when_nothing_waits() {
         let mut unread = Unread::default();
         let bytes = TYPED_BYTES_MAX + 1;
-        assert_eq!(unread.type_in(&vec![b'x'; bytes]), Err(Refused::Larger { bytes }));
+        assert_eq!(
+            unread.type_in(&vec![b'x'; bytes]),
+            Err(Refused::Larger { bytes })
+        );
         assert!(unread.is_empty());
     }
 }

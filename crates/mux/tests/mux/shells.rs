@@ -42,7 +42,10 @@ fn bash(script: &str) -> api::Opens {
 }
 
 fn signal_front(listing: &api::Listing, signal: rustix::process::Signal) {
-    let front = running(listing).and_then(|running| running.foreground.as_ref()).unwrap().pid;
+    let front = running(listing)
+        .and_then(|running| running.foreground.as_ref())
+        .unwrap()
+        .pid;
     let front = rustix::process::Pid::from_raw(front.cast_signed()).unwrap();
     rustix::process::kill_process_group(front, signal).unwrap();
 }
@@ -61,10 +64,15 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
-        let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
+        let Some(Is::Going(going)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(going.command.as_deref(), Some("make test"));
         let running = running(&listing).unwrap();
-        let front = running.foreground.as_ref().expect("something runs in front");
+        let front = running
+            .foreground
+            .as_ref()
+            .expect("something runs in front");
         assert_eq!(front.pid, running.pid);
         assert_eq!(front.argv[..2], ["/bin/sh", "-c"]);
         viewer.press_enter(key).await;
@@ -72,12 +80,17 @@ fn a_shell_s_marks_say_what_it_runs_and_how_that_ended() {
             matches!(said(listing), Some(Is::Ended(_)))
         })
         .await;
-        let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
+        let Some(Is::Ended(ended)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(ended.command.as_deref(), Some("make test"));
         assert_eq!(ended.ending, Some(api::ran::ended::Ending::Status(3)));
         let since = going.since.unwrap();
         let at = ended.at.unwrap();
-        assert!((at.seconds, at.nanos) >= (since.seconds, since.nanos), "{since:?} after {at:?}");
+        assert!(
+            (at.seconds, at.nanos) >= (since.seconds, since.nanos),
+            "{since:?} after {at:?}"
+        );
         assert!(ended.took.is_some());
     });
 }
@@ -102,28 +115,44 @@ fn a_job_stopped_and_brought_back_reads_as_its_command() {
             matches!(said(listing), Some(Is::Stopped(_)))
         })
         .await;
-        let Some(Is::Stopped(stopped)) = said(&listing) else { unreachable!() };
+        let Some(Is::Stopped(stopped)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(stopped.command.as_deref(), Some("sleep 30"));
         viewer.press_enter(key).await;
         let listing = watched_until(&mut watch, "sleep brought back", |listing| {
             in_front(listing, "sleep") && matches!(said(listing), Some(Is::Going(_)))
         })
         .await;
-        let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
+        let Some(Is::Going(going)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(going.command.as_deref(), Some("sleep 30"));
         signal_front(&listing, rustix::process::Signal::TERM);
         let listing = watched_until(&mut watch, "sleep ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_))) && in_front(listing, "bash")
         })
         .await;
-        let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
+        let Some(Is::Ended(ended)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(ended.command.as_deref(), Some("sleep 30"));
-        assert_eq!(ended.ending, Some(api::ran::ended::Ending::Resumed(api::ran::Resumed {})));
+        assert_eq!(
+            ended.ending,
+            Some(api::ran::ended::Ending::Resumed(api::ran::Resumed {}))
+        );
         viewer.press_enter(key).await;
-        watched_until(&mut watch, "nothing said once the program ended", |listing| {
-            let program = listing.terminals.first().and_then(|terminal| terminal.program.as_ref());
-            matches!(program, Some(api::terminal::Program::Ended(_)))
-        })
+        watched_until(
+            &mut watch,
+            "nothing said once the program ended",
+            |listing| {
+                let program = listing
+                    .terminals
+                    .first()
+                    .and_then(|terminal| terminal.program.as_ref());
+                matches!(program, Some(api::terminal::Program::Ended(_)))
+            },
+        )
         .await;
     });
 }
@@ -145,14 +174,18 @@ fn the_marks_of_a_shell_the_command_runs_are_none_of_the_terminal_s() {
             matches!(said(listing), Some(Is::Going(going)) if going.front() == api::Front::Asking)
         })
         .await;
-        let Some(Is::Going(going)) = said(&listing) else { unreachable!() };
+        let Some(Is::Going(going)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(going.command.as_deref(), Some("inner"));
         viewer.press_enter(key).await;
         let listing = watched_until(&mut watch, "inner ended", |listing| {
             matches!(said(listing), Some(Is::Ended(_)))
         })
         .await;
-        let Some(Is::Ended(ended)) = said(&listing) else { unreachable!() };
+        let Some(Is::Ended(ended)) = said(&listing) else {
+            unreachable!()
+        };
         assert_eq!(ended.command.as_deref(), Some("inner"));
         assert_eq!(ended.ending, Some(api::ran::ended::Ending::Status(7)));
     });

@@ -9,7 +9,7 @@ use std::time::Duration;
 use lune_domain::agent::Harness;
 use serde::Deserialize;
 
-use crate::{log, program, Directory};
+use crate::{Directory, log, program};
 
 const FIND: &str = r#"dir=$(cd "$1" 2>/dev/null && pwd -P) || exit 0
 config=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
@@ -108,13 +108,18 @@ pub(crate) fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, 
         Harness::ClaudeCode => claude_found_in(cwd),
         Harness::Pi => {
             let home = env_dir("HOME");
-            let agent = env_dir("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
-            Ok(pi_found(Path::new(cwd.as_str()), home.as_deref(), agent.as_deref()))
-        },
+            let agent =
+                env_dir("PI_CODING_AGENT_DIR").or_else(|| Some(home.as_ref()?.join(PI_AGENT)));
+            Ok(pi_found(
+                Path::new(cwd.as_str()),
+                home.as_deref(),
+                agent.as_deref(),
+            ))
+        }
         Harness::Antigravity => {
             let home = env_dir("HOME");
             Ok(agy_found(Path::new(cwd.as_str()), home.as_deref()))
-        },
+        }
     }
 }
 
@@ -141,11 +146,13 @@ fn found(stdout: &[u8]) -> Vec<Skill> {
             plugin.keeps(text);
         }
     }
-    let found = files.into_iter().filter_map(|(at, path, text)| match (at, plugins.get(at)) {
-        ("", _) => own(path, text),
-        (_, Some(plugin)) => plugin.name(path).map(|name| (name, Front::read(text))),
-        (_, None) => None,
-    });
+    let found = files
+        .into_iter()
+        .filter_map(|(at, path, text)| match (at, plugins.get(at)) {
+            ("", _) => own(path, text),
+            (_, Some(plugin)) => plugin.name(path).map(|name| (name, Front::read(text))),
+            (_, None) => None,
+        });
     listed(found.filter(|(_, front)| front.invocable))
 }
 
@@ -159,7 +166,11 @@ fn listed(found: impl Iterator<Item = (String, Front)>) -> Vec<Skill> {
         if seen.insert(name.clone()) {
             let shown = |c: char| if c.is_control() { ' ' } else { c };
             let description = front.description.chars().map(shown).take(DESCRIPTION_CHARS);
-            skills.push(Skill { name, description: description.collect(), runs: front.runs });
+            skills.push(Skill {
+                name,
+                description: description.collect(),
+                runs: front.runs,
+            });
         }
     }
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -243,7 +254,7 @@ fn sorted_dir_entries(
         Err(error) => {
             log::say(&format!("skills in {}: {error}", dir.display()));
             return Vec::new();
-        },
+        }
     };
     let mut entries = Vec::new();
     for (seen, entry) in listed.enumerate() {
@@ -262,8 +273,8 @@ fn sorted_dir_entries(
                         entries.push((name, path));
                     }
                 }
-            },
-            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => log::say(&format!("skills in {}: {error}", dir.display())),
         }
     }
@@ -280,7 +291,11 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
     let mut plugin_roots: Vec<PathBuf> = Vec::new();
     let mut seen_plugins: HashSet<PathBuf> = HashSet::new();
     if let Some(home) = home {
-        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/antigravity-cli/skills"));
+        push_unique_path(
+            &mut roots,
+            &mut seen_roots,
+            home.join(".gemini/antigravity-cli/skills"),
+        );
         push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/skills"));
     }
     let top = cwd.ancestors().find(|dir| dir.join(".git").exists());
@@ -295,9 +310,17 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
         }
     }
     if let Some(home) = home {
-        push_unique_path(&mut roots, &mut seen_roots, home.join(".gemini/config/skills"));
+        push_unique_path(
+            &mut roots,
+            &mut seen_roots,
+            home.join(".gemini/config/skills"),
+        );
         push_unique_path(&mut roots, &mut seen_roots, home.join(".agents/skills"));
-        push_unique_path(&mut plugin_roots, &mut seen_plugins, home.join(".gemini/config/plugins"));
+        push_unique_path(
+            &mut plugin_roots,
+            &mut seen_plugins,
+            home.join(".gemini/config/plugins"),
+        );
     }
     for plugins in &plugin_roots {
         for skills in agy_plugin_skills(plugins) {
@@ -310,7 +333,10 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
         if remaining == 0 {
             break;
         }
-        files.extend(agy_skill_files(root, remaining.min(AGY_SKILLS_PER_ROOT_MAX)));
+        files.extend(agy_skill_files(
+            root,
+            remaining.min(AGY_SKILLS_PER_ROOT_MAX),
+        ));
     }
     assert!(files.len() <= AGY_SKILL_FILES_MAX);
     let found = files.into_iter().filter_map(|file| {
@@ -322,7 +348,7 @@ fn agy_found(cwd: &Path, home: Option<&Path>) -> Vec<Skill> {
                     log::say(&format!("skills in {}: {error}", file.display()));
                 }
                 return None;
-            },
+            }
         };
         let folder = file.parent()?.file_name()?.to_str()?;
         let name = front.name.take().filter(|name| !name.is_empty());
@@ -335,7 +361,10 @@ fn agy_plugin_skills(plugins_dir: &Path) -> Vec<PathBuf> {
     let entries = sorted_dir_entries(plugins_dir, AGY_PLUGINS_MAX, |name, path| {
         !name.starts_with('.') && path.is_dir() && path.join("skills").is_dir()
     });
-    let roots: Vec<PathBuf> = entries.into_iter().map(|(_, path)| path.join("skills")).collect();
+    let roots: Vec<PathBuf> = entries
+        .into_iter()
+        .map(|(_, path)| path.join("skills"))
+        .collect();
     assert!(roots.len() <= AGY_PLUGINS_MAX);
     roots
 }
@@ -348,7 +377,10 @@ fn agy_skill_files(dir: &Path, limit: usize) -> Vec<PathBuf> {
             && path.is_dir()
             && path.join("SKILL.md").is_file()
     });
-    let files: Vec<PathBuf> = entries.into_iter().map(|(_, path)| path.join("SKILL.md")).collect();
+    let files: Vec<PathBuf> = entries
+        .into_iter()
+        .map(|(_, path)| path.join("SKILL.md"))
+        .collect();
     assert!(files.len() <= limit);
     files
 }
@@ -383,40 +415,57 @@ fn skill_files(dir: &Path, root: &Path, kept: Kept, depth: usize, files: &mut Ve
 
 fn frontmatter(file: &Path) -> io::Result<Option<String>> {
     let mut bytes = Vec::new();
-    File::open(file)?.take(FRONT_BYTES).read_to_end(&mut bytes)?;
+    File::open(file)?
+        .take(FRONT_BYTES)
+        .read_to_end(&mut bytes)?;
     let truncated = u64::try_from(bytes.len()).is_ok_and(|len| len == FRONT_BYTES);
     let text = match std::str::from_utf8(&bytes) {
         Ok(text) => text,
         Err(error) if truncated && error.error_len().is_none() => {
             std::str::from_utf8(&bytes[..error.valid_up_to()])
                 .map_err(|utf8| io::Error::new(ErrorKind::InvalidData, utf8))?
-        },
+        }
         Err(error) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
     };
     let mut lines = text.lines();
     if lines.next().is_none_or(|line| line.trim_end() != "---") {
         return Ok(None);
     }
-    let front: Vec<&str> =
-        lines.take(64).take_while(|line| line.trim_end() != "---").collect();
+    let front: Vec<&str> = lines
+        .take(64)
+        .take_while(|line| line.trim_end() != "---")
+        .collect();
     Ok(Some(front.join("\n")))
 }
 
 fn own(path: &str, text: &str) -> Option<(String, Front)> {
-    let workflow = path.strip_prefix("workflows/").and_then(|path| path.strip_suffix(".js"));
+    let workflow = path
+        .strip_prefix("workflows/")
+        .and_then(|path| path.strip_suffix(".js"));
     if let Some(file) = workflow.filter(|file| one_name(file)) {
         let name = meta(text, "name").unwrap_or_else(|| file.to_owned());
         let description = meta(text, "description").unwrap_or_default();
-        let front = Front { name: None, description, invocable: true, runs: Runs::ForAnyone };
+        let front = Front {
+            name: None,
+            description,
+            invocable: true,
+            runs: Runs::ForAnyone,
+        };
         return Some((name, front));
     }
-    let skill = path.strip_prefix("skills/").and_then(|path| path.strip_suffix("/SKILL.md"));
-    let name = skill.filter(|name| one_name(name)).or_else(|| command(path))?;
+    let skill = path
+        .strip_prefix("skills/")
+        .and_then(|path| path.strip_suffix("/SKILL.md"));
+    let name = skill
+        .filter(|name| one_name(name))
+        .or_else(|| command(path))?;
     Some((name.to_owned(), Front::read(text)))
 }
 
 fn command(path: &str) -> Option<&str> {
-    path.strip_prefix("commands/")?.strip_suffix(".md").filter(|name| one_name(name))
+    path.strip_prefix("commands/")?
+        .strip_suffix(".md")
+        .filter(|name| one_name(name))
 }
 
 fn one_name(name: &str) -> bool {
@@ -445,7 +494,13 @@ fn plugins_on(listed: &str) -> HashMap<String, Plugin> {
         .filter(|plugin| plugin.enabled && !plugin.install_path.is_empty())
         .map(|plugin| {
             let name = plugin.id.split('@').next().unwrap_or_default().to_owned();
-            (plugin.install_path, Plugin { name, keeps: vec!["skills".to_owned()] })
+            (
+                plugin.install_path,
+                Plugin {
+                    name,
+                    keeps: vec!["skills".to_owned()],
+                },
+            )
         })
         .collect()
 }
@@ -459,10 +514,11 @@ impl Plugin {
             Some(serde_json::Value::String(path)) => vec![path.as_str()],
             Some(serde_json::Value::Array(paths)) => {
                 paths.iter().filter_map(serde_json::Value::as_str).collect()
-            },
+            }
             _ => Vec::new(),
         };
-        self.keeps.extend(paths.into_iter().map(|path| bare(path).to_owned()));
+        self.keeps
+            .extend(paths.into_iter().map(|path| bare(path).to_owned()));
     }
 
     fn name(&self, path: &str) -> Option<String> {
@@ -493,7 +549,12 @@ struct Front {
 
 impl Default for Front {
     fn default() -> Self {
-        Front { name: None, description: String::new(), invocable: true, runs: Runs::ForAnyone }
+        Front {
+            name: None,
+            description: String::new(),
+            invocable: true,
+            runs: Runs::ForAnyone,
+        }
     }
 }
 
@@ -522,14 +583,14 @@ impl Front {
                 "description" => read.description = unquote(&parts.join(" ")),
                 "user-invocable" => {
                     user_invocable = Some(!unquote(&parts.join(" ")).eq_ignore_ascii_case("false"));
-                },
+                }
                 "disable-slash-command" if truthy(&unquote(&parts.join(" "))) => {
                     disable_slash = true;
-                },
+                }
                 "disable-model-invocation" if truthy(&unquote(&parts.join(" "))) => {
                     read.runs = Runs::OnlyForYou;
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
         read.invocable = !disable_slash && user_invocable.unwrap_or(true);
@@ -543,14 +604,20 @@ fn truthy(value: &str) -> bool {
 
 fn meta(meta: &str, key: &str) -> Option<String> {
     meta.lines().find_map(|line| {
-        let value = line.trim_start().strip_prefix(key)?.trim_start().strip_prefix(':')?;
+        let value = line
+            .trim_start()
+            .strip_prefix(key)?
+            .trim_start()
+            .strip_prefix(':')?;
         literal(value.trim_start())
     })
 }
 
 fn literal(text: &str) -> Option<String> {
     let mut chars = text.chars();
-    let quote = chars.next().filter(|quote| matches!(quote, '\'' | '"' | '`'))?;
+    let quote = chars
+        .next()
+        .filter(|quote| matches!(quote, '\'' | '"' | '`'))?;
     let mut read = String::new();
     while let Some(c) = chars.next() {
         match c {
@@ -566,11 +633,12 @@ fn literal(text: &str) -> Option<String> {
 }
 
 fn unquote(value: &str) -> String {
-    let quoted = |quote: char| {
-        value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote)
-    };
+    let quoted =
+        |quote: char| value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote);
     if quoted('"') {
-        return value[1..value.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\");
+        return value[1..value.len() - 1]
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\");
     }
     if quoted('\'') {
         return value[1..value.len() - 1].replace("''", "'");
@@ -582,10 +650,13 @@ fn unquote(value: &str) -> String {
 mod tests {
     use super::*;
 
-
     fn skill(name: &str, description: &str) -> Skill {
         let name = Name::new(name.to_owned()).expect("a name");
-        Skill { name, description: description.to_owned(), runs: Runs::ForAnyone }
+        Skill {
+            name,
+            description: description.to_owned(),
+            runs: Runs::ForAnyone,
+        }
     }
 
     fn printed(plugins: &str, skills: &[(&str, &str, &str)]) -> Vec<u8> {
@@ -618,14 +689,26 @@ mod tests {
         let stdout = printed(
             PLUGINS,
             &[
-                ("", "skills/tigerstyle/SKILL.md", "name: tiger\ndescription: Apply TigerStyle."),
+                (
+                    "",
+                    "skills/tigerstyle/SKILL.md",
+                    "name: tiger\ndescription: Apply TigerStyle.",
+                ),
                 ("", "skills/handoff/SKILL.md", "description: here"),
                 ("", "commands/handoff.md", "description: yours"),
                 ("", "skills/background/SKILL.md", "user-invocable: false"),
                 ("", "commands/investigate.md", ""),
-                (REVIEW, "skills/deep/SKILL.md", "description: Review deeply."),
+                (
+                    REVIEW,
+                    "skills/deep/SKILL.md",
+                    "description: Review deeply.",
+                ),
                 (REVIEW, "commands/quick.md", "description: Review quickly."),
-                ("/c/plugins/off/1.0.0", "skills/gone/SKILL.md", "description: Off."),
+                (
+                    "/c/plugins/off/1.0.0",
+                    "skills/gone/SKILL.md",
+                    "description: Off.",
+                ),
             ],
         );
         assert_eq!(
@@ -640,7 +723,10 @@ mod tests {
         );
         let stdout = printed(
             "",
-            &[(REVIEW, "skills/deep/SKILL.md", ""), ("", "skills/tdd/SKILL.md", "")],
+            &[
+                (REVIEW, "skills/deep/SKILL.md", ""),
+                ("", "skills/tdd/SKILL.md", ""),
+            ],
         );
         assert_eq!(found(&stdout), [skill("tdd", "")]);
     }
@@ -650,9 +736,21 @@ mod tests {
         let stdout = printed(
             "[]",
             &[
-                ("", "workflows/empty.js", "export const meta = {\n  name: '',\n}"),
-                ("", "workflows/spaced.js", "export const meta = {\n  name: 'review pr',\n}"),
-                ("", "workflows/tabbed.js", "export const meta = {\n  name: 'a\tb',\n}"),
+                (
+                    "",
+                    "workflows/empty.js",
+                    "export const meta = {\n  name: '',\n}",
+                ),
+                (
+                    "",
+                    "workflows/spaced.js",
+                    "export const meta = {\n  name: 'review pr',\n}",
+                ),
+                (
+                    "",
+                    "workflows/tabbed.js",
+                    "export const meta = {\n  name: 'a\tb',\n}",
+                ),
                 ("", "skills/two words/SKILL.md", ""),
                 ("", "commands/one-word.md", ""),
             ],
@@ -665,7 +763,11 @@ mod tests {
         let stdout = printed(
             PLUGINS,
             &[
-                (REVIEW, MANIFEST, r#"{"name": "review", "skills": ["./extra/own", "./many/"]}"#),
+                (
+                    REVIEW,
+                    MANIFEST,
+                    r#"{"name": "review", "skills": ["./extra/own", "./many/"]}"#,
+                ),
                 (REVIEW, "skills/deep/SKILL.md", ""),
                 (REVIEW, "extra/own/SKILL.md", ""),
                 (REVIEW, "many/one/SKILL.md", ""),
@@ -674,13 +776,18 @@ mod tests {
                 (REVIEW, "SKILL.md", ""),
             ],
         );
-        let names: Vec<String> =
-            found(&stdout).iter().map(|skill| skill.name.to_string()).collect();
+        let names: Vec<String> = found(&stdout)
+            .iter()
+            .map(|skill| skill.name.to_string())
+            .collect();
         assert_eq!(names, ["review:deep", "review:one", "review:own"]);
 
         let stdout = printed(
             PLUGINS,
-            &[(REVIEW, "extra/own/SKILL.md", ""), (REVIEW, MANIFEST, r#"{"skills": "extra"}"#)],
+            &[
+                (REVIEW, "extra/own/SKILL.md", ""),
+                (REVIEW, MANIFEST, r#"{"skills": "extra"}"#),
+            ],
         );
         assert_eq!(found(&stdout), [skill("review:own", "")]);
     }
@@ -689,9 +796,15 @@ mod tests {
     fn a_description_is_read_as_yaml_writes_it() {
         for (front, description) in [
             ("description: plain", "plain"),
-            ("description: \"double \\\"quoted\\\"\"", "double \"quoted\""),
+            (
+                "description: \"double \\\"quoted\\\"\"",
+                "double \"quoted\"",
+            ),
             ("description: 'it''s single'", "it's single"),
-            ("description: >\n  folded over\n  two lines\nname: x", "folded over two lines"),
+            (
+                "description: >\n  folded over\n  two lines\nname: x",
+                "folded over two lines",
+            ),
             ("description: |-\n  kept\n\n  apart", "kept apart"),
             ("description: runs\n  on\nname: x", "runs on"),
             ("description: a: colon", "a: colon"),
@@ -702,7 +815,10 @@ mod tests {
         }
         assert!(Front::read("user-invocable: true").invocable);
         assert!(!Front::read("user-invocable: false").invocable);
-        for front in ["disable-model-invocation: true", "disable-model-invocation: \"Yes\""] {
+        for front in [
+            "disable-model-invocation: true",
+            "disable-model-invocation: \"Yes\"",
+        ] {
             assert_eq!(Front::read(front).runs, Runs::OnlyForYou, "{front:?}");
         }
         for front in ["disable-model-invocation: false", "name: x"] {
@@ -710,9 +826,14 @@ mod tests {
         }
         let long = format!("description: {}", "é".repeat(DESCRIPTION_CHARS * 2));
         let skills = found(&printed("[]", &[("", "skills/long/SKILL.md", &long)]));
-        let description = skills.first().map(|skill| skill.description.chars().count());
+        let description = skills
+            .first()
+            .map(|skill| skill.description.chars().count());
         assert_eq!(description, Some(DESCRIPTION_CHARS));
-        let tabbed = found(&printed("[]", &[("", "skills/t/SKILL.md", "description: a\tb")]));
+        let tabbed = found(&printed(
+            "[]",
+            &[("", "skills/t/SKILL.md", "description: a\tb")],
+        ));
         assert_eq!(tabbed, [skill("t", "a b")]);
     }
 
@@ -727,8 +848,16 @@ mod tests {
             "[]",
             &[
                 ("", "workflows/from-file.js", meta),
-                ("", "workflows/nameless.js", "export const meta = {\n  description: `Tests`,\n}"),
-                ("", "workflows/broken.js", "export const meta = {\n  name: 'unclosed,\n}"),
+                (
+                    "",
+                    "workflows/nameless.js",
+                    "export const meta = {\n  description: `Tests`,\n}",
+                ),
+                (
+                    "",
+                    "workflows/broken.js",
+                    "export const meta = {\n  name: 'unclosed,\n}",
+                ),
             ],
         );
         assert_eq!(
@@ -744,11 +873,17 @@ mod tests {
     fn put(root: &Path, file: &str, text: &str) {
         let path = root.join(file);
         let made = path.parent().map_or(Ok(()), std::fs::create_dir_all);
-        assert!(made.and_then(|()| std::fs::write(&path, text)).is_ok(), "{file}");
+        assert!(
+            made.and_then(|()| std::fs::write(&path, text)).is_ok(),
+            "{file}"
+        );
     }
 
     fn only_you(name: &str, description: &str) -> Skill {
-        Skill { runs: Runs::OnlyForYou, ..skill(name, description) }
+        Skill {
+            runs: Runs::OnlyForYou,
+            ..skill(name, description)
+        }
     }
 
     #[test]
@@ -759,34 +894,89 @@ mod tests {
         let root = scratch.path();
         let (home, agent) = (root.join("home"), root.join("home/.pi/agent"));
         let front = |description: &str| format!("---\ndescription: {description}\n---\nDo it.\n");
-        put(root, "outside/.agents/skills/far/SKILL.md", &front("Above the repository."));
+        put(
+            root,
+            "outside/.agents/skills/far/SKILL.md",
+            &front("Above the repository."),
+        );
         put(root, "outside/repo/.git/HEAD", "");
-        put(root, "outside/repo/.agents/skills/top/SKILL.md", &front("At the top."));
-        put(root, "outside/repo/.agents/skills/group/nested.md", &front("Below the top."));
-        put(root, "outside/repo/.agents/skills/flat.md", &front("At the top of Agent Skills."));
-        put(root, "outside/repo/inner/.pi/skills/near/SKILL.md", &front("Near."));
-        put(root, "outside/repo/inner/.pi/skills/near/more/SKILL.md", &front("Held by near."));
-        put(root, "outside/repo/inner/.pi/skills/loose.md", &front("At the top of pi's."));
-        put(root, "outside/repo/inner/.agents/skills/near/SKILL.md", &front("Farther."));
+        put(
+            root,
+            "outside/repo/.agents/skills/top/SKILL.md",
+            &front("At the top."),
+        );
+        put(
+            root,
+            "outside/repo/.agents/skills/group/nested.md",
+            &front("Below the top."),
+        );
+        put(
+            root,
+            "outside/repo/.agents/skills/flat.md",
+            &front("At the top of Agent Skills."),
+        );
+        put(
+            root,
+            "outside/repo/inner/.pi/skills/near/SKILL.md",
+            &front("Near."),
+        );
+        put(
+            root,
+            "outside/repo/inner/.pi/skills/near/more/SKILL.md",
+            &front("Held by near."),
+        );
+        put(
+            root,
+            "outside/repo/inner/.pi/skills/loose.md",
+            &front("At the top of pi's."),
+        );
+        put(
+            root,
+            "outside/repo/inner/.agents/skills/near/SKILL.md",
+            &front("Farther."),
+        );
         let named = "---\nname: renamed\ndescription: Named.\n---\n";
         put(root, "home/.pi/agent/skills/named/SKILL.md", named);
         let mine = "---\ndescription: Mine.\ndisable-model-invocation: true\n---\n";
         put(root, "home/.pi/agent/skills/mine/SKILL.md", mine);
-        put(root, "home/.pi/agent/skills/mute/SKILL.md", "---\nname: mute\n---\n");
-        put(root, "home/.pi/agent/skills/bare/SKILL.md", "No frontmatter.\n");
-        put(root, "home/.pi/agent/skills/.hidden/SKILL.md", &front("Hidden."));
-        put(root, "home/.pi/agent/skills/node_modules/dep/SKILL.md", &front("A dependency."));
-        put(root, "home/.agents/skills/shared/SKILL.md", &front("Shared."));
+        put(
+            root,
+            "home/.pi/agent/skills/mute/SKILL.md",
+            "---\nname: mute\n---\n",
+        );
+        put(
+            root,
+            "home/.pi/agent/skills/bare/SKILL.md",
+            "No frontmatter.\n",
+        );
+        put(
+            root,
+            "home/.pi/agent/skills/.hidden/SKILL.md",
+            &front("Hidden."),
+        );
+        put(
+            root,
+            "home/.pi/agent/skills/node_modules/dep/SKILL.md",
+            &front("A dependency."),
+        );
+        put(
+            root,
+            "home/.agents/skills/shared/SKILL.md",
+            &front("Shared."),
+        );
         let cwd = root.join("outside/repo/inner");
-        assert_eq!(pi_found(&cwd, Some(&home), Some(&agent)), [
-            skill("group", "Below the top."),
-            only_you("mine", "Mine."),
-            skill("near", "Near."),
-            skill("renamed", "Named."),
-            skill("shared", "Shared."),
-            skill("skills", "At the top of pi's."),
-            skill("top", "At the top."),
-        ]);
+        assert_eq!(
+            pi_found(&cwd, Some(&home), Some(&agent)),
+            [
+                skill("group", "Below the top."),
+                only_you("mine", "Mine."),
+                skill("near", "Near."),
+                skill("renamed", "Named."),
+                skill("shared", "Shared."),
+                skill("skills", "At the top of pi's."),
+                skill("top", "At the top."),
+            ]
+        );
     }
 
     #[test]
@@ -795,7 +985,11 @@ mod tests {
             panic!("no scratch directory");
         };
         let root = scratch.path();
-        put(root, "a/.agents/skills/up/SKILL.md", "---\ndescription: Up.\n---\n");
+        put(
+            root,
+            "a/.agents/skills/up/SKILL.md",
+            "---\ndescription: Up.\n---\n",
+        );
         let found = pi_found(&root.join("a/b/c"), None, None);
         assert!(found.contains(&skill("up", "Up.")), "{found:?}");
     }
@@ -808,67 +1002,130 @@ mod tests {
         let root = scratch.path();
         let home = root.join("home");
         let front = |description: &str| format!("---\ndescription: {description}\n---\nDo it.\n");
-        put(root, "outside/.agents/skills/far/SKILL.md", &front("Above the repository."));
+        put(
+            root,
+            "outside/.agents/skills/far/SKILL.md",
+            &front("Above the repository."),
+        );
         put(root, "outside/repo/.git/HEAD", "");
-        put(root, "outside/repo/.agents/skills/top/SKILL.md", &front("At the top."));
-        put(root, "outside/repo/.agents/skills/deep/nested/SKILL.md", &front("Too deep."));
-        put(root, "outside/repo/inner/.agent/skills/near/SKILL.md", &front("Near."));
+        put(
+            root,
+            "outside/repo/.agents/skills/top/SKILL.md",
+            &front("At the top."),
+        );
+        put(
+            root,
+            "outside/repo/.agents/skills/deep/nested/SKILL.md",
+            &front("Too deep."),
+        );
+        put(
+            root,
+            "outside/repo/inner/.agent/skills/near/SKILL.md",
+            &front("Near."),
+        );
         put(
             root,
             "outside/repo/inner/.agents/skills/hidden-cmd/SKILL.md",
             "---\ndescription: Hidden.\ndisable-slash-command: true\n---\n",
         );
-        put(root, "home/.gemini/antigravity-cli/skills/near/SKILL.md", &front("CLI wins."));
-        put(root, "home/.gemini/skills/shared/SKILL.md", &front("Shared."));
-        put(root, "home/.gemini/config/skills/global/SKILL.md", &front("Global."));
-        put(root, "home/.agents/skills/user-agent/SKILL.md", &front("Home agents."));
+        put(
+            root,
+            "home/.gemini/antigravity-cli/skills/near/SKILL.md",
+            &front("CLI wins."),
+        );
+        put(
+            root,
+            "home/.gemini/skills/shared/SKILL.md",
+            &front("Shared."),
+        );
+        put(
+            root,
+            "home/.gemini/config/skills/global/SKILL.md",
+            &front("Global."),
+        );
+        put(
+            root,
+            "home/.agents/skills/user-agent/SKILL.md",
+            &front("Home agents."),
+        );
         put(
             root,
             "home/.gemini/config/plugins/review/skills/deep-review/SKILL.md",
             "---\nname: deep-review\ndescription: Plugin review.\n---\n",
         );
         let cwd = root.join("outside/repo/inner");
-        assert_eq!(agy_found(&cwd, Some(&home)), [
-            skill("deep-review", "Plugin review."),
-            skill("global", "Global."),
-            skill("near", "CLI wins."),
-            skill("shared", "Shared."),
-            skill("top", "At the top."),
-            skill("user-agent", "Home agents."),
-        ]);
-        put(root, "plain/parent/.agents/skills/above/SKILL.md", &front("Above."));
-        put(root, "plain/parent/child/.agents/skills/here/SKILL.md", &front("Here."));
-        assert_eq!(agy_found(&root.join("plain/parent/child"), None), [skill("here", "Here.")]);
+        assert_eq!(
+            agy_found(&cwd, Some(&home)),
+            [
+                skill("deep-review", "Plugin review."),
+                skill("global", "Global."),
+                skill("near", "CLI wins."),
+                skill("shared", "Shared."),
+                skill("top", "At the top."),
+                skill("user-agent", "Home agents."),
+            ]
+        );
+        put(
+            root,
+            "plain/parent/.agents/skills/above/SKILL.md",
+            &front("Above."),
+        );
+        put(
+            root,
+            "plain/parent/child/.agents/skills/here/SKILL.md",
+            &front("Here."),
+        );
+        assert_eq!(
+            agy_found(&root.join("plain/parent/child"), None),
+            [skill("here", "Here.")]
+        );
 
         put(root, "home/.git/HEAD", "");
-        assert_eq!(agy_found(&home, Some(&home)), [
-            skill("deep-review", "Plugin review."),
-            skill("global", "Global."),
-            skill("near", "CLI wins."),
-            skill("shared", "Shared."),
-            skill("user-agent", "Home agents."),
-        ]);
+        assert_eq!(
+            agy_found(&home, Some(&home)),
+            [
+                skill("deep-review", "Plugin review."),
+                skill("global", "Global."),
+                skill("near", "CLI wins."),
+                skill("shared", "Shared."),
+                skill("user-agent", "Home agents."),
+            ]
+        );
 
         let invalid_dir = root.join("plain/parent/child/.agents/skills/corrupt");
         fs::create_dir_all(&invalid_dir).unwrap();
         fs::write(invalid_dir.join("SKILL.md"), [0xff, 0xfe, 0x00]).unwrap();
-        put(root, "plain/parent/child/.agents/skills/bare/SKILL.md", "No frontmatter.\n");
+        put(
+            root,
+            "plain/parent/child/.agents/skills/bare/SKILL.md",
+            "No frontmatter.\n",
+        );
         let header = "---\ndescription: Long UTF-8.\n---\n";
         let pad = usize::try_from(FRONT_BYTES).unwrap() - header.len() - 1;
         let long_utf8 = format!("{header}{}é\n", "a".repeat(pad));
-        put(root, "plain/parent/child/.agents/skills/long/SKILL.md", &long_utf8);
-        assert_eq!(agy_found(&root.join("plain/parent/child"), None), [
-            skill("bare", ""),
-            skill("here", "Here."),
-            skill("long", "Long UTF-8."),
-        ]);
+        put(
+            root,
+            "plain/parent/child/.agents/skills/long/SKILL.md",
+            &long_utf8,
+        );
+        assert_eq!(
+            agy_found(&root.join("plain/parent/child"), None),
+            [
+                skill("bare", ""),
+                skill("here", "Here."),
+                skill("long", "Long UTF-8."),
+            ]
+        );
         let filtered = root.join("filtered");
         put(&filtered, ".DS_Store", "");
         put(&filtered, ".hidden/SKILL.md", &front("Hidden."));
         fs::create_dir_all(filtered.join("aaa-empty")).unwrap();
         put(&filtered, "node_modules/dep/SKILL.md", &front("Dep."));
         put(&filtered, "real/SKILL.md", &front("Real."));
-        assert_eq!(agy_skill_files(&filtered, 1), [filtered.join("real/SKILL.md")]);
+        assert_eq!(
+            agy_skill_files(&filtered, 1),
+            [filtered.join("real/SKILL.md")]
+        );
         assert!(!Front::read("disable-slash-command: true\nuser-invocable: true").invocable);
         assert!(!Front::read("user-invocable: False").invocable);
     }
@@ -880,8 +1137,15 @@ mod tests {
         };
         let root = scratch.path();
         let inner = root.join("repo").join("inner");
-        let skill_dir = root.join("repo").join(".claude").join("skills").join("near");
-        let made = [std::fs::create_dir_all(&inner), std::fs::create_dir_all(&skill_dir)];
+        let skill_dir = root
+            .join("repo")
+            .join(".claude")
+            .join("skills")
+            .join("near");
+        let made = [
+            std::fs::create_dir_all(&inner),
+            std::fs::create_dir_all(&skill_dir),
+        ];
         assert!(made.iter().all(Result::is_ok));
         let wrote = std::fs::write(skill_dir.join("SKILL.md"), "---\ndescription: Near.\n---\n");
         assert!(wrote.is_ok());
@@ -931,13 +1195,21 @@ mod tests {
                 .find(|event| event["subtype"] == "init")
                 .expect("claude -p said its init");
             let names = init["slash_commands"].as_array().into_iter().flatten();
-            names.filter_map(serde_json::Value::as_str).map(str::to_owned).collect()
+            names
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
         }
 
         let dir = std::env::var("LUNE_SKILLS_DIR").unwrap_or_else(|_| ".".to_owned());
-        let finder = Command::new("sh").args(["-c", FIND, "sh", &dir]).output().expect("sh");
-        let lune: BTreeSet<String> =
-            found(&finder.stdout).iter().map(|skill| skill.name.to_string()).collect();
+        let finder = Command::new("sh")
+            .args(["-c", FIND, "sh", &dir])
+            .output()
+            .expect("sh");
+        let lune: BTreeSet<String> = found(&finder.stdout)
+            .iter()
+            .map(|skill| skill.name.to_string())
+            .collect();
 
         let none = tempfile::tempdir().expect("a directory");
         let own = commands(none.path(), &["--setting-sources", "local"]);
@@ -947,8 +1219,10 @@ mod tests {
         let brought =
             |name: &&String| own.contains(*name) || synced.iter().any(|at| name.starts_with(at));
         let finder_alone: Vec<&String> = lune.difference(&there).collect();
-        let claude_alone: Vec<&String> =
-            there.difference(&lune).filter(|name| !brought(name)).collect();
+        let claude_alone: Vec<&String> = there
+            .difference(&lune)
+            .filter(|name| !brought(name))
+            .collect();
         assert!(
             finder_alone.is_empty() && claude_alone.is_empty(),
             "in {dir}, the finder alone finds {finder_alone:?}, and Claude Code alone runs \

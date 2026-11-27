@@ -5,19 +5,17 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rustix::event::kqueue::{kevent, kqueue, Event, EventFilter, EventFlags, ProcessEvents};
+use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue};
 use rustix::io::Errno;
-use rustix::process::{kill_process, Pid, Signal};
-use sysinfo::{
-    Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind,
-};
+use rustix::process::{Pid, Signal, kill_process};
+use sysinfo::{Process, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System, UpdateKind};
 
-use lune_protocol::process::{laid_in_procargs, EXEC_STRINGS_BYTES_MAX};
+use lune_protocol::process::{EXEC_STRINGS_BYTES_MAX, laid_in_procargs};
 use lune_protocol::program_resume::ProcessArgv;
 
 use super::{
-    program_named, readable_fd, Found, Id, Mine, ProcessMeta, Start, Unended, Unread, Unreadable,
-    SPURIOUS_WAKES_MAX,
+    Found, Id, Mine, ProcessMeta, SPURIOUS_WAKES_MAX, Start, Unended, Unread, Unreadable,
+    program_named, readable_fd,
 };
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
@@ -43,14 +41,18 @@ pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
     let refresh = ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always);
     match with(pid, refresh, |process| process.cwd().map(Path::to_owned)) {
         Some(Some(cwd)) => Ok(cwd),
-        Some(None) => Err(Unread::Failed(format!("macOS does not say where {pid} runs"))),
+        Some(None) => Err(Unread::Failed(format!(
+            "macOS does not say where {pid} runs"
+        ))),
         None => Err(Unread::Gone),
     }
 }
 
 pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {
     let procargs = procargs(pid)?;
-    laid_in_procargs(&procargs).and_then(|laid| laid.environ()).map_err(unparsed)
+    laid_in_procargs(&procargs)
+        .and_then(|laid| laid.environ())
+        .map_err(unparsed)
 }
 
 #[must_use]
@@ -61,15 +63,22 @@ pub fn parent(pid: u32) -> Option<u32> {
 #[must_use]
 pub fn meta(pid: u32) -> Option<ProcessMeta> {
     let bsd = bsd_info(pid)?;
-    let name_bytes: Vec<u8> =
-        bsd.pbi_comm.iter().map(|ch| ch.cast_unsigned()).take_while(|b| *b != 0).collect();
+    let name_bytes: Vec<u8> = bsd
+        .pbi_comm
+        .iter()
+        .map(|ch| ch.cast_unsigned())
+        .take_while(|b| *b != 0)
+        .collect();
     let name = String::from_utf8_lossy(&name_bytes).into_owned();
     let exe = pid_exe(pid);
     let argv = procargs(pid).ok().and_then(|raw| {
         let laid = laid_in_procargs(&raw).ok()?;
         (!laid.argv.is_empty()).then(|| {
-            let words: Vec<String> =
-                laid.argv.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+            let words: Vec<String> = laid
+                .argv
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
             ProcessArgv::bounded(words)
         })
     });
@@ -131,7 +140,9 @@ fn pid_exe(pid: u32) -> Option<String> {
         reason = "proc_pidpath writes at most `buf_len` bytes into `buf`"
     )]
     let written = unsafe { libc::proc_pidpath(native, buf.as_mut_ptr().cast(), buf_len) };
-    let written = usize::try_from(written).ok().filter(|n| *n > 0 && *n <= buf.len())?;
+    let written = usize::try_from(written)
+        .ok()
+        .filter(|n| *n > 0 && *n <= buf.len())?;
     String::from_utf8(buf[..written].to_vec()).ok()
 }
 
@@ -180,7 +191,14 @@ fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
     let mut size: libc::size_t = 0;
     let sized = unsafe {
         let into = ptr::null_mut();
-        libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
+        libc::sysctl(
+            name.as_mut_ptr(),
+            name_count,
+            into,
+            &raw mut size,
+            ptr::null_mut(),
+            0,
+        )
     };
     if sized == -1 {
         return Err(unread(pid, &io::Error::last_os_error()));
@@ -193,12 +211,23 @@ fn procargs(pid: u32) -> Result<Vec<u8>, Unread> {
     let mut procargs = vec![0_u8; size];
     let read = unsafe {
         let into = procargs.as_mut_ptr().cast();
-        libc::sysctl(name.as_mut_ptr(), name_count, into, &raw mut size, ptr::null_mut(), 0)
+        libc::sysctl(
+            name.as_mut_ptr(),
+            name_count,
+            into,
+            &raw mut size,
+            ptr::null_mut(),
+            0,
+        )
     };
     if read == -1 {
         return Err(unread(pid, &io::Error::last_os_error()));
     }
-    assert!(size <= procargs.len(), "sysctl wrote {size} bytes into {}", procargs.len());
+    assert!(
+        size <= procargs.len(),
+        "sysctl wrote {size} bytes into {}",
+        procargs.len()
+    );
     procargs.truncate(size);
     Ok(procargs)
 }
@@ -221,7 +250,10 @@ pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
     let uid = rustix::process::getuid().as_raw();
     let mut seen = Mine::default();
     for (pid, process) in system.processes() {
-        let Some(program) = process.name().to_str().and_then(|name| program_named(programs, name))
+        let Some(program) = process
+            .name()
+            .to_str()
+            .and_then(|name| program_named(programs, name))
         else {
             continue;
         };
@@ -236,7 +268,10 @@ pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
         let Some(false) = forked(pid.as_u32()) else {
             continue;
         };
-        let id = Id { pid: pid.as_u32(), start };
+        let id = Id {
+            pid: pid.as_u32(),
+            start,
+        };
         let read = procargs(pid.as_u32()).and_then(|procargs| {
             let laid = laid_in_procargs(&procargs).map_err(unparsed)?;
             let environ = laid.environ().map_err(unparsed)?;
@@ -248,9 +283,14 @@ pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
             Err(Unread::Failed(why)) => {
                 seen.unreadable.push(Unreadable { id, program, why });
                 continue;
-            },
+            }
         };
-        seen.found.push(Found { id, program, argv, environ });
+        seen.found.push(Found {
+            id,
+            program,
+            argv,
+            environ,
+        });
     }
     seen
 }
@@ -292,8 +332,11 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
     let queue = match kqueue() {
         Ok(queue) => queue,
         Err(error) => {
-            return ids.iter().map(|id| (id.clone(), Unended::Unsignalled(error))).collect();
-        },
+            return ids
+                .iter()
+                .map(|id| (id.clone(), Unended::Unsignalled(error)))
+                .collect();
+        }
     };
     let mut left = Vec::new();
     let mut waiting: Vec<(&Id, Pid)> = Vec::new();
@@ -306,25 +349,32 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
             continue;
         }
         match kill_process(pid, signal) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(Errno::SRCH) => continue,
             Err(error) => {
                 left.push((id.clone(), Unended::Unsignalled(error)));
                 continue;
-            },
+            }
         }
         let flags = ProcessEvents::EXIT;
-        let end = Event::new(EventFilter::Proc { pid, flags }, EventFlags::ADD, ptr::null_mut());
+        let end = Event::new(
+            EventFilter::Proc { pid, flags },
+            EventFlags::ADD,
+            ptr::null_mut(),
+        );
         let mut unheard: [Event; 0] = [];
         match unsafe { kevent(&queue, &[end], &mut unheard[..], Some(Duration::ZERO)) } {
             Ok(_) => waiting.push((id, pid)),
-            Err(Errno::SRCH) => {},
+            Err(Errno::SRCH) => {}
             Err(error) => left.push((id.clone(), Unended::Unwatched(error))),
         }
     }
     let deadline = Instant::now() + wait;
     let flags = ProcessEvents::EXIT;
-    let blank = EventFilter::Proc { pid: Pid::INIT, flags };
+    let blank = EventFilter::Proc {
+        pid: Pid::INIT,
+        flags,
+    };
     let blank = Event::new(blank, EventFlags::empty(), ptr::null_mut());
     while !waiting.is_empty() {
         let Some(until) = deadline.checked_duration_since(Instant::now()) else {
@@ -339,7 +389,7 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
                 let unwatched = Unended::Unwatched(error);
                 left.extend(waiting.drain(..).map(|(id, _)| (id.clone(), unwatched)));
                 break;
-            },
+            }
         };
         for event in heard.iter().take(count) {
             let EventFilter::Proc { pid, .. } = event.filter() else {
@@ -358,7 +408,11 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
             }
         }
     }
-    left.extend(waiting.into_iter().map(|(id, _)| (id.clone(), Unended::Outlived)));
+    left.extend(
+        waiting
+            .into_iter()
+            .map(|(id, _)| (id.clone(), Unended::Outlived)),
+    );
     left
 }
 
@@ -379,12 +433,16 @@ impl Exit {
     pub fn watch(pid: Pid) -> io::Result<Option<Exit>> {
         let queue = kqueue()?;
         let flags = ProcessEvents::EXIT;
-        let end = Event::new(EventFilter::Proc { pid, flags }, EventFlags::ADD, ptr::null_mut());
+        let end = Event::new(
+            EventFilter::Proc { pid, flags },
+            EventFlags::ADD,
+            ptr::null_mut(),
+        );
         let mut unheard: [Event; 0] = [];
         for _ in 0..WATCH_INTR_MAX {
             match unsafe { kevent(&queue, &[end], &mut unheard[..], Some(Duration::ZERO)) } {
                 Ok(_) => return Ok(Some(Exit { queue, pid })),
-                Err(Errno::INTR) => {},
+                Err(Errno::INTR) => {}
                 Err(Errno::SRCH) => return Ok(None),
                 Err(error) => return Err(error.into()),
             }
@@ -405,7 +463,10 @@ impl Exit {
         for _ in 0..SPURIOUS_WAKES_MAX {
             let mut guard = ready.readable().await?;
             let blank = Event::new(
-                EventFilter::Proc { pid: Pid::INIT, flags: ProcessEvents::EXIT },
+                EventFilter::Proc {
+                    pid: Pid::INIT,
+                    flags: ProcessEvents::EXIT,
+                },
                 EventFlags::empty(),
                 ptr::null_mut(),
             );
@@ -419,14 +480,20 @@ impl Exit {
                     }
                     let failure = i32::try_from(heard[0].data())
                         .map_or(Errno::INVAL, Errno::from_raw_os_error);
-                    return if failure == Errno::SRCH { Ok(()) } else { Err(failure.into()) };
-                },
-                Err(Errno::INTR) => {},
+                    return if failure == Errno::SRCH {
+                        Ok(())
+                    } else {
+                        Err(failure.into())
+                    };
+                }
+                Err(Errno::INTR) => {}
                 Err(Errno::SRCH) => return Ok(()),
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(io::Error::other("kqueue woke too many times without an exit event"))
+        Err(io::Error::other(
+            "kqueue woke too many times without an exit event",
+        ))
     }
 }
 
@@ -437,7 +504,11 @@ impl Exit {
 pub fn ends(pid: Pid) -> io::Result<()> {
     let queue = kqueue()?;
     let flags = ProcessEvents::EXIT;
-    let end = Event::new(EventFilter::Proc { pid, flags }, EventFlags::ADD, ptr::null_mut());
+    let end = Event::new(
+        EventFilter::Proc { pid, flags },
+        EventFlags::ADD,
+        ptr::null_mut(),
+    );
     let mut adding: &[Event] = &[end];
     let mut heard = [end];
     loop {
@@ -447,10 +518,14 @@ pub fn ends(pid: Pid) -> io::Result<()> {
             Err(Errno::INTR) => {
                 adding = &[];
                 continue;
-            },
+            }
             Err(failure) => failure,
         };
-        return if failure == Errno::SRCH { Ok(()) } else { Err(failure.into()) };
+        return if failure == Errno::SRCH {
+            Ok(())
+        } else {
+            Err(failure.into())
+        };
     }
 }
 
@@ -474,8 +549,9 @@ impl Domain {
 
 fn lstart(secs: i64) -> String {
     const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] =
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
 
     let days = secs.div_euclid(86_400);
     let clock = secs.rem_euclid(86_400);
@@ -503,7 +579,11 @@ fn civil(days: i64) -> (i64, i64, i64) {
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let shifted_month = (5 * day_of_year + 2) / 153;
     let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
     (year, month, day)
 }

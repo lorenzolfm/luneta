@@ -17,6 +17,8 @@ mod git;
 #[cfg(test)]
 mod host;
 #[cfg(test)]
+mod layouts;
+#[cfg(test)]
 mod own;
 #[cfg(test)]
 mod phone;
@@ -43,8 +45,6 @@ mod terminate;
 #[cfg(test)]
 mod topics;
 #[cfg(test)]
-mod layouts;
+mod worktree;
 #[cfg(test)]
 mod worktrees;
-#[cfg(test)]
-mod worktree;

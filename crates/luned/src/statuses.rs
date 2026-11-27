@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::SystemTime;
 
 use lune_domain::agent::{Declared, Harness, OscReads, Rung};
+use lune_protocol::PROGRAM_STATUS_RECORDS_MAX;
 pub use lune_protocol::agent_status::BlockedReason;
 use lune_protocol::program_status::{ChildId, Message, Progress, Title};
 use lune_protocol::said::Said;
-use lune_protocol::PROGRAM_STATUS_RECORDS_MAX;
 
 use crate::agent::{Agent, SeenAgent, Sighting};
 use crate::api;
@@ -28,9 +28,16 @@ pub enum ActiveStatus {
     Working,
     Idle,
     Stopped,
-    Done { message: Option<Message> },
-    Blocked { reason: BlockedReason, message: Option<Message> },
-    Error { message: Option<Message> },
+    Done {
+        message: Option<Message>,
+    },
+    Blocked {
+        reason: BlockedReason,
+        message: Option<Message>,
+    },
+    Error {
+        message: Option<Message>,
+    },
     Shell,
     Other(Said),
 }
@@ -42,9 +49,11 @@ impl ActiveStatus {
         match self {
             ActiveStatus::Working => (known(api::Status::Busy), None, ReportedStatus::Working(())),
             ActiveStatus::Idle => (known(api::Status::Idle), None, ReportedStatus::Idle(())),
-            ActiveStatus::Stopped => {
-                (known(api::Status::Stopped), None, ReportedStatus::Stopped(()))
-            },
+            ActiveStatus::Stopped => (
+                known(api::Status::Stopped),
+                None,
+                ReportedStatus::Stopped(()),
+            ),
             ActiveStatus::Done { message } => (
                 known(api::Status::Done),
                 None,
@@ -81,10 +90,19 @@ impl ActiveStatus {
 pub enum SubagentPhase {
     Idle,
     Stopped,
-    Working { progress: Option<Progress> },
-    Done { message: Option<Message> },
-    Blocked { reason: BlockedReason, message: Option<Message> },
-    Error { message: Option<Message> },
+    Working {
+        progress: Option<Progress>,
+    },
+    Done {
+        message: Option<Message>,
+    },
+    Blocked {
+        reason: BlockedReason,
+        message: Option<Message>,
+    },
+    Error {
+        message: Option<Message>,
+    },
     Shell,
     Other(Said),
 }
@@ -96,19 +114,19 @@ impl SubagentPhase {
         match self {
             SubagentPhase::Idle => Phase::Idle(()),
             SubagentPhase::Stopped => Phase::Stopped(()),
-            SubagentPhase::Working { progress } => {
-                Phase::Working(api::WorkingStatus { progress: progress.map(|p| u32::from(p.get())) })
-            },
-            SubagentPhase::Done { message } => {
-                Phase::Done(api::DoneStatus { message: message.clone().map(String::from) })
-            },
+            SubagentPhase::Working { progress } => Phase::Working(api::WorkingStatus {
+                progress: progress.map(|p| u32::from(p.get())),
+            }),
+            SubagentPhase::Done { message } => Phase::Done(api::DoneStatus {
+                message: message.clone().map(String::from),
+            }),
             SubagentPhase::Blocked { reason, message } => Phase::Blocked(api::BlockedStatus {
                 reason: reason.to_api_reason(),
                 message: message.clone().map(String::from),
             }),
-            SubagentPhase::Error { message } => {
-                Phase::Error(api::ErrorStatus { message: message.clone().map(String::from) })
-            },
+            SubagentPhase::Error { message } => Phase::Error(api::ErrorStatus {
+                message: message.clone().map(String::from),
+            }),
             SubagentPhase::Shell => Phase::Shell(()),
             SubagentPhase::Other(word) => Phase::Other(word.clone().into()),
         }
@@ -138,7 +156,10 @@ impl Subagent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RungUpdate {
     Clear,
-    Active { status: ActiveStatus, at: Option<SystemTime> },
+    Active {
+        status: ActiveStatus,
+        at: Option<SystemTime>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,7 +173,12 @@ pub struct Report {
 impl Report {
     #[must_use]
     pub fn new(reads: Declared, agent: AgentId, update: RungUpdate) -> Report {
-        Report { agent, reads, update, subagents: Vec::new() }
+        Report {
+            agent,
+            reads,
+            update,
+            subagents: Vec::new(),
+        }
     }
 
     #[must_use]
@@ -165,7 +191,12 @@ impl Report {
     ) -> Report {
         assert!(subagents.len() <= SUBAGENTS_MAX);
         let update = RungUpdate::Active { status, at };
-        Report { agent, reads: reads.declared(), update, subagents }
+        Report {
+            agent,
+            reads: reads.declared(),
+            update,
+            subagents,
+        }
     }
 
     #[must_use]
@@ -206,7 +237,11 @@ impl ReportedAgent {
         proof: Proof,
     ) -> ReportedAgent {
         let seen = sighting.of(id.clone(), reads.harness());
-        ReportedAgent { seen, report: Report::new(reads, id, update), proof }
+        ReportedAgent {
+            seen,
+            report: Report::new(reads, id, update),
+            proof,
+        }
     }
 
     #[must_use]
@@ -260,7 +295,9 @@ impl Decided {
 
     #[must_use]
     pub fn subagents(&self) -> &[Subagent] {
-        self.0.as_ref().map_or(&[], |reported| reported.subagents.as_slice())
+        self.0
+            .as_ref()
+            .map_or(&[], |reported| reported.subagents.as_slice())
     }
 }
 
@@ -307,9 +344,17 @@ pub struct Statuses {
 
 impl Statuses {
     pub fn record(&mut self, report: Report) {
-        let Report { agent, reads, update, subagents } = report;
+        let Report {
+            agent,
+            reads,
+            update,
+            subagents,
+        } = report;
         let (harness, rung) = (reads.harness(), reads.rung());
-        let held_by_another = self.agents.get(&agent).is_some_and(|rungs| rungs.harness != harness);
+        let held_by_another = self
+            .agents
+            .get(&agent)
+            .is_some_and(|rungs| rungs.harness != harness);
         let RungUpdate::Active { status, at } = update else {
             if !held_by_another {
                 self.clear_rung(&agent, rung);
@@ -323,10 +368,10 @@ impl Statuses {
         if !self.agents.contains_key(&agent) && self.agents.len() >= AGENTS_MAX {
             return;
         }
-        let rungs = self
-            .agents
-            .entry(agent.clone())
-            .or_insert_with(|| Rungs { harness, active: BTreeMap::new() });
+        let rungs = self.agents.entry(agent.clone()).or_insert_with(|| Rungs {
+            harness,
+            active: BTreeMap::new(),
+        });
         let since = match rung {
             Rung::Osc7501 | Rung::Hook => match rungs.active.get(&rung) {
                 Some(previous) if same_phase(&previous.status, &status) => previous.since.or(at),
@@ -334,7 +379,14 @@ impl Statuses {
             },
             Rung::Feed | Rung::Extension | Rung::Transcript | Rung::Screen => at,
         };
-        rungs.active.insert(rung, Active { status, since, subagents });
+        rungs.active.insert(
+            rung,
+            Active {
+                status,
+                since,
+                subagents,
+            },
+        );
         assert_eq!(rungs.harness, harness);
         assert!(rungs.active.len() <= Rung::ALL.len());
         assert!(self.agents.len() <= AGENTS_MAX);
@@ -348,21 +400,42 @@ impl Statuses {
                 self.agents.remove(agent);
             }
         }
-        assert!(self.agents.get(agent).is_none_or(|rungs| !rungs.active.is_empty()));
-        assert!(!self.agents.get(agent).is_some_and(|rungs| rungs.active.contains_key(&rung)));
+        assert!(
+            self.agents
+                .get(agent)
+                .is_none_or(|rungs| !rungs.active.is_empty())
+        );
+        assert!(
+            !self
+                .agents
+                .get(agent)
+                .is_some_and(|rungs| rungs.active.contains_key(&rung))
+        );
     }
 
     pub fn forget(&mut self, agent: &AgentId, harness: Harness) {
-        if self.agents.get(agent).is_some_and(|rungs| rungs.harness == harness) {
+        if self
+            .agents
+            .get(agent)
+            .is_some_and(|rungs| rungs.harness == harness)
+        {
             self.agents.remove(agent);
         }
-        assert!(self.agents.get(agent).is_none_or(|rungs| rungs.harness != harness));
+        assert!(
+            self.agents
+                .get(agent)
+                .is_none_or(|rungs| rungs.harness != harness)
+        );
     }
 
     pub fn replace_rung(&mut self, rung: Rung, reports: Vec<Report>) {
         assert!(reports.len() <= AGENTS_MAX);
         let seen: HashSet<&AgentId> = reports.iter().map(Report::agent).collect();
-        assert_eq!(seen.len(), reports.len(), "each agent appears at most once in a rung snapshot");
+        assert_eq!(
+            seen.len(),
+            reports.len(),
+            "each agent appears at most once in a rung snapshot"
+        );
         let stale: Vec<AgentId> = self
             .agents
             .iter()
@@ -373,7 +446,11 @@ impl Statuses {
             self.clear_rung(&agent, rung);
         }
         for report in reports {
-            assert_eq!(report.reads.rung(), rung, "each report in a rung snapshot names that rung");
+            assert_eq!(
+                report.reads.rung(),
+                rung,
+                "each report in a rung snapshot names that rung"
+            );
             self.record(report);
         }
         assert!(self.agents.len() <= AGENTS_MAX);
@@ -391,7 +468,10 @@ impl Statuses {
         let Some(rungs) = self.agents.get(agent) else {
             return Decided(None);
         };
-        assert!(!rungs.active.is_empty(), "cleared rungs remove empty agent entries");
+        assert!(
+            !rungs.active.is_empty(),
+            "cleared rungs remove empty agent entries"
+        );
         assert!(rungs.active.len() <= Rung::ALL.len());
         let (&rung, active) = rungs
             .active
@@ -409,7 +489,9 @@ impl Statuses {
     pub fn apply(&self, seen: &SeenAgent) -> Agent {
         let status = self.decide(&seen.id);
         assert!(
-            self.agents.get(&seen.id).is_none_or(|rungs| rungs.harness == seen.harness),
+            self.agents
+                .get(&seen.id)
+                .is_none_or(|rungs| rungs.harness == seen.harness),
             "an agent's status comes from rungs of its own harness"
         );
         Agent {
@@ -436,7 +518,7 @@ fn same_phase(previous: &ActiveStatus, current: &ActiveStatus) -> bool {
         | (ActiveStatus::Shell, ActiveStatus::Shell) => true,
         (ActiveStatus::Blocked { reason: a, .. }, ActiveStatus::Blocked { reason: b, .. }) => {
             a == b
-        },
+        }
         (ActiveStatus::Other(a), ActiveStatus::Other(b)) => a == b,
         _ => false,
     }
@@ -453,7 +535,10 @@ pub(crate) mod tests {
     use crate::process::{AgentPid, Start};
 
     fn agent(pid: u32) -> AgentId {
-        AgentId::new(AgentPid::new(pid).unwrap(), Start::spelled("100".to_owned()).unwrap())
+        AgentId::new(
+            AgentPid::new(pid).unwrap(),
+            Start::spelled("100".to_owned()).unwrap(),
+        )
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -461,7 +546,10 @@ pub(crate) mod tests {
     }
 
     fn report(id: &AgentId, reads: Declared, status: ActiveStatus, time: u64) -> Report {
-        let update = RungUpdate::Active { status, at: Some(at(time)) };
+        let update = RungUpdate::Active {
+            status,
+            at: Some(at(time)),
+        };
         Report::new(reads, id.clone(), update)
     }
 
@@ -482,7 +570,9 @@ pub(crate) mod tests {
         let mut statuses = Statuses::default();
         let id = agent(42);
         let reads = Declared::of(Harness::ClaudeCode, Rung::Osc7501);
-        let summed = ActiveStatus::Done { message: Message::parse("message", "All done").ok() };
+        let summed = ActiveStatus::Done {
+            message: Message::parse("message", "All done").ok(),
+        };
 
         statuses.record(report(&id, reads, ActiveStatus::Done { message: None }, 10));
         statuses.record(report(&id, reads, summed.clone(), 12));
@@ -511,7 +601,11 @@ pub(crate) mod tests {
         assert_eq!(decided, (Some(Rung::Extension), Some(&ActiveStatus::Idle)));
 
         statuses.record(Report::new(pi, id.clone(), RungUpdate::Clear));
-        assert_eq!(statuses.decide(&id), Decided(None), "the rungs of the harness before are gone");
+        assert_eq!(
+            statuses.decide(&id),
+            Decided(None),
+            "the rungs of the harness before are gone"
+        );
     }
 
     #[test]
@@ -555,7 +649,13 @@ pub(crate) mod tests {
         let reads = OscReads::of(Harness::ClaudeCode);
         let since = Some(at(1));
         let told = vec![subagent];
-        let osc = Report::osc_7501(reads, id.clone(), ActiveStatus::Working, since, told.clone());
+        let osc = Report::osc_7501(
+            reads,
+            id.clone(),
+            ActiveStatus::Working,
+            since,
+            told.clone(),
+        );
         statuses.record(osc);
         assert_eq!(statuses.decide(&id).subagents(), told.as_slice());
     }

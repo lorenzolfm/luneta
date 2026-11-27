@@ -50,17 +50,33 @@ impl Speaker {
             SampleFormat::I32 => stream::<i32>(&device, &config, &feed, &quiet),
             SampleFormat::U16 => stream::<u16>(&device, &config, &feed, &quiet),
             SampleFormat::U8 => stream::<u8>(&device, &config, &feed, &quiet),
-            other => return Err(format!("the speakers take {other} samples, lune makes none")),
+            other => {
+                return Err(format!(
+                    "the speakers take {other} samples, lune makes none"
+                ));
+            }
         }?;
-        stream.play().map_err(|error| format!("the speakers do not start: {error}"))?;
+        stream
+            .play()
+            .map_err(|error| format!("the speakers do not start: {error}"))?;
         let up = Up::new(rate, config.sample_rate(), config.channels());
         let channels = u64::from(config.channels().max(1));
         let rate = u64::from(config.sample_rate()) * channels;
-        Ok(Speaker { _stream: stream, feed, quiet, up, rate })
+        Ok(Speaker {
+            _stream: stream,
+            feed,
+            quiet,
+            up,
+            rate,
+        })
     }
 
     pub fn play(&mut self, samples: &[f32]) {
-        let mut waiting = self.feed.samples.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut waiting = self
+            .feed
+            .samples
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.up.push(samples, &mut waiting);
     }
 
@@ -71,11 +87,21 @@ impl Speaker {
             if self.quiet.cut.load(Ordering::Relaxed) {
                 return Ok(false);
             }
-            let failed = self.feed.failed.lock().unwrap_or_else(PoisonError::into_inner).take();
+            let failed = self
+                .feed
+                .failed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
             if let Some(why) = failed {
                 return Err(why);
             }
-            let left = self.feed.samples.lock().unwrap_or_else(PoisonError::into_inner).len();
+            let left = self
+                .feed
+                .samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len();
             if left as u64 <= most {
                 return Ok(true);
             }
@@ -103,12 +129,15 @@ fn by_default(device: &Device) -> Result<SupportedStreamConfig, String> {
 }
 
 fn chosen(device: &Device, rate: u32) -> Result<SupportedStreamConfig, String> {
-    let as_it_comes = device.supported_output_configs().ok().and_then(|mut configs| {
-        configs.find_map(|range| {
-            let fits = range.channels() == 1 && range.sample_format() == SampleFormat::F32;
-            fits.then(|| range.try_with_sample_rate(rate)).flatten()
-        })
-    });
+    let as_it_comes = device
+        .supported_output_configs()
+        .ok()
+        .and_then(|mut configs| {
+            configs.find_map(|range| {
+                let fits = range.channels() == 1 && range.sample_format() == SampleFormat::F32;
+                fits.then(|| range.try_with_sample_rate(rate)).flatten()
+            })
+        });
     match as_it_comes {
         Some(config) => Ok(config),
         None => by_default(device),
@@ -128,9 +157,11 @@ where
     let stream = device.build_output_stream(
         config.config(),
         move |samples: &mut [T], _: &_| {
-            let silent =
-                quiet.cut.load(Ordering::Relaxed) || quiet.held.load(Ordering::Relaxed);
-            let mut waiting = playing.samples.lock().unwrap_or_else(PoisonError::into_inner);
+            let silent = quiet.cut.load(Ordering::Relaxed) || quiet.held.load(Ordering::Relaxed);
+            let mut waiting = playing
+                .samples
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let mut taken = 0;
             for sample in samples {
                 let next = if silent { None } else { waiting.pop_front() };
@@ -144,7 +175,10 @@ where
                 return;
             }
             let why = format!("the speakers stopped: {error}");
-            *failing.failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(why);
+            *failing
+                .failed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(why);
         },
         None,
     );
@@ -162,7 +196,12 @@ struct Up {
 impl Up {
     fn new(from: u32, to: u32, channels: u16) -> Up {
         let channels = usize::from(channels.max(1));
-        Up { channels, step: f64::from(from.max(1)) / f64::from(to.max(1)), last: 0.0, at: 0.0 }
+        Up {
+            channels,
+            step: f64::from(from.max(1)) / f64::from(to.max(1)),
+            last: 0.0,
+            at: 0.0,
+        }
     }
 
     fn push(&mut self, samples: &[f32], taken: &mut VecDeque<f32>) {
@@ -208,7 +247,11 @@ mod tests {
         for to in [16_000, 22_050, 24_000, 44_100, 48_000, 96_000] {
             let second = vec![0.25; 24_000];
             let taken = up(24_000, to, 2, &second);
-            assert!(taken.len().abs_diff(to as usize * 2) <= 2, "{to}: {}", taken.len());
+            assert!(
+                taken.len().abs_diff(to as usize * 2) <= 2,
+                "{to}: {}",
+                taken.len()
+            );
         }
     }
 

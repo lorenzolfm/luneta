@@ -12,8 +12,8 @@ use tokio::sync::watch::Receiver;
 use crate::agent::{Agent, Name};
 use crate::core::{self, Command};
 use crate::transcripts::{
-    self, one_line, Asked, Digest, SessionId, ShareBytes, StepsMax, Tail, TailLimits,
-    TranscriptHarness,
+    self, Asked, Digest, SessionId, ShareBytes, StepsMax, Tail, TailLimits, TranscriptHarness,
+    one_line,
 };
 use crate::watch::Troubles;
 use crate::{claude, program};
@@ -56,12 +56,69 @@ const SYSTEM: &str = "You name the topic of a developer's coding session, for it
     Answer with the topic alone, on one line, and nothing else.";
 
 const ROUTINE_WORDS: &[&str] = &[
-    "a", "after", "against", "ahead", "all", "an", "and", "both", "ci", "commit", "continue",
-    "description", "do", "done", "everything", "finding", "findings", "finishes", "fix", "for",
-    "go", "green", "here", "in", "is", "it", "link", "merge", "merged", "no", "ok", "okay", "on",
-    "once", "open", "pass", "passes", "please", "pr", "proceed", "push", "rebase", "recommendation",
-    "recommendations", "sure", "sync", "thank", "thanks", "that", "the", "then", "these", "this",
-    "those", "update", "upstream", "when", "with", "yeah", "yep", "yes", "you", "your",
+    "a",
+    "after",
+    "against",
+    "ahead",
+    "all",
+    "an",
+    "and",
+    "both",
+    "ci",
+    "commit",
+    "continue",
+    "description",
+    "do",
+    "done",
+    "everything",
+    "finding",
+    "findings",
+    "finishes",
+    "fix",
+    "for",
+    "go",
+    "green",
+    "here",
+    "in",
+    "is",
+    "it",
+    "link",
+    "merge",
+    "merged",
+    "no",
+    "ok",
+    "okay",
+    "on",
+    "once",
+    "open",
+    "pass",
+    "passes",
+    "please",
+    "pr",
+    "proceed",
+    "push",
+    "rebase",
+    "recommendation",
+    "recommendations",
+    "sure",
+    "sync",
+    "thank",
+    "thanks",
+    "that",
+    "the",
+    "then",
+    "these",
+    "this",
+    "those",
+    "update",
+    "upstream",
+    "when",
+    "with",
+    "yeah",
+    "yep",
+    "yes",
+    "you",
+    "your",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -134,8 +191,10 @@ impl Topics {
     }
 
     fn look(&mut self, agents: &[Agent], shown: bool) -> Vec<Due> {
-        let named: Vec<(SessionId, &Agent)> =
-            agents.iter().filter_map(|agent| Some((topical(agent)?, agent))).collect();
+        let named: Vec<(SessionId, &Agent)> = agents
+            .iter()
+            .filter_map(|agent| Some((topical(agent)?, agent)))
+            .collect();
         self.forget_gone(&named, Instant::now());
         let projects = self.projects.as_path();
         for (id, agent) in named {
@@ -166,9 +225,10 @@ impl Topics {
             let Some(digest) = grown else {
                 continue;
             };
-            let new = digest.asked.as_ref().is_some_and(|asked| {
-                kept.asked.as_ref().is_none_or(|was| !was.same(asked))
-            });
+            let new = digest
+                .asked
+                .as_ref()
+                .is_some_and(|asked| kept.asked.as_ref().is_none_or(|was| !was.same(asked)));
             if new {
                 kept.asked.clone_from(&digest.asked);
                 let routine = digest.asked.as_ref().is_some_and(names_no_subject);
@@ -178,11 +238,7 @@ impl Topics {
                 }
             }
         }
-        if shown {
-            self.due()
-        } else {
-            Vec::new()
-        }
+        if shown { self.due() } else { Vec::new() }
     }
 
     fn forget_gone(&mut self, named: &[(SessionId, &Agent)], now: Instant) {
@@ -210,7 +266,10 @@ impl Topics {
             };
             self.writing.insert(id.clone());
             let prompt = prompt(kept.topic.as_ref().map(Said::as_str), digest);
-            due.push(Due { id: id.clone(), prompt });
+            due.push(Due {
+                id: id.clone(),
+                prompt,
+            });
         }
         assert!(self.writing.len() <= CALLS_MAX);
         due
@@ -220,7 +279,8 @@ impl Topics {
         let started = self.writing.remove(&id);
         assert!(started, "a call that ended had started");
         if let Err(why) = &said {
-            self.troubles.say(format!("the model named no topic: {why}"));
+            self.troubles
+                .say(format!("the model named no topic: {why}"));
         }
         self.troubles.done();
         let Some(kept) = self.kept.get_mut(&id) else {
@@ -234,7 +294,8 @@ impl Topics {
 
     fn topics(&self) -> HashMap<SessionId, Said> {
         let here = self.kept.iter().filter(|(_, kept)| kept.left.is_none());
-        here.filter_map(|(id, kept)| Some((id.clone(), kept.topic.clone()?))).collect()
+        here.filter_map(|(id, kept)| Some((id.clone(), kept.topic.clone()?)))
+            .collect()
     }
 }
 
@@ -255,7 +316,10 @@ fn names_no_subject(asked: &Asked) -> bool {
     };
     let text = text.to_lowercase();
     let mut words = text.split_whitespace().peekable();
-    words.next_if(|word| word.strip_prefix('/').is_some_and(|name| !name.contains('/')));
+    words.next_if(|word| {
+        word.strip_prefix('/')
+            .is_some_and(|name| !name.contains('/'))
+    });
     words.all(|word| ROUTINE_WORDS.contains(&word.trim_end_matches(MARKS)))
 }
 
@@ -264,7 +328,12 @@ fn prompt(current: Option<&str>, digest: Digest) -> String {
         Some(topic) => format!("The topic the row goes by now: {topic}"),
         None => "The row has no topic yet.".to_owned(),
     };
-    let told = Digest { title: None, ..digest }.lines().join("\n");
+    let told = Digest {
+        title: None,
+        ..digest
+    }
+    .lines()
+    .join("\n");
     format!("<session>\n{current}\n{told}\n</session>")
 }
 
@@ -300,7 +369,10 @@ fn written(prompt: &str) -> Result<Said, String> {
         claude.current_dir(home);
     }
     let ran = program::run_reading(&mut claude, WRITING, told).map_err(not_run)?;
-    topic_of(&ran.answer_why_on_either().map_err(|why| format!("claude: {why}"))?)
+    topic_of(
+        &ran.answer_why_on_either()
+            .map_err(|why| format!("claude: {why}"))?,
+    )
 }
 
 fn start(Due { id, prompt }: Due, wrote: &Sender<Wrote>) -> io::Result<()> {
@@ -320,35 +392,37 @@ pub fn follow(
     began: SystemTime,
     sweep: Duration,
 ) -> io::Result<()> {
-    thread::Builder::new().name("topics".to_owned()).spawn(move || {
-        let (wrote, ended) = mpsc::channel();
-        let mut topics = Topics::new(projects, began);
-        let mut told = HashMap::new();
-        loop {
-            let Some(agents) = core::ask(&core, Command::Claudes) else {
-                return;
-            };
-            let shown = *shown.borrow();
-            for due in topics.look(&agents, shown) {
-                let id = due.id.clone();
-                if let Err(error) = start(due, &wrote) {
-                    let said = Err(format!("no thread to ask it on: {error}"));
-                    topics.wrote(Wrote { id, said });
-                }
-            }
-            match ended.recv_timeout(sweep) {
-                Ok(ended) => topics.wrote(ended),
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {},
-            }
-            let now = topics.topics();
-            if now != told {
-                if core.send(Command::Topics(now.clone())).is_err() {
+    thread::Builder::new()
+        .name("topics".to_owned())
+        .spawn(move || {
+            let (wrote, ended) = mpsc::channel();
+            let mut topics = Topics::new(projects, began);
+            let mut told = HashMap::new();
+            loop {
+                let Some(agents) = core::ask(&core, Command::Claudes) else {
                     return;
+                };
+                let shown = *shown.borrow();
+                for due in topics.look(&agents, shown) {
+                    let id = due.id.clone();
+                    if let Err(error) = start(due, &wrote) {
+                        let said = Err(format!("no thread to ask it on: {error}"));
+                        topics.wrote(Wrote { id, said });
+                    }
                 }
-                told = now;
+                match ended.recv_timeout(sweep) {
+                    Ok(ended) => topics.wrote(ended),
+                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+                }
+                let now = topics.topics();
+                if now != told {
+                    if core.send(Command::Topics(now.clone())).is_err() {
+                        return;
+                    }
+                    told = now;
+                }
             }
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -365,13 +439,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::Directory;
     use crate::agent::Source;
+    use crate::claude;
     use crate::mux::OwnMade;
     use crate::process::AgentPid;
-    use crate::claude;
     use crate::statuses::tests::decided;
     use crate::statuses::{ActiveStatus, BlockedReason};
-    use crate::Directory;
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
@@ -393,7 +467,10 @@ mod tests {
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
-            terminal: Some(TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(60) }),
+            terminal: Some(TerminalKey {
+                id: NonZeroU32::MIN,
+                made: OwnMade::from_nanos(60),
+            }),
         }
     }
 
@@ -416,7 +493,11 @@ mod tests {
 
         fn add(&self, id: &str, record: &serde_json::Value) {
             let path = self.transcript(id);
-            let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
             writeln!(file, "{record}").unwrap();
         }
 
@@ -440,7 +521,10 @@ mod tests {
 
     fn failed() -> Wrote {
         let id = SessionId::parse(ID).unwrap();
-        Wrote { id, said: Err("it did not answer in time".to_owned()) }
+        Wrote {
+            id,
+            said: Err("it did not answer in time".to_owned()),
+        }
     }
 
     fn with_a_topic(projects: &Projects, agents: &[Agent]) -> Topics {
@@ -458,21 +542,33 @@ mod tests {
         let busy = [agent(ID, ActiveStatus::Working, 2)];
         assert_eq!(topics.look(&busy, true), []);
 
-        projects.add(ID, &json!({"type": "ai-title", "aiTitle": "The first prompt"}));
+        projects.add(
+            ID,
+            &json!({"type": "ai-title", "aiTitle": "The first prompt"}),
+        );
         projects.prompted(ID, "fold the sessions");
         let due = topics.look(&busy, true);
         let [Due { id, prompt }] = due.as_slice() else {
             panic!("{due:?}");
         };
         assert_eq!(id.as_str(), ID);
-        assert!(prompt.contains("The topic the row goes by now: The first prompt"), "{prompt}");
-        assert!(prompt.contains("The developer last asked it: fold the sessions"), "{prompt}");
+        assert!(
+            prompt.contains("The topic the row goes by now: The first prompt"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The developer last asked it: fold the sessions"),
+            "{prompt}"
+        );
         topics.wrote(said(ID, "Session folds"));
         assert_eq!(topics.topics(), only(ID, "Session folds"));
 
         let step = json!({"content": [{"type": "text", "text": "Looking."}]});
         projects.add(ID, &json!({"type": "assistant", "message": step}));
-        projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}));
+        projects.add(
+            ID,
+            &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}),
+        );
         assert_eq!(topics.look(&busy, true), []);
 
         projects.prompted(ID, "now the tabs");
@@ -480,8 +576,14 @@ mod tests {
         let [Due { prompt, .. }] = due.as_slice() else {
             panic!("{due:?}");
         };
-        assert!(prompt.contains("The topic the row goes by now: Session folds"), "{prompt}");
-        assert!(prompt.contains("The developer last asked it: now the tabs"), "{prompt}");
+        assert!(
+            prompt.contains("The topic the row goes by now: Session folds"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The developer last asked it: now the tabs"),
+            "{prompt}"
+        );
     }
 
     #[test]
@@ -493,7 +595,12 @@ mod tests {
         assert_eq!(topics.look(&busy, true).len(), 1);
         topics.wrote(said(ID, "Session folds"));
 
-        for routine in ["yes, go ahead", "merge once CI passes", "/compact", "/tigerstyle this pr"] {
+        for routine in [
+            "yes, go ahead",
+            "merge once CI passes",
+            "/compact",
+            "/tigerstyle this pr",
+        ] {
             projects.prompted(ID, routine);
             assert_eq!(topics.look(&busy, true), [], "{routine}");
             assert_eq!(topics.topics(), only(ID, "Session folds"));
@@ -517,7 +624,10 @@ mod tests {
         assert_eq!(topics.look(&busy, true).len(), 1);
 
         let id = SessionId::parse(ID).unwrap();
-        topics.wrote(Wrote { id, said: Err("it did not answer in time".to_owned()) });
+        topics.wrote(Wrote {
+            id,
+            said: Err("it did not answer in time".to_owned()),
+        });
         projects.prompted(ID, "continue");
         assert_eq!(topics.look(&busy, true).len(), 1);
     }
@@ -595,7 +705,10 @@ mod tests {
     #[test]
     fn a_prompt_that_names_no_subject_makes_the_call_after_an_agent_was_away() {
         let busy = [agent(ID, ActiveStatus::Working, 2)];
-        let unseated = [Agent { terminal: None, ..agent(ID, ActiveStatus::Working, 2) }];
+        let unseated = [Agent {
+            terminal: None,
+            ..agent(ID, ActiveStatus::Working, 2)
+        }];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
         assert_eq!(topics.look(&unseated, true), []);
@@ -667,8 +780,9 @@ mod tests {
     fn a_prompt_that_names_no_subject_takes_no_place_from_one_waiting_for_room() {
         let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
         let projects = Projects::new();
-        let mut agents: Vec<Agent> =
-            (0..CALLS_MAX).map(|n| agent(&id(n), ActiveStatus::Working, 2)).collect();
+        let mut agents: Vec<Agent> = (0..CALLS_MAX)
+            .map(|n| agent(&id(n), ActiveStatus::Working, 2))
+            .collect();
         for n in 0..CALLS_MAX {
             projects.prompted(&id(n), "fold the sessions");
         }
@@ -719,7 +833,9 @@ mod tests {
         for text in subject {
             assert!(!names_no_subject(&whole(text)), "{text}");
         }
-        assert!(!names_no_subject(&Asked::Cut("merge once ci passes".to_owned())));
+        assert!(!names_no_subject(&Asked::Cut(
+            "merge once ci passes".to_owned()
+        )));
     }
 
     #[test]
@@ -731,7 +847,20 @@ mod tests {
         assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true), []);
         let finished = [agent(ID, ActiveStatus::Idle, 3)];
         assert_eq!(topics.look(&finished, true).len(), 1);
-        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Blocked { reason: BlockedReason::Unspecified, message: None }, 4)], true), []);
+        assert_eq!(
+            topics.look(
+                &[agent(
+                    ID,
+                    ActiveStatus::Blocked {
+                        reason: BlockedReason::Unspecified,
+                        message: None
+                    },
+                    4
+                )],
+                true
+            ),
+            []
+        );
     }
 
     #[test]
@@ -741,7 +870,10 @@ mod tests {
         projects.prompted(asked, "fold the sessions");
         projects.prompted(quiet, "sort the tabs");
         let mut topics = projects.topics();
-        let agents = [agent(asked, ActiveStatus::Working, 2), agent(quiet, ActiveStatus::Idle, 2)];
+        let agents = [
+            agent(asked, ActiveStatus::Working, 2),
+            agent(quiet, ActiveStatus::Idle, 2),
+        ];
         let shown = topics.look(&agents, true);
         assert_eq!(shown.len(), 2);
         topics.wrote(said(asked, "Session folds"));
@@ -751,14 +883,20 @@ mod tests {
         projects.prompted(asked, "and the views");
         assert_eq!(topics.look(&agents, false), []);
         assert_eq!(topics.look(&agents, false), []);
-        projects.add(quiet, &json!({"type": "last-prompt", "lastPrompt": "sort the tabs"}));
+        projects.add(
+            quiet,
+            &json!({"type": "last-prompt", "lastPrompt": "sort the tabs"}),
+        );
 
         let due = topics.look(&agents, true);
         let [Due { id, prompt }] = due.as_slice() else {
             panic!("{due:?}");
         };
         assert_eq!(id.as_str(), asked);
-        assert!(prompt.contains("The developer last asked it: and the views"), "{prompt}");
+        assert!(
+            prompt.contains("The developer last asked it: and the views"),
+            "{prompt}"
+        );
     }
 
     #[test]
@@ -773,7 +911,10 @@ mod tests {
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], false), []);
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], true), []);
         assert_eq!(topics.topics(), HashMap::new());
-        projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}));
+        projects.add(
+            ID,
+            &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}),
+        );
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], true), []);
         projects.prompted(ID, "now the tabs");
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], true).len(), 1);
@@ -783,8 +924,9 @@ mod tests {
     fn no_more_calls_run_than_the_most_and_the_rest_wait() {
         let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
         let projects = Projects::new();
-        let agents: Vec<Agent> =
-            (0..CALLS_MAX + 2).map(|n| agent(&id(n), ActiveStatus::Working, 2)).collect();
+        let agents: Vec<Agent> = (0..CALLS_MAX + 2)
+            .map(|n| agent(&id(n), ActiveStatus::Working, 2))
+            .collect();
         for n in 0..CALLS_MAX + 2 {
             projects.prompted(&id(n), "fold the sessions");
         }
@@ -819,10 +961,16 @@ mod tests {
         assert!(prompt.contains("last asked it: now the tabs"), "{prompt}");
 
         let id = SessionId::parse(ID).unwrap();
-        topics.wrote(Wrote { id, said: Err("it did not answer in time".to_owned()) });
+        topics.wrote(Wrote {
+            id,
+            said: Err("it did not answer in time".to_owned()),
+        });
         assert_eq!(topics.topics(), only(ID, "Session folds"));
         assert_eq!(topics.look(&busy, true), []);
-        projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "now the tabs"}));
+        projects.add(
+            ID,
+            &json!({"type": "last-prompt", "lastPrompt": "now the tabs"}),
+        );
         assert_eq!(topics.look(&busy, true), []);
     }
 
@@ -831,7 +979,10 @@ mod tests {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true).len(), 1);
+        assert_eq!(
+            topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true).len(),
+            1
+        );
         topics.wrote(said(ID, "Session folds"));
 
         assert_eq!(topics.look(&[], true), []);
@@ -857,7 +1008,10 @@ mod tests {
 
         let before = Instant::now();
         assert_eq!(topics.look(&[], true), []);
-        topics.forget_gone(&[], before + REMEMBERED.saturating_sub(Duration::from_secs(1)));
+        topics.forget_gone(
+            &[],
+            before + REMEMBERED.saturating_sub(Duration::from_secs(1)),
+        );
         assert_eq!(topics.kept.len(), 1);
         topics.forget_gone(&[], Instant::now() + REMEMBERED);
         assert_eq!(topics.kept.len(), 0);
@@ -946,17 +1100,64 @@ mod tests {
 
     #[test]
     fn a_call_is_made_only_for_an_agent_a_row_goes_by_the_topic_of() {
-        let named = |source| Some(Name { text: Said::new("fold".to_owned()).unwrap(), source });
+        let named = |source| {
+            Some(Name {
+                text: Said::new("fold".to_owned()).unwrap(),
+                source,
+            })
+        };
         let word = |word: &str| Some(Said::new(word.to_owned()).unwrap());
         let cases = [
-            (Agent { name: named(Some(Source::User)), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { name: named(Some(Source::Peer)), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { name: named(None), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { terminal: None, ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { entrypoint: word("sdk-cli"), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { entrypoint: None, ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (
+                Agent {
+                    name: named(Some(Source::User)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    name: named(Some(Source::Peer)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    name: named(None),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    terminal: None,
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    entrypoint: word("sdk-cli"),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    entrypoint: None,
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
             (agent("no-uuid-here", ActiveStatus::Working, 2), false),
-            (Agent { name: named(Some(Source::Derived)), ..agent(ID, ActiveStatus::Working, 2) }, true),
+            (
+                Agent {
+                    name: named(Some(Source::Derived)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                true,
+            ),
         ];
         for (agent, called) in cases {
             let projects = Projects::new();
@@ -973,11 +1174,17 @@ mod tests {
     fn a_topic_is_one_short_line() {
         let topic = |said: &str| topic_of(said.as_bytes()).map(String::from);
         assert_eq!(topic("Session folds\n"), Ok("Session folds".to_owned()));
-        assert_eq!(topic("\n  \"Session   folds.\"\n\n"), Ok("Session folds".to_owned()));
+        assert_eq!(
+            topic("\n  \"Session   folds.\"\n\n"),
+            Ok("Session folds".to_owned())
+        );
         assert_eq!(topic("\"Session folds\"."), Ok("Session folds".to_owned()));
         assert_eq!(topic("**`lune.rs`**"), Ok("lune.rs".to_owned()));
         assert_eq!(topic("CI for PR #310."), Ok("CI for PR #310".to_owned()));
-        assert_eq!(topic("Session\u{1b}[31m folds"), Ok("Session[31m folds".to_owned()));
+        assert_eq!(
+            topic("Session\u{1b}[31m folds"),
+            Ok("Session[31m folds".to_owned())
+        );
         assert_eq!(topic(&"é".repeat(TOPIC_CHARS)), Ok("é".repeat(TOPIC_CHARS)));
         let own = [
             ".gitignore rules",
@@ -990,9 +1197,16 @@ mod tests {
             assert_eq!(topic(own), Ok(own.to_owned()));
         }
         for nothing in ["", " \n \n", "\"\"", "."] {
-            assert_eq!(topic(nothing), Err("it said nothing".to_owned()), "{nothing:?}");
+            assert_eq!(
+                topic(nothing),
+                Err("it said nothing".to_owned()),
+                "{nothing:?}"
+            );
         }
-        assert_eq!(topic("The topic:\nSession folds"), Err("it said more than a line".to_owned()));
+        assert_eq!(
+            topic("The topic:\nSession folds"),
+            Err("it said more than a line".to_owned())
+        );
         let long = format!("it said more than {TOPIC_CHARS} characters");
         assert_eq!(topic(&"é".repeat(TOPIC_CHARS + 1)), Err(long));
     }

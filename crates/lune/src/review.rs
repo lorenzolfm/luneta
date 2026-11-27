@@ -173,7 +173,11 @@ impl ReviewPane {
     }
 
     #[must_use]
-    pub fn loaded(&mut self, response: Result<Arc<LoadedDiff>, String>, revision: NonZeroU64) -> bool {
+    pub fn loaded(
+        &mut self,
+        response: Result<Arc<LoadedDiff>, String>,
+        revision: NonZeroU64,
+    ) -> bool {
         let current_revision = match &self.state {
             PaneState::Loading => None,
             PaneState::Failed { revision, .. } | PaneState::Loaded { revision, .. } => {
@@ -387,9 +391,7 @@ impl ReviewPane {
                     viewer.scroll_by(-3, viewport);
                 }
             }
-            MouseEventKind::Down(MouseButton::Left)
-                if local.y > 0 && local.y + 1 < area.height =>
-            {
+            MouseEventKind::Down(MouseButton::Left) if local.y > 0 && local.y + 1 < area.height => {
                 let body_row = usize::from(local.y - 1);
                 if !tree_area.is_empty() && local.x < tree_area.width {
                     let index = self.tree_scroll.saturating_add(body_row);
@@ -495,8 +497,11 @@ impl ReviewPane {
                 }
                 let overlay = if viewer.patch().files.is_empty() {
                     if !diff_area.is_empty() {
-                        let message =
-                            format!(" No changes between {} and {}.", viewer.base(), viewer.head());
+                        let message = format!(
+                            " No changes between {} and {}.",
+                            viewer.base(),
+                            viewer.head()
+                        );
                         buffer.set_stringn(
                             diff_area.x,
                             diff_area.y + 1.min(diff_area.height.saturating_sub(1)),
@@ -815,8 +820,15 @@ fn draw_split(
     let gutter_x = old_number_x + LINE_NUMBER_COLS + 1;
     let new_number_x = gutter_x + GUTTER_COLS + 1;
     let right_x = new_number_x + LINE_NUMBER_COLS;
-    assert!(left_width > 0 && right_width > 0, "both split code columns are positive");
-    assert_eq!(right_x + right_width, area.right(), "split columns tile diff area");
+    assert!(
+        left_width > 0 && right_width > 0,
+        "both split code columns are positive"
+    );
+    assert_eq!(
+        right_x + right_width,
+        area.right(),
+        "split columns tile diff area"
+    );
 
     let visible_rows = usize::from(area.height);
     let selection = viewer.selection_range();
@@ -1624,7 +1636,9 @@ diff --git a/src/lib.rs b/src/lib.rs
         let narrow = Rect::new(0, 0, SPLIT_HARD_MIN_WIDTH - 1, 10);
         let mut narrow_buf = Buffer::empty(narrow);
         pane.draw(&mut narrow_buf, narrow, true, None);
-        let header: String = (0..narrow.width).map(|x| narrow_buf[(x, 0)].symbol()).collect();
+        let header: String = (0..narrow.width)
+            .map(|x| narrow_buf[(x, 0)].symbol())
+            .collect();
         assert!(!header.contains("[split]"), "{header}");
 
         let mut clear_wire = Vec::new();
@@ -1664,7 +1678,10 @@ diff --git a/crates/a/two.rs b/crates/a/two.rs
         assert!(split_row.contains("10000"), "{split_row}");
 
         pane.key(&KeyEvent::from(KeyCode::Tab));
-        assert_eq!(pane.key(&KeyEvent::from(KeyCode::Char('e'))), ReviewAction::None);
+        assert_eq!(
+            pane.key(&KeyEvent::from(KeyCode::Char('e'))),
+            ReviewAction::None
+        );
         pane.key(&KeyEvent::from(KeyCode::Enter));
         let mut folded_buf = Buffer::empty(area);
         pane.draw(&mut folded_buf, area, true, None);

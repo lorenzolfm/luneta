@@ -11,7 +11,10 @@ pub const BUILT: Option<u64> = match option_env!("LUNE_BUILT") {
     None => None,
 };
 
-const _: () = assert!(env!("CARGO_PKG_VERSION_PRE").is_empty(), "a release has no pre-release");
+const _: () = assert!(
+    env!("CARGO_PKG_VERSION_PRE").is_empty(),
+    "a release has no pre-release"
+);
 
 pub const OWN: Build = Build {
     release: match (
@@ -41,10 +44,15 @@ impl Release {
     #[must_use]
     pub fn parse(version: &str) -> Option<Release> {
         let mut numbers = version.split('.').map(|number| number.parse().ok());
-        match (numbers.next(), numbers.next(), numbers.next(), numbers.next()) {
+        match (
+            numbers.next(),
+            numbers.next(),
+            numbers.next(),
+            numbers.next(),
+        ) {
             (Some(Some(major)), Some(Some(minor)), Some(Some(patch)), None) => {
                 Some(Release(major, minor, patch))
-            },
+            }
             _ => None,
         }
     }
@@ -59,7 +67,10 @@ pub struct Build {
 impl Build {
     #[must_use]
     pub fn of(version: &str, built: Option<u64>) -> Option<Build> {
-        Some(Build { release: Release::parse(version)?, built })
+        Some(Build {
+            release: Release::parse(version)?,
+            built,
+        })
     }
 
     #[must_use]
@@ -118,7 +129,10 @@ pub fn of(version: &str, built: Option<u64>) -> Of {
     if theirs == Some(OWN) {
         return Of::Own;
     }
-    Of::Other(Other { spelled: spelled(version, built), build: theirs })
+    Of::Other(Other {
+        spelled: spelled(version, built),
+        build: theirs,
+    })
 }
 
 #[must_use]
@@ -136,7 +150,10 @@ mod tests {
     #[test]
     fn a_build_reads_back_as_it_is_spelled() {
         for built in [None, Some(1793301121)] {
-            assert_eq!(Build::parse(&spelled("0.2.2", built)), Build::of("0.2.2", built));
+            assert_eq!(
+                Build::parse(&spelled("0.2.2", built)),
+                Build::of("0.2.2", built)
+            );
         }
         assert_eq!(Build::parse(&SAID), Some(OWN));
         assert_eq!(OWN.to_string(), *SAID);
@@ -150,7 +167,11 @@ mod tests {
         assert_eq!(of(VERSION, BUILT), Of::Own);
         let other = |version, built| match of(version, built) {
             Of::Other(other) => other,
-            Of::Own => panic!("{} is another build than {}", spelled(version, built), *SAID),
+            Of::Own => panic!(
+                "{} is another build than {}",
+                spelled(version, built),
+                *SAID
+            ),
         };
         let stamp = Some(BUILT.map_or(0, |built| built + 1));
         assert_eq!(other(VERSION, stamp).to_string(), spelled(VERSION, stamp));
@@ -186,7 +207,11 @@ mod tests {
             built: Some(1_793_301_121),
             agy_folder: None,
         };
-        assert_eq!(info.encode_to_vec(), said(None), "an older lune reads this luned's");
+        assert_eq!(
+            info.encode_to_vec(),
+            said(None),
+            "an older lune reads this luned's"
+        );
         let older = InfoResponse::decode(said(Some(b"/tmp/zellij-1000")).as_slice());
         assert_eq!(older.unwrap(), info, "and this lune reads an older luned's");
     }

@@ -4,9 +4,9 @@ use std::process::ExitCode;
 use std::sync::mpsc::Sender;
 use std::thread::{self, JoinHandle};
 
+use luned::Directory;
 use luned::asks::Turn;
 use luned::prunes::{Came, Deleting, Goes, Outcome, Plan, Pruned, Pushed, name_of};
-use luned::Directory;
 
 use crate::agreed::{self, Agreed, PLANNED};
 use crate::due::Due;
@@ -42,14 +42,16 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
     let agreed = Agreed::of_prune(&plan, turn.map(Turn::key));
     let takes = match turn {
         None => Some(agreed),
-        Some(turn) => turn.before().map(|before| Agreed::of_prune(&plan, Some(before))),
+        Some(turn) => turn
+            .before()
+            .map(|before| Agreed::of_prune(&plan, Some(before))),
     };
     match (yes, takes) {
-        (Some(yes), Some(takes)) if yes == takes => {},
+        (Some(yes), Some(takes)) if yes == takes => {}
         (yes, _) => {
             eprintln!("lune: {}", unagreed(yes, agreed));
             return ExitCode::from(PLANNED);
-        },
+        }
     }
     match luned.prune(&dir, &plan.deletes()) {
         Ok(Pruned::Went(outcomes)) => exit_of(&outcomes),
@@ -60,9 +62,12 @@ pub fn run(repo: Option<&Path>, yes: Option<Agreed>, folder: &Path) -> ExitCode 
             if let Some(none) = none_goes(&now) {
                 return none;
             }
-            eprintln!("lune: {}", unagreed(yes, Agreed::of_prune(&now, turn.map(Turn::key))));
+            eprintln!(
+                "lune: {}",
+                unagreed(yes, Agreed::of_prune(&now, turn.map(Turn::key)))
+            );
             ExitCode::from(PLANNED)
-        },
+        }
         Err(why) => failed(&why),
     }
 }
@@ -76,7 +81,9 @@ fn none_goes(plan: &Plan) -> Option<ExitCode> {
         eprintln!("lune: {name} has no merged worktree to delete");
         return Some(ExitCode::SUCCESS);
     }
-    Some(failed(&format!("{name}: no merged worktree to delete of those it could ask about")))
+    Some(failed(&format!(
+        "{name}: no merged worktree to delete of those it could ask about"
+    )))
 }
 
 fn unagreed(yes: Option<Agreed>, agreed: Agreed) -> String {
@@ -113,14 +120,18 @@ fn exit_of(outcomes: &[Outcome]) -> ExitCode {
                 println!("deleted {name}");
                 eprintln!("lune: {name}: {why}");
                 well = false;
-            },
+            }
             Came::Stays(why) => {
                 eprintln!("lune: {name} stays: {why}");
                 well = false;
-            },
+            }
         }
     }
-    if well { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if well {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 pub fn size(bytes: u64) -> String {
@@ -132,7 +143,7 @@ pub fn size(bytes: u64) -> String {
         GIB.. => {
             let tenths = in_tenths(GIB);
             format!("{}.{} GB", tenths / 10, tenths % 10)
-        },
+        }
         MIB.. => format!("{} MB", bytes.div_ceil(MIB)),
         _ => format!("{} KB", bytes.div_ceil(KIB)),
     }
@@ -148,16 +159,28 @@ fn with_it(goes: &Goes) -> String {
 }
 
 fn listed(plan: &Plan) -> Vec<String> {
-    let width = plan.goes.iter().map(|goes| name_of(&goes.folder).len()).max().unwrap_or(0);
+    let width = plan
+        .goes
+        .iter()
+        .map(|goes| name_of(&goes.folder).len())
+        .max()
+        .unwrap_or(0);
     let goes = plan.goes.iter().map(|goes| {
         let (name, number) = (name_of(&goes.folder), goes.number);
         let bytes = goes.bytes.map_or("?".to_owned(), size);
-        format!("delete {name:<width$}  #{number}  {bytes}  {}", with_it(goes))
+        format!(
+            "delete {name:<width$}  #{number}  {bytes}  {}",
+            with_it(goes)
+        )
     });
-    let kept = plan
-        .kept
-        .iter()
-        .map(|kept| format!("keep {} #{}: {}", name_of(&kept.folder), kept.number, kept.why));
+    let kept = plan.kept.iter().map(|kept| {
+        format!(
+            "keep {} #{}: {}",
+            name_of(&kept.folder),
+            kept.number,
+            kept.why
+        )
+    });
     let unasked = plan
         .unasked
         .iter()
@@ -199,14 +222,18 @@ pub fn note(outcomes: &[Outcome]) -> Option<String> {
             Came::WentBut(why) => {
                 gone += 1;
                 stays.push(format!("{name} went, but {why}"));
-            },
+            }
             Came::Stays(why) => stays.push(format!("{name} stays: {why}")),
         }
     }
     if stays.is_empty() {
         return None;
     }
-    Some(format!("menu: deleted {gone} of {} worktrees; {}", outcomes.len(), stays.join("; ")))
+    Some(format!(
+        "menu: deleted {gone} of {} worktrees; {}",
+        outcomes.len(),
+        stays.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -228,7 +255,10 @@ mod tests {
     }
 
     fn outcome(name: &str, came: Came) -> Outcome {
-        Outcome { folder: format!("/w/{name}"), came }
+        Outcome {
+            folder: format!("/w/{name}"),
+            came,
+        }
     }
 
     #[test]
@@ -237,7 +267,10 @@ mod tests {
         let said = note(&[
             outcome("a", Came::Gone),
             outcome("b", Came::Stays("it has a view".to_owned())),
-            outcome("c", Came::WentBut("its branch on origin stays: no key".to_owned())),
+            outcome(
+                "c",
+                Came::WentBut("its branch on origin stays: no key".to_owned()),
+            ),
         ]);
         let want = "menu: deleted 2 of 3 worktrees; b stays: it has a view; c went, but its branch \
                     on origin stays: no key";

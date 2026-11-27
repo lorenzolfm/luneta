@@ -5,15 +5,13 @@ use std::process::Command;
 use lune_mux::api;
 use rustix::process::{Pid, test_kill_process};
 
-use crate::host::{
-    LUNE_MUX, Server, listed, new_terminal, run, script, shell, size, watched_end,
-};
+use crate::host::{LUNE_MUX, Server, listed, new_terminal, run, script, shell, size, watched_end};
 
 fn programs(listing: &api::Listing) -> Vec<Pid> {
     let pid = |terminal: &api::Terminal| match &terminal.program {
         Some(api::terminal::Program::Runs(runs)) => {
             Pid::from_raw(i32::try_from(runs.pid).unwrap()).unwrap()
-        },
+        }
         program => panic!("terminal {:?} runs nothing: {program:?}", terminal.key),
     };
     listing.terminals.iter().map(pid).collect()
@@ -21,8 +19,10 @@ fn programs(listing: &api::Listing) -> Vec<Pid> {
 
 async fn ended(pid: Pid) {
     let what = format!("program {pid:?} ends");
-    lune_waits::eventually_async(&what, async || test_kill_process(pid).is_err().then_some(()))
-        .await;
+    lune_waits::eventually_async(&what, async || {
+        test_kill_process(pid).is_err().then_some(())
+    })
+    .await;
 }
 
 #[test]
@@ -30,7 +30,10 @@ fn it_listens_only_in_the_one_absolute_folder_it_is_given() {
     let refused: [(&[&str], &str); 3] = [
         (&[], "give it the one folder to listen in"),
         (&["/tmp/a", "/tmp/b"], "give it the one folder to listen in"),
-        (&["lune"], "lune is no folder to listen in, as it is not absolute"),
+        (
+            &["lune"],
+            "lune is no folder to listen in, as it is not absolute",
+        ),
     ];
     for (arguments, why) in refused {
         let output = Command::new(LUNE_MUX).args(arguments).output().unwrap();

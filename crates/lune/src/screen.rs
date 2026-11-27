@@ -1,6 +1,6 @@
 use alacritty_terminal::event::EventListener;
-use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::Term;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::{Color as Colour, NamedColor};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -8,7 +8,9 @@ use ratatui::style::{Color, Modifier, Style};
 
 fn within(area: Rect, line: i32, column: usize) -> Option<Position> {
     let row = u16::try_from(line).ok().filter(|row| *row < area.height)?;
-    let column = u16::try_from(column).ok().filter(|column| *column < area.width)?;
+    let column = u16::try_from(column)
+        .ok()
+        .filter(|column| *column < area.width)?;
     Some(Position::new(area.x + column, area.y + row))
 }
 
@@ -25,7 +27,10 @@ pub fn show<T: EventListener>(screen: &Term<T>, buffer: &mut Buffer, area: Rect,
             continue;
         };
         let cell = indexed.cell;
-        if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+        if cell
+            .flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+        {
             drawn.reset();
             continue;
         }
@@ -86,15 +91,15 @@ fn colour(colour: Colour) -> (Color, bool) {
                 return (Color::Indexed(index), true);
             }
             (Color::Reset, named == NamedColor::DimForeground)
-        },
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use alacritty_terminal::event::VoidListener;
-    use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::term::Config;
+    use alacritty_terminal::term::test::TermSize;
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
     use super::*;
@@ -110,7 +115,9 @@ mod tests {
     }
 
     fn line(buffer: &Buffer, y: u16) -> String {
-        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
     }
 
     #[test]
@@ -129,7 +136,11 @@ mod tests {
 
     #[test]
     fn the_colours_a_terminal_names_are_left_to_its_theme() {
-        let buffer = drawn(4, 1, b"\x1b[31;44ma\x1b[38;5;200mb\x1b[38;2;1;2;3mc\x1b[0md");
+        let buffer = drawn(
+            4,
+            1,
+            b"\x1b[31;44ma\x1b[38;5;200mb\x1b[38;2;1;2;3mc\x1b[0md",
+        );
         assert_eq!(buffer[(2, 1)].style().fg, Some(Color::Indexed(1)));
         assert_eq!(buffer[(2, 1)].style().bg, Some(Color::Indexed(4)));
         assert_eq!(buffer[(3, 1)].style().fg, Some(Color::Indexed(200)));

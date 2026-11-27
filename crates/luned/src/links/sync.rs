@@ -23,7 +23,10 @@ pub(super) fn to_head(dir: &str, link: &Link, remote: Option<&str>) -> Result<()
         Some(remote) => Some(remote.to_owned()),
         None => remote_of(dir, link)?,
     };
-    let Viewed { base_ref_name: base, head_ref_oid: head } = viewed(link)?;
+    let Viewed {
+        base_ref_name: base,
+        head_ref_oid: head,
+    } = viewed(link)?;
     if let Some(remote) = remote {
         fetch(dir, &remote, &base, MAKING)?;
     }
@@ -52,7 +55,15 @@ fn viewed(link: &Link) -> Result<Viewed, String> {
     let number = link.number.to_string();
     let repository = format!("{GITHUB}/{}", link.repository());
     let mut gh = Command::new("gh");
-    gh.args(["pr", "view", &number, "--repo", &repository, "--json", "baseRefName,headRefOid"]);
+    gh.args([
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        &repository,
+        "--json",
+        "baseRefName,headRefOid",
+    ]);
     let ran = program::run(&mut gh, ASKING)
         .map_err(|error| format!("gh pr view could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("gh pr view: {why}"))?;
@@ -67,7 +78,9 @@ pub(crate) fn fetch(dir: &str, remote: &str, base: &str, limit: Duration) -> Res
         .named([remote, &base])
         .run_alone(limit)
         .map_err(|error| format!("git fetch could not be run: {error}"))?;
-    ran.answer().map(drop).map_err(|why| format!("git fetch: {why}"))
+    ran.answer()
+        .map(drop)
+        .map_err(|why| format!("git fetch: {why}"))
 }
 
 fn trusting_no_tree(command: &mut Command) -> &mut Command {
@@ -97,7 +110,7 @@ fn follow(dir: &str) -> Result<(), String> {
         Ran::Ended { status, stderr, .. } => {
             let said = String::from_utf8_lossy(&stderr);
             Err(failure(&said).unwrap_or_else(|| format!("luned follow: {status}")))
-        },
+        }
         Ran::Stuck => Err("wt follow did not end in time".to_owned()),
     }
 }

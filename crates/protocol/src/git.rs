@@ -8,8 +8,15 @@ pub const STATUS: [&str; 3] = ["--porcelain=v2", "--branch", "--show-stash"];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitStatus {
     Outside,
-    NoCheckout { repository: Said },
-    Checkout { repository: Option<Said>, head: Head, changes: Changes, stashes: u32 },
+    NoCheckout {
+        repository: Said,
+    },
+    Checkout {
+        repository: Option<Said>,
+        head: Head,
+        changes: Changes,
+        stashes: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,14 +46,21 @@ impl Changed {
     }
 
     fn to_api(self) -> v1::Changed {
-        v1::Changed { added: self.added, deleted: self.deleted }
+        v1::Changed {
+            added: self.added,
+            deleted: self.deleted,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Head {
     Detached,
-    Branch { name: Said, upstream: Option<Upstream>, changed: Option<Changed> },
+    Branch {
+        name: Said,
+        upstream: Option<Upstream>,
+        changed: Option<Changed>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,17 +88,23 @@ impl GitStatus {
                 v1::git_status::Stands::NoCheckout(v1::git_status::NoCheckout {
                     repository: repository.as_str().to_owned(),
                 })
-            },
-            GitStatus::Checkout { repository, head, changes, stashes } => {
-                v1::git_status::Stands::Checkout(v1::Checkout {
-                    head: Some(head.to_api()),
-                    changes: Some(changes.to_api()),
-                    stashes: *stashes,
-                    repository: repository.as_ref().map(|it| it.as_str().to_owned()),
-                })
-            },
+            }
+            GitStatus::Checkout {
+                repository,
+                head,
+                changes,
+                stashes,
+            } => v1::git_status::Stands::Checkout(v1::Checkout {
+                head: Some(head.to_api()),
+                changes: Some(changes.to_api()),
+                stashes: *stashes,
+                repository: repository.as_ref().map(|it| it.as_str().to_owned()),
+            }),
         };
-        v1::GitStatus { dir: dir.to_owned(), stands: Some(stands) }
+        v1::GitStatus {
+            dir: dir.to_owned(),
+            stands: Some(stands),
+        }
     }
 
     #[must_use]
@@ -94,7 +114,7 @@ impl GitStatus {
             v1::git_status::Stands::NoCheckout(it) => {
                 let repository = Said::new(it.repository.clone())?;
                 return Some(GitStatus::NoCheckout { repository });
-            },
+            }
             v1::git_status::Stands::Checkout(checkout) => checkout,
         };
         let repository = match &checkout.repository {
@@ -128,7 +148,12 @@ impl GitStatus {
             }
         }
         let head = head.ok_or("no line that says what is checked out")?;
-        Ok(GitStatus::Checkout { repository: Some(repository), head, changes, stashes })
+        Ok(GitStatus::Checkout {
+            repository: Some(repository),
+            head,
+            changes,
+            stashes,
+        })
     }
 }
 
@@ -137,7 +162,11 @@ impl Head {
         if named == DETACHED {
             return Some(Head::Detached);
         }
-        Some(Head::Branch { name: Said::new(named.to_owned())?, upstream: None, changed: None })
+        Some(Head::Branch {
+            name: Said::new(named.to_owned())?,
+            upstream: None,
+            changed: None,
+        })
     }
 
     fn of_api(head: &v1::checkout::Head) -> Option<Self> {
@@ -154,7 +183,11 @@ impl Head {
     fn to_api(&self) -> v1::checkout::Head {
         match self {
             Head::Detached => v1::checkout::Head::Detached(()),
-            Head::Branch { name, upstream, changed } => v1::checkout::Head::Branch(v1::Branch {
+            Head::Branch {
+                name,
+                upstream,
+                changed,
+            } => v1::checkout::Head::Branch(v1::Branch {
                 name: name.as_str().to_owned(),
                 upstream: upstream.map(Upstream::to_api),
                 changed: changed.map(Changed::to_api),
@@ -167,15 +200,24 @@ impl Upstream {
     fn of(ab: &str) -> Option<Self> {
         let (ahead, behind) = ab.split_once(' ')?;
         let ahead = ahead.strip_prefix('+')?.parse().ok()?;
-        Some(Upstream { ahead, behind: behind.strip_prefix('-')?.parse().ok()? })
+        Some(Upstream {
+            ahead,
+            behind: behind.strip_prefix('-')?.parse().ok()?,
+        })
     }
 
     fn of_api(upstream: v1::Upstream) -> Self {
-        Upstream { ahead: upstream.ahead, behind: upstream.behind }
+        Upstream {
+            ahead: upstream.ahead,
+            behind: upstream.behind,
+        }
     }
 
     fn to_api(self) -> v1::Upstream {
-        v1::Upstream { ahead: self.ahead, behind: self.behind }
+        v1::Upstream {
+            ahead: self.ahead,
+            behind: self.behind,
+        }
     }
 }
 
@@ -195,7 +237,7 @@ impl Changes {
             (Some("2"), Some(states)) => {
                 self.renamed += 1;
                 self.add_change(states);
-            },
+            }
             (Some("u"), Some(_)) => self.conflicted += 1,
             (Some("?"), _) => self.untracked += 1,
             _ => return false,
@@ -234,7 +276,7 @@ impl Changes {
 
 #[cfg(test)]
 mod tests {
-    use super::{v1, Changed, Changes, GitStatus, Head, Said};
+    use super::{Changed, Changes, GitStatus, Head, Said, v1};
 
     fn repo() -> Said {
         Said::new("/w/repo".to_owned()).unwrap()
@@ -255,15 +297,26 @@ mod tests {
             "",
         ];
         for line in unread {
-            assert!(GitStatus::parse(&format!("{head}{line}\n"), repo()).is_err(), "{line:?}");
+            assert!(
+                GitStatus::parse(&format!("{head}{line}\n"), repo()).is_err(),
+                "{line:?}"
+            );
         }
         for status in ["? new\n", "# branch.head (detached)\n# branch.ab +1 -0\n"] {
             assert!(GitStatus::parse(status, repo()).is_err(), "{status:?}");
         }
         let status =
             GitStatus::parse(&format!("{head}# branch.to-come 1\n? new\n"), repo()).unwrap();
-        let GitStatus::Checkout { head: Head::Branch { name, upstream: None, .. }, changes, .. } =
-            status
+        let GitStatus::Checkout {
+            head:
+                Head::Branch {
+                    name,
+                    upstream: None,
+                    ..
+                },
+            changes,
+            ..
+        } = status
         else {
             panic!("main, with no upstream: {status:?}");
         };
@@ -282,8 +335,10 @@ mod tests {
              1 .D N... 100644 100644 000000 a a gone.rs\n? new\n",
             "# branch.head (detached)\n1 .T N... 100644 100644 120000 a a link\n",
         ];
-        let mut statuses: Vec<GitStatus> =
-            said.iter().map(|it| GitStatus::parse(it, repo()).unwrap()).collect();
+        let mut statuses: Vec<GitStatus> = said
+            .iter()
+            .map(|it| GitStatus::parse(it, repo()).unwrap())
+            .collect();
         statuses.push(GitStatus::Outside);
         statuses.push(GitStatus::NoCheckout { repository: repo() });
         statuses.push(GitStatus::Checkout {
@@ -294,7 +349,11 @@ mod tests {
         });
         let name = Said::new("fold".to_owned()).unwrap();
         let changed = Changed::new(120, 34);
-        let head = Head::Branch { name, upstream: None, changed };
+        let head = Head::Branch {
+            name,
+            upstream: None,
+            changed,
+        };
         statuses.push(GitStatus::Checkout {
             repository: None,
             head,
@@ -302,7 +361,10 @@ mod tests {
             stashes: 0,
         });
         for status in statuses {
-            assert_eq!(GitStatus::of_api(&status.to_api("/w/repo")).as_ref(), Some(&status));
+            assert_eq!(
+                GitStatus::of_api(&status.to_api("/w/repo")).as_ref(),
+                Some(&status)
+            );
         }
 
         let checkout = |head, changes| {
@@ -314,14 +376,35 @@ mod tests {
             }))
         };
         let branch = |name: &str| {
-            let branch = v1::Branch { name: name.to_owned(), upstream: None, changed: None };
+            let branch = v1::Branch {
+                name: name.to_owned(),
+                upstream: None,
+                changed: None,
+            };
             Some(v1::checkout::Head::Branch(branch))
         };
-        let none = v1::Changed { added: 0, deleted: 0 };
-        let head = v1::Branch { name: "fold".to_owned(), upstream: None, changed: Some(none) };
-        let stands = checkout(Some(v1::checkout::Head::Branch(head)), Some(v1::Changes::default()));
-        let status = GitStatus::of_api(&v1::GitStatus { dir: "/w/repo".to_owned(), stands });
-        let Some(GitStatus::Checkout { head: Head::Branch { changed, .. }, .. }) = status else {
+        let none = v1::Changed {
+            added: 0,
+            deleted: 0,
+        };
+        let head = v1::Branch {
+            name: "fold".to_owned(),
+            upstream: None,
+            changed: Some(none),
+        };
+        let stands = checkout(
+            Some(v1::checkout::Head::Branch(head)),
+            Some(v1::Changes::default()),
+        );
+        let status = GitStatus::of_api(&v1::GitStatus {
+            dir: "/w/repo".to_owned(),
+            stands,
+        });
+        let Some(GitStatus::Checkout {
+            head: Head::Branch { changed, .. },
+            ..
+        }) = status
+        else {
             panic!("fold: {status:?}");
         };
         assert_eq!(changed, None);
@@ -336,12 +419,17 @@ mod tests {
                 stashes: 0,
                 repository: Some(String::new()),
             })),
-            Some(v1::git_status::Stands::NoCheckout(v1::git_status::NoCheckout {
-                repository: String::new(),
-            })),
+            Some(v1::git_status::Stands::NoCheckout(
+                v1::git_status::NoCheckout {
+                    repository: String::new(),
+                },
+            )),
         ];
         for stands in unread {
-            let status = v1::GitStatus { dir: "/w/repo".to_owned(), stands };
+            let status = v1::GitStatus {
+                dir: "/w/repo".to_owned(),
+                stands,
+            };
             assert_eq!(GitStatus::of_api(&status), None, "{status:?}");
         }
     }

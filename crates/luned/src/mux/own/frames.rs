@@ -1,5 +1,5 @@
 use lune_domain::mux::TerminalKey;
-pub use lune_domain::projects::layout::{Side, Size, SIDE_MAX};
+pub use lune_domain::projects::layout::{SIDE_MAX, Side, Size};
 
 use super::api;
 
@@ -9,7 +9,10 @@ fn size_heard(what: &str, size: Option<api::Size>) -> Result<Size, String> {
         let cells = u16::try_from(count).ok().and_then(Side::new);
         cells.ok_or_else(|| format!("{what}'s {name} are {count}"))
     };
-    Ok(Size { columns: cells("columns", size.columns)?, rows: cells("rows", size.rows)? })
+    Ok(Size {
+        columns: cells("columns", size.columns)?,
+        rows: cells("rows", size.rows)?,
+    })
 }
 
 pub(super) fn colours(foreground: Option<[u8; 3]>, background: Option<[u8; 3]>) -> api::Colours {
@@ -18,7 +21,10 @@ pub(super) fn colours(foreground: Option<[u8; 3]>, background: Option<[u8; 3]>) 
         green: green.into(),
         blue: blue.into(),
     };
-    api::Colours { foreground: foreground.map(rgb), background: background.map(rgb) }
+    api::Colours {
+        foreground: foreground.map(rgb),
+        background: background.map(rgb),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,12 +158,19 @@ impl Line {
     }
 
     pub fn new(glyphs: Vec<Glyph>, ending: Ending, columns: Side) -> Result<Line, String> {
-        let taken: u32 = glyphs.iter().map(|glyph| u32::from(glyph.shows.columns())).sum();
+        let taken: u32 = glyphs
+            .iter()
+            .map(|glyph| u32::from(glyph.shows.columns()))
+            .sum();
         let taken = taken + u32::from(ending == Ending::WrapsWide);
         if taken != u32::from(columns.get()) {
             return Err(format!("a row of {columns} columns has glyphs of {taken}"));
         }
-        Ok(Line { glyphs, ending, columns })
+        Ok(Line {
+            glyphs,
+            ending,
+            columns,
+        })
     }
 
     fn heard(line: Option<api::Line>, columns: Side) -> Result<Line, String> {
@@ -168,9 +181,13 @@ impl Line {
             api::Ending::WrapsWide => Ending::WrapsWide,
             api::Ending::Unspecified => {
                 return Err("a row of a frame does not say how it ends".into());
-            },
+            }
         };
-        let glyphs = line.glyphs.into_iter().map(glyph).collect::<Result<Vec<_>, _>>()?;
+        let glyphs = line
+            .glyphs
+            .into_iter()
+            .map(glyph)
+            .collect::<Result<Vec<_>, _>>()?;
         Line::new(glyphs, ending, columns)
     }
 }
@@ -180,10 +197,13 @@ fn glyph(glyph: api::Glyph) -> Result<Glyph, String> {
         api::glyph::Shows::Blank(api::Blank {}) => Shows::Blank,
         api::glyph::Shows::Narrow(api::Narrow { grapheme }) => {
             Shows::Narrow(Grapheme::new(grapheme)?)
-        },
+        }
         api::glyph::Shows::Wide(api::Wide { grapheme }) => Shows::Wide(Grapheme::new(grapheme)?),
     };
-    Ok(Glyph { shows, style: style_heard(glyph.style)? })
+    Ok(Glyph {
+        shows,
+        style: style_heard(glyph.style)?,
+    })
 }
 
 fn style_heard(style: Option<api::Style>) -> Result<Style, String> {
@@ -201,7 +221,7 @@ fn style_heard(style: Option<api::Style>) -> Result<Style, String> {
         ) => true,
         Ok(api::Underline::Unspecified) | Err(_) => {
             return Err("a glyph's style does not say its underline".to_owned());
-        },
+        }
     };
     Ok(Style {
         foreground: colour_heard(style.foreground)?,
@@ -288,7 +308,7 @@ impl Frame {
                     return Err(format!("a frame of {} rows has {}", size.rows, lines.len()));
                 }
                 lines.iter().collect()
-            },
+            }
             Rows::Changed(rows) => {
                 let mut changed = vec![false; usize::from(size.rows.get())];
                 for (index, _) in rows {
@@ -300,11 +320,17 @@ impl Frame {
                     }
                 }
                 rows.iter().map(|(_, line)| line).collect()
-            },
+            }
         };
-        if let Some(line) = lines.into_iter().find(|line| line.columns() != size.columns) {
+        if let Some(line) = lines
+            .into_iter()
+            .find(|line| line.columns() != size.columns)
+        {
             let taken = line.columns();
-            return Err(format!("a row of {} columns has glyphs of {taken}", size.columns));
+            return Err(format!(
+                "a row of {} columns has glyphs of {taken}",
+                size.columns
+            ));
         }
         if let Some(cursor) = cursor
             && (cursor.row >= size.rows.get() || cursor.column >= size.columns.get())
@@ -312,7 +338,13 @@ impl Frame {
             let at = format!("{}:{}", cursor.row, cursor.column);
             return Err(format!("the cursor is off the frame, at {at}"));
         }
-        Ok(Frame { terminal, size, rows, cursor, tracks_mouse })
+        Ok(Frame {
+            terminal,
+            size,
+            rows,
+            cursor,
+            tracks_mouse,
+        })
     }
 
     #[must_use]
@@ -359,25 +391,37 @@ impl Frame {
                 if lines.len() != usize::from(size.rows.get()) {
                     return Err(format!("a frame of {} rows has {}", size.rows, lines.len()));
                 }
-                let lines = lines.into_iter().map(|line| Line::heard(Some(line), size.columns));
+                let lines = lines
+                    .into_iter()
+                    .map(|line| Line::heard(Some(line), size.columns));
                 Rows::Whole(lines.collect::<Result<_, _>>()?)
-            },
+            }
             api::frame::Rows::Changed(api::Changed { rows }) => {
                 let row = |row: api::Row| {
-                    let index = u16::try_from(row.index).ok().filter(|it| *it < size.rows.get());
+                    let index = u16::try_from(row.index)
+                        .ok()
+                        .filter(|it| *it < size.rows.get());
                     let index = index.ok_or_else(|| format!("a frame has no row {}", row.index))?;
                     Ok((index, Line::heard(row.line, size.columns)?))
                 };
                 Rows::Changed(rows.into_iter().map(row).collect::<Result<_, String>>()?)
-            },
+            }
         };
-        let cursor = frame.cursor.map(|cursor| cursor_heard(&cursor)).transpose()?;
+        let cursor = frame
+            .cursor
+            .map(|cursor| cursor_heard(&cursor))
+            .transpose()?;
         Frame::new(terminal, size, rows, cursor, frame.mouse_tracking)
     }
 }
 
 fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
-    let off = || format!("the cursor is off the frame, at {}:{}", cursor.row, cursor.column);
+    let off = || {
+        format!(
+            "the cursor is off the frame, at {}:{}",
+            cursor.row, cursor.column
+        )
+    };
     let row = u16::try_from(cursor.row).map_err(|_| off())?;
     let column = u16::try_from(cursor.column).map_err(|_| off())?;
     let shape = match api::CursorShape::try_from(cursor.shape) {
@@ -387,9 +431,14 @@ fn cursor_heard(cursor: &api::Cursor) -> Result<Cursor, String> {
         Ok(api::CursorShape::BlockHollow) => CursorShape::BlockHollow,
         Ok(api::CursorShape::Unspecified) | Err(_) => {
             return Err("the cursor does not say its shape".to_owned());
-        },
+        }
     };
-    Ok(Cursor { row, column, shape, blinking: cursor.blinking })
+    Ok(Cursor {
+        row,
+        column,
+        shape,
+        blinking: cursor.blinking,
+    })
 }
 
 #[cfg(test)]
@@ -400,17 +449,30 @@ mod tests {
     use crate::mux::own::OwnMade;
 
     fn key() -> TerminalKey {
-        TerminalKey { id: NonZeroU32::new(2).unwrap(), made: OwnMade::from_nanos(60) }
+        TerminalKey {
+            id: NonZeroU32::new(2).unwrap(),
+            made: OwnMade::from_nanos(60),
+        }
     }
 
     fn narrow(grapheme: &str) -> api::Glyph {
-        let shows = api::glyph::Shows::Narrow(api::Narrow { grapheme: grapheme.to_owned() });
-        api::Glyph { shows: Some(shows), style: None }
+        let shows = api::glyph::Shows::Narrow(api::Narrow {
+            grapheme: grapheme.to_owned(),
+        });
+        api::Glyph {
+            shows: Some(shows),
+            style: None,
+        }
     }
 
     fn wide(grapheme: &str) -> api::Glyph {
-        let shows = api::glyph::Shows::Wide(api::Wide { grapheme: grapheme.to_owned() });
-        api::Glyph { shows: Some(shows), style: None }
+        let shows = api::glyph::Shows::Wide(api::Wide {
+            grapheme: grapheme.to_owned(),
+        });
+        api::Glyph {
+            shows: Some(shows),
+            style: None,
+        }
     }
 
     fn frame(columns: u32, lines: Vec<api::Line>) -> api::Frame {
@@ -435,23 +497,42 @@ mod tests {
             vec![
                 line(vec![narrow("a"), wide("日")], api::Ending::Here),
                 line(vec![narrow("a"), narrow("b")], api::Ending::WrapsWide),
-                line(vec![narrow("a"), narrow("b"), narrow("c")], api::Ending::Wraps),
+                line(
+                    vec![narrow("a"), narrow("b"), narrow("c")],
+                    api::Ending::Wraps,
+                ),
             ],
         ))
         .unwrap();
-        let Rows::Whole(lines) = &read.rows else { panic!("whole rows") };
+        let Rows::Whole(lines) = &read.rows else {
+            panic!("whole rows")
+        };
         let two = Shows::Wide(Grapheme::new("日".to_owned()).unwrap());
         assert_eq!(lines[0].glyphs()[1].shows, two);
         assert!(!lines[0].wraps());
         assert!(lines[1].wraps_wide());
-        assert!(lines[1].wraps(), "a wide glyph that wraps early wraps its row");
+        assert!(
+            lines[1].wraps(),
+            "a wide glyph that wraps early wraps its row"
+        );
         assert!(lines[2].wraps());
         assert!(!lines[2].wraps_wide());
-        let unsaid =
-            Frame::heard(frame(3, vec![line(vec![narrow("a")], api::Ending::Unspecified)]));
-        assert_eq!(unsaid.unwrap_err(), "a row of a frame does not say how it ends");
-        let unknown = api::Line { glyphs: vec![narrow("a")], ending: 9 };
-        assert!(Frame::heard(frame(1, vec![unknown])).is_err(), "nor in a word of a newer mux's");
+        let unsaid = Frame::heard(frame(
+            3,
+            vec![line(vec![narrow("a")], api::Ending::Unspecified)],
+        ));
+        assert_eq!(
+            unsaid.unwrap_err(),
+            "a row of a frame does not say how it ends"
+        );
+        let unknown = api::Line {
+            glyphs: vec![narrow("a")],
+            ending: 9,
+        };
+        assert!(
+            Frame::heard(frame(1, vec![unknown])).is_err(),
+            "nor in a word of a newer mux's"
+        );
         let short = Frame::heard(frame(3, vec![line(vec![narrow("a")], api::Ending::Here)]));
         assert_eq!(short.unwrap_err(), "a row of 3 columns has glyphs of 1");
         let long = vec![line(vec![narrow("a"), wide("日")], api::Ending::Here)];
@@ -461,84 +542,200 @@ mod tests {
 
     #[test]
     fn a_frame_that_does_not_fit_its_size_does_not_read() {
-        let row = api::Line { glyphs: vec![narrow("a")], ending: api::Ending::Here.into() };
+        let row = api::Line {
+            glyphs: vec![narrow("a")],
+            ending: api::Ending::Here.into(),
+        };
         let mut two = frame(1, vec![row.clone(), row.clone()]);
-        two.size = Some(api::Size { columns: 1, rows: 1 });
+        two.size = Some(api::Size {
+            columns: 1,
+            rows: 1,
+        });
         assert_eq!(Frame::heard(two).unwrap_err(), "a frame of 1 rows has 2");
-        let nobody = api::Frame { terminal: None, ..frame(1, vec![row.clone()]) };
+        let nobody = api::Frame {
+            terminal: None,
+            ..frame(1, vec![row.clone()])
+        };
         assert_eq!(Frame::heard(nobody).unwrap_err(), "a terminal with no key");
-        let changed = api::Changed { rows: vec![api::Row { index: 1, line: Some(row.clone()) }] };
+        let changed = api::Changed {
+            rows: vec![api::Row {
+                index: 1,
+                line: Some(row.clone()),
+            }],
+        };
         let past = api::Frame {
             rows: Some(api::frame::Rows::Changed(changed)),
             ..frame(1, vec![row.clone()])
         };
         assert_eq!(Frame::heard(past).unwrap_err(), "a frame has no row 1");
-        let twice = |index| api::Row { index, line: Some(row.clone()) };
-        let changed = api::Changed { rows: vec![twice(0), twice(0)] };
+        let twice = |index| api::Row {
+            index,
+            line: Some(row.clone()),
+        };
+        let changed = api::Changed {
+            rows: vec![twice(0), twice(0)],
+        };
         let again = api::Frame {
             rows: Some(api::frame::Rows::Changed(changed)),
             ..frame(1, vec![row.clone()])
         };
-        assert_eq!(Frame::heard(again).unwrap_err(), "a frame changes row 0 twice");
+        assert_eq!(
+            Frame::heard(again).unwrap_err(),
+            "a frame changes row 0 twice"
+        );
         let cursor = Some(api::Cursor {
             row: 0,
             column: 1,
             shape: api::CursorShape::Block.into(),
             blinking: false,
         });
-        let off = api::Frame { cursor, ..frame(1, vec![row.clone()]) };
-        assert_eq!(Frame::heard(off).unwrap_err(), "the cursor is off the frame, at 0:1");
-        let unsaid_shape = Some(api::Cursor { row: 0, column: 0, ..api::Cursor::default() });
-        let unsaid = api::Frame { cursor: unsaid_shape, ..frame(1, vec![row.clone()]) };
-        assert_eq!(Frame::heard(unsaid).unwrap_err(), "the cursor does not say its shape");
-        let unknown_shape = Some(api::Cursor { row: 0, column: 0, shape: 99, blinking: false });
-        let unknown = api::Frame { cursor: unknown_shape, ..frame(1, vec![row.clone()]) };
-        assert_eq!(Frame::heard(unknown).unwrap_err(), "the cursor does not say its shape");
-        let none =
-            api::Frame { size: Some(api::Size { columns: 0, rows: 1 }), ..frame(1, vec![row]) };
+        let off = api::Frame {
+            cursor,
+            ..frame(1, vec![row.clone()])
+        };
+        assert_eq!(
+            Frame::heard(off).unwrap_err(),
+            "the cursor is off the frame, at 0:1"
+        );
+        let unsaid_shape = Some(api::Cursor {
+            row: 0,
+            column: 0,
+            ..api::Cursor::default()
+        });
+        let unsaid = api::Frame {
+            cursor: unsaid_shape,
+            ..frame(1, vec![row.clone()])
+        };
+        assert_eq!(
+            Frame::heard(unsaid).unwrap_err(),
+            "the cursor does not say its shape"
+        );
+        let unknown_shape = Some(api::Cursor {
+            row: 0,
+            column: 0,
+            shape: 99,
+            blinking: false,
+        });
+        let unknown = api::Frame {
+            cursor: unknown_shape,
+            ..frame(1, vec![row.clone()])
+        };
+        assert_eq!(
+            Frame::heard(unknown).unwrap_err(),
+            "the cursor does not say its shape"
+        );
+        let none = api::Frame {
+            size: Some(api::Size {
+                columns: 0,
+                rows: 1,
+            }),
+            ..frame(1, vec![row])
+        };
         assert_eq!(Frame::heard(none).unwrap_err(), "a frame's columns are 0");
-        let escape = api::Line { glyphs: vec![narrow("\u{1b}")], ending: api::Ending::Here.into() };
-        assert!(Frame::heard(frame(1, vec![escape])).unwrap_err().contains("control character"));
+        let escape = api::Line {
+            glyphs: vec![narrow("\u{1b}")],
+            ending: api::Ending::Here.into(),
+        };
+        assert!(
+            Frame::heard(frame(1, vec![escape]))
+                .unwrap_err()
+                .contains("control character")
+        );
     }
 
     #[test]
     fn a_glyph_of_a_colour_no_terminal_has_does_not_read() {
-        let no_underline = api::Style { underline: api::Underline::None.into(), ..api::Style::default() };
+        let no_underline = api::Style {
+            underline: api::Underline::None.into(),
+            ..api::Style::default()
+        };
         let coloured = |is| {
             let foreground = Some(api::Colour { is });
-            let style = Some(api::Style { foreground, ..no_underline });
-            glyph(api::Glyph { style, ..narrow("a") })
+            let style = Some(api::Style {
+                foreground,
+                ..no_underline
+            });
+            glyph(api::Glyph {
+                style,
+                ..narrow("a")
+            })
         };
         let foreground = |glyph: Result<Glyph, String>| glyph.unwrap().style.foreground;
-        let rgb = |red| Some(api::colour::Is::Rgb(api::Rgb { red, green: 0, blue: 255 }));
+        let rgb = |red| {
+            Some(api::colour::Is::Rgb(api::Rgb {
+                red,
+                green: 0,
+                blue: 255,
+            }))
+        };
         let palette = foreground(coloured(Some(api::colour::Is::Palette(255))));
         assert_eq!(palette, Some(Colour::Palette(255)));
-        assert_eq!(foreground(coloured(rgb(255))), Some(Colour::Rgb([255, 0, 255])));
-        assert!(coloured(Some(api::colour::Is::Palette(256))).unwrap_err().contains("none a"));
-        assert!(coloured(rgb(256)).unwrap_err().contains("is of none a terminal has"));
+        assert_eq!(
+            foreground(coloured(rgb(255))),
+            Some(Colour::Rgb([255, 0, 255]))
+        );
+        assert!(
+            coloured(Some(api::colour::Is::Palette(256)))
+                .unwrap_err()
+                .contains("none a")
+        );
+        assert!(
+            coloured(rgb(256))
+                .unwrap_err()
+                .contains("is of none a terminal has")
+        );
         assert_eq!(coloured(None).unwrap_err(), "a colour is none");
-        let plain = glyph(api::Glyph { style: Some(no_underline), ..narrow("a") });
+        let plain = glyph(api::Glyph {
+            style: Some(no_underline),
+            ..narrow("a")
+        });
         assert_eq!(plain, glyph(narrow("a")));
         assert_eq!(glyph(narrow("a")).unwrap().style, Style::PLAIN);
         assert_eq!(Style::PLAIN, Style::default());
-        let unsaid = glyph(api::Glyph { style: Some(api::Style::default()), ..narrow("a") });
-        assert_eq!(unsaid.unwrap_err(), "a glyph's style does not say its underline");
-        let unknown = api::Style { underline: 99, ..api::Style::default() };
-        let unknown = glyph(api::Glyph { style: Some(unknown), ..narrow("a") });
-        assert_eq!(unknown.unwrap_err(), "a glyph's style does not say its underline");
+        let unsaid = glyph(api::Glyph {
+            style: Some(api::Style::default()),
+            ..narrow("a")
+        });
+        assert_eq!(
+            unsaid.unwrap_err(),
+            "a glyph's style does not say its underline"
+        );
+        let unknown = api::Style {
+            underline: 99,
+            ..api::Style::default()
+        };
+        let unknown = glyph(api::Glyph {
+            style: Some(unknown),
+            ..narrow("a")
+        });
+        assert_eq!(
+            unknown.unwrap_err(),
+            "a glyph's style does not say its underline"
+        );
     }
 
     #[test]
     fn a_frame_is_made_only_of_its_size() {
-        let size = Size { columns: Side::new(2).unwrap(), rows: Side::MIN };
+        let size = Size {
+            columns: Side::new(2).unwrap(),
+            rows: Side::MIN,
+        };
         let line = |columns: u16| {
-            let glyph = Glyph { shows: Shows::Blank, style: Style::PLAIN };
+            let glyph = Glyph {
+                shows: Shows::Blank,
+                style: Style::PLAIN,
+            };
             let glyphs = vec![glyph; usize::from(columns)];
             Line::new(glyphs, Ending::Here, Side::new(columns).unwrap()).unwrap()
         };
         let two = line(2);
         let cursor = |column| {
-            Some(Cursor { row: 0, column, shape: CursorShape::Bar, blinking: false })
+            Some(Cursor {
+                row: 0,
+                column,
+                shape: CursorShape::Bar,
+                blinking: false,
+            })
         };
         let made = |rows, cursor| Frame::new(key(), size, rows, cursor, false);
         assert!(made(Rows::Whole(vec![two.clone()]), cursor(1)).is_ok());
@@ -546,14 +743,24 @@ mod tests {
         assert_eq!(none.unwrap_err(), "a frame of 1 rows has 0");
         let past = made(Rows::Changed(vec![(1, two.clone())]), None);
         assert_eq!(past.unwrap_err(), "a frame has no row 1");
-        let twice = made(Rows::Changed(vec![(0, two.clone()), (0, two.clone())]), None);
+        let twice = made(
+            Rows::Changed(vec![(0, two.clone()), (0, two.clone())]),
+            None,
+        );
         assert_eq!(twice.unwrap_err(), "a frame changes row 0 twice");
         let off = made(Rows::Whole(vec![two]), cursor(2));
         assert_eq!(off.unwrap_err(), "the cursor is off the frame, at 0:2");
         let narrow = made(Rows::Whole(vec![line(1)]), None);
         assert_eq!(narrow.unwrap_err(), "a row of 2 columns has glyphs of 1");
-        assert!(Grapheme::new("\u{1b}[2J".to_owned()).unwrap_err().contains("control character"));
-        assert_eq!(Grapheme::new(String::new()).unwrap_err(), "a glyph has no grapheme");
+        assert!(
+            Grapheme::new("\u{1b}[2J".to_owned())
+                .unwrap_err()
+                .contains("control character")
+        );
+        assert_eq!(
+            Grapheme::new(String::new()).unwrap_err(),
+            "a glyph has no grapheme"
+        );
     }
 
     #[test]

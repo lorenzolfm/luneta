@@ -4,7 +4,7 @@ use std::io::{self, ErrorKind};
 use std::path::Path;
 
 use luned::api::Remote;
-use luned::{Destination, HostsParsed, HOSTS_FILE, HOSTS_MAX};
+use luned::{Destination, HOSTS_FILE, HOSTS_MAX, HostsParsed};
 
 use crate::state;
 
@@ -66,13 +66,19 @@ pub fn parsed() -> Result<HostsParsed, String> {
 }
 
 fn file() -> Result<std::path::PathBuf, String> {
-    state::Folder::of_user().path(HOSTS_FILE).map_err(|unset| unset.to_string())
+    state::Folder::of_user()
+        .path(HOSTS_FILE)
+        .map_err(|unset| unset.to_string())
 }
 
 fn add_to(file: &Path, destination: &Destination) -> Result<Added, String> {
     changed(file, |text| {
         let named = luned::hosts_named(text, |_| {});
-        if named.lines().iter().any(|line| line.destination() == destination) {
+        if named
+            .lines()
+            .iter()
+            .any(|line| line.destination() == destination)
+        {
             return Ok((Added::Already, None));
         }
         if named.lines().len() >= HOSTS_MAX {
@@ -93,7 +99,10 @@ fn add_to(file: &Path, destination: &Destination) -> Result<Added, String> {
 
 fn forget_in(file: &Path, destination: &Destination) -> Result<bool, String> {
     changed(file, |text| {
-        let names = |line: &&str| line.parse::<Destination>().is_ok_and(|it| it == *destination);
+        let names = |line: &&str| {
+            line.parse::<Destination>()
+                .is_ok_and(|it| it == *destination)
+        };
         if !text.lines().any(|line| names(&line)) {
             return Ok((false, None));
         }
@@ -153,8 +162,16 @@ mod tests {
 
     #[test]
     fn a_remote_is_named_by_its_first_listing_and_never_by_an_unparsed_one() {
-        let remote = |destination: &str| Remote { destination: destination.to_owned(), reached: None };
-        let remotes = [remote("nixos"), remote("-oops"), remote("pi"), remote("nixos")];
+        let remote = |destination: &str| Remote {
+            destination: destination.to_owned(),
+            reached: None,
+        };
+        let remotes = [
+            remote("nixos"),
+            remote("-oops"),
+            remote("pi"),
+            remote("nixos"),
+        ];
         let named = [Some(machine("nixos")), None, Some(machine("pi")), None];
         assert_eq!(named_once(&remotes), named);
     }
@@ -167,7 +184,10 @@ mod tests {
         fs::write(&file, "nixos\n-oops\n  me@vps").unwrap();
         assert_eq!(add_to(&file, &machine("me@vps")), Ok(Added::Already));
         assert_eq!(add_to(&file, &machine("pi")), Ok(Added::Named));
-        assert_eq!(fs::read_to_string(&file).unwrap(), "nixos\n-oops\n  me@vps\npi\n");
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            "nixos\n-oops\n  me@vps\npi\n"
+        );
 
         assert_eq!(forget_in(&file, &machine("me@vps")), Ok(true));
         assert_eq!(forget_in(&file, &machine("me@vps")), Ok(false));
@@ -177,7 +197,11 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<Vec<_>>();
         left.sort();
-        assert_eq!(left, ["hosts", "hosts.lock"], "no file is left halfway written");
+        assert_eq!(
+            left,
+            ["hosts", "hosts.lock"],
+            "no file is left halfway written"
+        );
     }
 
     #[test]
@@ -190,7 +214,10 @@ mod tests {
                 let (file, start) = (&file, &start);
                 scope.spawn(move || {
                     start.wait();
-                    assert_eq!(add_to(file, &machine(&format!("host-{n}"))), Ok(Added::Named));
+                    assert_eq!(
+                        add_to(file, &machine(&format!("host-{n}"))),
+                        Ok(Added::Named)
+                    );
                 });
             }
         });
@@ -205,7 +232,11 @@ mod tests {
         let many: Vec<String> = (0..HOSTS_MAX).map(|n| format!("host-{n}\n")).collect();
         let many = many.concat();
         fs::write(&file, &many).unwrap();
-        assert!(add_to(&file, &machine("one-more")).unwrap_err().contains("as many as"));
+        assert!(
+            add_to(&file, &machine("one-more"))
+                .unwrap_err()
+                .contains("as many as")
+        );
         assert_eq!(add_to(&file, &machine("host-0")), Ok(Added::Already));
         assert_eq!(fs::read_to_string(&file).unwrap(), many);
     }

@@ -9,8 +9,9 @@ use super::config::{
     RuleProgram, TrustRule, has_parent_component, normalize_lexical,
 };
 
-const INTERPRETERS: [&str; 10] =
-    ["node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl", "tsx", "ts-node"];
+const INTERPRETERS: [&str; 10] = [
+    "node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl", "tsx", "ts-node",
+];
 
 const PATH_COMPONENTS_MAX: usize = 256;
 
@@ -36,9 +37,14 @@ pub enum RuleUntrustedReason {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrustVerdict {
-    Trusted { rule: String },
+    Trusted {
+        rule: String,
+    },
     UntrustedGlobal(GlobalUntrustedReason),
-    UntrustedRule { rule: String, reason: RuleUntrustedReason },
+    UntrustedRule {
+        rule: String,
+        reason: RuleUntrustedReason,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +71,7 @@ pub fn evaluate(
         ConfigState::Loaded(config) => config,
         ConfigState::Incomplete { .. } => {
             return TrustVerdict::UntrustedGlobal(GlobalUntrustedReason::ConfigIncomplete);
-        },
+        }
     };
     if (running_as_root || record.uid() == 0) && !config.allow_root {
         return TrustVerdict::UntrustedGlobal(GlobalUntrustedReason::Root);
@@ -95,7 +101,9 @@ pub fn evaluate(
     if let Some(allowed_dirs) = &rule.dirs {
         let cwd = record.cwd().map(ResumeCwdSource::as_str).or(fallback_cwd);
         let allowed = cwd.is_some_and(|dir| {
-            allowed_dirs.iter().any(|base| dir_allowed(dir, base, check_symlinks))
+            allowed_dirs
+                .iter()
+                .any(|base| dir_allowed(dir, base, check_symlinks))
         });
         if !allowed {
             return TrustVerdict::UntrustedRule {
@@ -125,13 +133,13 @@ pub fn evaluate(
                     rule: rule_name,
                     reason: RuleUntrustedReason::FlagNotListed,
                 };
-            },
+            }
             Err(FlagError::Value) => {
                 return TrustVerdict::UntrustedRule {
                     rule: rule_name,
                     reason: RuleUntrustedReason::FlagValue,
                 };
-            },
+            }
         };
         assert!(record.argv().words().len() >= rule.command_len());
         let trailing = &record.argv().words()[rule.command_len()..];
@@ -142,13 +150,13 @@ pub fn evaluate(
                     rule: rule_name,
                     reason: RuleUntrustedReason::FlagValue,
                 };
-            },
+            }
             Err(FlagError::NotListed) => {
                 return TrustVerdict::UntrustedRule {
                     rule: rule_name,
                     reason: RuleUntrustedReason::FlagsDiffer,
                 };
-            },
+            }
         };
         if reported != expected {
             return TrustVerdict::UntrustedRule {
@@ -200,7 +208,7 @@ pub fn process_matches_program(
     let target = match target {
         RuleProgram::Absolute(path) => {
             return matches_absolute_target(process_exe, process_argv, path, check_symlinks);
-        },
+        }
         RuleProgram::Bare(name) => name.as_str(),
     };
     if matches_bare_name(process_name, target) {
@@ -236,7 +244,11 @@ fn matches_absolute_target(
     check_symlinks: bool,
 ) -> bool {
     let target = target.as_str();
-    let target_canonical = if check_symlinks { fs::canonicalize(target).ok() } else { None };
+    let target_canonical = if check_symlinks {
+        fs::canonicalize(target).ok()
+    } else {
+        None
+    };
     let path_eq = |candidate: &str| {
         if !candidate.starts_with('/') {
             return false;
@@ -292,7 +304,10 @@ fn is_interpreter_name(name: &str) -> bool {
 }
 
 fn is_interpreter_path(path: &str) -> bool {
-    Path::new(path).file_name().and_then(|n| n.to_str()).is_some_and(is_interpreter_name)
+    Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_interpreter_name)
 }
 
 fn matches_path_basename(path: &str, target: &str) -> bool {
@@ -306,7 +321,9 @@ fn matches_bare_name(candidate: &str, target: &str) -> bool {
     if candidate == target {
         return true;
     }
-    if let Some(inner) = candidate.strip_prefix('.').and_then(|s| s.strip_suffix("-wrapped"))
+    if let Some(inner) = candidate
+        .strip_prefix('.')
+        .and_then(|s| s.strip_suffix("-wrapped"))
         && inner == target
     {
         return true;
@@ -334,7 +351,7 @@ fn program_args_start(launch_argv: &[String], target: &RuleProgram) -> Option<us
                 return Some(script_index + 1);
             }
             Some(1)
-        },
+        }
         RuleProgram::Bare(name) => {
             if matches_path_basename(first, name) {
                 return Some(1);
@@ -347,7 +364,7 @@ fn program_args_start(launch_argv: &[String], target: &RuleProgram) -> Option<us
                 return Some(script_index + 1);
             }
             Some(1)
-        },
+        }
     }
 }
 
@@ -407,7 +424,10 @@ fn matching_rule<'a>(
     config: &'a ResumeConfig,
     check_symlinks: bool,
 ) -> Option<&'a TrustRule> {
-    config.rules.values().find(|rule| rule_matches_command(words, rule, check_symlinks))
+    config
+        .rules
+        .values()
+        .find(|rule| rule_matches_command(words, rule, check_symlinks))
 }
 
 pub(crate) fn rule_matches_command(
@@ -552,7 +572,7 @@ fn canonicalize_existing_or_parent(path: &str) -> Result<std::path::PathBuf, std
                     full.push(part);
                 }
                 return Ok(full);
-            },
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let Some(name) = cursor.file_name() else {
                     return Err(error);
@@ -562,7 +582,7 @@ fn canonicalize_existing_or_parent(path: &str) -> Result<std::path::PathBuf, std
                     return Err(error);
                 };
                 cursor = parent;
-            },
+            }
             Err(error) => return Err(error),
         }
     }
@@ -594,7 +614,10 @@ fn parse_launch_flags(
         let (values, next_index) = consume_flag_values(args, index, inline_value, rule.values)?;
         assert!(next_index > index);
         if rule.action == FlagAction::Keep {
-            kept.push(FlagOccurrence { name: flag_name.to_owned(), values });
+            kept.push(FlagOccurrence {
+                name: flag_name.to_owned(),
+                values,
+            });
         }
         index = next_index;
     }
@@ -621,7 +644,10 @@ fn parse_reported_flags(
         }
         let (values, next_index) = consume_flag_values(args, index, inline_value, rule.values)?;
         assert!(next_index > index);
-        kept.push(FlagOccurrence { name: flag_name.to_owned(), values });
+        kept.push(FlagOccurrence {
+            name: flag_name.to_owned(),
+            values,
+        });
         index = next_index;
     }
     Ok(kept)
@@ -648,13 +674,13 @@ fn consume_flag_values(
         (FlagValues::None, None) => (Vec::new(), index + 1),
         (FlagValues::One | FlagValues::Optional | FlagValues::Many, Some(value)) => {
             (vec![value.to_owned()], index + 1)
-        },
+        }
         (FlagValues::One, None) => {
             let Some(next) = args.get(index + 1) else {
                 return Err(FlagError::Value);
             };
             (vec![next.clone()], index + 2)
-        },
+        }
         (FlagValues::Optional, None) => {
             if let Some(next) = args.get(index + 1)
                 && !next.starts_with('-')
@@ -663,7 +689,7 @@ fn consume_flag_values(
             } else {
                 (Vec::new(), index + 1)
             }
-        },
+        }
         (FlagValues::Many, None) => {
             let mut values = Vec::new();
             let mut scan = index + 1;
@@ -678,7 +704,7 @@ fn consume_flag_values(
                 return Err(FlagError::Value);
             }
             (values, scan)
-        },
+        }
     };
     assert!(next_index > index);
     assert!(next_index <= args.len());
@@ -711,8 +737,7 @@ mod tests {
             1000,
             ProcessName::from_os(process_name),
             process_exe.map(|exe| ProcessExe::parse(exe.to_owned()).unwrap()),
-            process_argv
-                .map(|a| ProcessArgv::bounded(a.iter().map(|s| (*s).to_owned()).collect())),
+            process_argv.map(|a| ProcessArgv::bounded(a.iter().map(|s| (*s).to_owned()).collect())),
             placement,
             ResumeArgv::parse(reported_argv.iter().map(|s| (*s).to_owned()).collect()).unwrap(),
             cwd.map(|d| ResumeCwdSource::Explicit(ResumeCwd::parse(d).unwrap())),
@@ -743,13 +768,33 @@ mod tests {
         let native = sample_record(
             "2.1.332",
             Some("/home/u/.local/share/claude/versions/2.1.332"),
-            Some(&["claude", "--continue", "--model=opus", "--add-dir", "/a", "/b", "--", "hi"]),
-            &["claude", "--resume", UUID, "--model", "opus", "--add-dir", "/a", "/b"],
+            Some(&[
+                "claude",
+                "--continue",
+                "--model=opus",
+                "--add-dir",
+                "/a",
+                "/b",
+                "--",
+                "hi",
+            ]),
+            &[
+                "claude",
+                "--resume",
+                UUID,
+                "--model",
+                "opus",
+                "--add-dir",
+                "/a",
+                "/b",
+            ],
             Some("/home/u/code/app"),
         );
         assert_eq!(
             evaluate(&native, &state, false, None, false),
-            TrustVerdict::Trusted { rule: "claude".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "claude".to_owned()
+            }
         );
 
         let via_node = sample_record(
@@ -761,7 +806,9 @@ mod tests {
         );
         assert_eq!(
             evaluate(&via_node, &state, false, None, false),
-            TrustVerdict::Trusted { rule: "claude".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "claude".to_owned()
+            }
         );
     }
 
@@ -773,8 +820,13 @@ dir = "~/code"
 "#;
         let state = parse_config_toml(restricted, None, Some(Path::new("/home/u")));
 
-        let no_rule =
-            sample_record("vim", Some("/usr/bin/vim"), Some(&["vim"]), &["vim"], Some("/home/u/code"));
+        let no_rule = sample_record(
+            "vim",
+            Some("/usr/bin/vim"),
+            Some(&["vim"]),
+            &["vim"],
+            Some("/home/u/code"),
+        );
         assert_eq!(
             evaluate(&no_rule, &state, false, None, false),
             TrustVerdict::UntrustedGlobal(GlobalUntrustedReason::NoRule)
@@ -934,7 +986,9 @@ dir = "~/code"
         );
         assert_eq!(
             evaluate(&escape_rec, &state, false, None, false),
-            TrustVerdict::Trusted { rule: "nvim".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "nvim".to_owned()
+            }
         );
         assert_eq!(
             evaluate(&escape_rec, &state, false, None, true),
@@ -950,7 +1004,9 @@ dir = "~/code"
         );
         assert_eq!(
             evaluate(&safe_rec, &state, false, None, true),
-            TrustVerdict::Trusted { rule: "nvim".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "nvim".to_owned()
+            }
         );
 
         let dangling = sessions.join("dangling.vim");
@@ -992,7 +1048,9 @@ dir = "~/code"
         );
         assert_eq!(
             evaluate(&fresh_rec, &state, false, None, true),
-            TrustVerdict::Trusted { rule: "nvim".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "nvim".to_owned()
+            }
         );
 
         let too_deep = format!(
@@ -1022,14 +1080,16 @@ dir = "~/code"
         let state = ConfigState::Loaded(config.clone());
 
         let pi_rule = config.rules.get("pi").unwrap();
-        let pi_launch: Vec<String> =
-            ["pi", "-e", "./a.ts", "-e", "./b.ts", "delete staging db"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-        let pi_kept =
-            extract_kept_args(&pi_launch, pi_rule.program(), pi_rule.flags.as_ref().unwrap())
-                .unwrap();
+        let pi_launch: Vec<String> = ["pi", "-e", "./a.ts", "-e", "./b.ts", "delete staging db"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let pi_kept = extract_kept_args(
+            &pi_launch,
+            pi_rule.program(),
+            pi_rule.flags.as_ref().unwrap(),
+        )
+        .unwrap();
         assert_eq!(pi_kept, ["-e", "./a.ts", "-e", "./b.ts"]);
 
         let claude_rule = config.rules.get("claude").unwrap();
@@ -1082,18 +1142,29 @@ dir = "~/code"
         );
         assert_eq!(
             evaluate(&claude_rec, &state, false, None, false),
-            TrustVerdict::Trusted { rule: "claude".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "claude".to_owned()
+            }
         );
 
         let agy_rule = config.rules.get("agy").unwrap();
-        let agy_launch: Vec<String> =
-            ["agy", "--conversation", "conv-1", "--add-dir", "/extra", "do not replay"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-        let agy_kept =
-            extract_kept_args(&agy_launch, agy_rule.program(), agy_rule.flags.as_ref().unwrap())
-                .unwrap();
+        let agy_launch: Vec<String> = [
+            "agy",
+            "--conversation",
+            "conv-1",
+            "--add-dir",
+            "/extra",
+            "do not replay",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let agy_kept = extract_kept_args(
+            &agy_launch,
+            agy_rule.program(),
+            agy_rule.flags.as_ref().unwrap(),
+        )
+        .unwrap();
         assert_eq!(agy_kept, ["--add-dir", "/extra"]);
     }
 
@@ -1144,7 +1215,9 @@ command = ["/usr/local/bin/mytool", "--resume", { match = "id" }]
         );
         assert_eq!(
             evaluate(&via_python, &state, false, None, false),
-            TrustVerdict::Trusted { rule: "mytool".to_owned() }
+            TrustVerdict::Trusted {
+                rule: "mytool".to_owned()
+            }
         );
     }
 }

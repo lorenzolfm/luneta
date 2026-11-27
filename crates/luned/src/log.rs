@@ -44,7 +44,7 @@ pub fn start(process: Process) -> Result<(), String> {
     let log = match state::path(NAME) {
         Ok(path) => {
             Log::open(path.clone(), process).map_err(|error| format!("{}: {error}", path.display()))
-        },
+        }
         Err(unset) => Err(unset.to_string()),
     };
     let (log, why) = match log {
@@ -63,11 +63,11 @@ pub fn say(what: &str) {
         let _ = log.write(what, SystemTime::now());
     }
     match started.process {
-        Process::Lune => {},
+        Process::Lune => {}
         Process::Luned => {
             let line = format!("luned: {what}\n");
             let _ = io::stderr().lock().write_all(line.as_bytes());
-        },
+        }
     }
 }
 
@@ -90,11 +90,18 @@ pub fn panicked(panic: &PanicHookInfo<'_>) {
         return;
     };
     let current = thread::current();
-    let mut what = format!("thread '{}' panicked", current.name().unwrap_or("<unnamed>"));
+    let mut what = format!(
+        "thread '{}' panicked",
+        current.name().unwrap_or("<unnamed>")
+    );
     if let Some(at) = panic.location() {
         let _ = write!(what, " at {at}");
     }
-    let _ = write!(what, ": {}", panic.payload_as_str().unwrap_or("Box<dyn Any>"));
+    let _ = write!(
+        what,
+        ": {}",
+        panic.payload_as_str().unwrap_or("Box<dyn Any>")
+    );
     let _ = log.write(&what, SystemTime::now());
 }
 
@@ -111,7 +118,11 @@ impl Log {
         }
         opened(&path)?;
         let who = format!("{}[{}]", process.name(), std::process::id());
-        Ok(Log { path, who, unmoved: AtomicBool::new(false) })
+        Ok(Log {
+            path,
+            who,
+            unmoved: AtomicBool::new(false),
+        })
     }
 
     fn write(&self, what: &str, now: SystemTime) -> io::Result<()> {
@@ -128,7 +139,7 @@ impl Log {
 
     fn moved(&self, full: File, now: SystemTime) -> File {
         match full.try_lock() {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(TryLockError::WouldBlock) => return full,
             Err(TryLockError::Error(error)) => return self.unmoved(full, &error, now),
         }
@@ -149,7 +160,11 @@ impl Log {
 }
 
 fn opened(path: &Path) -> io::Result<File> {
-    OpenOptions::new().create(true).append(true).mode(0o600).open(path)
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
 }
 
 fn same_file(file: &File, path: &Path) -> io::Result<bool> {
@@ -224,7 +239,11 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let path = state.path().join("lune").join(NAME);
         let log = Log::open(path.clone(), Process::Lune).unwrap();
-        log.write("lune-mux did not take its client there", at(1_793_282_592, 481)).unwrap();
+        log.write(
+            "lune-mux did not take its client there",
+            at(1_793_282_592, 481),
+        )
+        .unwrap();
         log.write("and again", at(1_793_282_593, 7)).unwrap();
         let pid = std::process::id();
         let expected = format!(
@@ -246,7 +265,10 @@ mod tests {
         for (seconds, date) in dated {
             assert_eq!(utc(at(seconds, 0)), date, "{seconds}");
         }
-        assert_eq!(utc(UNIX_EPOCH - Duration::from_secs(1)), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            utc(UNIX_EPOCH - Duration::from_secs(1)),
+            "1970-01-01T00:00:00.000Z"
+        );
     }
 
     #[test]
@@ -254,13 +276,21 @@ mod tests {
         let state = tempfile::tempdir().unwrap();
         let path = state.path().join(NAME);
         let log = Log::open(path.clone(), Process::Lune).unwrap();
-        log.write("gh said:\nError: \u{1b}[31mno\u{1b}[0m\n", at(0, 0)).unwrap();
+        log.write("gh said:\nError: \u{1b}[31mno\u{1b}[0m\n", at(0, 0))
+            .unwrap();
         log.write(&"x".repeat(SAID_MAX * 2), at(0, 0)).unwrap();
         let written = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = written.lines().collect();
         assert_eq!(lines.len(), 2, "{written}");
-        assert!(lines[0].ends_with(r"gh said:\nError: \u{1b}[31mno\u{1b}[0m"), "{written}");
-        assert!(lines[1].ends_with(&format!(" {}…", "x".repeat(SAID_MAX))), "{}", lines[1]);
+        assert!(
+            lines[0].ends_with(r"gh said:\nError: \u{1b}[31mno\u{1b}[0m"),
+            "{written}"
+        );
+        assert!(
+            lines[1].ends_with(&format!(" {}…", "x".repeat(SAID_MAX))),
+            "{}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -271,10 +301,16 @@ mod tests {
         fs::write(&moved, "the one before\n").unwrap();
         let full = format!("{}\n", "x".repeat(usize::try_from(MAX).unwrap()));
         fs::write(&path, &full).unwrap();
-        Log::open(path.clone(), Process::Lune).unwrap().write("past it", at(0, 0)).unwrap();
+        Log::open(path.clone(), Process::Lune)
+            .unwrap()
+            .write("past it", at(0, 0))
+            .unwrap();
         assert_eq!(fs::read_to_string(&moved).unwrap(), full);
         let written = fs::read_to_string(&path).unwrap();
-        assert!(written.ends_with(" past it\n") && written.lines().count() == 1, "{written}");
+        assert!(
+            written.ends_with(" past it\n") && written.lines().count() == 1,
+            "{written}"
+        );
     }
 
     #[test]
@@ -290,8 +326,14 @@ mod tests {
         let written = fs::read_to_string(&path).unwrap();
         let past: Vec<&str> = written[full.len()..].lines().collect();
         assert_eq!(past.len(), 3, "{past:?}");
-        assert!(past[0].contains(&format!("] {NAME} does not move to {NAME}.1: ")), "{past:?}");
-        assert!(past[1].ends_with("] past it") && past[2].ends_with("] and again"), "{past:?}");
+        assert!(
+            past[0].contains(&format!("] {NAME} does not move to {NAME}.1: ")),
+            "{past:?}"
+        );
+        assert!(
+            past[1].ends_with("] past it") && past[2].ends_with("] and again"),
+            "{past:?}"
+        );
     }
 
     #[test]
@@ -308,7 +350,8 @@ mod tests {
                 let log = Log::open(path.clone(), Process::Luned).unwrap();
                 scope.spawn(move || {
                     for line in 0..LINES {
-                        log.write(&format!("writer {writer} line {line}"), at(0, 0)).unwrap();
+                        log.write(&format!("writer {writer} line {line}"), at(0, 0))
+                            .unwrap();
                     }
                 });
             }
@@ -319,7 +362,11 @@ mod tests {
         let written: Vec<&str> = moved[nearly.len()..].lines().chain(now.lines()).collect();
         let said: HashSet<String> = written
             .iter()
-            .map(|line| line.split_once("] ").map_or("", |(_, said)| said).to_owned())
+            .map(|line| {
+                line.split_once("] ")
+                    .map_or("", |(_, said)| said)
+                    .to_owned()
+            })
             .collect();
         let expected: HashSet<String> = (0..WRITERS)
             .flat_map(|writer| (0..LINES).map(move |line| format!("writer {writer} line {line}")))

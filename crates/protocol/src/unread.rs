@@ -8,7 +8,11 @@ pub struct Unread(pub NonZeroU32);
 
 impl fmt::Display for Unread {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "luned cannot read {} of Claude Code's session files", self.0)
+        write!(
+            f,
+            "luned cannot read {} of Claude Code's session files",
+            self.0
+        )
     }
 }
 
@@ -21,7 +25,10 @@ pub struct Unplaced {
 impl Unplaced {
     #[must_use]
     pub fn new(unread: NonZeroU32, unplaced: NonZeroU32) -> Self {
-        assert!(unplaced <= unread, "{unplaced} files unplaced of {unread} unread");
+        assert!(
+            unplaced <= unread,
+            "{unplaced} files unplaced of {unread} unread"
+        );
         Unplaced { unread, unplaced }
     }
 }
@@ -67,11 +74,23 @@ mod tests {
         let one = NonZeroU32::new(1).unwrap();
         let said = "luned cannot read 1 of Claude Code's session files";
         assert_eq!(Unread(one).to_string(), said);
-        assert_eq!(unplaced(1, 1).to_string(), format!("{said}, nor tell where its agent runs"));
+        assert_eq!(
+            unplaced(1, 1).to_string(),
+            format!("{said}, nor tell where its agent runs")
+        );
         let two = "luned cannot read 2 of Claude Code's session files, nor tell where";
-        assert_eq!(unplaced(2, 2).to_string(), format!("{two} their agents run"));
-        assert_eq!(unplaced(2, 1).to_string(), format!("{two} 1 of their agents runs"));
+        assert_eq!(
+            unplaced(2, 2).to_string(),
+            format!("{two} their agents run")
+        );
+        assert_eq!(
+            unplaced(2, 1).to_string(),
+            format!("{two} 1 of their agents runs")
+        );
         let three = "luned cannot read 3 of Claude Code's session files, nor tell where";
-        assert_eq!(unplaced(3, 2).to_string(), format!("{three} 2 of their agents run"));
+        assert_eq!(
+            unplaced(3, 2).to_string(),
+            format!("{three} 2 of their agents run")
+        );
     }
 }

@@ -14,7 +14,13 @@ impl Width {
     pub fn kept(state_folder: &state::Folder) -> (Self, Option<String>) {
         match state_folder.path("width") {
             Ok(file) => Width::within(file),
-            Err(unset) => (Width { columns: sidebar::COLUMNS, file: Err(unset) }, None),
+            Err(unset) => (
+                Width {
+                    columns: sidebar::COLUMNS,
+                    file: Err(unset),
+                },
+                None,
+            ),
         }
     }
 
@@ -23,7 +29,7 @@ impl Width {
             Ok(text) => match text.trim().parse::<u16>() {
                 Ok(columns) if columns < sidebar::NARROWEST => {
                     Err(format!("{columns} is narrower than {}", sidebar::NARROWEST))
-                },
+                }
                 parsed => parsed.map_err(|error| error.to_string()),
             },
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(sidebar::COLUMNS),
@@ -31,9 +37,18 @@ impl Width {
         };
         let (columns, unread) = match read {
             Ok(columns) => (columns, None),
-            Err(error) => (sidebar::COLUMNS, Some(format!("{}: {error}", file.display()))),
+            Err(error) => (
+                sidebar::COLUMNS,
+                Some(format!("{}: {error}", file.display())),
+            ),
         };
-        (Width { columns, file: Ok(file) }, unread)
+        (
+            Width {
+                columns,
+                file: Ok(file),
+            },
+            unread,
+        )
     }
 
     pub fn columns(&self) -> u16 {
@@ -41,7 +56,10 @@ impl Width {
     }
 
     pub fn drag(&mut self, column: u16, terminal: u16) {
-        self.columns = column.saturating_add(1).min(terminal / 2).max(sidebar::NARROWEST);
+        self.columns = column
+            .saturating_add(1)
+            .min(terminal / 2)
+            .max(sidebar::NARROWEST);
     }
 
     pub fn keep(&self) -> Result<(), String> {
@@ -74,11 +92,17 @@ mod tests {
 
     #[test]
     fn a_drag_stays_between_the_narrowest_and_half_the_terminal() {
-        let mut width = Width { columns: sidebar::COLUMNS, file: Err(state::Unset) };
+        let mut width = Width {
+            columns: sidebar::COLUMNS,
+            file: Err(state::Unset),
+        };
         let narrowest = sidebar::NARROWEST;
-        for (column, terminal, columns) in
-            [(3, 120, narrowest), (100, 120, 60), (59, 120, 60), (20, 24, narrowest)]
-        {
+        for (column, terminal, columns) in [
+            (3, 120, narrowest),
+            (100, 120, 60),
+            (59, 120, 60),
+            (20, 24, narrowest),
+        ] {
             width.drag(column, terminal);
             assert_eq!(width.columns(), columns, "column {column} of {terminal}");
         }
@@ -104,7 +128,10 @@ mod tests {
         let blocker = scratch.path().join("not a folder");
         fs::write(&blocker, "").unwrap();
         let (width, unread) = Width::within(blocker.join("width"));
-        assert_eq!((width.columns(), unread.is_some()), (sidebar::COLUMNS, true));
+        assert_eq!(
+            (width.columns(), unread.is_some()),
+            (sidebar::COLUMNS, true)
+        );
         assert!(width.keep().is_err_and(|why| why.contains("not a folder")));
     }
 }

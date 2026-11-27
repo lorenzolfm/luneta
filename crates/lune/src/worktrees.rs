@@ -1,22 +1,22 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{self, Argv, Holders, Name, Opens, OwnedFolder, ProjectId, Size};
-use lune_domain::projects::ViewId;
 use lune_domain::projects::ProjectName;
+use lune_domain::projects::ViewId;
 use lune_domain::projects::WorktreeId;
+use lune_domain::projects::{self, Argv, Holders, Name, Opens, OwnedFolder, ProjectId, Size};
 use lune_domain::rows::{self, Holds, Project};
-use luned::api::change_projects_request::{AddProject, AddWorktree, Change, CloseProject};
-use luned::api::change_projects_request::{CloseView, CloseWorktree, Pull, Start};
-use luned::api::change_projects_request::RenameProject;
-use luned::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
-use luned::api::change_projects_request::{Bring, Join, RenameTerminal};
-use luned::api::change_projects_response::Made;
 use luned::api::ChangeProjectsResponse;
+use luned::api::change_projects_request::RenameProject;
+use luned::api::change_projects_request::{AddProject, AddWorktree, Change, CloseProject};
+use luned::api::change_projects_request::{Bring, Join, RenameTerminal};
+use luned::api::change_projects_request::{CloseView, CloseWorktree, Pull, Start};
+use luned::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
+use luned::api::change_projects_response::Made;
 use luned::api::make_worktree_response::Landed as Answered;
 use luned::api::projects::Held;
 use luned::api::{
@@ -56,7 +56,10 @@ impl Folder {
             let held = below.is_own() || below.as_str() == OWNED_FOLDER;
             return (!held).then_some(Folder::Home(below));
         }
-        let at = folder.strip_suffix('/').filter(|it| !it.is_empty()).unwrap_or(folder);
+        let at = folder
+            .strip_suffix('/')
+            .filter(|it| !it.is_empty())
+            .unwrap_or(folder);
         projects::Dir::parse(at).ok().map(Folder::At)
     }
 
@@ -86,7 +89,10 @@ impl From<&projects::Dir> for Folder {
 }
 
 pub fn said_unmade(unchanged: Unchanged, what: &str) -> String {
-    unchanged.said(&format!("no {what} made"), &format!("the {what} may be made"))
+    unchanged.said(
+        &format!("no {what} made"),
+        &format!("the {what} may be made"),
+    )
 }
 
 pub fn said_unopened(unchanged: Unchanged, folder: &Directory, tab: &str) -> String {
@@ -128,7 +134,11 @@ fn in_kept<T>(path: &Path, project: ProjectId, made: Result<T, String>) -> Resul
         Err(why) => why,
     };
     let went = kept(path)?.iter().all(|it| it.id != project);
-    Err(if went { Tried::Went(why) } else { Tried::Failed(why) })
+    Err(if went {
+        Tried::Went(why)
+    } else {
+        Tried::Failed(why)
+    })
 }
 
 fn on_current<T, E>(
@@ -180,9 +190,15 @@ fn change_answered<E: From<Unchanged>>(
     change: Change,
     read: fn(&Unasked) -> E,
 ) -> Result<ChangeProjectsResponse, E> {
-    let request = ChangeProjectsRequest { on, change: Some(change) };
+    let request = ChangeProjectsRequest {
+        on,
+        change: Some(change),
+    };
     let answered = on_current(path, async |daemon| {
-        daemon.change_projects(ASKING, request).await.map_err(|unasked| read(&unasked))
+        daemon
+            .change_projects(ASKING, request)
+            .await
+            .map_err(|unasked| read(&unasked))
     });
     answered.unwrap_or_else(|unasked| Err(E::from(Unchanged::Refused(unasked))))
 }
@@ -202,7 +218,7 @@ fn project_of(made: Option<Made>) -> Result<ProjectId, Unchanged> {
     match made {
         Some(Made::Project(made)) => {
             ProjectId::of(made).ok_or_else(|| Unchanged::InDoubt(zero("project")))
-        },
+        }
         made => Err(unread(made, "project")),
     }
 }
@@ -212,7 +228,9 @@ fn zero(made: &str) -> String {
 }
 
 fn unread(answer: Option<Made>, wanted: &str) -> Unchanged {
-    Unchanged::InDoubt(format!("lune can't read luned's answer {answer:?} as a {wanted}"))
+    Unchanged::InDoubt(format!(
+        "lune can't read luned's answer {answer:?} as a {wanted}"
+    ))
 }
 
 fn landed(made: Option<Made>) -> Result<Landed, Unchanged> {
@@ -231,7 +249,12 @@ pub fn add_worktree(
 ) -> Result<Landed, String> {
     let (project, folder) = (project.get(), folder.to_owned());
     let opens = Some(Opens::Shell.to_api());
-    let change = Change::AddWorktree(AddWorktree { project, folder, name: None, opens });
+    let change = Change::AddWorktree(AddWorktree {
+        project,
+        folder,
+        name: None,
+        opens,
+    });
     let added = changed_on(path, on(machine), change).and_then(landed);
     added.map_err(|unchanged| said_unmade(unchanged, "worktree"))
 }
@@ -243,7 +266,12 @@ pub fn branched(
     branch: &Branch,
 ) -> Result<Landed, String> {
     let (on, project, branch) = (on(machine), project.get(), branch.as_str().to_owned());
-    let request = MakeWorktreeRequest { on, project, branch, opens: None };
+    let request = MakeWorktreeRequest {
+        on,
+        project,
+        branch,
+        opens: None,
+    };
     let late = |late: String| Unready::InDoubt(format!("{late}, so the worktree may be made"));
     let asking = async |daemon: &Shared| {
         let mut answer = daemon
@@ -258,7 +286,10 @@ pub fn branched(
         .await?;
         let unsaid = || Unready::InDoubt("luned ended its answer with no worktree".to_owned());
         let id = |id| WorktreeId::of(id).ok_or_else(|| Unready::InDoubt(zero("worktree")));
-        match answered.and_then(|answered| answered.landed).ok_or_else(unsaid)? {
+        match answered
+            .and_then(|answered| answered.landed)
+            .ok_or_else(unsaid)?
+        {
             Answered::Made(made) | Answered::Started(made) => id(made).map(Landed::Made),
             Answered::Found(found) => id(found).map(Landed::Found),
         }
@@ -271,7 +302,10 @@ pub fn branched(
 }
 
 pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Listed, String> {
-    let request = ListWorkRequest { on: on(machine), project: project.get() };
+    let request = ListWorkRequest {
+        on: on(machine),
+        project: project.get(),
+    };
     let asking = async |daemon: &Shared| {
         let mut answer = daemon
             .list_work(luned::ANSWER, request)
@@ -279,7 +313,12 @@ pub fn work(path: &Path, machine: &Machine, project: ProjectId) -> Result<Listed
             .map_err(|unasked| unasked.said(None))?;
         let listed = answered_within(
             WORK_PATIENCE,
-            async { answer.message().await.map_err(|status| status.message().to_owned()) },
+            async {
+                answer
+                    .message()
+                    .await
+                    .map_err(|status| status.message().to_owned())
+            },
             |late| late,
         )
         .await?;
@@ -301,7 +340,10 @@ pub fn read_diff(
     machine: &Machine,
     worktree: WorktreeId,
 ) -> Result<Arc<LoadedDiff>, String> {
-    let request = ReadDiffRequest { on: on(machine), worktree: worktree.get() };
+    let request = ReadDiffRequest {
+        on: on(machine),
+        worktree: worktree.get(),
+    };
     let asking = async |daemon: &Shared| {
         let mut answer = daemon
             .read_diff(luned::ANSWER, request)
@@ -309,7 +351,12 @@ pub fn read_diff(
             .map_err(|unasked| unasked.said(None))?;
         let read = answered_within(
             WORK_PATIENCE,
-            async { answer.message().await.map_err(|status| status.message().to_owned()) },
+            async {
+                answer
+                    .message()
+                    .await
+                    .map_err(|status| status.message().to_owned())
+            },
             |late| late,
         )
         .await?;
@@ -325,13 +372,16 @@ fn unbranched(status: &Status) -> Unready {
         Code::NotFound => Unready::Nowhere(why),
         Code::InvalidArgument | Code::FailedPrecondition | Code::Unimplemented => {
             Unready::Failed(why)
-        },
+        }
         _ => Unready::InDoubt(why),
     }
 }
 
 fn started_at(path: &Path, folder: &str) -> Result<Option<Landed>, String> {
-    let start = Start { folder: folder.to_owned(), name: None };
+    let start = Start {
+        folder: folder.to_owned(),
+        name: None,
+    };
     let started = changed_on(path, None, Change::Start(start)).and_then(|made| match made {
         Some(Made::Project(_)) => Ok(None),
         made => landed(made).map(Some),
@@ -348,11 +398,7 @@ pub fn closed(
     changed_on(path, on(machine), close(worktree, seen)).map(drop)
 }
 
-pub fn closed_view(
-    path: &Path,
-    machine: &Machine,
-    terminal: TerminalKey,
-) -> Result<(), Unchanged> {
+pub fn closed_view(path: &Path, machine: &Machine, terminal: TerminalKey) -> Result<(), Unchanged> {
     let (id, made_at) = (terminal.id.get(), Some(terminal.made.into()));
     let terminal = Some(luned::api::TerminalKey { id, made_at });
     let change = Change::CloseView(CloseView { terminal });
@@ -374,14 +420,20 @@ pub fn closed_project(
     let project = project.get();
     let worktrees = worktrees.iter().map(|it| it.get()).collect();
     let seen = seen.iter().map(|it| it.get()).collect();
-    let change = Change::CloseProject(CloseProject { project, worktrees, seen });
+    let change = Change::CloseProject(CloseProject {
+        project,
+        worktrees,
+        seen,
+    });
     changed_on(path, on(machine), change).map(drop)
 }
 
 fn on(machine: &Machine) -> Option<On> {
     match machine {
         Machine::Local => None,
-        Machine::Remote(destination) => Some(On { destination: destination.to_string() }),
+        Machine::Remote(destination) => Some(On {
+            destination: destination.to_string(),
+        }),
     }
 }
 
@@ -393,13 +445,24 @@ pub fn reordered(
     let change = match order {
         Reorder::Projects { seen, wanted } => {
             let ids = |ids: &[ProjectId]| ids.iter().map(|it| it.get()).collect();
-            Change::ReorderProjects(ReorderProjects { projects: ids(wanted), seen: ids(seen) })
-        },
-        Reorder::Worktrees { project, seen, wanted } => {
+            Change::ReorderProjects(ReorderProjects {
+                projects: ids(wanted),
+                seen: ids(seen),
+            })
+        }
+        Reorder::Worktrees {
+            project,
+            seen,
+            wanted,
+        } => {
             let ids = |ids: &[WorktreeId]| ids.iter().map(|it| it.get()).collect();
             let (project, worktrees, seen) = (project.get(), ids(wanted), ids(seen));
-            Change::ReorderWorktrees(ReorderWorktrees { project, worktrees, seen })
-        },
+            Change::ReorderWorktrees(ReorderWorktrees {
+                project,
+                worktrees,
+                seen,
+            })
+        }
     };
     change_answered(path, on(machine), change, Unchanged::of_asked).map(|answered| answered.kept)
 }
@@ -423,11 +486,15 @@ fn chosen(
     folder: &str,
 ) -> Option<Result<Arrival, Tried>> {
     if let Some(name) = name
-        && let Some(named) = projects.iter().find(|project| project.name.as_str() == name)
+        && let Some(named) = projects
+            .iter()
+            .find(|project| project.name.as_str() == name)
     {
         return Some(Ok(Arrival::Home(named.id)));
     }
-    let holding = projects.iter().find(|project| holds(project.dir.as_str(), cwd))?;
+    let holding = projects
+        .iter()
+        .find(|project| holds(project.dir.as_str(), cwd))?;
     let landed = match name {
         Some(name) => branched_in(path, holding, name),
         None => at_folder(path, holding, folder),
@@ -436,13 +503,17 @@ fn chosen(
 }
 
 fn branched_in(path: &Path, holding: &Project, name: &str) -> Result<Landing, Tried> {
-    assert_ne!(holding.name.as_str(), name, "a name a project has goes to that project");
+    assert_ne!(
+        holding.name.as_str(),
+        name,
+        "a name a project has goes to that project"
+    );
     match holding.holds {
-        Holds::Clone { .. } => {},
+        Holds::Clone { .. } => {}
         Holds::Folder(_) => {
             let one = projects::folder_has_one_worktree(&holding.name);
             return Err(Tried::Failed(format!("{name} names no project, and {one}")));
-        },
+        }
     }
     let branch = Branch::parse(name).map_err(|why| format!("no worktree made: {why}"))?;
     let made = branched(path, &Machine::Local, holding.id, &branch);
@@ -470,7 +541,9 @@ pub fn start(
     cwd: &Path,
     seen: impl Fn(ProjectId) -> Option<SystemTime>,
 ) -> Result<Option<Arrival>, String> {
-    let folder = cwd.to_str().ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
+    let folder = cwd
+        .to_str()
+        .ok_or_else(|| format!("{} is not UTF-8", cwd.display()))?;
     let name = name.map(str::trim);
     twice(|| started(path, name, cwd, folder, &seen))
 }
@@ -488,30 +561,42 @@ fn started(
     }
     let Some(name) = name else {
         let last = |project: &&Project| seen(project.id);
-        let held = projects.iter().filter(|project| !project.worktrees().is_empty());
-        let found = held.max_by_key(last).and_then(|it| projects::last_used(it.uses()));
+        let held = projects
+            .iter()
+            .filter(|project| !project.worktrees().is_empty());
+        let found = held
+            .max_by_key(last)
+            .and_then(|it| projects::last_used(it.uses()));
         return Ok(found.map(Arrival::Worktree));
     };
     let unmade = match add_project(path, folder, Some(name)) {
         Ok(_) => None,
         Err(Unadded::Unchanged(refused @ Unchanged::Refused(_))) => {
             return Err(Tried::Failed(said_unmade(refused, "project")));
-        },
+        }
         Err(Unadded::Nests(why)) => Some(said_unmade(Unchanged::Refused(why), "project")),
         Err(Unadded::Unchanged(in_doubt @ Unchanged::InDoubt(_))) => {
             Some(said_unmade(in_doubt, "project"))
-        },
+        }
     };
     let unlisted = |unlisted: String| Tried::Failed(unmade.clone().unwrap_or(unlisted));
     let projects = kept(path).map_err(unlisted)?;
-    let unkept = || format!("luned made the project of {}, and keeps it nowhere", cwd.display());
+    let unkept = || {
+        format!(
+            "luned made the project of {}, and keeps it nowhere",
+            cwd.display()
+        )
+    };
     let unfound = unmade.unwrap_or_else(unkept);
     let chosen = chosen(path, &projects, Some(name), cwd, folder);
     chosen.unwrap_or(Err(Tried::Failed(unfound))).map(Some)
 }
 
 pub fn made_at(path: &Path, machine: &Machine, folder: &Folder) -> Result<Landing, String> {
-    let start = Change::Start(Start { folder: folder.to_string(), name: None });
+    let start = Change::Start(Start {
+        folder: folder.to_string(),
+        name: None,
+    });
     let made = changed_on(path, on(machine), start).and_then(|made| match made {
         Some(Made::Project(_)) => project_of(made).map(Landing::Unopened),
         made => landed(made).map(Landing::Worktree),
@@ -537,7 +622,7 @@ pub fn pulled(
         Ok(Pulled::Unopened { worktree, why }) => {
             let why = format!("{cwd} is {name}'s worktree, and its command does not run: {why}");
             Ok(Pulled::Unopened { worktree, why })
-        },
+        }
         Ok(pulled @ (Pulled::Went(_) | Pulled::Opened { .. })) => Ok(pulled),
         Err(unchanged) => Err(said_unopened(unchanged, cwd, name)),
     }
@@ -557,10 +642,10 @@ fn pulled_of(answered: ChangeProjectsResponse) -> Result<Pulled, Unchanged> {
         (Landed::Made(worktree) | Landed::Found(worktree), None) => Ok(Pulled::Went(worktree)),
         (Landed::Found(worktree), Some(Opened::View(view))) => {
             Ok(Pulled::Opened { worktree, view })
-        },
+        }
         (Landed::Found(worktree), Some(Opened::Unopened(why))) => {
             Ok(Pulled::Unopened { worktree, why })
-        },
+        }
         (Landed::Made(worktree), Some(opened)) => Err(Unchanged::InDoubt(format!(
             "lune can't read luned's answer: worktree {worktree} is made, and {opened:?} too"
         ))),
@@ -591,7 +676,10 @@ pub fn renamed_project(
     to: &ProjectName,
 ) -> Result<(), Unchanged> {
     let (project, to) = (project.get(), to.as_str().to_owned());
-    changed_there(machine, Change::RenameProject(RenameProject { project, to }))
+    changed_there(
+        machine,
+        Change::RenameProject(RenameProject { project, to }),
+    )
 }
 
 pub fn renamed_worktree(
@@ -610,7 +698,10 @@ pub fn renamed_terminal(
     to: Option<&Name>,
 ) -> Result<(), Unchanged> {
     let (terminal, to) = (terminal.get(), to.map(|to| to.as_str().to_owned()));
-    changed_there(machine, Change::RenameTerminal(RenameTerminal { terminal, to }))
+    changed_there(
+        machine,
+        Change::RenameTerminal(RenameTerminal { terminal, to }),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -634,7 +725,9 @@ impl Landed {
 }
 
 pub fn worked_in(path: &Path, folder: &Path, opens: &Opens) -> Result<Landed, String> {
-    let folder = folder.to_str().ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
+    let folder = folder
+        .to_str()
+        .ok_or_else(|| format!("{} is not UTF-8", folder.display()))?;
     joined(path, folder, opens).map_err(|unchanged| match unchanged {
         Unchanged::Refused(why) => why,
         Unchanged::InDoubt(why) => format!("{why}, so luned may keep {folder} as a worktree"),
@@ -651,12 +744,18 @@ pub fn joined_as(
 }
 
 fn joined(path: &Path, folder: &str, opens: &Opens) -> Result<Landed, Unchanged> {
-    let change = Change::Join(Join { folder: folder.to_owned(), opens: Some(opens.to_api()) });
+    let change = Change::Join(Join {
+        folder: folder.to_owned(),
+        opens: Some(opens.to_api()),
+    });
     changed_on(path, None, change).and_then(landed)
 }
 
 pub fn dirs(path: &Path) -> Result<Vec<Directory>, String> {
-    Ok(kept(path)?.iter().map(|project| Directory::from(&project.dir)).collect())
+    Ok(kept(path)?
+        .iter()
+        .map(|project| Directory::from(&project.dir))
+        .collect())
 }
 
 pub fn folder_of(path: &Path, worktree: WorktreeId) -> Result<PathBuf, String> {
@@ -673,8 +772,14 @@ pub enum Went {
 }
 
 pub fn bring(path: &Path, worktree: WorktreeId, from: TerminalKey) -> Result<Went, Unchanged> {
-    let from = luned::api::TerminalKey { id: from.id.get(), made_at: Some(from.made.into()) };
-    let change = Change::Bring(Bring { worktree: worktree.get(), from: Some(from) });
+    let from = luned::api::TerminalKey {
+        id: from.id.get(),
+        made_at: Some(from.made.into()),
+    };
+    let change = Change::Bring(Bring {
+        worktree: worktree.get(),
+        from: Some(from),
+    });
     changed_on(path, None, change).and_then(|made| match made {
         Some(Made::Taken(taken)) if taken == worktree.get() => Ok(Went::Taken),
         Some(Made::Untaken(())) => Ok(Went::Elsewhere),
@@ -723,7 +828,7 @@ pub fn opened(
             Heard::Laid { laid, .. } if laid.worktree() != worktree => {
                 let other = laid.worktree();
                 return Err(format!("luned laid out worktree {other}, not {worktree}"));
-            },
+            }
             Heard::Laid { laid, .. } => {
                 let views: BTreeSet<ViewId> = laid.views().map(|view| view.id).collect();
                 asking = match (asking, opening) {
@@ -731,14 +836,14 @@ pub fn opened(
                     (Asking::Unsent(open), Opening::IfEmpty | Opening::Beside) => {
                         let _ = show.ask_focus(open);
                         Asking::Sent { before: views }
-                    },
+                    }
                     (Asking::Sent { before }, _) if views.is_subset(&before) => {
                         Asking::Sent { before }
-                    },
+                    }
                     (Asking::Sent { .. }, _) => return Ok(()),
                 };
-            },
-            Heard::Edged { .. } | Heard::Sent(_) => {},
+            }
+            Heard::Edged { .. } | Heard::Sent(_) => {}
             Heard::Left(gone) => return Err(format!("worktree {gone} is gone")),
             Heard::Refused { why, .. } => return Err(format!("luned refused: {why}")),
             Heard::Forgotten(why) | Heard::Lost(why) => return Err(why),
@@ -769,14 +874,25 @@ mod tests {
         let folder = Directory::parse("/w/cdk/issue-5".to_owned()).unwrap();
         let unopened = |status: &Status| said_unopened(Unchanged::of(status), &folder, "#5");
         let left = "/w/cdk/issue-5 is #5's worktree, and it is not opened: it said no";
-        assert_eq!(unopened(&refused), left, "a pull refused leaves the worktree made");
+        assert_eq!(
+            unopened(&refused),
+            left,
+            "a pull refused leaves the worktree made"
+        );
         let maybe = "it dropped, so /w/cdk/issue-5, #5's worktree, may be opened";
-        assert_eq!(unopened(&doubt), maybe, "a pull answered late may have opened it");
+        assert_eq!(
+            unopened(&doubt),
+            maybe,
+            "a pull answered late may have opened it"
+        );
     }
 
     #[test]
     fn a_late_answer_says_the_change_may_be_made() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
         let never = std::future::pending::<Result<Option<Made>, Unchanged>>();
         let late = runtime.block_on(answered_within(Duration::ZERO, never, Unchanged::InDoubt));
         let said = late.map_err(|unchanged| said_unmade(unchanged, "worktree"));
@@ -789,19 +905,26 @@ mod tests {
         let said = |unchanged| said_unmade(unchanged, "worktree");
         assert_eq!(
             landed(None).map_err(said),
-            Err("lune can't read luned's answer None as a worktree, so the worktree may be \
+            Err(
+                "lune can't read luned's answer None as a worktree, so the worktree may be \
                  made"
-                .to_owned())
+                    .to_owned()
+            )
         );
         assert_eq!(
             landed(Some(Made::Worktree(0))).map_err(said),
-            Err("luned said it made worktree 0, and no id is 0, so the worktree may be made"
-                .to_owned())
+            Err(
+                "luned said it made worktree 0, and no id is 0, so the worktree may be made"
+                    .to_owned()
+            )
         );
         let said = |unchanged| said_unmade(unchanged, "project");
         let project = project_of(Some(Made::Taken(4))).map_err(said);
         let unread = "lune can't read luned's answer Some(Taken(4)) as a project";
-        assert_eq!(project, Err(format!("{unread}, so the project may be made")));
+        assert_eq!(
+            project,
+            Err(format!("{unread}, so the project may be made"))
+        );
         assert!(matches!(project_of(Some(Made::Project(4))), Ok(id) if id.get() == 4));
         assert!(matches!(landed(Some(Made::Found(5))), Ok(Landed::Found(id)) if id.get() == 5));
     }
@@ -809,7 +932,11 @@ mod tests {
     #[test]
     fn a_pull_goes_to_its_worktree_and_a_found_one_says_what_its_command_opened() {
         use luned::api::change_projects_response::Opened as Said;
-        let answer = |made, opened| ChangeProjectsResponse { made, opened, kept: None };
+        let answer = |made, opened| ChangeProjectsResponse {
+            made,
+            opened,
+            kept: None,
+        };
         let (worktree, view) = (WorktreeId::of(5).unwrap(), ViewId::of(9).unwrap());
         let made = answer(Some(Made::Worktree(5)), None);
         assert_eq!(pulled_of(made), Ok(Pulled::Went(worktree)));
@@ -817,13 +944,22 @@ mod tests {
         assert_eq!(pulled_of(found), Ok(Pulled::Went(worktree)));
         let opened = answer(Some(Made::Found(5)), Some(Said::View(9)));
         assert_eq!(pulled_of(opened), Ok(Pulled::Opened { worktree, view }));
-        let unopened = answer(Some(Made::Found(5)), Some(Said::Unopened("no room".to_owned())));
+        let unopened = answer(
+            Some(Made::Found(5)),
+            Some(Said::Unopened("no room".to_owned())),
+        );
         let why = "no room".to_owned();
         assert_eq!(pulled_of(unopened), Ok(Pulled::Unopened { worktree, why }));
         let zero = Unchanged::InDoubt("opened: it names view 0".to_owned());
-        assert_eq!(pulled_of(answer(Some(Made::Found(5)), Some(Said::View(0)))), Err(zero));
+        assert_eq!(
+            pulled_of(answer(Some(Made::Found(5)), Some(Said::View(0)))),
+            Err(zero)
+        );
         let both = answer(Some(Made::Worktree(5)), Some(Said::View(9)));
         let both = pulled_of(both).unwrap_err();
-        assert!(matches!(&both, Unchanged::InDoubt(why) if why.contains("is made")), "{both:?}");
+        assert!(
+            matches!(&both, Unchanged::InDoubt(why) if why.contains("is made")),
+            "{both:?}"
+        );
     }
 }

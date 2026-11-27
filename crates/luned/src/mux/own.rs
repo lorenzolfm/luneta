@@ -20,12 +20,18 @@ const TERMINAL_MADE_VAR: &str = "LUNE_MUX_TERMINAL_MADE";
 const TERMINAL_VARS: [&str; 2] = [TERMINAL_VAR, TERMINAL_MADE_VAR];
 
 pub(crate) fn terminal_in(environ: &[OsString]) -> Result<Option<TerminalKey>, String> {
-    if TERMINAL_VARS.iter().all(|name| value_in(environ, name).is_none()) {
+    if TERMINAL_VARS
+        .iter()
+        .all(|name| value_in(environ, name).is_none())
+    {
         return Ok(None);
     }
     let key = number_in(environ, TERMINAL_VAR).and_then(|id| {
         let made = number_in(environ, TERMINAL_MADE_VAR)?;
-        Ok(TerminalKey { id, made: OwnMade::from_nanos(made) })
+        Ok(TerminalKey {
+            id,
+            made: OwnMade::from_nanos(made),
+        })
     });
     let unnamed =
         |why: String| format!("{TERMINAL_VAR} and {TERMINAL_MADE_VAR} name no terminal: {why}");
@@ -38,7 +44,8 @@ where
 {
     let value = value_in(environ, name).ok_or_else(|| format!("{name} is unset"))?;
     let text = String::from_utf8_lossy(value);
-    text.parse().map_err(|error| format!("{name}={text:?}: {error}"))
+    text.parse()
+        .map_err(|error| format!("{name}={text:?}: {error}"))
 }
 
 pub fn terminal_here() -> Result<Option<TerminalKey>, String> {
@@ -72,17 +79,26 @@ mod tests {
 
     #[test]
     fn the_variables_name_a_terminal_by_its_id_and_its_making() {
-        let environ = |entries: &[&str]| -> Vec<OsString> {
-            entries.iter().map(OsString::from).collect()
+        let environ =
+            |entries: &[&str]| -> Vec<OsString> { entries.iter().map(OsString::from).collect() };
+        let all = environ(&[
+            "LUNE_MUX_TERMINAL=7",
+            "HOME=/h",
+            "LUNE_MUX_TERMINAL_MADE=60",
+        ]);
+        let key = TerminalKey {
+            id: NonZeroU32::new(7).unwrap(),
+            made: OwnMade::from_nanos(60),
         };
-        let all = environ(&["LUNE_MUX_TERMINAL=7", "HOME=/h", "LUNE_MUX_TERMINAL_MADE=60"]);
-        let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
         assert_eq!(terminal_in(&all), Ok(Some(key)));
         assert_eq!(terminal_in(&environ(&["HOME=/h"])), Ok(None));
         let made = "LUNE_MUX_TERMINAL_MADE=60";
         let unnamed = [
             (environ(&[made]), "LUNE_MUX_TERMINAL is unset"),
-            (environ(&["LUNE_MUX_TERMINAL=7"]), "LUNE_MUX_TERMINAL_MADE is unset"),
+            (
+                environ(&["LUNE_MUX_TERMINAL=7"]),
+                "LUNE_MUX_TERMINAL_MADE is unset",
+            ),
             (
                 environ(&["LUNE_MUX_TERMINAL=7", "LUNE_MUX_TERMINAL_MADE=-1"]),
                 "LUNE_MUX_TERMINAL_MADE=\"-1\": invalid digit found in string",

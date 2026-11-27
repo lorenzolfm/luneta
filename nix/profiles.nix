@@ -25,7 +25,8 @@ let
       ciRetriesRaw.count
     else
       0;
-  ciFinalLevel = if builtins.isAttrs ciProfile then ciProfile.final-status-level or "fail" else "fail";
+  ciFinalLevel =
+    if builtins.isAttrs ciProfile then ciProfile.final-status-level or "fail" else "fail";
   flakyFinalLevels = [
     "flaky"
     "retry"
@@ -254,7 +255,9 @@ in
   if ciRetriesValid then
     [ ]
   else
-    [ ".config/nextest.toml: [profile.ci].retries must be a non-negative integer or table with a non-negative count" ]
+    [
+      ".config/nextest.toml: [profile.ci].retries must be a non-negative integer or table with a non-negative count"
+    ]
 )
 ++ (
   if ciRetries == 0 || builtins.elem ciFinalLevel flakyFinalLevels then
@@ -268,5 +271,7 @@ in
   if ciJunitValid then
     [ ]
   else
-    [ ".config/nextest.toml: [profile.ci.junit].path must be a non-empty relative path without '..' so flake.nix can install junit.xml" ]
+    [
+      ".config/nextest.toml: [profile.ci.junit].path must be a non-empty relative path without '..' so flake.nix can install junit.xml"
+    ]
 )

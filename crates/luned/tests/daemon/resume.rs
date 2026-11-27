@@ -36,17 +36,33 @@ impl<'a> Shown<'a> {
         let (asks, asked) = mpsc::channel(16);
         let hello = Hello {
             worktree,
-            size: Some(Size { columns: 80, rows: 24 }),
+            size: Some(Size {
+                columns: 80,
+                rows: 24,
+            }),
             runs_in: None,
             again: false,
             on: None,
         };
-        asks.try_send(ShowRequest { event: Some(Event::Hello(hello)), asked: 0 }).unwrap();
+        asks.try_send(ShowRequest {
+            event: Some(Event::Hello(hello)),
+            asked: 0,
+        })
+        .unwrap();
         let heard = owned.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-            daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
+            daemon
+                .show(ReceiverStream::new(asked))
+                .await
+                .unwrap()
+                .into_inner()
         });
-        let mut shown = Shown { owned, asks, heard, laid: None };
+        let mut shown = Shown {
+            owned,
+            asks,
+            heard,
+            laid: None,
+        };
         shown.until("first layout", |_| true);
         shown
     }
@@ -56,7 +72,12 @@ impl<'a> Shown<'a> {
             beside: Some(open::Beside::Largest(())),
             opens: Some(Opens::Shell.to_api()),
         };
-        self.asks.try_send(ShowRequest { event: Some(Event::Open(open)), asked: 0 }).unwrap();
+        self.asks
+            .try_send(ShowRequest {
+                event: Some(Event::Open(open)),
+                asked: 0,
+            })
+            .unwrap();
         let laid = self.until("shell terminal ready", |l| {
             l.views.len() == 1 && view_key(&l.views[0]).is_some()
         });
@@ -71,7 +92,9 @@ impl<'a> Shown<'a> {
         }
         let patience = Patience::begun();
         loop {
-            let next = self.owned.block_on(patience.awaited(what, self.heard.message()));
+            let next = self
+                .owned
+                .block_on(patience.awaited(what, self.heard.message()));
             let word = next.unwrap().expect("layout stream went on");
             if let Some(show_response::Event::Laid(laid)) = word.event {
                 let matched = done(&laid);
@@ -92,13 +115,21 @@ fn view_key(view: &show_response::View) -> Option<TerminalKey> {
 }
 
 fn mux_key(key: TerminalKey) -> mux_api::TerminalKey {
-    mux_api::TerminalKey { id: key.id, made_at: key.made_at }
+    mux_api::TerminalKey {
+        id: key.id,
+        made_at: key.made_at,
+    }
 }
 
 fn open_worktree(owned: &Owned, dir: &Path) -> u64 {
     let dir_str = fs::canonicalize(dir).unwrap().to_str().unwrap().to_owned();
-    let add = Change::AddProject(AddProject { dir: dir_str, name: None });
-    let project_id = asked(&owned.host, add).unwrap().expect("expected project id");
+    let add = Change::AddProject(AddProject {
+        dir: dir_str,
+        name: None,
+    });
+    let project_id = asked(&owned.host, add)
+        .unwrap()
+        .expect("expected project id");
     let host = owned.host.host();
     let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|p| p.held) else {
         panic!("no projects kept");
@@ -115,7 +146,10 @@ fn list_resume(owned: &Owned, terminal_id: Option<u32>) -> ListResumeResponse {
     owned.block_on(async move {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
         daemon
-            .list_resume(ListResumeRequest { on: None, terminal_id })
+            .list_resume(ListResumeRequest {
+                on: None,
+                terminal_id,
+            })
             .await
             .unwrap()
             .into_inner()
@@ -126,7 +160,11 @@ fn reload_resume(owned: &Owned) -> ReloadResumeResponse {
     let folder = folder_in(owned.host.runtime.path()).unwrap();
     owned.block_on(async move {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        daemon.reload_resume(ReloadResumeRequest { on: None }).await.unwrap().into_inner()
+        daemon
+            .reload_resume(ReloadResumeRequest { on: None })
+            .await
+            .unwrap()
+            .into_inner()
     })
 }
 
@@ -154,7 +192,9 @@ fn run_in_shell(owned: &Owned, key: TerminalKey, line: &str) {
         };
         let words = vec![
             mux_api::FromViewer {
-                event: Some(mux_api::from_viewer::Event::Hello(mux_api::Greeting::default())),
+                event: Some(mux_api::from_viewer::Event::Hello(
+                    mux_api::Greeting::default(),
+                )),
             },
             mux_api::FromViewer {
                 event: Some(mux_api::from_viewer::Event::Showing(mux_api::Showing {
@@ -174,7 +214,11 @@ fn run_in_shell(owned: &Owned, key: TerminalKey, line: &str) {
                 })),
             },
         ];
-        let mut stream = client.show(tokio_stream::iter(words)).await.unwrap().into_inner();
+        let mut stream = client
+            .show(tokio_stream::iter(words))
+            .await
+            .unwrap()
+            .into_inner();
         while stream.message().await.unwrap().is_some() {}
     });
 }
@@ -196,13 +240,18 @@ fn send_ctrl_c(owned: &Owned, key: TerminalKey) {
         let mut client = mux_api::mux_client::MuxClient::new(channel);
         let ctrl_c = mux_api::Key {
             press: mux_api::Press::Down.into(),
-            modifiers: Some(mux_api::Modifiers { ctrl: true, ..mux_api::Modifiers::default() }),
+            modifiers: Some(mux_api::Modifiers {
+                ctrl: true,
+                ..mux_api::Modifiers::default()
+            }),
             key: Some(mux_api::key::Key::Character('c'.into())),
             text: String::new(),
         };
         let words = vec![
             mux_api::FromViewer {
-                event: Some(mux_api::from_viewer::Event::Hello(mux_api::Greeting::default())),
+                event: Some(mux_api::from_viewer::Event::Hello(
+                    mux_api::Greeting::default(),
+                )),
             },
             mux_api::FromViewer {
                 event: Some(mux_api::from_viewer::Event::Showing(mux_api::Showing {
@@ -216,7 +265,11 @@ fn send_ctrl_c(owned: &Owned, key: TerminalKey) {
                 })),
             },
         ];
-        let mut stream = client.show(tokio_stream::iter(words)).await.unwrap().into_inner();
+        let mut stream = client
+            .show(tokio_stream::iter(words))
+            .await
+            .unwrap()
+            .into_inner();
         while stream.message().await.unwrap().is_some() {}
     });
 }
@@ -229,7 +282,8 @@ fn write_config(owned: &Owned, toml: &str) {
 }
 
 fn logged(owned: &Owned) -> String {
-    fs::read_to_string(owned.host.home.path().join(".local/state/lune/lune.log")).unwrap_or_default()
+    fs::read_to_string(owned.host.home.path().join(".local/state/lune/lune.log"))
+        .unwrap_or_default()
 }
 
 fn enable_esm(bin: &Path) {
@@ -237,8 +291,12 @@ fn enable_esm(bin: &Path) {
 }
 
 fn kill_and_restore(owned: &Owned, shown: &mut Shown<'_>) -> Laid {
-    let before: Vec<Option<TerminalKey>> =
-        shown.until("current keys", |_| true).views.iter().map(view_key).collect();
+    let before: Vec<Option<TerminalKey>> = shown
+        .until("current keys", |_| true)
+        .views
+        .iter()
+        .map(view_key)
+        .collect();
     owned.kill_mux();
     shown.until("restored with fresh keys", |laid| {
         let now: Vec<Option<TerminalKey>> = laid.views.iter().map(view_key).collect();
@@ -269,7 +327,10 @@ fn trusted_rule(record: &api::ResumeRecordInfo) -> Option<&str> {
 }
 
 fn is_saved(record: &api::ResumeRecordInfo) -> bool {
-    matches!(record.persistence(), ResumePersistence::Saved | ResumePersistence::Tried)
+    matches!(
+        record.persistence(),
+        ResumePersistence::Saved | ResumePersistence::Tried
+    )
 }
 
 #[test]
@@ -322,33 +383,57 @@ fn synthesized_claude_resumes_with_kept_flags_in_shell_and_returns_to_shell() {
     let mut session_file = file_of_pid(CLAUDE_UUID, claude_pid, "idle");
     session_file["cwd"] = serde_json::json!(work_canon.to_str().unwrap());
     session_file["entrypoint"] = serde_json::json!("cli");
-    fs::write(sessions.join(format!("{claude_pid}.json")), session_file.to_string()).unwrap();
+    fs::write(
+        sessions.join(format!("{claude_pid}.json")),
+        session_file.to_string(),
+    )
+    .unwrap();
 
-    let resumed_info = eventually("luned synthesizes and persists trusted claude record", || {
-        let listed = list_resume(&owned, Some(key.id));
-        let rec = listed.terminals.first()?.records.first()?;
-        (rec.source() == ResumeRecordSource::Synthesized
-            && trusted_rule(rec).is_some()
-            && is_saved(rec))
+    let resumed_info = eventually(
+        "luned synthesizes and persists trusted claude record",
+        || {
+            let listed = list_resume(&owned, Some(key.id));
+            let rec = listed.terminals.first()?.records.first()?;
+            (rec.source() == ResumeRecordSource::Synthesized
+                && trusted_rule(rec).is_some()
+                && is_saved(rec))
             .then(|| rec.clone())
-    });
+        },
+    );
     assert_eq!(trusted_rule(&resumed_info), Some("claude"));
     assert_eq!(
         resumed_info.argv,
-        ["claude", "--resume", CLAUDE_UUID, "--model", "opus", "--verbose"]
+        [
+            "claude",
+            "--resume",
+            CLAUDE_UUID,
+            "--model",
+            "opus",
+            "--verbose"
+        ]
     );
     assert_eq!(resumed_info.placement(), ResumePlacement::ShellHosted);
 
-    let store_path = owned.host.home.path().join(".local/state/lune/resume/records.json");
+    let store_path = owned
+        .host
+        .home
+        .path()
+        .join(".local/state/lune/resume/records.json");
     let store_mode = fs::metadata(&store_path).unwrap().permissions().mode() & 0o777;
-    let dir_mode = fs::metadata(store_path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+    let dir_mode = fs::metadata(store_path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(dir_mode, 0o700);
     assert_eq!(store_mode, 0o600);
 
     let laid_after = kill_and_restore(&owned, &mut shown);
     let restored_key = view_key(&laid_after.views[0]).unwrap();
 
-    let got_args = eventually("claude resumes with kept flags", || fs::read(&resumed_args).ok());
+    let got_args = eventually("claude resumes with kept flags", || {
+        fs::read(&resumed_args).ok()
+    });
     let expected: Vec<u8> = ["--resume", CLAUDE_UUID, "--model", "opus", "--verbose"]
         .iter()
         .flat_map(|s| s.as_bytes().iter().copied().chain(std::iter::once(0)))
@@ -356,16 +441,34 @@ fn synthesized_claude_resumes_with_kept_flags_in_shell_and_returns_to_shell() {
     assert_eq!(got_args, expected);
 
     let log = logged(&owned);
-    assert!(log.contains("resuming saved program claude (rule claude)"), "{log}");
-    assert!(!log.contains(CLAUDE_UUID), "session uuid must not leak into logs: {log}");
-    assert!(!log.contains("opus"), "flag values must not leak into logs: {log}");
+    assert!(
+        log.contains("resuming saved program claude (rule claude)"),
+        "{log}"
+    );
+    assert!(
+        !log.contains(CLAUDE_UUID),
+        "session uuid must not leak into logs: {log}"
+    );
+    assert!(
+        !log.contains("opus"),
+        "flag values must not leak into logs: {log}"
+    );
 
     fs::write(&allow_exit, "").unwrap();
     let back = owned.host.home.path().join("back_at_shell");
-    run_in_shell(&owned, restored_key, &format!("echo SHELL_ALIVE > '{}'", back.display()));
-    eventually("exiting resumed claude returns to interactive shell", || {
-        fs::read_to_string(&back).ok().filter(|s| s.trim() == "SHELL_ALIVE")
-    });
+    run_in_shell(
+        &owned,
+        restored_key,
+        &format!("echo SHELL_ALIVE > '{}'", back.display()),
+    );
+    eventually(
+        "exiting resumed claude returns to interactive shell",
+        || {
+            fs::read_to_string(&back)
+                .ok()
+                .filter(|s| s.trim() == "SHELL_ALIVE")
+        },
+    );
 }
 
 #[test]
@@ -374,7 +477,9 @@ fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
     let pi_dir = owned.host.home.path().join(".pi/agent");
     fs::create_dir_all(&pi_dir).unwrap();
     let ext_path = pi_dir.join("extensions/lune.ts");
-    eventually("luned installs pi extension", || ext_path.is_file().then_some(()));
+    eventually("luned installs pi extension", || {
+        ext_path.is_file().then_some(())
+    });
 
     let work = owned.host.home.path().join("work");
     fs::create_dir_all(&work).unwrap();
@@ -429,7 +534,10 @@ fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
     let tok_after = eventually("pi extension loaded and checked token", || {
         fs::read_to_string(&token_check).ok()
     });
-    assert_eq!(tok_after, "undefined", "pi extension must delete OSC7577_TOKEN from process.env");
+    assert_eq!(
+        tok_after, "undefined",
+        "pi extension must delete OSC7577_TOKEN from process.env"
+    );
 
     let info = eventually("luned receives signed OSC 7577 from pi extension", || {
         let listed = list_resume(&owned, Some(key.id));
@@ -437,10 +545,13 @@ fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
         (rec.source() == ResumeRecordSource::Osc7577
             && trusted_rule(rec).is_some()
             && is_saved(rec))
-            .then(|| rec.clone())
+        .then(|| rec.clone())
     });
     assert_eq!(trusted_rule(&info), Some("pi"));
-    assert_eq!(info.argv, ["pi", "--session", "pi-sess-1", "--model", "sonnet"]);
+    assert_eq!(
+        info.argv,
+        ["pi", "--session", "pi-sess-1", "--model", "sonnet"]
+    );
 
     let laid_after = kill_and_restore(&owned, &mut shown);
     let restored_key = view_key(&laid_after.views[0]).unwrap();
@@ -462,7 +573,11 @@ fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
     fs::write(&trigger_quit, "").unwrap();
     eventually("pi emits clear=1 on quit and clears resume record", || {
         let listed = list_resume(&owned, Some(restored_key.id));
-        listed.terminals.first().is_some_and(|t| t.records.is_empty()).then_some(())
+        listed
+            .terminals
+            .first()
+            .is_some_and(|t| t.records.is_empty())
+            .then_some(())
     });
 }
 
@@ -533,7 +648,11 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     run_in_shell(
         &owned,
         key,
-        &format!("nvim --emit '{}' '{}'", legit_session.display(), work_canon.display()),
+        &format!(
+            "nvim --emit '{}' '{}'",
+            legit_session.display(),
+            work_canon.display()
+        ),
     );
     eventually("nvim record saved", || {
         let listed = list_resume(&owned, Some(key.id));
@@ -560,7 +679,11 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     run_in_shell(
         &owned,
         key2,
-        &format!("nvim --emit '{}' '{}'", escaped_session.display(), work_canon.display()),
+        &format!(
+            "nvim --emit '{}' '{}'",
+            escaped_session.display(),
+            work_canon.display()
+        ),
     );
     eventually("symlink-escaped nvim record saved", || {
         let listed = list_resume(&owned, Some(key2.id));
@@ -571,9 +694,14 @@ command = ["nvim", "-S", { under = "~/sessions" }]
 
     let _laid3 = kill_and_restore(&owned, &mut shown2);
     eventually("symlink escape is blocked on restore", || {
-        logged(&owned).contains("not resuming saved program nvim, starting a shell (reason=not_trusted)").then_some(())
+        logged(&owned)
+            .contains("not resuming saved program nvim, starting a shell (reason=not_trusted)")
+            .then_some(())
     });
-    assert!(!resumed_out.exists(), "escaped symlink session must not resume");
+    assert!(
+        !resumed_out.exists(),
+        "escaped symlink session must not resume"
+    );
 }
 
 #[test]
@@ -639,11 +767,21 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     run_in_shell(
         &owned,
         key,
-        &format!("nvim --emit '{}' '{}'", sess_file.display(), eph_canon.display()),
+        &format!(
+            "nvim --emit '{}' '{}'",
+            sess_file.display(),
+            eph_canon.display()
+        ),
     );
     eventually("ephemeral-cwd record saved", || {
         let listed = list_resume(&owned, Some(key.id));
-        listed.terminals.first()?.records.first().filter(|r| is_saved(r)).map(|_| ())
+        listed
+            .terminals
+            .first()?
+            .records
+            .first()
+            .filter(|r| is_saved(r))
+            .map(|_| ())
     });
 
     fs::remove_dir_all(&ephemeral).unwrap();
@@ -651,13 +789,20 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     eventually("missing explicit cwd skipped", || {
         logged(&owned).contains("reason=dir_gone").then_some(())
     });
-    assert!(!runs_file.exists(), "missing explicit cwd must not spawn program");
+    assert!(
+        !runs_file.exists(),
+        "missing explicit cwd must not spawn program"
+    );
 
     let key2 = view_key(&laid2.views[0]).unwrap();
     run_in_shell(
         &owned,
         key2,
-        &format!("nvim --emit '{}' '{}'", sess_file.display(), work_canon.display()),
+        &format!(
+            "nvim --emit '{}' '{}'",
+            sess_file.display(),
+            work_canon.display()
+        ),
     );
     eventually("failing-resume record saved", || {
         let listed = list_resume(&owned, Some(key2.id));
@@ -672,12 +817,16 @@ command = ["nvim", "-S", { under = "~/sessions" }]
 
     let _laid3 = kill_and_restore(&owned, &mut shown);
     eventually("first resume ran once and failed", || {
-        fs::read_to_string(&runs_file).ok().filter(|s| s.lines().count() == 1)
+        fs::read_to_string(&runs_file)
+            .ok()
+            .filter(|s| s.lines().count() == 1)
     });
 
     let _laid4 = kill_and_restore(&owned, &mut shown);
     eventually("second restore skips because already_tried", || {
-        logged(&owned).contains("reason=already_tried").then_some(())
+        logged(&owned)
+            .contains("reason=already_tried")
+            .then_some(())
     });
     let count = fs::read_to_string(&runs_file).unwrap().lines().count();
     assert_eq!(count, 1, "failed resume must never retry automatically");
@@ -688,8 +837,11 @@ fn reload_resume_keeps_previous_rules_on_broken_config_and_cli_reports_rules() {
     let owned = Owned::new();
 
     let initial = list_resume(&owned, None);
-    let names: Vec<&str> =
-        loaded_config(&initial).rules.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = loaded_config(&initial)
+        .rules
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert_eq!(names, ["agy", "claude", "codex", "opencode", "pi"]);
 
     let zero_status = {
@@ -697,7 +849,10 @@ fn reload_resume_keeps_previous_rules_on_broken_config_and_cli_reports_rules() {
         owned.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             daemon
-                .list_resume(ListResumeRequest { on: None, terminal_id: Some(0) })
+                .list_resume(ListResumeRequest {
+                    on: None,
+                    terminal_id: Some(0),
+                })
                 .await
                 .unwrap_err()
         })
@@ -715,21 +870,55 @@ command = ["htop"]
 "#,
     );
     let ok = reload_resume(&owned);
-    assert_eq!(ok.outcome, Some(api::reload_resume_response::Outcome::ReloadedRules(5)));
+    assert_eq!(
+        ok.outcome,
+        Some(api::reload_resume_response::Outcome::ReloadedRules(5))
+    );
 
     let after = list_resume(&owned, None);
     let after_cfg = loaded_config(&after);
-    assert!(after_cfg.rules.iter().any(|r| r.name == "htop" && !r.builtin));
+    assert!(
+        after_cfg
+            .rules
+            .iter()
+            .any(|r| r.name == "htop" && !r.builtin)
+    );
     assert!(after_cfg.disabled_rules.iter().any(|r| r.name == "codex"));
 
-    let cli_rules = owned.host.vars().command(&LUNE).args(["resume", "--rules"]).output().unwrap();
-    assert!(cli_rules.status.success(), "{}", String::from_utf8_lossy(&cli_rules.stderr));
+    let cli_rules = owned
+        .host
+        .vars()
+        .command(&LUNE)
+        .args(["resume", "--rules"])
+        .output()
+        .unwrap();
+    assert!(
+        cli_rules.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_rules.stderr)
+    );
     let rules_stdout = String::from_utf8_lossy(&cli_rules.stdout);
-    assert!(rules_stdout.contains("htop [custom]: htop"), "{rules_stdout}");
-    assert!(rules_stdout.contains("codex: disabled in config"), "{rules_stdout}");
+    assert!(
+        rules_stdout.contains("htop [custom]: htop"),
+        "{rules_stdout}"
+    );
+    assert!(
+        rules_stdout.contains("codex: disabled in config"),
+        "{rules_stdout}"
+    );
 
-    let cli_live = owned.host.vars().command(&LUNE).arg("resume").output().unwrap();
-    assert!(cli_live.status.success(), "{}", String::from_utf8_lossy(&cli_live.stderr));
+    let cli_live = owned
+        .host
+        .vars()
+        .command(&LUNE)
+        .arg("resume")
+        .output()
+        .unwrap();
+    assert!(
+        cli_live.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_live.stderr)
+    );
 
     write_config(&owned, "[resume\ndefaults = true");
     let bad = reload_resume(&owned);
@@ -742,8 +931,17 @@ command = ["htop"]
     let still = list_resume(&owned, None);
     assert!(loaded_config(&still).rules.iter().any(|r| r.name == "htop"));
 
-    let cli_bad = owned.host.vars().command(&LUNE).args(["resume", "--rules"]).output().unwrap();
-    assert!(!cli_bad.status.success(), "broken config should fail --rules validation");
+    let cli_bad = owned
+        .host
+        .vars()
+        .command(&LUNE)
+        .args(["resume", "--rules"])
+        .output()
+        .unwrap();
+    assert!(
+        !cli_bad.status.success(),
+        "broken config should fail --rules validation"
+    );
 }
 
 #[test]
@@ -752,7 +950,9 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
     let pi_dir = owned.host.home.path().join(".pi/agent");
     fs::create_dir_all(&pi_dir).unwrap();
     let ext_path = pi_dir.join("extensions/lune.ts");
-    eventually("luned installs pi extension", || ext_path.is_file().then_some(()));
+    eventually("luned installs pi extension", || {
+        ext_path.is_file().then_some(())
+    });
 
     let work = owned.host.home.path().join("work");
     fs::create_dir_all(&work).unwrap();
@@ -789,31 +989,58 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
     let key = shown.open_shell();
 
     run_in_shell(&owned, key, "claude --restricted");
-    let claude_pid: u32 =
-        eventually("restricted claude starts", || fs::read_to_string(&claude_pid_file).ok())
-            .parse()
-            .unwrap();
+    let claude_pid: u32 = eventually("restricted claude starts", || {
+        fs::read_to_string(&claude_pid_file).ok()
+    })
+    .parse()
+    .unwrap();
     let mut session_file = file_of_pid(CLAUDE_UUID, claude_pid, "idle");
     session_file["cwd"] = serde_json::json!(work_canon.to_str().unwrap());
     session_file["entrypoint"] = serde_json::json!("cli");
-    fs::write(sessions.join(format!("{claude_pid}.json")), session_file.to_string()).unwrap();
+    fs::write(
+        sessions.join(format!("{claude_pid}.json")),
+        session_file.to_string(),
+    )
+    .unwrap();
 
-    eventually("luned sees restricted claude on host without saving resume record", || {
-        let seen = owned.host.host().agents.iter().any(|a| a.pid == claude_pid);
-        let listed = list_resume(&owned, Some(key.id));
-        let empty = listed.terminals.first().is_some_and(|t| t.records.is_empty());
-        (seen && empty).then_some(())
-    });
+    eventually(
+        "luned sees restricted claude on host without saving resume record",
+        || {
+            let seen = owned.host.host().agents.iter().any(|a| a.pid == claude_pid);
+            let listed = list_resume(&owned, Some(key.id));
+            let empty = listed
+                .terminals
+                .first()
+                .is_some_and(|t| t.records.is_empty());
+            (seen && empty).then_some(())
+        },
+    );
 
     let laid_after_claude = kill_and_restore(&owned, &mut shown);
     let key2 = view_key(&laid_after_claude.views[0]).unwrap();
-    eventually("restricted claude is typed at prompt rather than executed", || {
-        owned.dumped(mux_key(key2)).contains("claude --restricted").then_some(())
-    });
-    let projects_file = owned.host.home.path().join(".local/state/lune/projects.json");
+    eventually(
+        "restricted claude is typed at prompt rather than executed",
+        || {
+            owned
+                .dumped(mux_key(key2))
+                .contains("claude --restricted")
+                .then_some(())
+        },
+    );
+    let projects_file = owned
+        .host
+        .home
+        .path()
+        .join(".local/state/lune/projects.json");
     let projects_text = fs::read_to_string(&projects_file).unwrap_or_default();
-    assert!(!projects_text.contains(CLAUDE_UUID), "untrusted agent must not be written as Runs::Agent: {projects_text}");
-    assert!(!claude_resumed.exists(), "claude --restricted must not auto-resume via legacy fallback");
+    assert!(
+        !projects_text.contains(CLAUDE_UUID),
+        "untrusted agent must not be written as Runs::Agent: {projects_text}"
+    );
+    assert!(
+        !claude_resumed.exists(),
+        "claude --restricted must not auto-resume via legacy fallback"
+    );
 
     let work_pi = owned.host.home.path().join("work_pi");
     fs::create_dir_all(&work_pi).unwrap();
@@ -848,15 +1075,21 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
     let pi_key = shown_pi.open_shell();
     run_in_shell(&owned, pi_key, "pi -e ./ext.ts 'NEVER_REPLAY_PROMPT'");
 
-    let info = eventually("pi extension emits resume without swallowing prompt", || {
-        let listed = list_resume(&owned, Some(pi_key.id));
-        let rec = listed.terminals.first()?.records.first()?;
-        (rec.source() == ResumeRecordSource::Osc7577
-            && trusted_rule(rec) == Some("pi")
-            && is_saved(rec))
+    let info = eventually(
+        "pi extension emits resume without swallowing prompt",
+        || {
+            let listed = list_resume(&owned, Some(pi_key.id));
+            let rec = listed.terminals.first()?.records.first()?;
+            (rec.source() == ResumeRecordSource::Osc7577
+                && trusted_rule(rec) == Some("pi")
+                && is_saved(rec))
             .then(|| rec.clone())
-    });
-    assert_eq!(info.argv, ["pi", "--session", "pi-sess-2", "-e", "./ext.ts"]);
+        },
+    );
+    assert_eq!(
+        info.argv,
+        ["pi", "--session", "pi-sess-2", "-e", "./ext.ts"]
+    );
 
     let _laid3 = kill_and_restore(&owned, &mut shown_pi);
     let got = eventually("pi resumes without replaying initial prompt", || {
@@ -913,29 +1146,46 @@ fn custom_absolute_claude_override_without_flags_synthesizes_and_resumes() {
     let mut shown = Shown::new(&owned, wt);
     let key = shown.open_shell();
 
-    run_in_shell(&owned, key, &format!("'{}' --model opus", claude_abs.display()));
-    let claude_pid: u32 = eventually("custom claude starts", || fs::read_to_string(&first_pid).ok())
-        .parse()
-        .unwrap();
+    run_in_shell(
+        &owned,
+        key,
+        &format!("'{}' --model opus", claude_abs.display()),
+    );
+    let claude_pid: u32 = eventually("custom claude starts", || {
+        fs::read_to_string(&first_pid).ok()
+    })
+    .parse()
+    .unwrap();
     let mut session_file = file_of_pid(CLAUDE_UUID, claude_pid, "idle");
     session_file["cwd"] = serde_json::json!(work_canon.to_str().unwrap());
     session_file["entrypoint"] = serde_json::json!("cli");
-    fs::write(sessions.join(format!("{claude_pid}.json")), session_file.to_string()).unwrap();
+    fs::write(
+        sessions.join(format!("{claude_pid}.json")),
+        session_file.to_string(),
+    )
+    .unwrap();
 
-    let info = eventually("synthesizer respects custom absolute path and omitted flags", || {
-        let listed = list_resume(&owned, Some(key.id));
-        let rec = listed.terminals.first()?.records.first()?;
-        (rec.source() == ResumeRecordSource::Synthesized
-            && trusted_rule(rec) == Some("claude")
-            && is_saved(rec))
+    let info = eventually(
+        "synthesizer respects custom absolute path and omitted flags",
+        || {
+            let listed = list_resume(&owned, Some(key.id));
+            let rec = listed.terminals.first()?.records.first()?;
+            (rec.source() == ResumeRecordSource::Synthesized
+                && trusted_rule(rec) == Some("claude")
+                && is_saved(rec))
             .then(|| rec.clone())
-    });
-    assert_eq!(info.argv, [claude_abs.to_str().unwrap(), "--resume", CLAUDE_UUID]);
+        },
+    );
+    assert_eq!(
+        info.argv,
+        [claude_abs.to_str().unwrap(), "--resume", CLAUDE_UUID]
+    );
 
     let _laid2 = kill_and_restore(&owned, &mut shown);
-    let got = eventually("custom absolute claude resumes without leaked default flags", || {
-        fs::read(&resumed_args).ok()
-    });
+    let got = eventually(
+        "custom absolute claude resumes without leaked default flags",
+        || fs::read(&resumed_args).ok(),
+    );
     let expected: Vec<u8> = ["--resume", CLAUDE_UUID]
         .iter()
         .flat_map(|s| s.as_bytes().iter().copied().chain(std::iter::once(0)))

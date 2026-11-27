@@ -68,7 +68,10 @@ impl Mark for Key {
 
     fn read(name: &str) -> Option<Self> {
         let (session, view) = name.rsplit_once('-')?;
-        let key = Key { session: Session::read(session)?, view: view.parse().ok()? };
+        let key = Key {
+            session: Session::read(session)?,
+            view: view.parse().ok()?,
+        };
         (key.name() == name).then_some(key)
     }
 }
@@ -136,16 +139,22 @@ impl<M: Mark> Ledger<M> {
             Ok(()) => {
                 swept_of_old_names::<M>(&dir);
                 Shared::Through(dir)
-            },
+            }
             Err(error) => Shared::Lost(format!("{}: {error}", dir.display())),
         };
-        let mut ledger = Ledger { shared, ..Ledger::default() };
+        let mut ledger = Ledger {
+            shared,
+            ..Ledger::default()
+        };
         ledger.reload();
         ledger
     }
 
     pub fn unshared(why: String) -> Self {
-        Ledger { shared: Shared::Lost(why), ..Ledger::default() }
+        Ledger {
+            shared: Shared::Lost(why),
+            ..Ledger::default()
+        }
     }
 
     pub fn dir(&self) -> Option<&Path> {
@@ -197,13 +206,17 @@ impl<M: Mark> Ledger<M> {
                 continue;
             };
             let kept = M::read(name).and_then(|mark| {
-                let nanos = fs::read_to_string(entry.path()).ok()?.trim_end().parse().ok()?;
+                let nanos = fs::read_to_string(entry.path())
+                    .ok()?
+                    .trim_end()
+                    .parse()
+                    .ok()?;
                 Some((mark, moment(nanos)))
             });
             match kept {
                 Some((mark, moment)) => {
                     moments.insert(mark, moment);
-                },
+                }
                 None => leftovers.extend(of_file::<M>(name)),
             }
         }
@@ -225,7 +238,10 @@ impl<M: Mark> Ledger<M> {
             }
         }
         self.leftovers.retain(|mark| !gone.contains(mark));
-        assert!(self.kept().all(|mark| !gone.contains(&mark)), "a ledger keeps no mark it forgot");
+        assert!(
+            self.kept().all(|mark| !gone.contains(&mark)),
+            "a ledger keeps no mark it forgot"
+        );
         let Shared::Through(dir) = &self.shared else {
             return;
         };
@@ -251,7 +267,11 @@ fn write<M: Mark>(
     moment: Option<SystemTime>,
 ) -> Result<(), String> {
     let name = mark.name();
-    assert_eq!(of_file(&name), Some(mark), "a ledger opening never sweeps a mark's file");
+    assert_eq!(
+        of_file(&name),
+        Some(mark),
+        "a ledger opening never sweeps a mark's file"
+    );
     let file = dir.join(&name);
     let kept = match moment {
         Some(moment) => {
@@ -259,11 +279,15 @@ fn write<M: Mark>(
             let nanos = nanos(moment).ok_or_else(unnamed)?;
             let unfinished = format!("{name}.{unfinished}");
             let swept = of_file(&unfinished);
-            assert_eq!(swept, Some(mark), "a ledger opening never sweeps a file half written");
+            assert_eq!(
+                swept,
+                Some(mark),
+                "a ledger opening never sweeps a file half written"
+            );
             let unfinished = dir.join(unfinished);
             fs::write(&unfinished, format!("{nanos}\n"))
                 .and_then(|()| fs::rename(&unfinished, &file))
-        },
+        }
         None => fs::remove_file(&file).or_else(|error| match error.kind() {
             ErrorKind::NotFound => Ok(()),
             _ => Err(error),
@@ -285,7 +309,10 @@ mod tests {
     }
 
     fn key(project: u64, view: u64) -> Key {
-        Key { session: session(project), view: ViewId::of(view).unwrap() }
+        Key {
+            session: session(project),
+            view: ViewId::of(view).unwrap(),
+        }
     }
 
     fn keys(ledger: &Ledger<Key>) -> Vec<Key> {
@@ -310,7 +337,10 @@ mod tests {
         there.set(key(10, 3), None);
         here.set(key(10, 3), None);
         assert!(!here.reload());
-        assert_eq!((here.get(key(10, 3)), here.get(key(20, u64::MAX))), (None, Some(at(7))));
+        assert_eq!(
+            (here.get(key(10, 3)), here.get(key(20, u64::MAX))),
+            (None, Some(at(7)))
+        );
         assert_eq!((here.lost(), there.lost()), (None, None));
     }
 
@@ -350,8 +380,14 @@ mod tests {
         ledger.set(key(10, 1), Some(at(5)));
         assert_eq!(swept.map(|file| file.exists()), [false; 5]);
         assert!(writing.exists());
-        assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 1)), Some(at(5)));
-        assert_eq!(Session::read(&format!("{}-1", nanos(at(10)).unwrap())), None);
+        assert_eq!(
+            Ledger::within(scratch.path().to_owned()).get(key(10, 1)),
+            Some(at(5))
+        );
+        assert_eq!(
+            Session::read(&format!("{}-1", nanos(at(10)).unwrap())),
+            None
+        );
     }
 
     #[test]
@@ -392,7 +428,10 @@ mod tests {
             let mut ledger = writer.join().unwrap();
             assert_eq!(ledger.lost(), None);
             ledger.set(key(10, 4), Some(at(1)));
-            assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 4)), Some(at(1)));
+            assert_eq!(
+                Ledger::within(scratch.path().to_owned()).get(key(10, 4)),
+                Some(at(1))
+            );
         }
     }
 
@@ -406,7 +445,10 @@ mod tests {
             fs::write(file, "5\n").unwrap();
         }
         let ledger: Ledger<Session> = Ledger::within(scratch.path().to_owned());
-        assert_eq!([&view, &project, &half].map(|file| file.exists()), [false, true, false]);
+        assert_eq!(
+            [&view, &project, &half].map(|file| file.exists()),
+            [false, true, false]
+        );
         assert_eq!(ledger.kept().collect::<Vec<_>>(), [session(20)]);
         assert_eq!(ledger.get(session(20)), Some(moment(5)));
     }
@@ -419,8 +461,11 @@ mod tests {
         for key in [gone, sibling, other] {
             here.set(key, Some(at(5)));
         }
-        let left = [gone, sibling]
-            .map(|key| scratch.path().join(format!("{}.{}", key.name(), state::unfinished())));
+        let left = [gone, sibling].map(|key| {
+            scratch
+                .path()
+                .join(format!("{}.{}", key.name(), state::unfinished()))
+        });
         for file in &left {
             fs::write(file, "5").unwrap();
         }
@@ -443,7 +488,10 @@ mod tests {
         let gone = BTreeSet::from([key(30, 1), key(40, 1)]);
         assert_eq!(ledger.kept().collect::<BTreeSet<_>>(), gone);
         ledger.forget(&gone);
-        assert_eq!((half.exists(), empty.exists(), ledger.kept().count()), (false, false, 0));
+        assert_eq!(
+            (half.exists(), empty.exists(), ledger.kept().count()),
+            (false, false, 0)
+        );
     }
 
     #[test]
@@ -452,7 +500,11 @@ mod tests {
         let file = scratch.path().join("not a folder");
         fs::write(&file, "").unwrap();
         let mut ledger = Ledger::within(file.join("seen"));
-        assert!(ledger.lost().is_some_and(|lost| lost.contains("not a folder")));
+        assert!(
+            ledger
+                .lost()
+                .is_some_and(|lost| lost.contains("not a folder"))
+        );
         ledger.set(key(10, 1), Some(at(5)));
         assert_eq!(ledger.get(key(10, 1)), Some(at(5)));
     }
@@ -464,8 +516,15 @@ mod tests {
         ledger.set(key(10, 1), Some(at(5)));
         let before = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
         ledger.set(key(10, 1), Some(before));
-        assert!(ledger.lost().is_some_and(|lost| lost.contains("before 1970")));
+        assert!(
+            ledger
+                .lost()
+                .is_some_and(|lost| lost.contains("before 1970"))
+        );
         assert_eq!(ledger.get(key(10, 1)), Some(before));
-        assert_eq!(Ledger::within(scratch.path().to_owned()).get(key(10, 1)), Some(at(5)));
+        assert_eq!(
+            Ledger::within(scratch.path().to_owned()).get(key(10, 1)),
+            Some(at(5))
+        );
     }
 }

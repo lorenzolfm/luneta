@@ -5,22 +5,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use hyper_util::rt::TokioIo;
-use lune_waits::{eventually, Span};
+use lune_waits::{Span, eventually};
 use luned::mux::own::api::mux_client::MuxClient;
 use luned::mux::own::api::{self as mux_api, InfoRequest, InfoResponse, ListRequest, Listing};
 use luned::mux::own::server;
 use luned::{ALONE, SWEEP};
 use tempfile::TempDir;
 use tokio_stream::wrappers::UnixListenerStream;
-use tonic::codegen::{http, Body, BoxFuture, Context, Poll, Service, StdError};
+use tonic::Status;
+use tonic::codegen::{Body, BoxFuture, Context, Poll, Service, StdError, http};
 use tonic::server::{Grpc, NamedService, UnaryService};
 use tonic::service::Routes;
 use tonic::transport::{Channel, Endpoint, Server, Uri};
-use tonic::Status;
 use tonic_prost::ProstCodec;
 
 use crate::demand::build_of;
-use crate::host::{script, start, start_as, Daemon, Host, Running, Slot, LUNED};
+use crate::host::{Daemon, Host, LUNED, Running, Slot, script, start, start_as};
 
 const STAND_IN_MUX: &str = "LUNE_TEST_STAND_IN_MUX_FOLDER";
 
@@ -48,11 +48,19 @@ pub fn built_server() -> PathBuf {
     for source in built_from {
         files_in(&root.join(source), &mut sources);
     }
-    assert!(sources.len() > 2, "lune-mux's sources are not in {}", root.display());
+    assert!(
+        sources.len() > 2,
+        "lune-mux's sources are not in {}",
+        root.display()
+    );
     for source in sources {
         let changed = fs::metadata(&source).and_then(|it| it.modified());
         let fresh = changed.is_ok_and(|changed| changed <= built);
-        assert!(fresh, "{} changed since {shown} was built: {rebuild}", source.display());
+        assert!(
+            fresh,
+            "{} changed since {shown} was built: {rebuild}",
+            source.display()
+        );
     }
     program
 }
@@ -78,8 +86,15 @@ impl Owned {
         built_server();
         let host = Host::new();
         let daemon = start(host.vars()).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        Owned { host, daemon: Some(daemon), runtime }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        Owned {
+            host,
+            daemon: Some(daemon),
+            runtime,
+        }
     }
 
     pub fn stop_daemon(&mut self) {
@@ -87,7 +102,10 @@ impl Owned {
     }
 
     pub fn daemon_ended(&mut self, what: &str) -> std::process::ExitStatus {
-        self.daemon.as_mut().expect("a daemon was started").ended(what)
+        self.daemon
+            .as_mut()
+            .expect("a daemon was started")
+            .ended(what)
     }
 
     pub fn start_daemon(&mut self) {
@@ -116,16 +134,30 @@ impl Owned {
     pub fn listing(&self) -> Listing {
         let socket = self.socket();
         self.runtime.block_on(async move {
-            mux_client(socket).await.list(ListRequest {}).await.unwrap().into_inner()
+            mux_client(socket)
+                .await
+                .list(ListRequest {})
+                .await
+                .unwrap()
+                .into_inner()
         })
     }
 
     pub fn dumped(&self, terminal: mux_api::TerminalKey) -> String {
         let socket = self.socket();
         let dumped = mux_api::Dumped::Text.into();
-        let request = mux_api::DumpRequest { dumped, terminal: Some(terminal) };
+        let request = mux_api::DumpRequest {
+            dumped,
+            terminal: Some(terminal),
+        };
         self.runtime.block_on(async move {
-            mux_client(socket).await.dump(request).await.unwrap().into_inner().text
+            mux_client(socket)
+                .await
+                .dump(request)
+                .await
+                .unwrap()
+                .into_inner()
+                .text
         })
     }
 
@@ -143,10 +175,21 @@ impl Owned {
             ends,
             resume_in_shell: None,
         });
-        let size = Some(mux_api::Size { columns: 80, rows: 24 });
-        let request = mux_api::NewTerminalRequest { opens, tag: tag.to_vec(), size };
+        let size = Some(mux_api::Size {
+            columns: 80,
+            rows: 24,
+        });
+        let request = mux_api::NewTerminalRequest {
+            opens,
+            tag: tag.to_vec(),
+            size,
+        };
         self.runtime.block_on(async move {
-            let made = mux_client(socket).await.new_terminal(request).await.unwrap();
+            let made = mux_client(socket)
+                .await
+                .new_terminal(request)
+                .await
+                .unwrap();
             made.into_inner().terminal.unwrap()
         })
     }
@@ -154,7 +197,11 @@ impl Owned {
     pub fn close_terminal(&self, request: mux_api::CloseTerminalRequest) {
         let socket = self.socket();
         self.runtime.block_on(async move {
-            mux_client(socket).await.close_terminal(request).await.unwrap();
+            mux_client(socket)
+                .await
+                .close_terminal(request)
+                .await
+                .unwrap();
         });
     }
 
@@ -182,13 +229,18 @@ impl Owned {
     pub fn stand_in_mux(&self, says: Option<&str>) -> Running {
         let mut command = Command::new(env::current_exe().unwrap());
         command.args(["own::stand_in_mux", "--exact", "--ignored"]);
-        command.env(STAND_IN_MUX, self.host.folder()).stdout(Stdio::null()).stderr(Stdio::null());
+        command
+            .env(STAND_IN_MUX, self.host.folder())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         if let Some(says) = says {
             command.env(STAND_IN_SAYS, says);
         }
         let stand_in = Running::spawn(&mut command);
         let pid = rustix::process::Pid::from_raw(i32::try_from(stand_in.pid()).unwrap());
-        eventually("the stand-in lune-mux listens", || (self.mux_pid() == pid).then_some(()));
+        eventually("the stand-in lune-mux listens", || {
+            (self.mux_pid() == pid).then_some(())
+        });
         stand_in
     }
 }
@@ -214,12 +266,19 @@ fn stand_in_mux() {
     };
     let says = env::var(STAND_IN_SAYS).ok().map(build_of);
     let says = says.map(|(version, built)| InfoResponse { version, built });
-    let lock = OpenOptions::new().create(true).truncate(false).write(true).open(folder.join(LOCK));
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(folder.join(LOCK));
     let lock = lock.unwrap();
     lock.lock().unwrap();
     let socket = folder.join(server::SOCKET);
     let _ = fs::remove_file(&socket);
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         Server::builder()
@@ -257,7 +316,9 @@ where
             let Some(says) = says else {
                 return Ok(Status::unimplemented("a stand-in lune-mux").into_http());
             };
-            Ok(Grpc::new(ProstCodec::default()).unary(Says(says), request).await)
+            Ok(Grpc::new(ProstCodec::default())
+                .unary(Says(says), request)
+                .await)
         })
     }
 }
@@ -362,14 +423,17 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     fs::write(sessions.join(format!("{pid}.json")), file.to_string()).unwrap();
     fs::write(&step1, "").unwrap();
 
-    let blocked = eventually("rung 1 blocked overrides rung 2 busy and carries subagents", || {
-        owned.host.host().agents.into_iter().find(|agent| {
-            agent.pid == pid
-                && agent.session_id.as_deref() == Some("osc-session")
-                && matches!(AgentStatus::of_api(agent), AgentStatus::Blocked { .. })
-                && agent.status_rung == Some(StatusRung::Osc7501.into())
-        })
-    });
+    let blocked = eventually(
+        "rung 1 blocked overrides rung 2 busy and carries subagents",
+        || {
+            owned.host.host().agents.into_iter().find(|agent| {
+                agent.pid == pid
+                    && agent.session_id.as_deref() == Some("osc-session")
+                    && matches!(AgentStatus::of_api(agent), AgentStatus::Blocked { .. })
+                    && agent.status_rung == Some(StatusRung::Osc7501.into())
+            })
+        },
+    );
     assert_eq!(
         AgentStatus::of_api(&blocked),
         AgentStatus::Blocked {
@@ -382,7 +446,9 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     assert_eq!(blocked.subagents[0].title.as_deref(), Some("Explore"));
     assert_eq!(
         blocked.subagents[0].phase,
-        Some(api::subagent::Phase::Working(api::WorkingStatus { progress: Some(50) }))
+        Some(api::subagent::Phase::Working(api::WorkingStatus {
+            progress: Some(50)
+        }))
     );
 
     fs::write(&step2, "").unwrap();
@@ -395,7 +461,9 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     });
     assert_eq!(
         AgentStatus::of_api(&done),
-        AgentStatus::Done { message: Message::parse("message", "All done").ok() }
+        AgentStatus::Done {
+            message: Message::parse("message", "All done").ok()
+        }
     );
 
     fs::write(&step3, "").unwrap();
@@ -422,7 +490,11 @@ fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
     eventually("the first server listens", || socket.exists().then_some(()));
     let mut second = host.vars().command(program);
     second.arg(host.folder());
-    let second = second.stdin(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    let second = second
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
     assert_eq!(second.code(), Some(i32::from(server::ANOTHER_RUNS)));
 }
 

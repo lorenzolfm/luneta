@@ -21,6 +21,7 @@ pub mod helper;
 pub mod images;
 pub mod issues;
 mod keeps;
+mod layouts;
 pub mod links;
 pub mod log;
 pub mod mux;
@@ -34,55 +35,54 @@ pub mod program;
 pub mod projects;
 pub mod prunes;
 pub mod rebases;
+mod remote;
 pub mod repositories;
 pub mod resume;
-mod remote;
 pub mod sayings;
 pub mod screens;
 pub mod seats;
-mod shows;
 pub mod shells;
+mod shows;
+pub mod skills;
+pub mod state;
 mod statuses;
 mod streams;
-pub mod skills;
 mod tailnet;
 pub mod tasks;
 pub mod terminal_socket;
-pub mod state;
 pub mod terminate;
 mod titles;
 mod topics;
 pub mod transcripts;
-mod layouts;
 mod watch;
 pub mod work;
 pub mod zoxide;
 
 pub use agy::folder as agy_folder;
-pub use pi::extension as pi_extension;
-pub use claude::{folder as claude_folder, one_answer, TORN};
+pub use claude::{TORN, folder as claude_folder, one_answer};
 pub use client::{
-    connect, info_of_any_build, kept, listening, reach, stream, through, unanswered, Answer,
-    Daemon, Held, LocalWatch, PeerPid, Reached, RoundTrip, Shared, Unasked, Unbridged, Unmatched,
-    Unreached, Unsent, WatchError, WatchedHost, Watching, ANSWER, BRIDGED, REACH,
+    ANSWER, Answer, BRIDGED, Daemon, Held, LocalWatch, PeerPid, REACH, Reached, RoundTrip, Shared,
+    Unasked, Unbridged, Unmatched, Unreached, Unsent, WatchError, WatchedHost, Watching, connect,
+    info_of_any_build, kept, listening, reach, stream, through, unanswered,
 };
-pub use daemon::{parked_watch, serve, Claim, ALONE, ANSWERING_MAX, LISTENING, SWEEP, WATCH};
-pub use keeps::KEPT;
+pub use daemon::{ALONE, ANSWERING_MAX, Claim, LISTENING, SWEEP, WATCH, parked_watch, serve};
 pub use directory::Directory;
 pub use folder::Refusal;
-pub use lune_protocol::release;
-pub use process::{
-    read_ready_line, var, Exit as ProcessExit, ReadyLine, ReadyPrefix, READY_BYTES_MAX,
-};
-pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE};
+pub use git::{REPOSITORY_VARS as GIT_REPOSITORY_VARS, local as local_git};
+pub use keeps::KEPT;
 pub use layouts::RESTORE_PAUSE;
-pub use git::{local as local_git, REPOSITORY_VARS as GIT_REPOSITORY_VARS};
-pub use shows::{
-    show, AskNumber, Beside, Direction, Echoed, FocusAsked, Found, Growth, Heard, Laid,
-    LayoutAsked, View, Rect, Show, Shows, Where,
+pub use lune_protocol::release;
+pub use pi::extension as pi_extension;
+pub use process::{
+    Exit as ProcessExit, READY_BYTES_MAX, ReadyLine, ReadyPrefix, read_ready_line, var,
 };
 pub use remote::{
-    named_by as hosts_named, parsed as hosts_parsed, sharing, Destination, Line as HostsLine,
-    Parsed as HostsParsed, FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX, HOSTS_MAX, THIS_MACHINE,
-    said_by, told_by,
+    Destination, FILE as HOSTS_FILE, HELD_MAX as BRIDGE_HELD_MAX, HOSTS_MAX, Line as HostsLine,
+    Parsed as HostsParsed, THIS_MACHINE, named_by as hosts_named, parsed as hosts_parsed, said_by,
+    sharing, told_by,
 };
+pub use shows::{
+    AskNumber, Beside, Direction, Echoed, FocusAsked, Found, Growth, Heard, Laid, LayoutAsked,
+    Rect, Show, Shows, View, Where, show,
+};
+pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE};

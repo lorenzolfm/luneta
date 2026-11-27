@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::path::PathBuf;
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -14,9 +14,9 @@ use tokio_stream::{Stream, StreamExt as _};
 use tonic::{Status, Streaming};
 
 use super::api::{self, from_viewer, to_viewer, typed};
-use super::frames::{colours, Frame};
-use super::server::{reached_at, refused, socket, unreached_at, Reached, Room, Roomed};
-use crate::api::{frames_request, On, FramesRequest};
+use super::frames::{Frame, colours};
+use super::server::{Reached, Room, Roomed, reached_at, refused, socket, unreached_at};
+use crate::api::{FramesRequest, On, frames_request};
 use crate::folder::Folder;
 use crate::remote::Destination;
 use crate::streams::{self, Dropped, Inbox, Next, Outbox};
@@ -83,11 +83,14 @@ impl Saying {
             Saying::Showing(keys) => {
                 let terminals = keys.into_iter().map(TerminalKey::said).collect();
                 from_viewer::Event::Showing(api::Showing { terminals })
-            },
+            }
             Saying::Typed(key, event) => {
-                let typed = api::Typed { terminal: Some(key.said()), event: Some(event) };
+                let typed = api::Typed {
+                    terminal: Some(key.said()),
+                    event: Some(event),
+                };
                 from_viewer::Event::Typed(typed)
-            },
+            }
         };
         api::FromViewer { event: Some(event) }
     }
@@ -100,7 +103,10 @@ pub struct Viewer {
 
 impl Viewer {
     pub fn show(&self, keys: BTreeSet<TerminalKey>) {
-        assert!(keys.len() <= SHOWN_MAX, "a viewer shows at most {SHOWN_MAX} terminals");
+        assert!(
+            keys.len() <= SHOWN_MAX,
+            "a viewer shows at most {SHOWN_MAX} terminals"
+        );
         self.outbox.say(Saying::Showing(keys));
     }
 
@@ -117,8 +123,14 @@ impl Drop for Viewer {
 
 #[derive(Clone, Debug)]
 pub enum Reach {
-    Mux { socket: PathBuf, runs_in: Option<TerminalKey> },
-    On { luned: Folder, destination: Destination },
+    Mux {
+        socket: PathBuf,
+        runs_in: Option<TerminalKey>,
+    },
+    On {
+        luned: Folder,
+        destination: Destination,
+    },
 }
 
 pub fn start<Told: FnMut(Seen) + Send + 'static>(
@@ -142,14 +154,16 @@ pub async fn relayed(
 ) -> Result<impl Stream<Item = Result<api::ToViewer, Status>> + Send + 'static, Status> {
     let room = Room::relayed()?;
     let socket = socket().map_err(|failure| Status::failed_precondition(failure.to_string()))?;
-    let unreached =
-        |error: io::Error| Status::unavailable(unreached_at(&socket, &error));
+    let unreached = |error: io::Error| Status::unavailable(unreached_at(&socket, &error));
     let streams = match reached_at(&socket).await.map_err(unreached)? {
         Reached::Matched(matched) => matched.streams(room),
         Reached::Unreached => return Err(Status::unavailable("lune-mux does not run")),
         Reached::Unmatched(unmatched) => return Err(Status::unavailable(unmatched.to_string())),
     };
-    let heard = streams.show(said).await.map_err(|status| relayed_from_mux(&status))?;
+    let heard = streams
+        .show(said)
+        .await
+        .map_err(|status| relayed_from_mux(&status))?;
     Ok(heard.map(|heard| heard.map_err(|status| relayed_from_mux(&status))))
 }
 
@@ -209,25 +223,40 @@ async fn hearing(
             let hello = from_viewer::Event::Hello(greeting.greeted(*runs_in));
             let first = api::FromViewer { event: Some(hello) };
             let heard = streams.show(tokio_stream::once(first).chain(sent)).await;
-            heard.map(Hearing::Mux).map_err(|status| refused(&status).to_string())
-        },
+            heard
+                .map(Hearing::Mux)
+                .map_err(|status| refused(&status).to_string())
+        }
         Reach::On { luned, destination } => {
             let daemon = match crate::reach(luned).await {
                 Ok(crate::Reached::Matched(daemon)) => daemon,
                 Ok(crate::Reached::Unmatched(unmatched)) => return Err(unmatched.to_string()),
                 Err(error) => return Err(format!("luned is not reached: {error}")),
             };
-            let on = Some(On { destination: destination.to_string() });
-            let hello = frames_request::Hello { on, greeting: Some(greeting.greeted(None)) };
-            let first = FramesRequest { event: Some(frames_request::Event::Hello(hello)) };
-            let said = |said| FramesRequest { event: Some(frames_request::Event::Said(said)) };
+            let on = Some(On {
+                destination: destination.to_string(),
+            });
+            let hello = frames_request::Hello {
+                on,
+                greeting: Some(greeting.greeted(None)),
+            };
+            let first = FramesRequest {
+                event: Some(frames_request::Event::Hello(hello)),
+            };
+            let said = |said| FramesRequest {
+                event: Some(frames_request::Event::Said(said)),
+            };
             let words = tokio_stream::once(first).chain(sent.map(said));
-            let heard = daemon.frames(crate::ANSWER, words).await.map_err(|unasked| match unasked {
-                crate::Unasked::Unsent(unsent) => unsent.to_string(),
-                crate::Unasked::Asked(status) => said_by_luned(&status),
-            })?;
+            let heard =
+                daemon
+                    .frames(crate::ANSWER, words)
+                    .await
+                    .map_err(|unasked| match unasked {
+                        crate::Unasked::Unsent(unsent) => unsent.to_string(),
+                        crate::Unasked::Asked(status) => said_by_luned(&status),
+                    })?;
             Ok(Hearing::On(heard))
-        },
+        }
     }
 }
 
@@ -256,7 +285,7 @@ async fn stream(
                     return Ok(untaken());
                 }
                 continue;
-            },
+            }
         };
         match said.event {
             Some(to_viewer::Event::Frame(frame)) => match Frame::heard(frame) {
@@ -267,7 +296,7 @@ async fn stream(
                 Err(why) => return Ok(format!("lune-mux said what lune cannot read: {why}")),
             },
             Some(to_viewer::Event::Refused(api::Refused { reason })) => told(Seen::Refused(reason)),
-            Some(to_viewer::Event::Closed(_)) => {},
+            Some(to_viewer::Event::Closed(_)) => {}
             None => return Ok("lune-mux said nothing to its viewer".to_owned()),
         }
     }
@@ -282,27 +311,47 @@ mod tests {
     use tokio::sync::Semaphore;
     use tonic::Code;
 
-    use super::{relayed, Framed};
+    use super::{Framed, relayed};
+    use crate::mux::own::OwnMade;
     use crate::mux::own::frames::{self, Ending, Frame, Glyph, Line, Rows, Shows, Side, Size};
     use crate::mux::own::server::{RELAYED, RELAYED_MAX};
-    use crate::mux::own::OwnMade;
 
     #[test]
     fn a_framed_holds_its_permit_until_take_finishes() {
         let budget = Arc::new(Semaphore::new(1));
         let permit = Arc::clone(&budget).try_acquire_owned().unwrap();
-        let size = Size { columns: Side::MIN, rows: Side::MIN };
-        let glyph = Glyph { shows: Shows::Blank, style: frames::Style::PLAIN };
+        let size = Size {
+            columns: Side::MIN,
+            rows: Side::MIN,
+        };
+        let glyph = Glyph {
+            shows: Shows::Blank,
+            style: frames::Style::PLAIN,
+        };
         let line = Line::new(vec![glyph], Ending::Here, Side::MIN).unwrap();
-        let key = TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(0) };
+        let key = TerminalKey {
+            id: NonZeroU32::MIN,
+            made: OwnMade::from_nanos(0),
+        };
         let frame = Frame::new(key, size, Rows::Whole(vec![line]), None, false).unwrap();
-        let framed = Framed { frame, taken: permit };
+        let framed = Framed {
+            frame,
+            taken: permit,
+        };
         let terminal = framed.take(|frame| {
-            assert_eq!(budget.available_permits(), 0, "the permit stays held while take runs");
+            assert_eq!(
+                budget.available_permits(),
+                0,
+                "the permit stays held while take runs"
+            );
             frame.terminal()
         });
         assert_eq!(terminal, key);
-        assert_eq!(budget.available_permits(), 1, "the permit returns once take finishes");
+        assert_eq!(
+            budget.available_permits(),
+            1,
+            "the permit returns once take finishes"
+        );
     }
 
     #[test]

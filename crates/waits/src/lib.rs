@@ -1,4 +1,7 @@
-#![expect(clippy::panic, reason = "a wait that runs out fails the test that waited, with what it waited for")]
+#![expect(
+    clippy::panic,
+    reason = "a wait that runs out fails the test that waited, with what it waited for"
+)]
 
 use std::fmt::{self, Debug, Display};
 use std::future::IntoFuture;
@@ -17,11 +20,20 @@ pub const OUTLASTING: Duration = PATIENCE.saturating_mul(2);
 
 const LOOK: Duration = Duration::from_millis(20);
 
-const _: () = assert!(LOOK.as_millis() < QUIET.as_millis(), "a quiet window is looked at more than once");
+const _: () = assert!(
+    LOOK.as_millis() < QUIET.as_millis(),
+    "a quiet window is looked at more than once"
+);
 
-const _: () = assert!(QUIET.as_millis() < PATIENCE.as_millis(), "a quiet window is shorter than any wait for an event");
+const _: () = assert!(
+    QUIET.as_millis() < PATIENCE.as_millis(),
+    "a quiet window is shorter than any wait for an event"
+);
 
-const _: () = assert!(PATIENCE.as_nanos() < OUTLASTING.as_nanos(), "it outlasts any wait for an event");
+const _: () = assert!(
+    PATIENCE.as_nanos() < OUTLASTING.as_nanos(),
+    "it outlasts any wait for an event"
+);
 
 const QUIETLY: Span = Span::of(QUIET);
 
@@ -33,7 +45,10 @@ impl Span {
     pub const fn of(span: Duration) -> Span {
         assert!(!span.is_zero(), "a window of no time sees nothing");
         let past = span.as_nanos() >= PATIENCE.as_nanos();
-        assert!(!past, "a window as long as a wait for an event waits on the clock");
+        assert!(
+            !past,
+            "a window as long as a wait for an event waits on the clock"
+        );
         Span(span)
     }
 }
@@ -44,9 +59,15 @@ pub struct Gap(Duration);
 impl Gap {
     #[must_use]
     pub const fn of(gap: Duration) -> Gap {
-        assert!(!gap.is_zero(), "writes kept apart by no time are not kept apart");
+        assert!(
+            !gap.is_zero(),
+            "writes kept apart by no time are not kept apart"
+        );
         let past = gap.as_nanos() > QUIET.as_nanos();
-        assert!(!past, "apart spaces writes past a settle, it is no wait for an event");
+        assert!(
+            !past,
+            "apart spaces writes past a settle, it is no wait for an event"
+        );
         Gap(gap)
     }
 }
@@ -105,7 +126,9 @@ pub struct Patience {
 impl Patience {
     #[must_use]
     pub fn begun() -> Patience {
-        Patience { deadline: Instant::now() + PATIENCE }
+        Patience {
+            deadline: Instant::now() + PATIENCE,
+        }
     }
 
     #[must_use]
@@ -156,11 +179,16 @@ impl Patience {
 }
 
 pub fn eventually<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
-    polled(|| check().ok_or(()), |()| panic!("never came to be in {PATIENCE:?}: {what}"))
+    polled(
+        || check().ok_or(()),
+        |()| panic!("never came to be in {PATIENCE:?}: {what}"),
+    )
 }
 
 pub fn eventually_showing<T, E: Debug>(what: &str, check: impl FnMut() -> Result<T, E>) -> T {
-    polled(check, |last| panic!("never came to be in {PATIENCE:?}: {what}, last {last:?}"))
+    polled(check, |last| {
+        panic!("never came to be in {PATIENCE:?}: {what}, last {last:?}")
+    })
 }
 
 fn polled<T, E>(mut check: impl FnMut() -> Result<T, E>, ran_out: impl FnOnce(E) -> T) -> T {
@@ -181,7 +209,10 @@ pub async fn eventually_async<T>(what: &str, mut check: impl AsyncFnMut() -> Opt
         if let Some(found) = check().await {
             return found;
         }
-        assert!(Instant::now() < deadline, "never came to be in {PATIENCE:?}: {what}");
+        assert!(
+            Instant::now() < deadline,
+            "never came to be in {PATIENCE:?}: {what}"
+        );
         tokio::time::sleep(LOOK).await;
     }
 }
@@ -227,7 +258,9 @@ pub fn seen_within<T>(span: Span, mut check: impl FnMut() -> Option<T>) -> Optio
 
 pub async fn repeated_through(span: Span, what: &str, mut step: impl AsyncFnMut()) {
     let end = Instant::now() + span.0;
-    let patience = Patience { deadline: end + PATIENCE };
+    let patience = Patience {
+        deadline: end + PATIENCE,
+    };
     while Instant::now() < end {
         patience.awaited(what, step()).await;
     }
@@ -247,7 +280,10 @@ pub fn ended(what: &str, child: &mut Child) -> ExitStatus {
 }
 
 pub async fn ended_async(what: &str, child: &mut Child) -> ExitStatus {
-    eventually_async(what, async || child.try_wait().expect("a child's status reads")).await
+    eventually_async(what, async || {
+        child.try_wait().expect("a child's status reads")
+    })
+    .await
 }
 
 pub fn runs_on(what: &str, child: &mut Child) {
@@ -261,5 +297,8 @@ pub fn apart(gap: Gap) {
 
 fn blocks_no_runtime() {
     let inside = tokio::runtime::Handle::try_current().is_ok();
-    assert!(!inside, "a blocking wait inside a runtime starves its tasks: wait with the async form");
+    assert!(
+        !inside,
+        "a blocking wait inside a runtime starves its tasks: wait with the async form"
+    );
 }

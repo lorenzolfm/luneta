@@ -26,11 +26,11 @@ impl fmt::Display for Refusal {
         match self {
             Refusal::NotYours(folder) => {
                 write!(f, "{} is not a folder of yours alone", folder.display())
-            },
+            }
             Refusal::Open(folder) => write!(f, "{} is open to other users", folder.display()),
             Refusal::Running(folder) => {
                 write!(f, "another lune-mux already runs in {}", folder.display())
-            },
+            }
             Refusal::Io(path, error) => write!(f, "{}: {error}", path.display()),
         }
     }
@@ -46,7 +46,9 @@ pub struct Claim {
 impl Claim {
     #[must_use]
     pub fn folder(&self) -> &Path {
-        self.socket.parent().expect("socket lives in its claimed folder")
+        self.socket
+            .parent()
+            .expect("socket lives in its claimed folder")
     }
 
     pub fn bind(&self) -> io::Result<(UnixListener, Bound)> {
@@ -56,27 +58,34 @@ impl Claim {
 
 pub fn claim(path: &Path) -> Result<Claim, Refusal> {
     match DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {},
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
         Err(error) => return Err(Refusal::Io(path.to_owned(), error)),
     }
     check(path)?;
     let lock_path = path.join(LOCK);
-    let lock =
-        OpenOptions::new().create(true).truncate(false).write(true).mode(0o600).open(&lock_path);
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&lock_path);
     let lock = lock.map_err(|error| Refusal::Io(lock_path.clone(), error))?;
     match lock.try_lock() {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Err(Refusal::Running(path.to_owned())),
         Err(TryLockError::Error(error)) => return Err(Refusal::Io(lock_path, error)),
     }
     let socket = path.join(SOCKET);
     match fs::remove_file(&socket) {
-        Ok(()) => {},
-        Err(error) if error.kind() == ErrorKind::NotFound => {},
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(Refusal::Io(socket, error)),
     }
-    Ok(Claim { socket, _lock: lock })
+    Ok(Claim {
+        socket,
+        _lock: lock,
+    })
 }
 
 fn check(folder: &Path) -> Result<(), Refusal> {
