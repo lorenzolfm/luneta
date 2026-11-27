@@ -304,7 +304,7 @@
               cargoExtraArgs = "--locked";
               cargoClippyExtraArgs = "${clippyRun} --exclude lune-phone-bindgen -- -D warnings";
               postBuild = ''
-                cargoWithProfile check --locked ${daemonPackages}
+                cargoWithProfile clippy --locked ${daemonPackages} -- -D warnings
               '';
               doCheck = false;
               doInstallCargoArtifacts = false;

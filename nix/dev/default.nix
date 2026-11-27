@@ -72,6 +72,7 @@ pkgs.writeShellApplication {
   passthru.commands = {
     lint = command (import ./commands/lint.nix args);
     clippy-cross = command (import ./commands/clippy.nix args).cross;
+    clippy-release = command (import ./commands/clippy.nix args).release;
   };
   text = ''
     paint() {

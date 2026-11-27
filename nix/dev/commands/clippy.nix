@@ -8,19 +8,27 @@
   ...
 }:
 let
+  hostTarget = pkgs.stdenv.hostPlatform.rust.rustcTarget;
   target =
     if pkgs.stdenv.hostPlatform.isDarwin then "x86_64-unknown-linux-gnu" else "aarch64-apple-darwin";
   tools = [ (toolchain.override { targets = [ target ]; }) ] ++ buildTools ++ [ pkgs.git ];
-  buildScriptsSkipped = pkgs.writeText "clippy-cross.toml" ''
-    [target.${target}.transcribe]
-    rustc-link-lib = ["transcribe"]
-    [target.${target}.alsa]
-    rustc-link-lib = ["asound"]
-    [target.${target}.ghostty-vt]
-    rustc-link-lib = ["ghostty-vt"]
+  skipNative =
+    triple:
+    ''
+      [target.${triple}.transcribe]
+      rustc-link-lib = ["transcribe"]
+      [target.${triple}.alsa]
+      rustc-link-lib = ["asound"]
+      [target.${triple}.ghostty-vt]
+      rustc-link-lib = ["ghostty-vt"]
+    '';
+  buildScriptsSkipped = pkgs.writeText "clippy-skip-native.toml" ''
+    ${skipNative hostTarget}
+    ${skipNative target}
   '';
+  hostRelease = "cargo clippy --config ${buildScriptsSkipped} --locked ${daemonPackages} --release -- -D warnings";
   crossClippy = ''cargo clippy --config ${buildScriptsSkipped} --locked ${clippyRun} --target ${target} "$@" -- -D warnings'';
-  crossCheck = "cargo check --config ${buildScriptsSkipped} --locked ${daemonPackages} --target ${target} --release";
+  crossRelease = "cargo clippy --config ${buildScriptsSkipped} --locked ${daemonPackages} --target ${target} --release -- -D warnings";
 in
 {
   name = "clippy";
@@ -31,7 +39,7 @@ in
     ${compileEnv}
     status=0
     cargo clippy --locked ${clippyRun} "$@" -- -D warnings || status=$?
-    cargo check --locked ${daemonPackages} || status=$?
+    ${hostRelease} || status=$?
     if [ "$status" -eq 0 ]; then
       case " $* " in
         *" --allow-dirty "*) ;;
@@ -40,7 +48,7 @@ in
     fi
     echo "dev clippy: linting for ${target}" >&2
     ${crossClippy} || status=$?
-    ${crossCheck} || status=$?
+    ${crossRelease} || status=$?
     exit "$status"
   '';
   cross = {
@@ -50,8 +58,16 @@ in
       ${compileEnv}
       status=0
       ${crossClippy} || status=$?
-      ${crossCheck} || status=$?
+      ${crossRelease} || status=$?
       exit "$status"
+    '';
+  };
+  release = {
+    name = "clippy-release";
+    tools = buildTools ++ [ pkgs.git ];
+    text = ''
+      ${compileEnv}
+      ${hostRelease}
     '';
   };
 }

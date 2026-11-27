@@ -5,10 +5,7 @@ let
   waits = ../.config/ast-grep/waits;
   calls = ../.config/ast-grep/calls;
   nextestRules = import ./nextest-rules.nix { inherit pkgs; };
-  binTestRules = import ./bin-test-rules.nix {
-    inherit pkgs;
-    root = ../.;
-  };
+  binTestRules = pkgs.writeTextDir "bin-tests.yml" (import ./bin-test-rules.nix { root = ../.; });
   grammar = language: "${pkgs.tree-sitter-grammars."tree-sitter-${language}"}/parser";
   extensions = {
     fish = [ "fish" ];
@@ -88,11 +85,27 @@ pkgs.writeShellApplication {
     pkgs.coreutils
     pkgs.findutils
     pkgs.gnugrep
+    pkgs.jq
   ];
   text = ''
+    tmp_config=""
+    inspect=""
+    trap '[ -z "$inspect" ] || rm -f "$inspect"; [ -z "$tmp_config" ] || rm -rf "$tmp_config"' EXIT
+    config=${config}
+    config_dir=${configDir}
+    if (( $# == 2 )) && [[ $1 == --bin-rules ]]; then
+      tmp_config="$(mktemp -d)"
+      jq --arg old ${lib.escapeShellArg "${binTestRules}"} --arg new "$2" \
+        '.ruleDirs |= map(if . == $old then $new else . end)' ${config} >"$tmp_config/sgconfig.yml"
+      config="$tmp_config/sgconfig.yml"
+      config_dir="$tmp_config"
+    elif (( $# != 0 )); then
+      echo "usage: lune-comments [--bin-rules <dir>]" >&2
+      exit 2
+    fi
     case "$PWD/" in
-      ${configDir}/*)
-        echo "lune-comments: the ast-grep config's folder ${configDir} holds $PWD, so its rules' files: and ignores: globs would see paths under that folder, not paths from $PWD" >&2
+      "$config_dir"/*)
+        echo "lune-comments: the ast-grep config's folder $config_dir holds $PWD, so its rules' files: and ignores: globs would see paths under that folder, not paths from $PWD" >&2
         exit 1
         ;;
     esac
@@ -111,11 +124,10 @@ pkgs.writeShellApplication {
       echo "lune-comments: no file to scan was listed on stdin" >&2
       exit 1
     fi
-    ast-grep test --config ${config} || status=1
+    ast-grep test --config "$config" || status=1
     inspect="$(mktemp)"
-    trap 'rm -f "$inspect"' EXIT
     printf '%s\0' "''${found[@]}" |
-      xargs -0 ast-grep scan --error --inspect entity --config ${config} 2>"$inspect" || status=1
+      xargs -0 ast-grep scan --error --inspect entity --config "$config" 2>"$inspect" || status=1
     ruled_file='^sg: entity[|]file[|](.*): language=[^,]*,appliedRuleCount=[1-9][0-9]*$'
     declare -A ruled=()
     while IFS= read -r line; do

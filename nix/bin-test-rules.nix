@@ -1,46 +1,77 @@
-{ pkgs, root }:
+{ root }:
 let
-  inherit (pkgs) lib;
-  crateDirs = builtins.attrNames (
-    lib.filterAttrs (_: kind: kind == "directory") (builtins.readDir (root + "/crates"))
+  cratesEntries = builtins.readDir (root + "/crates");
+  crateDirs = builtins.filter (name: cratesEntries.${name} == "directory") (
+    builtins.attrNames cratesEntries
   );
-  untestedBins = lib.concatMap (
-    dir:
+  stripDotSlash =
+    path:
+    if builtins.substring 0 2 path == "./" then
+      stripDotSlash (builtins.substring 2 (builtins.stringLength path - 2) path)
+    else
+      path;
+  firstExisting =
+    dir: candidates:
     let
-      manifest = builtins.fromTOML (builtins.readFile (root + "/crates/${dir}/Cargo.toml"));
-      packageName = manifest.package.name;
-      bins = builtins.filter (bin: (bin.test or true) == false) (manifest.bin or [ ]);
-      binPath =
-        bin:
-        lib.removePrefix "./" (
-          bin.path or (if bin.name == packageName then "src/main.rs" else "src/bin/${bin.name}.rs")
-        );
+      found = builtins.filter (rel: builtins.pathExists (root + "/crates/${dir}/${rel}")) candidates;
     in
-    map (bin: "crates/${dir}/${binPath bin}") bins
-  ) crateDirs;
-  rules = lib.optionals (untestedBins != [ ]) [
-    {
-      id = "untested-bins-hold-no-tests";
-      language = "rust";
-      files = untestedBins;
-      message = "This [[bin]] sets test = false in Cargo.toml, so Cargo neither compiles nor runs tests in it. Put unit tests and submodules in the crate's library, or remove test = false.";
-      rule.any = [
-        {
-          kind = "attribute";
-          any = [
-            { regex = ''^(::)?(\w+::)*test\b''; }
-            { regex = ''^(cfg|cfg_attr)\((?s:.*\btest\b.*)\)$''; }
+    if found == [ ] then null else builtins.head found;
+  resolveBin =
+    dir: packageName: bin:
+    let
+      explicit = if bin ? path then stripDotSlash bin.path else null;
+      candidates =
+        if bin.name == packageName then
+          [
+            "src/main.rs"
+            "src/bin/${bin.name}.rs"
+            "src/bin/${bin.name}/main.rs"
+          ]
+        else
+          [
+            "src/bin/${bin.name}.rs"
+            "src/bin/${bin.name}/main.rs"
           ];
-        }
-        {
-          kind = "mod_item";
-          not.has = {
-            field = "body";
-            kind = "declaration_list";
-          };
-        }
-      ];
-    }
-  ];
+      rel = if explicit != null then explicit else firstExisting dir candidates;
+    in
+    if rel == null then
+      throw "nix/bin-test-rules.nix: crates/${dir}/Cargo.toml [[bin]] ${bin.name} matches none of ${builtins.concatStringsSep ", " candidates}"
+    else if !builtins.pathExists (root + "/crates/${dir}/${rel}") then
+      throw "nix/bin-test-rules.nix: crates/${dir}/Cargo.toml [[bin]] ${bin.name} points to missing path crates/${dir}/${rel}"
+    else
+      "crates/${dir}/${rel}";
+  untestedBins = builtins.concatLists (
+    map (
+      dir:
+      let
+        manifest = builtins.fromTOML (builtins.readFile (root + "/crates/${dir}/Cargo.toml"));
+        packageName = manifest.package.name;
+        bins = builtins.filter (bin: (bin.test or true) == false) (manifest.bin or [ ]);
+      in
+      map (resolveBin dir packageName) bins
+    ) crateDirs
+  );
+  rule = {
+    id = "untested-bins-hold-no-tests";
+    language = "rust";
+    message = "This [[bin]] sets test = false in Cargo.toml, so Cargo neither compiles nor runs tests in it. Put unit tests and submodules in the crate's library, or remove test = false.";
+    rule.any = [
+      {
+        kind = "attribute";
+        any = [
+          { regex = ''^(::)?(\w+::)*test\b''; }
+          { regex = ''^(cfg|cfg_attr)\((?s:.*\btest\b.*)\)$''; }
+        ];
+      }
+      {
+        kind = "mod_item";
+        not.has = {
+          field = "body";
+          kind = "declaration_list";
+        };
+      }
+    ];
+  }
+  // (if untestedBins == [ ] then { ignores = [ "**" ]; } else { files = untestedBins; });
 in
-pkgs.writeTextDir "bin-tests.yml" (lib.concatMapStringsSep "\n---\n" builtins.toJSON rules)
+builtins.toJSON rule

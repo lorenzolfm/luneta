@@ -29,11 +29,15 @@ jobs:
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           base=HEAD^
           if [[ $GITHUB_EVENT_NAME == push ]]; then
             git fetch --depth=1 origin "$BEFORE"
             base="$BEFORE"
+          elif [[ $GITHUB_EVENT_NAME == merge_group ]]; then
+            git fetch --depth=1 origin "$MERGE_BASE"
+            base="$MERGE_BASE"
           fi
           files="$(git diff --no-renames --name-only "$base" HEAD)"
           docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/lune/SKILL.md || true)"
@@ -69,6 +73,7 @@ jobs:
             stalled-download-timeout = 30
             download-attempts = 3
             fallback = true
+            ${{ runner.os == 'macOS' && 'keep-outputs = true' || '' }}
             ${{ !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
             ${{ !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
 
@@ -112,6 +117,10 @@ jobs:
       - name: Clippy for the Mac
         if: ${{ !cancelled() }}
         run: nix run .#dev.commands.clippy-cross
+
+      - name: Clippy for Linux release
+        if: ${{ !cancelled() }}
+        run: nix run .#dev.commands.clippy-release
 
       - name: Advisories
         run: nix run .#dev -- deny advisories
