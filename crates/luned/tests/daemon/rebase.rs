@@ -331,6 +331,9 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
 
     commit(&dir.path, "theirs", "mine\n");
     commit(&up, "theirs", "yours\n");
+    eventually("the view's row sees the commit on fix", || {
+        window.shows(" fix +2 -1").then_some(())
+    });
     window.send(REBASE);
     let agent = eventually("an agent starts on the conflicts", || fs::read_to_string(&asked).ok());
     assert!(agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "), "{agent}");
