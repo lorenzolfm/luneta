@@ -2,6 +2,7 @@ name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -53,10 +54,10 @@ jobs:
 
     steps:
       - &checkout-head
-        name: actions/checkout v7, at the PR's head
+        name: actions/checkout v7, at the head to test
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - &install-nix
         name: cachix/install-nix-action v31
@@ -95,6 +96,12 @@ jobs:
           .#checks.x86_64-linux.profiles
           .#checks.x86_64-linux.swift
           .#checks.x86_64-linux.typescript
+
+      - name: Evaluate release derivations
+        run: >-
+          nix eval --json .#packages
+          --apply 'builtins.mapAttrs (_: packages: packages.luned.drvPath)'
+          >/dev/null
 
       - name: Bans, licenses and sources
         run: nix build -L --out-link deny .#checks.x86_64-linux.deny
@@ -258,11 +265,17 @@ jobs:
     needs: code
     if: >-
       ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && github.event_name == 'push' }}
+      && (github.event_name == 'push' || github.event_name == 'merge_group') }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+          - runner: macos-latest
+            system: aarch64-darwin
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -278,7 +291,7 @@ jobs:
       - *macos-dns
 
       - name: Build the release package
-        run: nix build -L ".#packages.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
+        run: nix build -L ".#packages.${{ matrix.system }}.luned"
 
       - *attic-push
 

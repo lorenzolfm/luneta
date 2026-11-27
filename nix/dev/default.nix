@@ -4,6 +4,7 @@
   buildTools,
   compileEnv,
   clippyRun,
+  daemonPackages,
   testRun,
   nextest,
   testTools,
@@ -27,6 +28,7 @@ let
       buildTools
       compileEnv
       clippyRun
+      daemonPackages
       testRun
       nextest
       testKit

@@ -4,6 +4,7 @@
   buildTools,
   compileEnv,
   clippyRun,
+  daemonPackages,
   ...
 }:
 let
@@ -18,7 +19,8 @@ let
     [target.${target}.ghostty-vt]
     rustc-link-lib = ["ghostty-vt"]
   '';
-  crossRun = ''cargo clippy --config ${buildScriptsSkipped} --locked ${clippyRun} --target ${target} "$@" -- -D warnings'';
+  crossClippy = ''cargo clippy --config ${buildScriptsSkipped} --locked ${clippyRun} --target ${target} "$@" -- -D warnings'';
+  crossCheck = "cargo check --config ${buildScriptsSkipped} --locked ${daemonPackages} --target ${target} --release";
 in
 {
   name = "clippy";
@@ -29,6 +31,7 @@ in
     ${compileEnv}
     status=0
     cargo clippy --locked ${clippyRun} "$@" -- -D warnings || status=$?
+    cargo check --locked ${daemonPackages} || status=$?
     if [ "$status" -eq 0 ]; then
       case " $* " in
         *" --allow-dirty "*) ;;
@@ -36,7 +39,8 @@ in
       esac
     fi
     echo "dev clippy: linting for ${target}" >&2
-    ${crossRun} || status=$?
+    ${crossClippy} || status=$?
+    ${crossCheck} || status=$?
     exit "$status"
   '';
   cross = {
@@ -44,7 +48,10 @@ in
     inherit tools;
     text = ''
       ${compileEnv}
-      ${crossRun}
+      status=0
+      ${crossClippy} || status=$?
+      ${crossCheck} || status=$?
+      exit "$status"
     '';
   };
 }

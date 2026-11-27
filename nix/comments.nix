@@ -5,6 +5,10 @@ let
   waits = ../.config/ast-grep/waits;
   calls = ../.config/ast-grep/calls;
   nextestRules = import ./nextest-rules.nix { inherit pkgs; };
+  binTestRules = import ./bin-test-rules.nix {
+    inherit pkgs;
+    root = ../.;
+  };
   grammar = language: "${pkgs.tree-sitter-grammars."tree-sitter-${language}"}/parser";
   extensions = {
     fish = [ "fish" ];
@@ -40,6 +44,7 @@ let
         "${waits}/rules"
         "${calls}/rules"
         "${nextestRules}"
+        "${binTestRules}"
       ];
       utilDirs = [ "${waits}/utils" ];
       testConfigs = [

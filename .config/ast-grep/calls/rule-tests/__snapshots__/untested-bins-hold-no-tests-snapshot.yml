@@ -6,6 +6,18 @@ snapshots:
       style: primary
       start: 3
       end: 12
+  '#[::core::prelude::v1::test] fn core_unit() {}':
+    labels:
+    - source: ::core::prelude::v1::test
+      style: primary
+      start: 2
+      end: 27
+  '#[::tokio::test] async fn qualified_async_unit() {}':
+    labels:
+    - source: ::tokio::test
+      style: primary
+      start: 2
+      end: 15
   '#[cfg(all(unix, test))] mod unix_tests {}':
     labels:
     - source: cfg(all(unix, test))
@@ -24,6 +36,12 @@ snapshots:
       style: primary
       start: 2
       end: 34
+  '#[path = "other.rs"] mod other;':
+    labels:
+    - source: mod other;
+      style: primary
+      start: 21
+      end: 31
   '#[test] fn unit() {}':
     labels:
     - source: test
@@ -42,3 +60,9 @@ snapshots:
       style: primary
       start: 2
       end: 13
+  mod helper;:
+    labels:
+    - source: mod helper;
+      style: primary
+      start: 0
+      end: 11

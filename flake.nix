@@ -225,8 +225,10 @@
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
           };
 
+          checksProfile = "checks";
+
           checksArgs = daemon // {
-            CARGO_PROFILE = "checks";
+            CARGO_PROFILE = checksProfile;
           };
 
           checksDeps = craneLib.buildDepsOnly (
@@ -315,6 +317,7 @@
               toolchain
               buildTools
               clippyRun
+              daemonPackages
               testRun
               nextest
               testTools
@@ -378,7 +381,17 @@
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             profiles =
               let
-                failures = import ./nix/profiles.nix { root = ./.; };
+                failures = import ./nix/profiles.nix {
+                  root = ./.;
+                  inherit checksProfile;
+                  derivationProfiles = {
+                    checksDeps = checksDeps.CARGO_PROFILE or null;
+                    tested = tested.CARGO_PROFILE or null;
+                    clippy = clippy.CARGO_PROFILE or null;
+                    releaseDeps = releaseDeps.CARGO_PROFILE or null;
+                    luned = luned.CARGO_PROFILE or null;
+                  };
+                };
               in
               pkgs.runCommand "lune-profiles" { } (
                 if failures == [ ] then
