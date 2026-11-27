@@ -7,7 +7,7 @@ in
 {
   name = "lint";
   usage = "[--breaking]";
-  help = "statix, deadnix, no comments, matching dev and release crate profiles, swift-format and swiftlint over the app, typescript over extensions, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
+  help = "statix, deadnix, no comments, matching dev and release crate profiles, iOS CI input filter parity, swift-format and swiftlint over the app, typescript over extensions, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
   tools = [
     pkgs.buf
     pkgs.deadnix
@@ -25,6 +25,18 @@ in
       failures="$(
         nix eval --impure --raw --expr \
           'builtins.concatStringsSep "\n" (import ${../../profiles.nix} { root = /. + builtins.getEnv "PWD"; })'
+      )" || return 1
+      [ -z "$failures" ] || {
+        printf '%s\n' "$failures" >&2
+        return 1
+      }
+    }
+
+    ios_inputs() {
+      local failures
+      failures="$(
+        nix eval --impure --raw --expr \
+          'builtins.concatStringsSep "\n" (import ${../../ios-inputs.nix} { root = /. + builtins.getEnv "PWD"; })'
       )" || return 1
       [ -z "$failures" ] || {
         printf '%s\n' "$failures" >&2
@@ -54,6 +66,7 @@ in
           xargs -0 deadnix --fail || status=1
         git ls-files -z --cached --others --exclude-standard | lune-comments || status=1
         profiles || status=1
+        ios_inputs || status=1
         git ls-files -z --cached --others --exclude-standard '*.swift' |
           xargs -0 -r swift-check || status=1
         git ls-files -z --cached --others --exclude-standard 'crates/*.ts' |

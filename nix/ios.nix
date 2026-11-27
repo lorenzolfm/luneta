@@ -129,17 +129,26 @@ let
       exit "$status"
     '';
   };
-in
-{
-  inherit xcodeVersion;
 
-  tools = [
-    checkoutSimulator
+  buildTools = [
     pkgs.xcodegen
     plutil
     requireXcode
     xcodebuild
     xcodebuildLogged
+  ];
+
+  runTools = [
+    checkoutSimulator
     xcrun
   ];
+in
+{
+  inherit
+    xcodeVersion
+    buildTools
+    runTools
+    ;
+
+  tools = buildTools ++ runTools;
 }
