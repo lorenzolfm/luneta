@@ -205,62 +205,72 @@
 
           nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
 
+          daemonPackages = "-p lune -p luned -p lune-mux";
+
+          testTools = [
+            pkgs.cargo-nextest
+            pkgs.git
+            pkgs.nodejs
+            pkgs.openssh
+            pkgs.procps
+          ];
+
           daemon = {
             pname = "luned";
             inherit version src;
             strictDeps = true;
 
-            cargoExtraArgs = "--locked -p lune -p luned -p lune-mux";
-
             nativeBuildInputs = [ pkgs.protobuf ] ++ speechBuild;
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
-
-            nativeCheckInputs = [
-              pkgs.cargo-nextest
-              pkgs.git
-              pkgs.nodejs
-              pkgs.openssh
-              pkgs.procps
-            ];
           };
 
-          checked = daemon // {
+          checksArgs = daemon // {
             CARGO_PROFILE = "checks";
           };
 
-          daemonDeps = craneLib.buildDepsOnly checked;
+          checksDeps = craneLib.buildDepsOnly (
+            checksArgs
+            // {
+              pname = "luned-checks";
+              cargoExtraArgs = "--locked ${daemonPackages}";
+              doCheck = true;
+            }
+          );
 
-          luned =
-            let
-              released = daemon // {
-                doCheck = false;
+          releaseArgs = daemon // {
+            CARGO_PROFILE = "release";
+            cargoExtraArgs = "--locked ${daemonPackages}";
+            doCheck = false;
+          };
+
+          releaseDeps = craneLib.buildDepsOnly releaseArgs;
+
+          luned = craneLib.buildPackage (
+            releaseArgs
+            // {
+              cargoArtifacts = releaseDeps;
+
+              meta = {
+                description = "The lune daemon, its CLI, and lune's own multiplexer";
+                homepage = "https://github.com/lorenzolfm/lune";
+                license = pkgs.lib.licenses.mit;
+                mainProgram = "luned";
+                platforms = systems;
               };
-            in
-            craneLib.buildPackage (
-              released
-              // {
-                cargoArtifacts = craneLib.buildDepsOnly released;
-
-                meta = {
-                  description = "The lune daemon, its CLI, and lune's own multiplexer";
-                  homepage = "https://github.com/lorenzolfm/lune";
-                  license = pkgs.lib.licenses.mit;
-                  mainProgram = "luned";
-                  platforms = systems;
-                };
-              }
-              // pkgs.lib.optionalAttrs (self ? rev) {
-                LUNE_BUILT = toString self.lastModified;
-              }
-            );
+            }
+            // pkgs.lib.optionalAttrs (self ? rev) {
+              LUNE_BUILT = toString self.lastModified;
+            }
+          );
 
           tested = craneLib.mkCargoDerivation (
-            builtins.removeAttrs checked [ "cargoExtraArgs" ]
+            checksArgs
             // {
               pnameSuffix = "-tested";
               src = testSrc;
-              cargoArtifacts = daemonDeps;
+              cargoArtifacts = checksDeps;
+              nativeCheckInputs = testTools;
               doCheck = true;
               doInstallCargoArtifacts = false;
 
@@ -285,12 +295,15 @@
           clippyRun = "--all-targets --workspace";
 
           clippy = craneLib.cargoClippy (
-            checked
+            checksArgs
             // {
               src = lintSrc;
-              cargoArtifacts = daemonDeps;
+              cargoArtifacts = checksDeps;
               cargoExtraArgs = "--locked";
               cargoClippyExtraArgs = "${clippyRun} --exclude lune-phone-bindgen -- -D warnings";
+              postBuild = ''
+                cargoWithProfile check --locked ${daemonPackages}
+              '';
               doCheck = false;
               doInstallCargoArtifacts = false;
             }
@@ -304,8 +317,8 @@
               clippyRun
               testRun
               nextest
+              testTools
               ;
-            testTools = daemon.nativeCheckInputs;
             compileEnv = ''
               export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
               export PKG_CONFIG_PATH="${

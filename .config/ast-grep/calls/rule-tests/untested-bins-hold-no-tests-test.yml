@@ -1,0 +1,14 @@
+id: untested-bins-hold-no-tests
+valid:
+  - "fn main() {}"
+  - "#[cfg(target_os = \"linux\")] fn only_linux() {}"
+  - "#[cfg(feature = \"testing\")] fn testing_feature() {}"
+  - "#[allow(clippy::test_attr_in_doctest)] fn allowed() {}"
+invalid:
+  - "#[test] fn unit() {}"
+  - "#[tokio::test] async fn async_unit() {}"
+  - "#[tokio::test(flavor = \"multi_thread\")] async fn mt_unit() {}"
+  - "#[cfg(test)] mod tests {}"
+  - "#![cfg(test)]"
+  - "#[cfg(all(unix, test))] mod unix_tests {}"
+  - "#[cfg_attr(test, allow(dead_code))] fn helper() {}"

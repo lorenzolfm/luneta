@@ -1,0 +1,44 @@
+id: untested-bins-hold-no-tests
+snapshots:
+  '#![cfg(test)]':
+    labels:
+    - source: cfg(test)
+      style: primary
+      start: 3
+      end: 12
+  '#[cfg(all(unix, test))] mod unix_tests {}':
+    labels:
+    - source: cfg(all(unix, test))
+      style: primary
+      start: 2
+      end: 22
+  '#[cfg(test)] mod tests {}':
+    labels:
+    - source: cfg(test)
+      style: primary
+      start: 2
+      end: 11
+  '#[cfg_attr(test, allow(dead_code))] fn helper() {}':
+    labels:
+    - source: cfg_attr(test, allow(dead_code))
+      style: primary
+      start: 2
+      end: 34
+  '#[test] fn unit() {}':
+    labels:
+    - source: test
+      style: primary
+      start: 2
+      end: 6
+  '#[tokio::test(flavor = "multi_thread")] async fn mt_unit() {}':
+    labels:
+    - source: tokio::test(flavor = "multi_thread")
+      style: primary
+      start: 2
+      end: 38
+  '#[tokio::test] async fn async_unit() {}':
+    labels:
+    - source: tokio::test
+      style: primary
+      start: 2
+      end: 13

@@ -208,7 +208,8 @@ jobs:
 
       - *tailscale
 
-      - name: Give macOS its own DNS back, and only the tailnet's names to MagicDNS
+      - &macos-dns
+        name: Give macOS its own DNS back, and only the tailnet's names to MagicDNS
         if: runner.os == 'macOS' && steps.tailscale.outcome != 'skipped'
         env:
           TAILSCALE: ${{ steps.tailscale.outcome }}
@@ -250,6 +251,34 @@ jobs:
 
       - name: Build and test the daemon
         run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
+
+      - *attic-push
+
+  release:
+    needs: code
+    if: >-
+      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && github.event_name == 'push' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - *checkout-head
+
+      - *install-nix
+
+      - *tailscale
+
+      - *macos-dns
+
+      - name: Build the release package
+        run: nix build -L ".#packages.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
 
       - *attic-push
 

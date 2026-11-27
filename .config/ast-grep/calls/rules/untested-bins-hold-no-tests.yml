@@ -1,0 +1,15 @@
+id: untested-bins-hold-no-tests
+language: rust
+files:
+  - crates/lune/src/main.rs
+  - crates/luned/src/bin/luned.rs
+  - crates/mux/src/main.rs
+message: >-
+  This [[bin]] sets test = false in Cargo.toml, so Cargo neither compiles nor
+  runs tests in it. Put unit tests in the crate's library, or remove
+  test = false.
+rule:
+  kind: attribute
+  any:
+    - regex: ^(\w+::)*test\b
+    - regex: ^(cfg|cfg_attr)\((?s:.*\btest\b.*)\)$
