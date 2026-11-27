@@ -40,6 +40,7 @@
       systems = builtins.attrNames systemConfigs;
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
       toolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
       nextestToml = builtins.fromTOML (builtins.readFile ./.config/nextest.toml);
       ciProfile = nextestToml.profile.ci or (throw ".config/nextest.toml has no [profile.ci]");
@@ -60,6 +61,42 @@
         toolchainToml.toolchain.channel or (throw "rust-toolchain.toml has no [toolchain].channel");
       workspaceMembers = cargoToml.workspace.members or [ ];
       workspaceExclude = cargoToml.workspace.exclude or [ ];
+
+      libghosttyRsSource = "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf";
+      gitHashes = {
+        ${libghosttyRsSource} = "sha256-VkLyG0Y3V8ugEl2emA7Zpe0StQnwqu8Ay2xMQWr8Kn8=";
+        "git+https://github.com/lorenzolfm/wt?rev=b73f7d36d8f6f6c9301da9568de82ec8bd917cce#b73f7d36d8f6f6c9301da9568de82ec8bd917cce" =
+          "sha256-KYTyp97dAhus2mzuvsvX4JbRilIbucNIBe7xR2xf+BE=";
+      };
+      gitSources = nixpkgs.lib.unique (
+        builtins.filter (nixpkgs.lib.hasPrefix "git+") (map (crate: crate.source or "") cargoLock.package)
+      );
+      unhashed = builtins.filter (source: !(gitHashes ? ${source})) gitSources;
+      staleGitHashes = builtins.filter (source: !(builtins.elem source gitSources)) (
+        builtins.attrNames gitHashes
+      );
+      gitHashChecks = [
+        {
+          ok = unhashed == [ ];
+          message = "gitHashes has no hash for ${nixpkgs.lib.concatStringsSep ", " unhashed}, so every evaluation would clone it";
+        }
+        {
+          ok = staleGitHashes == [ ];
+          message = "gitHashes has unused entries not in Cargo.lock: ${nixpkgs.lib.concatStringsSep ", " staleGitHashes}";
+        }
+      ];
+
+      ghosttyRevs = {
+        ${libghosttyRsSource} = "108cacb17ed8990840cd14abfce43d8ed8503ca1";
+      };
+      ghosttySys = nixpkgs.lib.findFirst (
+        crate: crate.name == "libghostty-vt-sys"
+      ) (throw "Cargo.lock has no libghostty-vt-sys") cargoLock.package;
+      ghosttySysRev =
+        ghosttyRevs.${ghosttySys.source}
+          or (throw "ghosttyRevs has no commit for libghostty-vt-sys from ${ghosttySys.source}");
+
+      cachedPathsMax = 32;
 
       build =
         system:
@@ -176,32 +213,17 @@
             '';
           };
 
-          cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
-
-          gitHashes = {
-            "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" =
-              "sha256-VkLyG0Y3V8ugEl2emA7Zpe0StQnwqu8Ay2xMQWr8Kn8=";
-            "git+https://github.com/lorenzolfm/wt?rev=b73f7d36d8f6f6c9301da9568de82ec8bd917cce#b73f7d36d8f6f6c9301da9568de82ec8bd917cce" =
-              "sha256-KYTyp97dAhus2mzuvsvX4JbRilIbucNIBe7xR2xf+BE=";
-          };
-          unhashed = pkgs.lib.unique (
-            builtins.filter (source: pkgs.lib.hasPrefix "git+" source && !(gitHashes ? ${source})) (
-              map (crate: crate.source or "") cargoLock.package
-            )
-          );
-          linkedVendor =
-            pkgs.lib.throwIfNot (unhashed == [ ])
-              "gitHashes has no hash for ${pkgs.lib.concatStringsSep ", " unhashed}, so every evaluation would clone it"
-              (
-                craneLib.vendorCargoDeps {
-                  cargoLockParsed = cargoLock;
-                  outputHashes = gitHashes;
-                }
-              );
-          cargoVendorDir = pkgs.runCommand "lune-cargo-vendor" { } ''
-            cp -rL ${linkedVendor} "$out"
+          linkedVendor = nixpkgs.lib.foldr (check: next: nixpkgs.lib.throwIfNot check.ok check.message next) (
+            craneLib.vendorCargoDeps
+              {
+                cargoLockParsed = cargoLock;
+                outputHashes = gitHashes;
+              }
+          ) gitHashChecks;
+          cargoVendorDir = pkgs.runCommand "lune-cargo-vendor" { allowedReferences = [ "out" ]; } ''
+            cp -rL "${linkedVendor}" "$out"
             chmod u+w "$out" "$out/config.toml"
-            substituteInPlace "$out/config.toml" --replace-fail ${linkedVendor} "$out"
+            substituteInPlace "$out/config.toml" --replace-fail "${linkedVendor}" "$out"
             chmod a-w "$out" "$out/config.toml"
           '';
 
@@ -211,24 +233,27 @@
           ];
           speechLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.alsa-lib ];
 
-          ghosttyRevs = {
-            "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" =
-              "108cacb17ed8990840cd14abfce43d8ed8503ca1";
-          };
-          ghosttySys = pkgs.lib.findFirst (
-            crate: crate.name == "libghostty-vt-sys"
-          ) (throw "Cargo.lock has no libghostty-vt-sys") cargoLock.package;
-          ghosttySysRev =
-            ghosttyRevs.${ghosttySys.source}
-              or (throw "ghosttyRevs has no commit for libghostty-vt-sys from ${ghosttySys.source}");
           libghosttyVt =
             pkgs.lib.throwIfNot (ghostty.rev == ghosttySysRev)
               "the ghostty input is not ${ghosttySysRev}, which libghostty-vt-sys binds"
               (
-                pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
+                (pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
                   optimize = "ReleaseSafe";
                   revision = ghostty.shortRev;
-                }
+                }).overrideAttrs
+                  (
+                    finalAttrs: prev: {
+                      zigBuildFlags = prev.zigBuildFlags ++ [ "-Dstrip=true" ];
+                      disallowedReferences = [
+                        finalAttrs.deps
+                        pkgs.zig_0_17
+                      ];
+                      postFixup = (prev.postFixup or "") + ''
+                        "$STRIP" -S "$dev/lib/libghostty-vt.a"
+                        "$RANLIB" "$dev/lib/libghostty-vt.a"
+                      '';
+                    }
+                  )
               );
 
           inherit (cfg) ggmlCpu;
@@ -646,7 +671,7 @@
           inherit dev luned terminal-browser;
           flaky-report = flakyReport.bin;
 
-          cached = [
+          cachedArtifacts = [
             cargoVendorDir
             checksDeps
             releaseDeps
@@ -697,10 +722,33 @@
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
 
       cached = nixpkgs.lib.mapAttrs (
-        _: built:
-        nixpkgs.lib.concatMap (drv: map (output: drv.${output}.outPath) drv.outputs) (
-          built.cached ++ builtins.attrValues (builtins.removeAttrs built.checks [ "lints" ])
-        )
+        system: built:
+        let
+          paths = nixpkgs.lib.concatMap (
+            artifact: map (output: artifact.${output}.outPath) artifact.outputs
+          ) (built.cachedArtifacts ++ builtins.attrValues (builtins.removeAttrs built.checks [ "lints" ]));
+          checks = [
+            {
+              ok = paths != [ ];
+              message = "cached.${system} is empty";
+            }
+            {
+              ok = builtins.length paths <= cachedPathsMax;
+              message = "cached.${system} has ${toString (builtins.length paths)} paths, exceeding ${toString cachedPathsMax}";
+            }
+            {
+              ok = builtins.length paths == builtins.length (nixpkgs.lib.unique paths);
+              message = "cached.${system} contains duplicate store paths";
+            }
+            {
+              ok = builtins.all (
+                path: nixpkgs.lib.hasPrefix "/nix/store/" path && !(nixpkgs.lib.hasSuffix ".drv" path)
+              ) paths;
+              message = "cached.${system} contains a non-output store path";
+            }
+          ];
+        in
+        nixpkgs.lib.foldr (check: next: nixpkgs.lib.throwIfNot check.ok check.message next) paths checks
       ) bySystem;
     };
 }

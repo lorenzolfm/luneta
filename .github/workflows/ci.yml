@@ -211,25 +211,50 @@ jobs:
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
         run: |
-          if [[ -z $ATTIC_TOKEN ]]; then
+          set -u
+          if [[ -z ${ATTIC_TOKEN:-} ]]; then
             echo "No ATTIC_TOKEN secret, so nothing is pushed."
             exit 0
           fi
           attic="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#attic-client)/bin/attic"
           "$attic" login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
           system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+          if [[ -z $system ]]; then
+            echo "builtins.currentSystem evaluated to empty" >&2
+            exit 1
+          fi
           cached="$(nix eval --json ".#cached.$system")"
+          raw_paths="$(jq -er 'if type == "array" and length > 0 and all(type == "string") then .[] else error("cached must be a non-empty array of strings") end' <<<"$cached")"
+          cached_paths_max=32
+          candidate_count=0
           skip="${ATTIC_SKIP_PATH:-}"
           built=()
-          while read -r path; do
+          while IFS= read -r path; do
+            candidate_count=$((candidate_count + 1))
+            if (( candidate_count > cached_paths_max )); then
+              echo "cached.$system listed more than $cached_paths_max paths" >&2
+              exit 1
+            fi
+            if [[ $path != /nix/store/* ]]; then
+              echo "cached.$system emitted non-store path: $path" >&2
+              exit 1
+            fi
+            if [[ $path == *.drv ]]; then
+              echo "cached.$system emitted derivation path: $path" >&2
+              exit 1
+            fi
             if [[ -n $skip && $path == "$skip" ]]; then
               continue
             fi
             if [[ -e $path ]]; then
               built+=("$path")
             fi
-          done < <(jq -r '.[]' <<<"$cached")
-          if [[ ${#built[@]} -eq 0 ]]; then
+          done <<<"$raw_paths"
+          if (( candidate_count == 0 )); then
+            echo "cached.$system yielded no paths" >&2
+            exit 1
+          fi
+          if (( ${#built[@]} == 0 )); then
             echo "This job built nothing the cache keeps."
             exit 0
           fi
