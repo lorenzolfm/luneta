@@ -41,11 +41,63 @@ jobs:
           if [[ -n $files && $docs == "$files" ]]; then
             changed=false
           fi
-          app='ios/.*|crates/(phone|phone-bindgen|protocol)/.*|proto/.*'
-          build='Cargo\.(toml|lock)|rust-toolchain\.toml|flake\.(nix|lock)|nix/ios\.nix|nix/dev/default\.nix|nix/dev/commands/ios\.nix|\.github/workflows/ci\.yml'
+          ios_dirs=(
+            ios
+            crates/phone
+            crates/phone-bindgen
+            crates/protocol
+            proto
+          )
+          ios_files=(
+            Cargo.toml
+            Cargo.lock
+            rust-toolchain.toml
+            flake.nix
+            flake.lock
+            nix/ios.nix
+            nix/dev/default.nix
+            nix/dev/commands/ios.nix
+            .github/workflows/ci.yml
+          )
+          dir_args=()
+          for dir in "${ios_dirs[@]}"; do
+            if [[ ! -d $dir ]]; then
+              echo "::error::ios filter directory missing: $dir" >&2
+              exit 1
+            fi
+            if [[ ! $dir =~ ^[A-Za-z0-9_/-]+$ ]]; then
+              echo "::error::ios filter directory contains unsupported characters: $dir" >&2
+              exit 1
+            fi
+            dir_args+=(-e "^$dir/")
+          done
+          file_args=()
+          for file in "${ios_files[@]}"; do
+            if [[ ! -f $file ]]; then
+              echo "::error::ios filter file missing: $file" >&2
+              exit 1
+            fi
+            file_args+=(-e "$file")
+          done
           ios=true
-          if [[ -n $files ]] && ! grep -qxE "$app|$build" <<<"$files"; then
+          if [[ -n $files ]]; then
             ios=false
+            status=0
+            grep -qxF "${file_args[@]}" <<<"$files" || status=$?
+            case "$status" in
+              0) ios=true ;;
+              1) ;;
+              *) exit "$status" ;;
+            esac
+            if [[ $ios == false ]]; then
+              status=0
+              grep -qE "${dir_args[@]}" <<<"$files" || status=$?
+              case "$status" in
+                0) ios=true ;;
+                1) ;;
+                *) exit "$status" ;;
+              esac
+            fi
           fi
           echo "$files"
           echo "changed=$changed" | tee -a "$GITHUB_OUTPUT"
@@ -75,8 +127,8 @@ jobs:
             connect-timeout = 5
             fallback = true
             ${{ runner.os == 'macOS' && 'keep-outputs = true' || '' }}
-            ${{ github.job != 'ios' && !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
-            ${{ github.job != 'ios' && !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
+            ${{ !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
+            ${{ !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
 
       - &tailscale
         name: tailscale/github-action v4.4.0, to reach the attic cache
@@ -100,6 +152,7 @@ jobs:
           .#checks.x86_64-linux.deadnix
           .#checks.x86_64-linux.comments
           .#checks.x86_64-linux.profiles
+          .#checks.x86_64-linux.ios-inputs
           .#checks.x86_64-linux.swift
           .#checks.x86_64-linux.typescript
 
@@ -271,7 +324,13 @@ jobs:
     steps:
       - *checkout-head
 
-      - *install-nix
+      - name: cachix/install-nix-action v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            connect-timeout = 5
+            fallback = true
 
       - name: Select the Xcode the app is built with
         run: |
@@ -292,9 +351,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/phone/Cargo.toml', 'crates/phone-bindgen/Cargo.toml', 'crates/protocol/Cargo.toml', 'rust-toolchain.toml', 'flake.lock') }}
 
       - name: Build the app for the simulator
+        env:
+          CARGO_INCREMENTAL: "0"
         run: nix run .#dev.commands.ios-build
 
       - name: actions/upload-artifact v7, xcodebuild's whole output
