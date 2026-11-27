@@ -3,6 +3,7 @@
   toolchain,
   buildTools,
   compileEnv,
+  cross,
   clippyRun,
   testRun,
   nextest,
@@ -26,6 +27,7 @@ let
       toolchain
       buildTools
       compileEnv
+      cross
       clippyRun
       testRun
       nextest
@@ -33,9 +35,39 @@ let
       ;
   };
 
-  records = map (file: import (./commands + "/${file}") args) (
-    builtins.attrNames (builtins.readDir ./commands)
+  commandFiles = lib.filterAttrs (name: kind: kind == "regular" && lib.hasSuffix ".nix" name) (
+    builtins.readDir ./commands
   );
+
+  reserved = [
+    "help"
+    "-h"
+    "--help"
+  ];
+
+  loadCommand =
+    file:
+    let
+      stem = lib.removeSuffix ".nix" file;
+      record = import (./commands + "/${file}") args;
+      checks = [
+        {
+          ok = record.name == stem;
+          message = "nix/dev/commands/${file} sets name = ${builtins.toJSON record.name}, expected ${builtins.toJSON stem}";
+        }
+        {
+          ok = !(builtins.elem record.name reserved);
+          message = "nix/dev/commands/${file} shadows reserved dev command ${builtins.toJSON record.name}";
+        }
+        {
+          ok = builtins.match "[a-z][a-z0-9-]*" record.name != null;
+          message = "nix/dev/commands/${file} sets invalid command name ${builtins.toJSON record.name}";
+        }
+      ];
+    in
+    lib.foldr (check: next: lib.throwIfNot check.ok check.message next) record checks;
+
+  records = map loadCommand (builtins.attrNames commandFiles);
 
   command =
     record:
@@ -44,10 +76,32 @@ let
       runtimeInputs = record.tools;
       inheritPath = record.inheritPath or false;
       text = ''
+        enter_checkout() {
+          local root config
+          root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)" || root=""
+          if [ ! -f "$root/crates/luned/Cargo.toml" ]; then
+            echo "dev: run this inside the lune checkout" >&2
+            exit 2
+          fi
+          for config in "$root/.cargo/config.toml" "$root/.cargo/config"; do
+            if [ -e "$config" ] || [ -L "$config" ]; then
+              echo "dev: $config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml" >&2
+              exit 2
+            fi
+          done
+          export DEV_HERE="$PWD"
+          export DEV_PATH="''${DEV_PATH:-$PATH}"
+          cd "$root"
+        }
+        enter_checkout
         export PATH="$PATH:''${CARGO_HOME:-''${HOME:-}/.cargo}/bin"
         ${record.text}
       '';
     };
+
+  commands = lib.mapAttrs' (
+    file: _: lib.nameValuePair (lib.removeSuffix ".nix" file) (command (loadCommand file))
+  ) commandFiles;
 
   signature = record: "dev ${record.name} ${record.usage}";
   width = lib.foldl' lib.max 0 (map (record: lib.stringLength (signature record)) records);
@@ -59,8 +113,8 @@ let
 
   dispatch = lib.concatMapStringsSep "\n" (record: ''
     ${record.name})
-      enter_checkout
-      exec ${lib.getExe (command record)} "$@"
+      export DEV_PATH="$PATH"
+      exec ${lib.getExe commands.${record.name}} "$@"
       ;;
   '') records;
 in
@@ -68,8 +122,7 @@ pkgs.writeShellApplication {
   name = "dev";
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
-    lint = command (import ./commands/lint.nix args);
-    clippy-cross = command (import ./commands/clippy.nix args).cross;
+    inherit (commands) lint deny;
   };
   text = ''
     paint() {
@@ -95,23 +148,6 @@ pkgs.writeShellApplication {
     error() {
       paint 2
       printf '%sdev:%s %s\n' "$red" "$reset" "$1" >&2
-    }
-
-    enter_checkout() {
-      root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)" || root=""
-      if [ ! -f "$root/crates/luned/Cargo.toml" ]; then
-        error "run this inside the lune checkout"
-        exit 2
-      fi
-      for config in "$root/.cargo/config.toml" "$root/.cargo/config"; do
-        if [ -e "$config" ] || [ -L "$config" ]; then
-          error "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml"
-          exit 2
-        fi
-      done
-      export DEV_HERE="$PWD"
-      export DEV_PATH="$PATH"
-      cd "$root"
     }
 
     cmd="''${1:-help}"

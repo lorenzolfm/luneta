@@ -16,7 +16,7 @@ jobs:
   code:
     runs-on: ubuntu-latest
     outputs:
-      changed: ${{ steps.diff.outputs.changed }}
+      plan: ${{ steps.diff.outputs.plan }}
 
     steps:
       - name: actions/checkout v7
@@ -24,7 +24,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Whether anything but Markdown the build doesn't read changed
+      - name: Whether anything but Markdown the build doesn't read changed, and whether breaking or the dev CLI need to run
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
@@ -36,16 +36,37 @@ jobs:
           fi
           files="$(git diff --no-renames --name-only "$base" HEAD)"
           docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/lune/SKILL.md || true)"
-          changed=true
+          any_matches() {
+            local pattern="${1:-}"
+            if [[ -z $pattern ]]; then
+              echo "diff: any_matches requires a non-empty pattern" >&2
+              exit 2
+            fi
+            local status=0
+            grep --quiet --extended-regexp -- "$pattern" <<<"$files" || status=$?
+            case "$status" in
+              0) return 0 ;;
+              1) return 1 ;;
+              *) exit "$status" ;;
+            esac
+          }
           if [[ -n $files && $docs == "$files" ]]; then
-            changed=false
+            plan="$(jq -cn '{kind: "docs"}')"
+          else
+            breaking=true
+            dev=true
+            if [[ -n $files ]]; then
+              any_matches '^(proto/|nix/dev/(default|commands/lint)\.nix$|flake\.(nix|lock)$|\.github/workflows/ci\.yml$)' || breaking=false
+              any_matches '^(nix/.*\.nix$|flake\.(nix|lock)$|\.github/workflows/ci\.yml$)' || dev=false
+            fi
+            plan="$(jq -cn --argjson breaking "$breaking" --argjson dev "$dev" '{kind: "code", breaking: $breaking, dev: $dev}')"
           fi
           echo "$files"
-          echo "changed=$changed" | tee -a "$GITHUB_OUTPUT"
+          printf 'plan=%s\n' "$plan" | tee -a "$GITHUB_OUTPUT"
 
   clippy:
     needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    if: fromJSON(needs.code.outputs.plan).kind != 'docs'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,31 +103,17 @@ jobs:
           tags: tag:ci
           ping: attic.tail174781.ts.net
 
-      - name: Build the dev CLI
+      - name: Build the dev CLI, when what it is built from changed
+        id: dev
+        if: fromJSON(needs.code.outputs.plan).dev != false
         run: nix build --no-link .#dev
 
-      - name: Lints
-        run: >-
-          nix build -L --keep-going --out-link lint
-          .#checks.x86_64-linux.statix
-          .#checks.x86_64-linux.deadnix
-          .#checks.x86_64-linux.comments
-          .#checks.x86_64-linux.profiles
-          .#checks.x86_64-linux.swift
-          .#checks.x86_64-linux.typescript
-
-      - name: Bans, licenses and sources
-        run: nix build -L --out-link deny .#checks.x86_64-linux.deny
-
-      - name: Clippy
-        run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
-
-      - name: Clippy for the Mac
-        if: ${{ !cancelled() }}
-        run: nix run .#dev.commands.clippy-cross
+      - name: Lints, bans, licenses, sources, and clippy for Linux and the Mac
+        if: ${{ !cancelled() && (success() || steps.dev.outcome == 'failure') }}
+        run: nix build -L --keep-going --out-link checks .#checks.x86_64-linux.lints
 
       - name: Advisories
-        run: nix run .#dev -- deny advisories
+        run: nix run .#dev.commands.deny -- advisories
 
       - &attic-push
         name: Push the store to the attic cache
@@ -125,8 +132,9 @@ jobs:
   breaking:
     needs: code
     if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && github.event_name == 'pull_request' }}
+      github.event_name == 'pull_request'
+      && fromJSON(needs.code.outputs.plan).kind == 'code'
+      && fromJSON(needs.code.outputs.plan).breaking != false
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -150,8 +158,8 @@ jobs:
   tested:
     needs: code
     if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && !github.event.pull_request.head.repo.fork }}
+      fromJSON(needs.code.outputs.plan).kind != 'docs'
+      && !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -186,7 +194,8 @@ jobs:
   daemon:
     needs: [code, tested]
     if: >-
-      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      ${{ !cancelled() && needs.code.result == 'success'
+      && fromJSON(needs.code.outputs.plan).kind != 'docs'
       && needs.tested.outputs.untested != '[]' }}
     strategy:
       fail-fast: false
@@ -254,7 +263,7 @@ jobs:
 
   ios:
     needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    if: fromJSON(needs.code.outputs.plan).kind != 'docs'
     runs-on: xcode-27
     timeout-minutes: 40
 
