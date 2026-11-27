@@ -8,6 +8,38 @@ let
   locked =
     map (package: package.name)
       (builtins.fromTOML (builtins.readFile (root + "/Cargo.lock"))).package;
+  nextest = builtins.fromTOML (builtins.readFile (root + "/.config/nextest.toml"));
+  ciProfile = nextest.profile.ci or null;
+  ciRetriesRaw = if builtins.isAttrs ciProfile then ciProfile.retries or 0 else 0;
+  ciRetriesValid =
+    (builtins.isInt ciRetriesRaw && ciRetriesRaw >= 0)
+    || (
+      builtins.isAttrs ciRetriesRaw
+      && builtins.isInt (ciRetriesRaw.count or null)
+      && ciRetriesRaw.count >= 0
+    );
+  ciRetries =
+    if builtins.isInt ciRetriesRaw then
+      ciRetriesRaw
+    else if builtins.isAttrs ciRetriesRaw && builtins.isInt (ciRetriesRaw.count or null) then
+      ciRetriesRaw.count
+    else
+      0;
+  ciFinalLevel = if builtins.isAttrs ciProfile then ciProfile.final-status-level or "fail" else "fail";
+  flakyFinalLevels = [
+    "flaky"
+    "retry"
+    "slow"
+    "skip"
+    "pass"
+    "all"
+  ];
+  ciJunitPath = if builtins.isAttrs ciProfile then (ciProfile.junit or { }).path or null else null;
+  ciJunitValid =
+    builtins.isString ciJunitPath
+    && ciJunitPath != ""
+    && builtins.substring 0 1 ciJunitPath != "/"
+    && builtins.match "(^|.*/)\\.\\.(/.*|$)" ciJunitPath == null;
   devProfile = profile.dev or { };
   releaseProfile = profile.release or { };
   devPackages = devProfile.package or { };
@@ -212,3 +244,29 @@ in
   name:
   "Cargo.toml: ${name} gets a profile override, but no package in Cargo.lock has that name, so the override changes nothing"
 ) missing
+++ (
+  if builtins.isAttrs ciProfile then
+    [ ]
+  else
+    [ ".config/nextest.toml: missing [profile.ci] table required by flake.nix and CI" ]
+)
+++ (
+  if ciRetriesValid then
+    [ ]
+  else
+    [ ".config/nextest.toml: [profile.ci].retries must be a non-negative integer or table with a non-negative count" ]
+)
+++ (
+  if ciRetries == 0 || builtins.elem ciFinalLevel flakyFinalLevels then
+    [ ]
+  else
+    [
+      ".config/nextest.toml: [profile.ci] sets retries = ${toString ciRetries}, so final-status-level must be one of ${builtins.concatStringsSep ", " flakyFinalLevels} (got ${builtins.toJSON ciFinalLevel}) for CI flaky log fallback"
+    ]
+)
+++ (
+  if ciJunitValid then
+    [ ]
+  else
+    [ ".config/nextest.toml: [profile.ci.junit].path must be a non-empty relative path without '..' so flake.nix can install junit.xml" ]
+)

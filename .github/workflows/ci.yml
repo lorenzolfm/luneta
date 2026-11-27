@@ -217,7 +217,7 @@ jobs:
           fi
           attic="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#attic-client)/bin/attic"
           "$attic" login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
-          nix path-info --all | grep -v '\.drv$' | "$attic" push homelab:main --stdin
+          nix path-info --all | awk -v skip="${ATTIC_SKIP_PATH:-}" '!/\.drv$/ && (skip == "" || $0 != skip)' | "$attic" push homelab:main --stdin
 
   breaking:
     needs: code
@@ -353,140 +353,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/daemon.log"
-          : > "$log"
           system="$(nix eval --impure --raw --expr builtins.currentSystem)"
           if [[ -z $system ]]; then
             echo "::error::nix eval returned an empty system name"
             exit 1
           fi
-          nix build -L ".#checks.$system.luned" 2>&1 | tee "$log"
+          log="$RUNNER_TEMP/daemon.log"
+          out="$RUNNER_TEMP/luned-check"
+          rm -f "$out"
+          : > "$log"
+          nix build -L --out-link "$out" ".#checks.$system.luned" 2>&1 | tee "$log"
 
       - name: Name the tests that passed only on a retry
         if: ${{ !cancelled() && steps.daemon.outcome != 'skipped' }}
         shell: bash
+        env:
+          DAEMON_OUTCOME: ${{ steps.daemon.outcome }}
         run: |
           set -euo pipefail
-          log="$RUNNER_TEMP/daemon.log"
-          if [[ ! -f $log ]]; then
-            echo "::error::expected daemon build log at $log"
-            exit 1
-          fi
-          flaky_records_max=1000
-          flaky_summary_max=200
-          flaky_annotations_max=10
-          records="$(mktemp "$RUNNER_TEMP/flaky.XXXXXX")"
-          trap 'rm -f "$records"' EXIT
-          LC_ALL=C awk '
-            {
-              gsub(/\033\[[0-9;?]*[A-Za-z]/, "")
-              sub(/\r$/, "")
-              if ($0 ~ /^[^>]*> +Summary \[[^]]*\] +[0-9]+ tests? run:/) {
-                in_summary = 1
-                summary_flaky = 0
-                split("", seen)
-                if (match($0, /[1-9][0-9]* flaky/)) {
-                  count_text = substr($0, RSTART, RLENGTH)
-                  sub(/ flaky$/, "", count_text)
-                  summary_flaky = count_text + 0
-                }
-                next
-              }
-              if (!in_summary) {
-                next
-              }
-              if ($0 ~ /^[^>]*> +FLAKY [0-9]+\/[0-9]+ \[[^]]*\] +/) {
-                line = $0
-                sub(/^[^>]*> +FLAKY /, "", line)
-                slash = index(line, "/")
-                space = index(line, " ")
-                try_num = substr(line, 1, slash - 1)
-                total_num = substr(line, slash + 1, space - slash - 1)
-                sub(/^[0-9]+\/[0-9]+ \[[^]]*\] +/, "", line)
-                sub(/^\([^)]*\) +/, "", line)
-                sub(/ +$/, "", line)
-                if (length(line) > 0 && !(line in seen)) {
-                  seen[line] = try_num "\t" total_num
-                }
-              }
-            }
-            END {
-              print "SUMMARY\t" (summary_flaky + 0)
-              for (name in seen) {
-                print "FLAKY\t" seen[name] "\t" name
-              }
-            }
-          ' "$log" | LC_ALL=C sort -t $'\t' -k1,1r -k4,4 > "$records"
-          summary_flaky=0
-          parsed_flaky=0
-          records_truncated=0
-          flaky_names=()
-          flaky_tries=()
-          flaky_totals=()
-          {
-            IFS=$'\t' read -r tag summary_flaky
-            if [[ $tag != SUMMARY || ! $summary_flaky =~ ^[0-9]+$ ]]; then
-              echo "::error::flaky log parser produced malformed summary header"
-              exit 1
-            fi
-            while IFS=$'\t' read -r tag try_num total_num test_name; do
-              if [[ $tag != FLAKY || ! $try_num =~ ^[0-9]+$ || ! $total_num =~ ^[0-9]+$ || -z $test_name ]]; then
-                echo "::error::flaky log parser produced malformed record"
-                exit 1
-              fi
-              if (( try_num < 2 || try_num > total_num )); then
-                echo "::error::flaky record has invalid attempt count $try_num/$total_num for $test_name"
-                exit 1
-              fi
-              if (( parsed_flaky >= flaky_records_max )); then
-                records_truncated=1
-                break
-              fi
-              flaky_names+=("$test_name")
-              flaky_tries+=("$try_num")
-              flaky_totals+=("$total_num")
-              parsed_flaky=$(( parsed_flaky + 1 ))
-            done
-          } < "$records"
-          annotations_left=$flaky_annotations_max
-          if (( records_truncated != 0 )); then
-            echo "::warning title=Flaky test list truncated on $RUNNER_OS $RUNNER_ARCH::more than $flaky_records_max flaky tests were read; check the log"
-            annotations_left=$(( annotations_left - 1 ))
-          fi
-          if (( parsed_flaky != summary_flaky )); then
-            echo "::warning title=Flaky test count mismatch on $RUNNER_OS $RUNNER_ARCH::nextest summary counted $summary_flaky flaky test(s), but $parsed_flaky FLAKY line(s) were read; check the log"
-            annotations_left=$(( annotations_left - 1 ))
-          fi
-          if (( parsed_flaky == 0 )); then
-            exit 0
-          fi
-          summary_limit=$parsed_flaky
-          if (( summary_limit > flaky_summary_max )); then
-            summary_limit=$flaky_summary_max
-          fi
-          {
-            echo "### Flaky tests on $RUNNER_OS $RUNNER_ARCH"
-            echo
-            echo "Each failed and then passed on a retry, so the job went on. One that is here again after its fix is a real failure."
-            echo
-            for (( i = 0; i < summary_limit; i++ )); do
-              echo "- \`${flaky_names[i]}\`, which passed on try ${flaky_tries[i]} of ${flaky_totals[i]}"
-            done
-            if (( parsed_flaky > flaky_summary_max )); then
-              echo "- and $(( parsed_flaky - flaky_summary_max )) more flaky test(s) omitted; see the build log"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-          if (( parsed_flaky <= annotations_left )); then
-            for (( i = 0; i < parsed_flaky; i++ )); do
-              echo "::warning title=Flaky test on $RUNNER_OS $RUNNER_ARCH::${flaky_names[i]}, which passed on try ${flaky_tries[i]} of ${flaky_totals[i]}"
-            done
-          else
-            individual_limit=$(( annotations_left - 1 ))
-            for (( i = 0; i < individual_limit; i++ )); do
-              echo "::warning title=Flaky test on $RUNNER_OS $RUNNER_ARCH::${flaky_names[i]}, which passed on try ${flaky_tries[i]} of ${flaky_totals[i]}"
-            done
-            echo "::warning title=More flaky tests on $RUNNER_OS $RUNNER_ARCH::$(( parsed_flaky - individual_limit )) more flaky test(s) omitted from annotations; see the step summary"
-          fi
+          nix run .#flaky-report -- \
+            --outcome "$DAEMON_OUTCOME" \
+            --log "$RUNNER_TEMP/daemon.log" \
+            --junit "$RUNNER_TEMP/luned-check/share/luned/junit.xml" \
+            --out-link "$RUNNER_TEMP/luned-check"
 
       - *attic-push
 

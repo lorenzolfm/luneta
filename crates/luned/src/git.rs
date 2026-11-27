@@ -3356,6 +3356,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::ffi::OsStr;
     use std::fs::{self, File};
+    use std::num::NonZeroU32;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime};
@@ -3425,28 +3426,39 @@ mod tests {
         tree: &TreeWatch,
         file: &AbsPath,
     ) {
+        enum Probe {
+            Writing { attempt: NonZeroU32, woke: bool },
+            WaitingWake,
+        }
+
         assert!(!what.is_empty(), "wait description must be non-empty");
         assert!(
             file.as_path().parent().is_some_and(Path::is_dir),
             "target parent directory must exist before probing: {}",
             file.display()
         );
-        let mut written = 0_u32;
-        let mut heard = false;
-        let mut woke = false;
-        lune_waits::eventually(what, || {
-            if written > 0 {
-                heard |= watches.take_heard().contains_tree(tree);
-                woke |= woken.try_recv().is_ok();
-                if heard && woke {
-                    return Some(());
+        let write_probe = |attempt: NonZeroU32| {
+            fs::write(file.as_path(), format!("{attempt}\n")).unwrap();
+        };
+        write_probe(NonZeroU32::MIN);
+        let mut state = Probe::Writing { attempt: NonZeroU32::MIN, woke: false };
+        lune_waits::eventually(what, || match state {
+            Probe::Writing { attempt, woke } => {
+                let woke = woke || woken.try_recv().is_ok();
+                if watches.take_heard().contains_tree(tree) {
+                    if woke {
+                        return Some(());
+                    }
+                    state = Probe::WaitingWake;
+                    return None;
                 }
-            }
-            written = written.checked_add(1).expect("probe write count fits u32");
-            fs::write(file.as_path(), format!("{written}\n")).unwrap();
-            None
+                let next = attempt.checked_add(1).expect("probe write count fits u32");
+                write_probe(next);
+                state = Probe::Writing { attempt: next, woke };
+                None
+            },
+            Probe::WaitingWake => woken.try_recv().is_ok().then_some(()),
         });
-        assert!(written > 0, "at least one write must occur before hearing {what}");
         assert!(file.as_path().is_file(), "probed file must exist: {}", file.display());
     }
 
