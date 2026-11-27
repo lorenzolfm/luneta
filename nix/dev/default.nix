@@ -3,6 +3,7 @@
   toolchain,
   buildTools,
   compileEnv,
+  macBuildEnv,
   cross,
   clippyRun,
   testRun,
@@ -27,6 +28,7 @@ let
       toolchain
       buildTools
       compileEnv
+      macBuildEnv
       cross
       clippyRun
       testRun
@@ -71,6 +73,9 @@ let
 
   command =
     record:
+    let
+      qLabel = lib.escapeShellArg "dev-${record.name}";
+    in
     pkgs.writeShellApplication {
       name = "dev-${record.name}";
       runtimeInputs = record.tools;
@@ -78,14 +83,18 @@ let
       text = ''
         enter_checkout() {
           local root config
-          root="$(${lib.getExe pkgs.git} rev-parse --show-toplevel 2>/dev/null)" || root=""
-          if [ ! -f "$root/crates/luned/Cargo.toml" ]; then
-            echo "dev: run this inside the lune checkout" >&2
-            exit 2
-          fi
-          for config in "$root/.cargo/config.toml" "$root/.cargo/config"; do
+          root="$(pwd -P)"
+          while [ ! -f "$root/crates/luned/Cargo.toml" ]; do
+            if [ -e "$root/.git" ] || [ "$root" = / ] || [ -z "$root" ]; then
+              printf '%s: run this inside the lune checkout\n' ${qLabel} >&2
+              exit 2
+            fi
+            root="''${root%/*}"
+            root="''${root:-/}"
+          done
+          for config in "''${root%/}/.cargo/config.toml" "''${root%/}/.cargo/config"; do
             if [ -e "$config" ] || [ -L "$config" ]; then
-              echo "dev: $config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml" >&2
+              printf '%s: %s\n' ${qLabel} "$config exists, which flake.nix's cargoFiles ignores while dev and plain cargo read; remove it or wire it into flake.nix and ci.yml" >&2
               exit 2
             fi
           done
@@ -123,6 +132,7 @@ pkgs.writeShellApplication {
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
     inherit (commands) lint deny;
+    ios-build = command (import ./commands/ios.nix args).build;
   };
   text = ''
     paint() {

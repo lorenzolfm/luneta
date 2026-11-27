@@ -24,7 +24,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Whether anything but Markdown the build doesn't read changed, and whether breaking or the dev CLI need to run
+      - name: Whether anything but Markdown the build doesn't read changed, and whether breaking, the dev CLI, or ios need to run
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
@@ -34,8 +34,50 @@ jobs:
             git fetch --depth=1 origin "$BEFORE"
             base="$BEFORE"
           fi
-          files="$(git diff --no-renames --name-only "$base" HEAD)"
-          docs="$(grep -xE '.*\.md' <<<"$files" | grep -vxF skills/lune/SKILL.md || true)"
+          files="$(git -c core.quotepath=false diff --no-renames --name-only "$base" HEAD)"
+          ios_dirs=(
+            ios
+            crates/phone
+            crates/phone-bindgen
+            crates/protocol
+            proto
+          )
+          ios_files=(
+            Cargo.toml
+            Cargo.lock
+            clippy.toml
+            rust-toolchain.toml
+            flake.nix
+            flake.lock
+            nix/ios.nix
+            nix/dev/default.nix
+            nix/dev/commands/ios.nix
+            .github/workflows/ci.yml
+          )
+          dir_args=()
+          for dir in "${ios_dirs[@]}"; do
+            if [[ ! -d $dir ]]; then
+              echo "::error::ios filter directory missing: $dir" >&2
+              exit 1
+            fi
+            if [[ ! $dir =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$ ]]; then
+              echo "::error::ios filter directory is not a canonical relative path: $dir" >&2
+              exit 1
+            fi
+            dir_args+=(-e "^$dir/")
+          done
+          file_args=()
+          for file in "${ios_files[@]}"; do
+            if [[ ! -f $file ]]; then
+              echo "::error::ios filter file missing: $file" >&2
+              exit 1
+            fi
+            if [[ ! $file =~ ^\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*(/\.?[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$ ]]; then
+              echo "::error::ios filter file is not a canonical relative path: $file" >&2
+              exit 1
+            fi
+            file_args+=(-e "$file")
+          done
           any_matches() {
             local pattern="${1:-}"
             if [[ -z $pattern ]]; then
@@ -43,30 +85,64 @@ jobs:
               exit 2
             fi
             local status=0
-            grep --quiet --extended-regexp -- "$pattern" <<<"$files" || status=$?
+            grep --quiet --extended-regexp -- "$pattern" <<<"$non_docs" || status=$?
             case "$status" in
               0) return 0 ;;
               1) return 1 ;;
               *) exit "$status" ;;
             esac
           }
-          if [[ -n $files && $docs == "$files" ]]; then
+          non_docs=""
+          if [[ -n $files ]]; then
+            status=0
+            non_docs="$(grep -vxE '.*\.md' <<<"$files")" || status=$?
+            case "$status" in
+              0 | 1) ;;
+              *) exit "$status" ;;
+            esac
+            status=0
+            grep -qxF skills/lune/SKILL.md <<<"$files" || status=$?
+            case "$status" in
+              0) non_docs="${non_docs:+$non_docs$'\n'}skills/lune/SKILL.md" ;;
+              1) ;;
+              *) exit "$status" ;;
+            esac
+          fi
+          if [[ -n $files && -z $non_docs ]]; then
             plan="$(jq -cn '{kind: "docs"}')"
           else
             breaking=true
             dev=true
+            ios=true
             if [[ -n $files ]]; then
               any_matches '^(proto/|nix/dev/(default|commands/lint)\.nix$|flake\.(nix|lock)$|\.github/workflows/ci\.yml$)' || breaking=false
               any_matches '^(nix/.*\.nix$|flake\.(nix|lock)$|\.github/workflows/ci\.yml$)' || dev=false
+              ios=false
+              status=0
+              grep -qxF "${file_args[@]}" <<<"$non_docs" || status=$?
+              case "$status" in
+                0) ios=true ;;
+                1) ;;
+                *) exit "$status" ;;
+              esac
+              if [[ $ios == false ]]; then
+                status=0
+                grep -qE "${dir_args[@]}" <<<"$non_docs" || status=$?
+                case "$status" in
+                  0) ios=true ;;
+                  1) ;;
+                  *) exit "$status" ;;
+                esac
+              fi
             fi
-            plan="$(jq -cn --argjson breaking "$breaking" --argjson dev "$dev" '{kind: "code", breaking: $breaking, dev: $dev}')"
+            plan="$(jq -cn --argjson breaking "$breaking" --argjson dev "$dev" --argjson ios "$ios" '{kind: "code", breaking: $breaking, dev: $dev, ios: $ios}')"
           fi
           echo "$files"
           printf 'plan=%s\n' "$plan" | tee -a "$GITHUB_OUTPUT"
 
   clippy:
     needs: code
-    if: fromJSON(needs.code.outputs.plan).kind != 'docs'
+    if: fromJSON(needs.code.outputs.plan).kind == 'code'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -158,7 +234,7 @@ jobs:
   tested:
     needs: code
     if: >-
-      fromJSON(needs.code.outputs.plan).kind != 'docs'
+      fromJSON(needs.code.outputs.plan).kind == 'code'
       && !github.event.pull_request.head.repo.fork
     runs-on: ubuntu-latest
     permissions:
@@ -195,7 +271,8 @@ jobs:
     needs: [code, tested]
     if: >-
       ${{ !cancelled() && needs.code.result == 'success'
-      && fromJSON(needs.code.outputs.plan).kind != 'docs'
+      && needs.tested.result != 'failure'
+      && fromJSON(needs.code.outputs.plan).kind == 'code'
       && needs.tested.outputs.untested != '[]' }}
     strategy:
       fail-fast: false
@@ -263,14 +340,22 @@ jobs:
 
   ios:
     needs: code
-    if: fromJSON(needs.code.outputs.plan).kind != 'docs'
+    if: >-
+      fromJSON(needs.code.outputs.plan).kind == 'code'
+      && fromJSON(needs.code.outputs.plan).ios != false
     runs-on: xcode-27
     timeout-minutes: 40
 
     steps:
       - *checkout-head
 
-      - *install-nix
+      - name: cachix/install-nix-action v31
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            connect-timeout = 5
+            fallback = true
 
       - name: Select the Xcode the app is built with
         run: |
@@ -283,8 +368,25 @@ jobs:
           fi
           echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
 
+      - name: actions/cache v6.1.0, cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: actions/cache v6.1.0, cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'clippy.toml', 'crates/phone/Cargo.toml', 'crates/phone-bindgen/Cargo.toml', 'crates/protocol/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', 'nix/dev/default.nix', 'nix/dev/commands/ios.nix', '.github/workflows/ci.yml') }}
+
       - name: Build the app for the simulator
-        run: nix run .#dev -- ios build
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: nix run .#dev.commands.ios-build
 
       - name: actions/upload-artifact v7, xcodebuild's whole output
         if: failure()

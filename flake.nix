@@ -344,6 +344,7 @@
               pkgs
               toolchain
               buildTools
+              macBuildEnv
               cross
               clippyRun
               testRun
@@ -410,6 +411,19 @@
                 failures = import ./nix/profiles.nix { root = ./.; };
               in
               pkgs.runCommand "lune-profiles" { } (
+                if failures == [ ] then
+                  ''touch "$out"''
+                else
+                  ''
+                    printf '%s\n' ${pkgs.lib.escapeShellArgs failures} >&2
+                    exit 1
+                  ''
+              );
+            ios-inputs =
+              let
+                failures = import ./nix/ios-inputs.nix { root = ./.; };
+              in
+              pkgs.runCommand "lune-ios-inputs" { } (
                 if failures == [ ] then
                   ''touch "$out"''
                 else
