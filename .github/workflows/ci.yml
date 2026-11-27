@@ -196,6 +196,7 @@ jobs:
         run: nix build -L --keep-going --out-link checks .#checks.x86_64-linux.lints
 
       - name: Evaluate release derivations
+        if: ${{ !cancelled() && (success() || steps.dev.outcome == 'failure') }}
         run: >-
           nix eval --json .#packages
           --apply 'builtins.mapAttrs (_: packages: packages.luned.drvPath)'
@@ -353,10 +354,14 @@ jobs:
       - *attic-push
 
   release:
-    needs: code
+    needs: [code, clippy, tested, daemon]
     if: >-
-      fromJSON(needs.code.outputs.plan).kind == 'code'
+      ${{ !cancelled() && needs.code.result == 'success'
+      && fromJSON(needs.code.outputs.plan).kind == 'code'
       && (github.event_name == 'push' || github.event_name == 'merge_group')
+      && needs.clippy.result == 'success'
+      && (needs.daemon.result == 'success'
+      || (needs.daemon.result == 'skipped' && needs.tested.result == 'success')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -368,6 +373,7 @@ jobs:
           - runner: macos-latest
             system: aarch64-darwin
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write

@@ -60,9 +60,29 @@ snapshots:
       style: primary
       start: 2
       end: 13
+  include!("tests.rs");:
+    labels:
+    - source: include!("tests.rs")
+      style: primary
+      start: 0
+      end: 20
+    - source: include
+      style: secondary
+      start: 0
+      end: 7
   mod helper;:
     labels:
     - source: mod helper;
       style: primary
       start: 0
       end: 11
+  std::include!("tests.rs");:
+    labels:
+    - source: std::include!("tests.rs")
+      style: primary
+      start: 0
+      end: 25
+    - source: std::include
+      style: secondary
+      start: 0
+      end: 12
