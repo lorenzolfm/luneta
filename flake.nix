@@ -258,9 +258,7 @@
 
           craneLib = baseCraneLib.overrideScope (
             _: _: {
-              vendorCargoDeps =
-                _:
-                throw "pass cargoVendorDir directly; unbundled vendorCargoDeps is forbidden";
+              vendorCargoDeps = _: throw "pass cargoVendorDir directly; unbundled vendorCargoDeps is forbidden";
             }
           );
 
@@ -338,6 +336,23 @@
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
           };
 
+          scrubCargoDeps = label: depsToolchains: ''
+            targetDir="''${CARGO_TARGET_DIR:-target}"
+            rm -f "$targetDir/.rustc_info.json"
+            find "$targetDir" -path '*/build/transcribe-cpp-sys-*/out/build' -type d -prune -exec rm -rf -- {} +
+            for depToolchain in ${pkgs.lib.escapeShellArgs depsToolchains}; do
+              toolchainHash="$(basename "$depToolchain")"
+              toolchainHash="''${toolchainHash%%-*}"
+              found=0
+              grep -rlF -- "$toolchainHash" "$targetDir" >&2 || found=$?
+              if (( found == 0 )); then
+                echo "${label}: $targetDir still references $depToolchain before compression" >&2
+                exit 1
+              elif (( found != 1 )); then
+                exit "$found"
+              fi
+            done
+          '';
           checksArgs = daemon // {
             CARGO_PROFILE = checksProfile;
           };
@@ -351,6 +366,7 @@
               disallowedRequisites = [
                 toolchain
               ];
+              preInstall = scrubCargoDeps "checksDeps" [ toolchain ];
             }
           );
 
@@ -366,6 +382,7 @@
               disallowedRequisites = [
                 toolchain
               ];
+              preInstall = scrubCargoDeps "releaseDeps" [ toolchain ];
             }
           );
 
@@ -472,25 +489,22 @@
 
           hostTarget = pkgs.stdenv.hostPlatform.rust.rustcTarget;
 
-          skipNative =
-            triple:
-            ''
-              [target.${triple}.transcribe]
-              rustc-link-lib = ["transcribe"]
-              [target.${triple}.alsa]
-              rustc-link-lib = ["asound"]
-              [target.${triple}.ghostty-vt]
-              rustc-link-lib = ["ghostty-vt"]
-            '';
+          skipNative = triple: ''
+            [target.${triple}.transcribe]
+            rustc-link-lib = ["transcribe"]
+            [target.${triple}.alsa]
+            rustc-link-lib = ["asound"]
+            [target.${triple}.ghostty-vt]
+            rustc-link-lib = ["ghostty-vt"]
+          '';
 
           hostBuildScriptsSkipped = pkgs.writeText "clippy-host.toml" (skipNative hostTarget);
 
           cross =
             let
-              target =
-                pkgs.lib.throwIfNot (cfg.crossTarget != hostTarget)
-                  "clippy-cross target ${cfg.crossTarget} matches host ${hostTarget}"
-                  cfg.crossTarget;
+              target = pkgs.lib.throwIfNot (
+                cfg.crossTarget != hostTarget
+              ) "clippy-cross target ${cfg.crossTarget} matches host ${hostTarget}" cfg.crossTarget;
             in
             {
               inherit target;
@@ -518,6 +532,10 @@
             // {
               buildPhaseCargoCommand = "cargoWithProfile check ${clippyCrossArgs.cargoExtraArgs} ${vendoredClippyRun}";
               disallowedRequisites = [
+                toolchain
+                cross.toolchain
+              ];
+              preInstall = scrubCargoDeps "clippyCrossDeps" [
                 toolchain
                 cross.toolchain
               ];
@@ -557,6 +575,7 @@
               disallowedRequisites = [
                 toolchain
               ];
+              preInstall = scrubCargoDeps "clippyReleaseDeps" [ toolchain ];
             }
           );
 
@@ -591,6 +610,10 @@
                 toolchain
                 cross.toolchain
               ];
+              preInstall = scrubCargoDeps "clippyCrossReleaseDeps" [
+                toolchain
+                cross.toolchain
+              ];
             }
           );
 
@@ -603,7 +626,6 @@
               allowedReferences = [ ];
             }
           );
-
           deny = craneLib.cargoDeny {
             inherit (daemon) pname version cargoVendorDir;
             src = denySrc;
