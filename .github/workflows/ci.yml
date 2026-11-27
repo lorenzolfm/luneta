@@ -147,7 +147,9 @@ jobs:
 
   clippy:
     needs: code
-    if: fromJSON(needs.code.outputs.plan).kind == 'code'
+    if: >-
+      ${{ !cancelled() && needs.code.result == 'success'
+      && fromJSON(needs.code.outputs.plan).kind == 'code' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -210,63 +212,15 @@ jobs:
         if: ${{ !cancelled() && steps.tailscale.outcome == 'success' }}
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-        run: |
-          set -u
-          if [[ -z ${ATTIC_TOKEN:-} ]]; then
-            echo "No ATTIC_TOKEN secret, so nothing is pushed."
-            exit 0
-          fi
-          attic="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#attic-client)/bin/attic"
-          "$attic" login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
-          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          if [[ -z $system ]]; then
-            echo "builtins.currentSystem evaluated to empty" >&2
-            exit 1
-          fi
-          cached="$(nix eval --json ".#cached.$system")"
-          raw_paths="$(jq -er 'if type == "array" and length > 0 and all(type == "string") then .[] else error("cached must be a non-empty array of strings") end' <<<"$cached")"
-          cached_paths_max=32
-          candidate_count=0
-          skip="${ATTIC_SKIP_PATH:-}"
-          built=()
-          while IFS= read -r path; do
-            candidate_count=$((candidate_count + 1))
-            if (( candidate_count > cached_paths_max )); then
-              echo "cached.$system listed more than $cached_paths_max paths" >&2
-              exit 1
-            fi
-            if [[ $path != /nix/store/* ]]; then
-              echo "cached.$system emitted non-store path: $path" >&2
-              exit 1
-            fi
-            if [[ $path == *.drv ]]; then
-              echo "cached.$system emitted derivation path: $path" >&2
-              exit 1
-            fi
-            if [[ -n $skip && $path == "$skip" ]]; then
-              continue
-            fi
-            if [[ -e $path ]]; then
-              built+=("$path")
-            fi
-          done <<<"$raw_paths"
-          if (( candidate_count == 0 )); then
-            echo "cached.$system yielded no paths" >&2
-            exit 1
-          fi
-          if (( ${#built[@]} == 0 )); then
-            echo "This job built nothing the cache keeps."
-            exit 0
-          fi
-          printf '%s\n' "${built[@]}"
-          "$attic" push homelab:main "${built[@]}"
+        run: nix run .#dev.commands.attic-push
 
   breaking:
     needs: code
     if: >-
-      github.event_name == 'pull_request'
+      ${{ !cancelled() && needs.code.result == 'success'
+      && github.event_name == 'pull_request'
       && fromJSON(needs.code.outputs.plan).kind == 'code'
-      && fromJSON(needs.code.outputs.plan).breaking != false
+      && fromJSON(needs.code.outputs.plan).breaking != false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -305,34 +259,42 @@ jobs:
 
       - name: The runners whose tested luned attic doesn't hold
         id: tested
-        if: steps.tailscale.outcome == 'success'
+        env:
+          TAILSCALE: ${{ steps.tailscale.outcome }}
         run: |
-          checks="$(nix eval --json .#checks --apply 'builtins.mapAttrs (_: checks: checks.luned.outPath)')"
+          set -u
+          if [[ $TAILSCALE != success ]]; then
+            untested="$(nix eval --json .#ciRunners | jq -ce 'if type == "object" and length > 0 then [.[]] else error("ciRunners must be a non-empty object") end')"
+            echo "untested=$untested" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          targets="$(nix eval --json .#testedTargets)"
+          rows="$(jq -er 'to_entries | if length > 0 then .[] | [.key, .value.runner, .value.path] | @tsv else error("testedTargets must be non-empty") end' <<<"$targets")"
           untested=()
-          for pair in x86_64-linux=ubuntu-latest aarch64-linux=ubuntu-24.04-arm aarch64-darwin=macos-latest; do
-            system="${pair%%=*}"
-            check="$(jq -er --arg system "$system" '.[$system]' <<<"$checks")"
+          while IFS=$'\t' read -r system runner check; do
             if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
               echo "attic holds $system's tested $check"
             else
-              untested+=("${pair#*=}")
+              untested+=("$runner")
             fi
-          done
+          done <<<"$rows"
           echo "untested=$(jq -cn '$ARGS.positional' --args "${untested[@]}")" | tee -a "$GITHUB_OUTPUT"
 
   daemon:
     needs: [code, tested]
     if: >-
-      ${{ !cancelled() && needs.code.result == 'success'
-      && needs.tested.result != 'failure'
+      ${{ !cancelled()
+      && needs.code.result == 'success'
       && fromJSON(needs.code.outputs.plan).kind == 'code'
-      && needs.tested.outputs.untested != '[]' }}
+      && (needs.tested.result == 'skipped'
+      || (needs.tested.result == 'success' && needs.tested.outputs.untested != '[]')) }}
     strategy:
       fail-fast: false
       matrix:
         runner: >-
-          ${{ fromJSON(needs.tested.outputs.untested
-          || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]') }}
+          ${{ fromJSON(needs.tested.result == 'skipped'
+          && '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]'
+          || needs.tested.outputs.untested) }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -476,8 +438,9 @@ jobs:
   ios:
     needs: code
     if: >-
-      fromJSON(needs.code.outputs.plan).kind == 'code'
-      && fromJSON(needs.code.outputs.plan).ios != false
+      ${{ !cancelled() && needs.code.result == 'success'
+      && fromJSON(needs.code.outputs.plan).kind == 'code'
+      && fromJSON(needs.code.outputs.plan).ios != false }}
     runs-on: xcode-27
     timeout-minutes: 40
 
