@@ -58,17 +58,17 @@ impl Copies {
             Clip::Pull(link) => {
                 write(out, &link.url())?;
                 Ok(Some(Copied::Pull(link.number())))
-            },
+            }
             Clip::Filed(filed) => {
                 write(out, &filed.link().url())?;
                 Ok(None)
-            },
+            }
             Clip::Excerpt(excerpt) => {
                 write(out, &excerpt)?;
                 let copied = Copied::text(&excerpt);
                 self.excerpt = Some(excerpt);
                 Ok(Some(copied))
-            },
+            }
         }
     }
 
@@ -85,7 +85,10 @@ fn write(out: &mut impl io::Write, text: &str) -> io::Result<()> {
 fn osc52(text: &str) -> String {
     let text = base64::engine::general_purpose::STANDARD.encode(text);
     let spelled = |byte: u8| byte.is_ascii_alphanumeric() || b"+/=".contains(&byte);
-    assert!(text.bytes().all(spelled), "a copy can't end its escape early");
+    assert!(
+        text.bytes().all(spelled),
+        "a copy can't end its escape early"
+    );
     format!("\x1b]52;c;{text}\x07")
 }
 
@@ -107,9 +110,15 @@ impl Text {
         let lines = NonZeroUsize::new(excerpt.lines().count()).expect("an excerpt has a line");
         let first = excerpt.lines().map(shown).find(|line| !line.is_empty());
         let fits = |first: &str| first.chars().count() <= SHOWN_CHARS_MAX;
-        assert!(first.as_deref().is_none_or(fits), "a note keeps only what it can show");
+        assert!(
+            first.as_deref().is_none_or(fits),
+            "a note keeps only what it can show"
+        );
         let drawn = |first: &str| !first.chars().any(char::is_control);
-        assert!(first.as_deref().is_none_or(drawn), "a note draws no control character");
+        assert!(
+            first.as_deref().is_none_or(drawn),
+            "a note draws no control character"
+        );
         Text { lines, first }
     }
 
@@ -144,11 +153,15 @@ fn quotes_some(kept: &str, first: &str) -> bool {
     if kept == first {
         return true;
     }
-    kept.strip_suffix('…').is_some_and(|before| !before.is_empty())
+    kept.strip_suffix('…')
+        .is_some_and(|before| !before.is_empty())
 }
 
 fn shown(line: &str) -> String {
-    let spaced: String = line.chars().map(|it| if it.is_control() { ' ' } else { it }).collect();
+    let spaced: String = line
+        .chars()
+        .map(|it| if it.is_control() { ' ' } else { it })
+        .collect();
     spaced.trim().chars().take(SHOWN_CHARS_MAX).collect()
 }
 
@@ -178,7 +191,10 @@ mod tests {
         let note = copies.clip(&mut out, Clip::Pull(link())).unwrap();
         assert_eq!(note, Some(Copied::Pull(NonZeroU32::new(246).unwrap())));
         let spelled = "aHR0cHM6Ly9naXRodWIuY29tL28vci9wdWxsLzI0Ng==";
-        assert_eq!(String::from_utf8(out).unwrap(), format!("\x1b]52;c;{spelled}\x07"));
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!("\x1b]52;c;{spelled}\x07")
+        );
     }
 
     #[test]
@@ -189,19 +205,38 @@ mod tests {
         let mut clip = |copies: &mut Copies, clip| copies.clip(&mut out, clip).unwrap();
         assert_eq!(clip(&mut copies, Clip::Pull(link())), pull);
         assert_eq!(copies.excerpt(), None, "a link lune made is not read");
-        assert_eq!(clip(&mut copies, Clip::Excerpt(excerpt("swept"))), Some(noted("swept")));
+        assert_eq!(
+            clip(&mut copies, Clip::Excerpt(excerpt("swept"))),
+            Some(noted("swept"))
+        );
         assert_eq!(copies.excerpt(), Some("swept"));
         assert_eq!(clip(&mut copies, Clip::Pull(link())), pull);
-        assert_eq!(copies.excerpt(), Some("swept"), "a pull request's link leaves it");
+        assert_eq!(
+            copies.excerpt(),
+            Some("swept"),
+            "a pull request's link leaves it"
+        );
         let filed = Filed::page("https://github.com/o/r/issues/7", "Red").expect("an issue's page");
         let filed = clip(&mut copies, Clip::Filed(filed));
         assert_eq!(filed, None, "a filed issue says so in its own note");
-        assert_eq!(copies.excerpt(), Some("swept"), "a filed issue's link leaves it");
+        assert_eq!(
+            copies.excerpt(),
+            Some("swept"),
+            "a filed issue's link leaves it"
+        );
         let selected = clip(&mut copies, Clip::Excerpt(excerpt("selected")));
         assert_eq!(selected, Some(noted("selected")));
-        assert_eq!(copies.excerpt(), Some("selected"), "the next excerpt replaces it");
+        assert_eq!(
+            copies.excerpt(),
+            Some("selected"),
+            "the next excerpt replaces it"
+        );
         let written = String::from_utf8(out).unwrap();
-        assert_eq!(written.matches("\x1b]52;c;").count(), 5, "every copy goes to the clipboard");
+        assert_eq!(
+            written.matches("\x1b]52;c;").count(),
+            5,
+            "every copy goes to the clipboard"
+        );
     }
 
     #[test]
@@ -238,10 +273,13 @@ mod tests {
     #[test]
     fn more_lines_are_counted_and_the_first_with_words_is_said() {
         let copied = noted("\n   \n  fn main() {\n      run();\n  }\n");
-        assert_eq!(copied, Copied::Text(Text {
-            lines: NonZeroUsize::new(5).unwrap(),
-            first: Some("fn main() {".to_owned())
-        }));
+        assert_eq!(
+            copied,
+            Copied::Text(Text {
+                lines: NonZeroUsize::new(5).unwrap(),
+                first: Some("fn main() {".to_owned())
+            })
+        );
         assert_eq!(copied.said(40), "copied 5 lines \"fn main() {\"");
         assert_eq!(copied.said(24), "copied 5 lines \"fn mai…\"");
         assert_eq!(copied.said(18), "copied 5 lines");
@@ -255,7 +293,10 @@ mod tests {
 
     #[test]
     fn control_characters_are_said_as_spaces() {
-        assert_eq!(noted("\x1b[1mbold\x07\tafter").said(40), "copied \"[1mbold  after\"");
+        assert_eq!(
+            noted("\x1b[1mbold\x07\tafter").said(40),
+            "copied \"[1mbold  after\""
+        );
     }
 
     #[test]

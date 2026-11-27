@@ -1,23 +1,44 @@
 use std::fs::{self, Permissions};
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
-use crate::host::{info, start, Host, Vars, LUNE, SOCKET};
+use crate::host::{Host, LUNE, SOCKET, Vars, info, start};
 
 type Case = for<'p> fn(&'p Path, &'p Path) -> (Vars<'p>, &'p Path);
 
 #[test]
 fn the_cli_finds_the_daemon_where_the_variables_say() {
     let cases: [Case; 2] = [
-        |a, _| (Vars { runtime: Some(a), ..Vars::default() }, a),
-        |a, b| (Vars { runtime: Some(a), temp: Some(b), ..Vars::default() }, a),
+        |a, _| {
+            (
+                Vars {
+                    runtime: Some(a),
+                    ..Vars::default()
+                },
+                a,
+            )
+        },
+        |a, b| {
+            (
+                Vars {
+                    runtime: Some(a),
+                    temp: Some(b),
+                    ..Vars::default()
+                },
+                a,
+            )
+        },
     ];
     for case in cases {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let (vars, root) = case(a.path(), b.path());
         let daemon = start(vars).unwrap();
-        assert!(root.join(SOCKET).exists(), "no socket under {}", root.display());
+        assert!(
+            root.join(SOCKET).exists(),
+            "no socket under {}",
+            root.display()
+        );
         let said = info(vars);
         assert!(said.contains(&format!("(pid {})", daemon.pid())), "{said}");
     }
@@ -36,7 +57,10 @@ fn one_daemon_holds_the_folder_until_it_dies() {
     assert!(said.contains(&format!("(pid {})", first.pid())), "{said}");
 
     drop(first);
-    assert!(root.path().join(SOCKET).exists(), "a crash leaves the socket behind");
+    assert!(
+        root.path().join(SOCKET).exists(),
+        "a crash leaves the socket behind"
+    );
     let next = start(vars).unwrap();
     let said = info(vars);
     assert!(said.contains(&format!("(pid {})", next.pid())), "{said}");
@@ -78,12 +102,23 @@ fn a_second_luned_of_one_home_names_the_first_and_does_not_start() {
     let host = Host::new();
     let _first = start(host.vars()).unwrap();
     let other = tempfile::tempdir().unwrap();
-    let (ended, said) = start(Vars { runtime: Some(other.path()), ..host.vars() }).err().unwrap();
+    let (ended, said) = start(Vars {
+        runtime: Some(other.path()),
+        ..host.vars()
+    })
+    .err()
+    .unwrap();
     assert!(!ended.success());
     let first = host.runtime.path().join("lune");
-    let names = format!("and listens in {}: `lune terminate` ends it", first.display());
+    let names = format!(
+        "and listens in {}: `lune terminate` ends it",
+        first.display()
+    );
     assert!(said.contains(&names), "{said}");
-    assert!(!other.path().join(SOCKET).exists(), "a second luned of one home listens");
+    assert!(
+        !other.path().join(SOCKET).exists(),
+        "a second luned of one home listens"
+    );
 }
 
 #[test]

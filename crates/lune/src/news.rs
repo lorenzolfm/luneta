@@ -46,7 +46,10 @@ impl News {
     }
 
     pub fn lost(&self) -> Option<&str> {
-        self.seen.lost().or(self.stayed.lost()).or(self.unread.lost())
+        self.seen
+            .lost()
+            .or(self.stayed.lost())
+            .or(self.unread.lost())
     }
 
     pub fn reload(&mut self) -> bool {
@@ -106,7 +109,11 @@ impl News {
         finished: Option<SystemTime>,
         now: SystemTime,
     ) -> bool {
-        if self.stayed.get(key.session).is_none_or(|stayed| stayed < since) {
+        if self
+            .stayed
+            .get(key.session)
+            .is_none_or(|stayed| stayed < since)
+        {
             self.stayed.set(key.session, Some(now));
         }
         let mut changed = self.saw(key, finished, now);
@@ -121,7 +128,8 @@ impl News {
         if !self.is_new(key, finished) {
             return false;
         }
-        self.seen.set(key, finished.map(|finished| finished.max(now)));
+        self.seen
+            .set(key, finished.map(|finished| finished.max(now)));
         true
     }
 
@@ -136,7 +144,10 @@ impl News {
     }
 
     fn dirs(&self) -> Vec<&Path> {
-        [self.seen.dir(), self.stayed.dir(), self.unread.dir()].into_iter().flatten().collect()
+        [self.seen.dir(), self.stayed.dir(), self.unread.dir()]
+            .into_iter()
+            .flatten()
+            .collect()
     }
 }
 
@@ -179,7 +190,10 @@ mod tests {
     }
 
     fn view(view: u64) -> Key {
-        Key { session: session(10), view: id(view) }
+        Key {
+            session: session(10),
+            view: id(view),
+        }
     }
 
     fn finished(key: Key) -> Option<SystemTime> {
@@ -196,7 +210,11 @@ mod tests {
 
     fn listing(session: Session, views: &[u64]) -> Lists {
         let mut live = Lists::default();
-        live.lists(&Machine::Local, [(session, views.iter().map(|view| id(*view)))], true);
+        live.lists(
+            &Machine::Local,
+            [(session, views.iter().map(|view| id(*view)))],
+            true,
+        );
         live
     }
 
@@ -211,12 +229,19 @@ mod tests {
         assert_eq!(new(&news), [true, false]);
 
         let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
-        assert!([1, 2].iter().all(|id| news.is_new(view(*id), later(view(*id)))));
+        assert!(
+            [1, 2]
+                .iter()
+                .all(|id| news.is_new(view(*id), later(view(*id))))
+        );
     }
 
     #[test]
     fn a_stay_dates_the_session_with_nothing_new_in_it() {
-        let other = |view: u64| Key { session: session(20), view: id(view) };
+        let other = |view: u64| Key {
+            session: session(20),
+            view: id(view),
+        };
         let nothing = |_: Key| None;
         let mut news = News::default();
 
@@ -274,7 +299,11 @@ mod tests {
         assert!(!news.is_unread(view(2)));
 
         let later = |key: Key| finished(key).map(|at| at + Duration::from_secs(10));
-        assert!([1, 2].iter().all(|id| news.is_new(view(*id), later(view(*id)))));
+        assert!(
+            [1, 2]
+                .iter()
+                .all(|id| news.is_new(view(*id), later(view(*id))))
+        );
     }
 
     #[test]
@@ -340,7 +369,9 @@ mod tests {
 
         fs::set_permissions(&runtime, Permissions::from_mode(0o755)).unwrap();
         let news = News::within(&runtime);
-        let open = news.lost().is_some_and(|lost| lost.contains("is open to other users"));
+        let open = news
+            .lost()
+            .is_some_and(|lost| lost.contains("is open to other users"));
         assert!(open, "{:?}", news.lost());
     }
 }

@@ -136,7 +136,7 @@ pkgs.writeShellApplication {
   name = "dev";
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
-    inherit (commands) lint deny;
+    inherit (commands) lint deny fmt;
     attic-push = atticPush;
     ios-build = command (import ./commands/ios.nix args).build;
   };

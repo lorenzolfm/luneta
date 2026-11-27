@@ -19,8 +19,15 @@ enum Errand {
 }
 
 pub enum Unrun {
-    Sized { key: TerminalKey, size: Size, why: String },
-    Pasted { terminals: Vec<TerminalViewId>, why: String },
+    Sized {
+        key: TerminalKey,
+        size: Size,
+        why: String,
+    },
+    Pasted {
+        terminals: Vec<TerminalViewId>,
+        why: String,
+    },
 }
 
 pub struct Errands {
@@ -60,7 +67,10 @@ fn taken(sent: &Result<(), TrySendError<Errand>>) -> bool {
 async fn run(mut errands: mpsc::Receiver<Errand>, failed: mpsc::Sender<Unrun>) {
     let mut batch = Vec::with_capacity(ERRANDS_MAX);
     while errands.recv_many(&mut batch, ERRANDS_MAX).await > 0 {
-        assert!(batch.len() <= ERRANDS_MAX, "a batch is at most the errands that wait");
+        assert!(
+            batch.len() <= ERRANDS_MAX,
+            "a batch is at most the errands that wait"
+        );
         latest_kept(&mut batch);
         for errand in batch.drain(..) {
             if let Some(left) = ran(errand).await
@@ -77,8 +87,12 @@ async fn ran(errand: Errand) -> Option<Unrun> {
     match errand {
         Errand::Size { key, size } => {
             let sized = Terminals.sized(key, size).await;
-            sized.err().map(|failure| Unrun::Sized { key, size, why: failure.to_string() })
-        },
+            sized.err().map(|failure| Unrun::Sized {
+                key,
+                size,
+                why: failure.to_string(),
+            })
+        }
         Errand::Paste(pastes) => {
             let typed: Vec<(TerminalKey, &Line)> =
                 pastes.iter().map(|(_, key, line)| (*key, line)).collect();
@@ -87,7 +101,7 @@ async fn ran(errand: Errand) -> Option<Unrun> {
                 terminals: pastes.iter().map(|(terminal, ..)| *terminal).collect(),
                 why: failure.to_string(),
             })
-        },
+        }
     }
 }
 
@@ -98,7 +112,10 @@ fn latest_kept(batch: &mut Vec<Errand>) {
             last.insert(*key, index);
         }
     }
-    let pastes = batch.iter().filter(|it| matches!(it, Errand::Paste(_))).count();
+    let pastes = batch
+        .iter()
+        .filter(|it| matches!(it, Errand::Paste(_)))
+        .count();
     let mut index = 0;
     batch.retain(|errand| {
         let kept = match errand {
@@ -108,7 +125,11 @@ fn latest_kept(batch: &mut Vec<Errand>) {
         index += 1;
         kept
     });
-    assert_eq!(batch.len(), last.len() + pastes, "one size per terminal and every paste are kept");
+    assert_eq!(
+        batch.len(),
+        last.len() + pastes,
+        "one size per terminal and every paste are kept"
+    );
 }
 
 #[cfg(test)]
@@ -118,14 +139,20 @@ mod tests {
     use lune_domain::mux::{OwnMade, TerminalKey};
     use lune_domain::projects::Size;
 
-    use super::{latest_kept, Errand};
+    use super::{Errand, latest_kept};
 
     fn key(id: u32) -> TerminalKey {
-        TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(1) }
+        TerminalKey {
+            id: NonZeroU32::new(id).unwrap(),
+            made: OwnMade::from_nanos(1),
+        }
     }
 
     fn sized(key: TerminalKey, columns: u32) -> Errand {
-        Errand::Size { key, size: Size::of(columns, 24).unwrap() }
+        Errand::Size {
+            key,
+            size: Size::of(columns, 24).unwrap(),
+        }
     }
 
     fn said(batch: &[Errand]) -> Vec<String> {

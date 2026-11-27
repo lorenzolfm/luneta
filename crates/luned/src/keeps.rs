@@ -39,13 +39,24 @@ impl Draft {
             ));
         }
         sweep(folder.path(), now);
-        let since = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let since = now
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let count = FILES.fetch_add(1, Ordering::Relaxed);
         let kept = format!("{found}/{since}-{}-{count}.{extension}", std::process::id());
         let partial = format!("{kept}.part");
-        let file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&partial);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&partial);
         let file = file.map_err(|error| format!("{partial}: {error}"))?;
-        Ok(Draft { file, partial, kept })
+        Ok(Draft {
+            file,
+            partial,
+            kept,
+        })
     }
 
     pub(crate) fn make_room(&self, size: u64, most: u64) {
@@ -73,7 +84,9 @@ impl Draft {
     }
 
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.file.write_all(bytes).map_err(|error| format!("{}: {error}", self.kept))
+        self.file
+            .write_all(bytes)
+            .map_err(|error| format!("{}: {error}", self.kept))
     }
 
     pub(crate) fn keep(self) -> Result<String, String> {

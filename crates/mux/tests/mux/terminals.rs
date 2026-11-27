@@ -12,13 +12,23 @@ use crate::host::{
 };
 
 fn terminal<'a>(listing: &'a api::Listing, key: &api::TerminalKey) -> Option<&'a api::Terminal> {
-    listing.terminals.iter().find(|terminal| terminal.key.as_ref() == Some(key))
+    listing
+        .terminals
+        .iter()
+        .find(|terminal| terminal.key.as_ref() == Some(key))
 }
 
 fn made_at_another_time(key: api::TerminalKey) -> api::TerminalKey {
     let mut made_at = key.made_at.unwrap();
-    made_at.nanos = if made_at.nanos > 0 { made_at.nanos - 1 } else { 1 };
-    api::TerminalKey { made_at: Some(made_at), ..key }
+    made_at.nanos = if made_at.nanos > 0 {
+        made_at.nanos - 1
+    } else {
+        1
+    };
+    api::TerminalKey {
+        made_at: Some(made_at),
+        ..key
+    }
 }
 
 fn nanos(key: api::TerminalKey) -> i128 {
@@ -37,7 +47,10 @@ fn a_terminal_is_listed_with_its_tag_and_size_and_a_viewer_types_in_it() {
         assert_eq!(listing.terminals.len(), 1);
         assert_eq!(listed.tag, b"work 1");
         assert_eq!(listed.size, Some(size(40, 10)));
-        assert!(matches!(listed.program, Some(api::terminal::Program::Runs(_))));
+        assert!(matches!(
+            listed.program,
+            Some(api::terminal::Program::Runs(_))
+        ));
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key]).await;
         let prompted = viewer.until_prompted(key.id).await;
@@ -57,11 +70,16 @@ fn a_terminal_takes_the_size_it_is_given_and_not_its_viewer_s() {
         let prompted = viewer.until_prompted(key.id).await;
         let typed = viewer.type_at(key, &prompted, "stty size").await;
         assert_eq!(viewer.until_said(key.id, &typed).await, ["10 40"]);
-        let sized = api::SizeTerminalRequest { terminal: Some(key), size: Some(size(50, 12)) };
+        let sized = api::SizeTerminalRequest {
+            terminal: Some(key),
+            size: Some(size(50, 12)),
+        };
         mux.size_terminal(sized).await.unwrap();
         viewer
             .until("a frame of 50 by 12", |viewer| {
-                viewer.frame_of(key.id).is_some_and(|frame| frame.size == Some(size(50, 12)))
+                viewer
+                    .frame_of(key.id)
+                    .is_some_and(|frame| frame.size == Some(size(50, 12)))
             })
             .await;
         let prompted = viewer.until_prompted(key.id).await;
@@ -79,7 +97,10 @@ fn a_terminal_s_tag_changes_and_the_watch_says_so() {
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
         let key = new_terminal(&mut mux, shell(), b"before", size(40, 10)).await;
-        let tagged = api::TagTerminalRequest { terminal: Some(key), tag: b"after".to_vec() };
+        let tagged = api::TagTerminalRequest {
+            terminal: Some(key),
+            tag: b"after".to_vec(),
+        };
         mux.tag_terminal(tagged).await.unwrap();
         watched_until(&mut watch, "the new tag", |listing| {
             terminal(listing, &key).is_some_and(|terminal| terminal.tag == b"after")
@@ -122,7 +143,10 @@ fn a_viewer_that_shows_a_terminal_again_gets_its_whole_screen_again() {
         viewer.show(&[key]).await;
         let patience = Patience::begun();
         loop {
-            let next = viewer.next(patience, "the whole screen again").await.unwrap();
+            let next = viewer
+                .next(patience, "the whole screen again")
+                .await
+                .unwrap();
             let event = next.expect("the stream goes on");
             if let api::to_viewer::Event::Frame(frame) = event
                 && frame.terminal == Some(key)
@@ -142,8 +166,13 @@ fn typing_in_a_terminal_not_shown_is_refused_and_the_viewer_goes_on() {
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.press_enter(key).await;
-        viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
-        assert_eq!(viewer.refused[0], format!("terminal {} is not shown", key.id));
+        viewer
+            .until("a refusal", |viewer| !viewer.refused.is_empty())
+            .await;
+        assert_eq!(
+            viewer.refused[0],
+            format!("terminal {} is not shown", key.id)
+        );
         viewer.show(&[key]).await;
         let prompted = viewer.until_prompted(key.id).await;
         let typed = viewer.type_at(key, &prompted, "echo $((6 * 7))").await;
@@ -157,11 +186,19 @@ fn a_viewer_never_shows_the_terminal_it_runs_in() {
         let server = Server::start().await;
         let mut mux = server.client().await;
         let home = new_terminal(&mut mux, shell(), b"home", size(40, 10)).await;
-        let greeting = api::Greeting { colours: None, runs_in: Some(home) };
+        let greeting = api::Greeting {
+            colours: None,
+            runs_in: Some(home),
+        };
         let mut viewer = Viewer::hello(&mut mux, greeting).await.unwrap();
         viewer.show(&[home]).await;
-        viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
-        let refused = format!("the viewer runs in terminal {}, and never shows itself", home.id);
+        viewer
+            .until("a refusal", |viewer| !viewer.refused.is_empty())
+            .await;
+        let refused = format!(
+            "the viewer runs in terminal {}, and never shows itself",
+            home.id
+        );
         assert_eq!(viewer.refused, [refused]);
     });
 }
@@ -174,17 +211,35 @@ fn a_terminal_named_with_another_time_is_not_found() {
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let other = Some(made_at_another_time(key));
         let not_found = format!("no terminal {} made then", key.id);
-        let closed = mux.close_terminal(api::CloseTerminalRequest { terminal: other }).await;
-        let sized = api::SizeTerminalRequest { terminal: other, size: Some(size(20, 4)) };
+        let closed = mux
+            .close_terminal(api::CloseTerminalRequest { terminal: other })
+            .await;
+        let sized = api::SizeTerminalRequest {
+            terminal: other,
+            size: Some(size(20, 4)),
+        };
         let sized = mux.size_terminal(sized).await;
-        let tagged = api::TagTerminalRequest { terminal: other, tag: b"u".to_vec() };
+        let tagged = api::TagTerminalRequest {
+            terminal: other,
+            tag: b"u".to_vec(),
+        };
         let tagged = mux.tag_terminal(tagged).await;
-        let dumped = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: other };
+        let dumped = api::DumpRequest {
+            dumped: api::Dumped::Text.into(),
+            terminal: other,
+        };
         let dumped = mux.dump(dumped).await;
-        let refusals =
-            [closed.unwrap_err(), sized.unwrap_err(), tagged.unwrap_err(), dumped.unwrap_err()];
+        let refusals = [
+            closed.unwrap_err(),
+            sized.unwrap_err(),
+            tagged.unwrap_err(),
+            dumped.unwrap_err(),
+        ];
         for refusal in refusals {
-            assert_eq!((refusal.code(), refusal.message()), (Code::NotFound, not_found.as_str()));
+            assert_eq!(
+                (refusal.code(), refusal.message()),
+                (Code::NotFound, not_found.as_str())
+            );
         }
         assert!(terminal(&listed(&mut mux).await, &key).is_some());
     });
@@ -211,18 +266,29 @@ fn a_terminal_dumps_its_text() {
         let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
-        let key =
-            new_terminal(&mut mux, script("echo said", api::Ends::Holds), b"t", size(20, 4)).await;
+        let key = new_terminal(
+            &mut mux,
+            script("echo said", api::Ends::Holds),
+            b"t",
+            size(20, 4),
+        )
+        .await;
         watched_until(&mut watch, "the program ended", |listing| {
             terminal(listing, &key).is_some_and(|terminal| {
                 matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
             })
         })
         .await;
-        let dumped = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: Some(key) };
+        let dumped = api::DumpRequest {
+            dumped: api::Dumped::Text.into(),
+            terminal: Some(key),
+        };
         let text = mux.dump(dumped).await.unwrap().into_inner().text;
         assert!(text.lines().any(|line| line == "said"), "{text}");
-        let untold = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: None };
+        let untold = api::DumpRequest {
+            dumped: api::Dumped::Text.into(),
+            terminal: None,
+        };
         let refusal = mux.dump(untold).await.unwrap_err();
         assert_eq!(refusal.message(), "terminal is missing");
     });
@@ -234,17 +300,37 @@ fn a_terminal_looks_at_only_the_text_it_shows() {
         let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
-        let key =
-            new_terminal(&mut mux, script("seq 1 20", api::Ends::Holds), b"t", size(20, 4)).await;
+        let key = new_terminal(
+            &mut mux,
+            script("seq 1 20", api::Ends::Holds),
+            b"t",
+            size(20, 4),
+        )
+        .await;
         watched_until(&mut watch, "the program ended", |listing| {
             terminal(listing, &key).is_some_and(|terminal| {
                 matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
             })
         })
         .await;
-        let looked = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap().into_inner();
-        let again = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap().into_inner();
-        let dumped = api::DumpRequest { dumped: api::Dumped::Text.into(), terminal: Some(key) };
+        let looked = mux
+            .look(api::LookRequest {
+                terminal: Some(key),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let again = mux
+            .look(api::LookRequest {
+                terminal: Some(key),
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let dumped = api::DumpRequest {
+            dumped: api::Dumped::Text.into(),
+            terminal: Some(key),
+        };
         let text = mux.dump(dumped).await.unwrap().into_inner().text;
         let shown = looked.text.as_str();
         assert!(shown.lines().count() <= 4, "{shown}");
@@ -256,15 +342,23 @@ fn a_terminal_looks_at_only_the_text_it_shows() {
 }
 
 fn pressed(key: api::TerminalKey, shown: Option<u64>, text: &str) -> api::PressRequest {
-    let paste = api::pressed::Event::Paste(api::Paste { text: text.to_owned() });
+    let paste = api::pressed::Event::Paste(api::Paste {
+        text: text.to_owned(),
+    });
     let enter = api::pressed::Event::Key(api::Key {
         press: api::Press::Down.into(),
         modifiers: None,
         key: Some(api::key::Key::Named(api::Named::Enter.into())),
         text: String::new(),
     });
-    let pressed = [paste, enter].map(|event| api::Pressed { event: Some(event) }).to_vec();
-    api::PressRequest { terminal: Some(key), shown, pressed }
+    let pressed = [paste, enter]
+        .map(|event| api::Pressed { event: Some(event) })
+        .to_vec();
+    api::PressRequest {
+        terminal: Some(key),
+        shown,
+        pressed,
+    }
 }
 
 #[test]
@@ -276,7 +370,12 @@ fn a_press_lands_only_on_the_screen_it_was_looked_at() {
             "stty raw -echo; echo ready; dd bs=1 count=3 2>/dev/null | od -An -tx1; sleep 60";
         let key = new_terminal(&mut mux, script(heard, api::Ends::Holds), b"t", size(40, 4)).await;
         let looked = eventually_async("the program is ready", async || {
-            let looked = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap();
+            let looked = mux
+                .look(api::LookRequest {
+                    terminal: Some(key),
+                })
+                .await
+                .unwrap();
             let looked = looked.into_inner();
             looked.text.contains("ready").then_some(looked)
         })
@@ -287,11 +386,24 @@ fn a_press_lands_only_on_the_screen_it_was_looked_at() {
         let unsaid = mux.press(pressed(key, None, "no")).await.unwrap_err();
         assert_eq!(unsaid.message(), "shown is missing");
         let empty = pressed(key, Some(looked.shown), "");
-        let empty = api::PressRequest { pressed: Vec::new(), ..empty };
-        assert_eq!(mux.press(empty).await.unwrap_err().message(), "pressed is empty");
-        mux.press(pressed(key, Some(looked.shown), "ab")).await.unwrap();
+        let empty = api::PressRequest {
+            pressed: Vec::new(),
+            ..empty
+        };
+        assert_eq!(
+            mux.press(empty).await.unwrap_err().message(),
+            "pressed is empty"
+        );
+        mux.press(pressed(key, Some(looked.shown), "ab"))
+            .await
+            .unwrap();
         eventually_async("the program heard the press alone", async || {
-            let looked = mux.look(api::LookRequest { terminal: Some(key) }).await.unwrap();
+            let looked = mux
+                .look(api::LookRequest {
+                    terminal: Some(key),
+                })
+                .await
+                .unwrap();
             looked.into_inner().text.contains("61 62 0d").then_some(())
         })
         .await;
@@ -304,12 +416,18 @@ fn a_held_terminal_says_how_its_program_ended_and_a_closing_one_leaves() {
         let server = Server::start().await;
         let mut mux = server.client().await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
-        let held =
-            new_terminal(&mut mux, script("exit 3", api::Ends::Holds), b"held", size(20, 4)).await;
+        let held = new_terminal(
+            &mut mux,
+            script("exit 3", api::Ends::Holds),
+            b"held",
+            size(20, 4),
+        )
+        .await;
         let closes = script("read x", api::Ends::Closes);
         let closes = new_terminal(&mut mux, closes, b"closes", size(20, 4)).await;
-        let ended =
-            Some(api::terminal::Program::Ended(api::Exit { how: Some(api::exit::How::Code(3)) }));
+        let ended = Some(api::terminal::Program::Ended(api::Exit {
+            how: Some(api::exit::How::Code(3)),
+        }));
         watched_until(&mut watch, "the held program ended with 3", |listing| {
             terminal(listing, &held).is_some_and(|terminal| terminal.program == ended)
         })
@@ -336,7 +454,10 @@ fn a_tag_is_said_and_bounded() {
             size: Some(size(40, 10)),
         };
         let empty = mux.new_terminal(made(Vec::new())).await.unwrap_err();
-        assert_eq!((empty.code(), empty.message()), (Code::InvalidArgument, "tag is empty"));
+        assert_eq!(
+            (empty.code(), empty.message()),
+            (Code::InvalidArgument, "tag is empty")
+        );
         let long = mux.new_terminal(made(vec![b'x'; 257])).await.unwrap_err();
         assert_eq!(long.message(), "tag is over 256 bytes");
         mux.new_terminal(made(vec![0xff; 256])).await.unwrap();
@@ -353,14 +474,20 @@ fn a_showing_that_repeats_a_terminal_ends_the_viewer() {
         viewer.show(&[key, key]).await;
         let patience = Patience::begun();
         let refusal = loop {
-            match viewer.next(patience, "a refusal of the repeated terminal").await {
-                Ok(Some(_)) => {},
+            match viewer
+                .next(patience, "a refusal of the repeated terminal")
+                .await
+            {
+                Ok(Some(_)) => {}
                 Ok(None) => panic!("the stream ended without a refusal"),
                 Err(refusal) => break refusal,
             }
         };
         let repeated = format!("showing.terminals repeat {}", key.id);
-        assert_eq!((refusal.code(), refusal.message()), (Code::InvalidArgument, repeated.as_str()));
+        assert_eq!(
+            (refusal.code(), refusal.message()),
+            (Code::InvalidArgument, repeated.as_str())
+        );
     });
 }
 
@@ -371,10 +498,16 @@ fn showing_a_terminal_the_mux_does_not_hold_is_refused_and_the_others_are_shown(
         let mut mux = server.client().await;
         let key = new_terminal(&mut mux, shell(), b"t", size(40, 10)).await;
         let gone = new_terminal(&mut mux, shell(), b"gone", size(40, 10)).await;
-        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(gone) }).await.unwrap();
+        mux.close_terminal(api::CloseTerminalRequest {
+            terminal: Some(gone),
+        })
+        .await
+        .unwrap();
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[made_at_another_time(key), gone]).await;
-        viewer.until("two refusals", |viewer| viewer.refused.len() == 2).await;
+        viewer
+            .until("two refusals", |viewer| viewer.refused.len() == 2)
+            .await;
         let not_held = |key: api::TerminalKey| format!("no terminal {} made then", key.id);
         assert_eq!(viewer.refused, [not_held(key), not_held(gone)]);
         viewer.show(&[key, gone]).await;
@@ -395,19 +528,41 @@ fn a_closed_terminal_leaves_what_its_viewers_show_and_tells_them_it_closed() {
         let mut other = Viewer::new(&mut mux).await;
         viewer.show(&[one, two]).await;
         other.show(&[two]).await;
-        viewer.until("terminal one shown", |viewer| viewer.frame_of(one.id).is_some()).await;
-        other.until("terminal two shown", |other| other.frame_of(two.id).is_some()).await;
-        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(one) }).await.unwrap();
-        viewer.until("terminal one closed", |viewer| !viewer.closed.is_empty()).await;
+        viewer
+            .until("terminal one shown", |viewer| {
+                viewer.frame_of(one.id).is_some()
+            })
+            .await;
+        other
+            .until("terminal two shown", |other| {
+                other.frame_of(two.id).is_some()
+            })
+            .await;
+        mux.close_terminal(api::CloseTerminalRequest {
+            terminal: Some(one),
+        })
+        .await
+        .unwrap();
+        viewer
+            .until("terminal one closed", |viewer| !viewer.closed.is_empty())
+            .await;
         assert_eq!(viewer.closed, [one.id]);
         viewer.press_enter(one).await;
-        viewer.until("a refusal", |viewer| !viewer.refused.is_empty()).await;
-        assert_eq!(viewer.refused, [format!("terminal {} is not shown", one.id)]);
+        viewer
+            .until("a refusal", |viewer| !viewer.refused.is_empty())
+            .await;
+        assert_eq!(
+            viewer.refused,
+            [format!("terminal {} is not shown", one.id)]
+        );
         let prompted = viewer.until_prompted(two.id).await;
         let typed = viewer.type_at(two, &prompted, "echo $((6 * 7))").await;
         assert_eq!(viewer.until_said(two.id, &typed).await, ["42"]);
         assert_eq!(other.until_said(two.id, &typed).await, ["42"]);
-        assert!(other.closed.is_empty(), "a viewer hears only of the terminals it shows closing");
+        assert!(
+            other.closed.is_empty(),
+            "a viewer hears only of the terminals it shows closing"
+        );
     });
 }
 
@@ -420,9 +575,18 @@ fn the_last_terminal_to_close_ends_the_server() {
         let mut viewer = Viewer::new(&mut mux).await;
         viewer.show(&[key]).await;
         let mut watch = mux.watch(api::WatchRequest {}).await.unwrap().into_inner();
-        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
+        mux.close_terminal(api::CloseTerminalRequest {
+            terminal: Some(key),
+        })
+        .await
+        .unwrap();
         let patience = Patience::begun();
-        while viewer.next(patience, "the stream ends").await.unwrap().is_some() {}
+        while viewer
+            .next(patience, "the stream ends")
+            .await
+            .unwrap()
+            .is_some()
+        {}
         let emptied = api::watched::ended::Why::Emptied(api::watched::Emptied {});
         assert_eq!(watched_end(&mut watch).await, emptied);
         drop((viewer, watch, mux));
@@ -450,7 +614,11 @@ fn a_closed_terminal_s_program_that_ignores_hangups_and_terms_ends_before_the_se
         })
         .await;
         let pid = Pid::from_raw(pid).unwrap();
-        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(key) }).await.unwrap();
+        mux.close_terminal(api::CloseTerminalRequest {
+            terminal: Some(key),
+        })
+        .await
+        .unwrap();
         drop(mux);
         assert!(server.ended().await.success());
         assert_eq!(rustix::process::test_kill_process(pid), Err(Errno::SRCH));
@@ -464,7 +632,11 @@ fn a_closed_terminal_s_id_is_never_given_again() {
         let mut mux = server.client().await;
         let first = new_terminal(&mut mux, shell(), b"1", size(40, 10)).await;
         let second = new_terminal(&mut mux, shell(), b"2", size(40, 10)).await;
-        mux.close_terminal(api::CloseTerminalRequest { terminal: Some(second) }).await.unwrap();
+        mux.close_terminal(api::CloseTerminalRequest {
+            terminal: Some(second),
+        })
+        .await
+        .unwrap();
         let third = new_terminal(&mut mux, shell(), b"3", size(40, 10)).await;
         assert_eq!((first.id, second.id, third.id), (1, 2, 3));
     });
@@ -490,7 +662,12 @@ fn a_terminal_works_where_it_says_on_this_machine() {
 
 async fn scroll(viewer: &Viewer, key: api::TerminalKey, back: i32) {
     let event = Some(api::typed::Event::Scroll(api::Scroll { back }));
-    viewer.send(api::from_viewer::Event::Typed(api::Typed { terminal: Some(key), event })).await;
+    viewer
+        .send(api::from_viewer::Event::Typed(api::Typed {
+            terminal: Some(key),
+            event,
+        }))
+        .await;
 }
 
 const THIRTY_LINES: &str = "i=1; while [ $i -le 30 ]; do echo line$i; i=$((i + 1)); done; read x";
@@ -524,7 +701,13 @@ fn a_viewer_back_in_the_scrollback_stays_on_its_rows() {
         let server = Server::start().await;
         let mut mux = server.client().await;
         let lines = format!("{THIRTY_LINES}; echo more1; echo more2; echo more3; read x");
-        let key = new_terminal(&mut mux, script(&lines, api::Ends::Holds), b"t", size(20, 5)).await;
+        let key = new_terminal(
+            &mut mux,
+            script(&lines, api::Ends::Holds),
+            b"t",
+            size(20, 5),
+        )
+        .await;
         let mut reading = Viewer::new(&mut mux).await;
         let mut typing = Viewer::new(&mut mux).await;
         reading.show(&[key]).await;
@@ -566,11 +749,15 @@ fn rapid_title_changes_before_exit_still_list_the_last_title() {
         })
         .await;
         viewer.press_enter(key).await;
-        let listing = watched_until(&mut watch, "the program ended with its last title", |listing| {
-            terminal(listing, &key).is_some_and(|terminal| {
-                matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
-            })
-        })
+        let listing = watched_until(
+            &mut watch,
+            "the program ended with its last title",
+            |listing| {
+                terminal(listing, &key).is_some_and(|terminal| {
+                    matches!(terminal.program, Some(api::terminal::Program::Ended(_)))
+                })
+            },
+        )
         .await;
         assert_eq!(terminal(&listing, &key).unwrap().title, "frame-last");
     });

@@ -6,10 +6,10 @@ use std::process::{ChildStdin, ChildStdout, Stdio};
 use lune_waits::eventually;
 use luned::api::agent::{Status as Reported, WaitingFor as Waits};
 use luned::api::{Agent, Harness, Status, TranscriptEndsRequest, WaitingFor};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::agents::{terminal, Host, MADE_NANOS};
-use crate::host::{start, Daemon, Running, PATIENT};
+use crate::agents::{Host, MADE_NANOS, terminal};
+use crate::host::{Daemon, PATIENT, Running, start};
 
 const FAKE_AGY: &str = r#"
 import { createInterface } from "node:readline";
@@ -64,7 +64,11 @@ impl Agy {
             .stdout(Stdio::piped());
         let mut process = Running::spawn(&mut command);
         let (events, told) = process.piped();
-        Agy { process, events, told: BufReader::new(told) }
+        Agy {
+            process,
+            events,
+            told: BufReader::new(told),
+        }
     }
 
     fn sends(&mut self, payload: &Value) -> String {
@@ -102,7 +106,8 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
     let cmd = eventually("luned wires title in settings.json", || {
         title_command(&host).filter(|cmd| cmd.contains("lune-title.sh"))
     });
-    let updated: Value = serde_json::from_str(&fs::read_to_string(settings(&host)).unwrap()).unwrap();
+    let updated: Value =
+        serde_json::from_str(&fs::read_to_string(settings(&host)).unwrap()).unwrap();
     assert_eq!(updated["trustedWorkspaces"], json!(["/w"]));
 
     let mut agy = Agy::start(&host, &cmd);
@@ -117,11 +122,17 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
 
     let agent = as_status(&host, pid, Status::Idle);
     assert_eq!(agent.runs_in(), Harness::Antigravity);
-    assert_eq!(agent.session_id.as_deref(), Some("9c696c75-660f-4097-934f-e1cc290e4bd1"));
+    assert_eq!(
+        agent.session_id.as_deref(),
+        Some("9c696c75-660f-4097-934f-e1cc290e4bd1")
+    );
     assert_eq!(agent.cwd, "/home/you/work");
     assert!(agent.at_a_prompt());
     assert_eq!(agent.terminal, Some(terminal(4)));
-    assert_eq!(agent.name.as_ref().and_then(|name| name.given()), Some("Feature parity"));
+    assert_eq!(
+        agent.name.as_ref().and_then(|name| name.given()),
+        Some("Feature parity")
+    );
 }
 
 #[test]
@@ -138,7 +149,10 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
     }));
     assert_eq!(printed, "");
     let empty = as_status(&host, pid, Status::Idle);
-    assert_eq!(empty.session_id, None, "empty conversation leaves session_id absent");
+    assert_eq!(
+        empty.session_id, None,
+        "empty conversation leaves session_id absent"
+    );
 
     agy.sends(&json!({
         "cwd": "/home/you/work",
@@ -155,7 +169,12 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
     }));
     let still_busy = eventually("the agent gets its title", || {
         let agent = host.agents().into_iter().find(|agent| agent.pid == pid)?;
-        agent.name.as_ref().and_then(|name| name.given()).is_some().then_some(agent)
+        agent
+            .name
+            .as_ref()
+            .and_then(|name| name.given())
+            .is_some()
+            .then_some(agent)
     });
     assert_eq!(still_busy.status_since, busy.status_since);
 
@@ -167,7 +186,10 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
         "tool_confirmation_pending": true
     }));
     let waiting = as_status(&host, pid, Status::Waiting);
-    assert_eq!(waiting.waiting_for, Some(Waits::KnownWaitingFor(WaitingFor::PermissionPrompt.into())));
+    assert_eq!(
+        waiting.waiting_for,
+        Some(Waits::KnownWaitingFor(WaitingFor::PermissionPrompt.into()))
+    );
 
     agy.sends(&json!({
         "cwd": "/home/you/work",
@@ -180,10 +202,15 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
         let expected = Some(Waits::KnownWaitingFor(WaitingFor::InputNeeded.into()));
         (agent.waiting_for == expected).then_some(agent)
     });
-    assert_eq!(reviewing.status, Some(Reported::KnownStatus(Status::Waiting.into())));
+    assert_eq!(
+        reviewing.status,
+        Some(Reported::KnownStatus(Status::Waiting.into()))
+    );
 
     agy.process.kill();
-    eventually("the agy agent leaves the list once killed", || host.agents().is_empty().then_some(()));
+    eventually("the agy agent leaves the list once killed", || {
+        host.agents().is_empty().then_some(())
+    });
 }
 
 #[test]
@@ -211,15 +238,32 @@ fn transcript_ends_returns_antigravity_transcripts() {
     fs::write(&path, format!("{user}\n{reply}\n")).unwrap();
 
     let folder = crate::host::folder_in(host.runtime()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let response = runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let request = TranscriptEndsRequest { on: None, ids: vec![id.to_owned()], share: 8192 };
+        let request = TranscriptEndsRequest {
+            on: None,
+            ids: vec![id.to_owned()],
+            share: 8192,
+        };
         daemon.transcript_ends(request).await.unwrap().into_inner()
     });
-    let end = response.ends.get(id).expect("the antigravity transcript is returned");
+    let end = response
+        .ends
+        .get(id)
+        .expect("the antigravity transcript is returned");
     assert!(end.contains("Added Antigravity support."), "{end}");
-    let typed = response.typed_ends.get(id).expect("the typed antigravity transcript is returned");
+    let typed = response
+        .typed_ends
+        .get(id)
+        .expect("the typed antigravity transcript is returned");
     assert_eq!(typed.harness, i32::from(Harness::Antigravity));
-    assert!(typed.lines.contains("Added Antigravity support."), "{}", typed.lines);
+    assert!(
+        typed.lines.contains("Added Antigravity support."),
+        "{}",
+        typed.lines
+    );
 }

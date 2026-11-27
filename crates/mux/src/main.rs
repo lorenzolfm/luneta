@@ -23,7 +23,10 @@ fn main() -> ExitCode {
     };
     let path = PathBuf::from(path);
     if !path.is_absolute() {
-        eprintln!("lune-mux: {} is no folder to listen in, as it is not absolute", path.display());
+        eprintln!(
+            "lune-mux: {} is no folder to listen in, as it is not absolute",
+            path.display()
+        );
         return ExitCode::FAILURE;
     }
     let claim = match folder::claim(&path) {
@@ -31,24 +34,27 @@ fn main() -> ExitCode {
         Err(refusal @ folder::Refusal::Running(_)) => {
             eprintln!("lune-mux: {refusal}");
             return ExitCode::from(folder::ANOTHER_RUNS);
-        },
+        }
         Err(refusal) => {
             eprintln!("lune-mux: {refusal}");
             return ExitCode::FAILURE;
-        },
+        }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("lune-mux: {error}");
             return ExitCode::FAILURE;
-        },
+        }
     };
     match runtime.block_on(serve::serve(claim)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("lune-mux: {error}");
             ExitCode::FAILURE
-        },
+        }
     }
 }

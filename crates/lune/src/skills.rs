@@ -1,8 +1,8 @@
 use std::sync::mpsc::Sender;
 use std::thread;
 
-pub use luned::skills::{Name, Runs, Skill};
 use luned::Directory;
+pub use luned::skills::{Name, Runs, Skill};
 
 use crate::agents::Harness;
 use crate::fuzzy::{Fuzzy, Score, Typos};
@@ -50,7 +50,13 @@ pub struct Search {
 impl Search {
     pub fn new(dir: Directory) -> Self {
         let (term, found) = (String::new(), Vec::new());
-        Search { dir, term, skills: Skills::Finding, found, selected: 0 }
+        Search {
+            dir,
+            term,
+            skills: Skills::Finding,
+            found,
+            selected: 0,
+        }
     }
 
     pub fn dir(&self) -> &Directory {
@@ -70,7 +76,9 @@ impl Search {
             Skills::Found(skills) => skills.as_slice(),
             Skills::Finding | Skills::Failed(_) => &[],
         };
-        self.found.iter().filter_map(|found| Some((skills.get(found.at)?, found.hits.as_slice())))
+        self.found
+            .iter()
+            .filter_map(|found| Some((skills.get(found.at)?, found.hits.as_slice())))
     }
 
     pub fn count(&self) -> usize {
@@ -140,14 +148,26 @@ impl Search {
                 .enumerate()
                 .filter_map(|(at, skill)| {
                     if term.is_empty() {
-                        return Some(((false, false, 0), Found { at, hits: Vec::new() }));
+                        return Some((
+                            (false, false, 0),
+                            Found {
+                                at,
+                                hits: Vec::new(),
+                            },
+                        ));
                     }
                     let name = skill.name.as_str();
                     if let Some((score, hits)) = fuzzy.hits(name) {
                         return Some(((name == term, true, score), Found { at, hits }));
                     }
                     let score = fuzzy.score(&skill.description)?;
-                    Some(((false, false, score), Found { at, hits: Vec::new() }))
+                    Some((
+                        (false, false, score),
+                        Found {
+                            at,
+                            hits: Vec::new(),
+                        },
+                    ))
                 })
                 .collect()
         });
@@ -161,14 +181,20 @@ impl Search {
 mod tests {
     use super::*;
 
-
     fn skill(name: &str, description: &str) -> Skill {
         let name = Name::new(name.to_owned()).expect("a name");
-        Skill { name, description: description.to_owned(), runs: Runs::ForAnyone }
+        Skill {
+            name,
+            description: description.to_owned(),
+            runs: Runs::ForAnyone,
+        }
     }
 
     fn names(search: &Search) -> Vec<&str> {
-        search.found().map(|(skill, _)| skill.name.as_str()).collect()
+        search
+            .found()
+            .map(|(skill, _)| skill.name.as_str())
+            .collect()
     }
 
     #[test]
@@ -186,7 +212,10 @@ mod tests {
         ])));
         search.push('v');
         assert_eq!(names(&search), ["code-review", "tigerstyle"]);
-        assert_eq!(search.chosen().map(|skill| skill.name.as_str()), Some("code-review"));
+        assert_eq!(
+            search.chosen().map(|skill| skill.name.as_str()),
+            Some("code-review")
+        );
         let hits: Vec<&[usize]> = search.found().map(|(_, hits)| hits).collect();
         assert_eq!(hits, [&[5, 6, 7][..], &[]]);
 
@@ -199,7 +228,10 @@ mod tests {
         assert!(search.pop());
         assert!(search.pop());
         assert!(!search.pop());
-        assert_eq!(names(&search), ["code-review", "prototype", "re", "tigerstyle"]);
+        assert_eq!(
+            names(&search),
+            ["code-review", "prototype", "re", "tigerstyle"]
+        );
         "tigrestyle".chars().for_each(|c| search.push(c));
         assert_eq!(names(&search), ["tigerstyle"]);
         "tigrestyle".chars().for_each(|_| assert!(search.pop()));

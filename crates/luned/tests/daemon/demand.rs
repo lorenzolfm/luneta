@@ -10,29 +10,28 @@ use std::process::{Command, Stdio};
 use std::thread;
 
 use lune_protocol::watch::{HostVersion, LocalVersion, WatchedAfter};
-use lune_waits::{eventually, Began, Span};
+use lune_waits::{Began, Span, eventually};
 use luned::api::daemon_server::{Daemon, DaemonServer};
 use luned::api::{
     self, AnswerRequest, AskRequest, AskResponse, ClientWaiter, FileIssueRequest,
     FileIssueResponse, InfoResponse, IssueRepositoriesRequest, IssueRepositoriesResponse,
-    KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse,
-    KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse, ListContentsRequest,
-    ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest,
-    ListSkillsResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
-    PrunesResponse, RebaseRequest, RebaseResponse, TranscriptEndsRequest, TranscriptEndsResponse,
-    Version, WaitingRequest, WaitingResponse, WatchChangesRequest, WatchLocalChangesRequest,
-    WatchRequest,
+    KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest,
+    KeepPrintedResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
+    PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
+    RebaseRequest, RebaseResponse, TranscriptEndsRequest, TranscriptEndsResponse, Version,
+    WaitingRequest, WaitingResponse, WatchChangesRequest, WatchLocalChangesRequest, WatchRequest,
 };
-use luned::{folder, release, Claim, ALONE, SWEEP};
+use luned::{ALONE, Claim, SWEEP, folder, release};
 use prost::Message as _;
 use rustix::process::{Pid, Signal};
 use tokio_stream::wrappers::UnixListenerStream;
-use tokio_stream::{pending, StreamExt as _};
+use tokio_stream::{StreamExt as _, pending};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::host::{
-    answered, folder_in, info, install, script, side_by_side, start, start_as, Host, Running, Slot,
-    Vars, Waits, LUNE, LUNED, PATIENT, SOCKET,
+    Host, LUNE, LUNED, PATIENT, Running, SOCKET, Slot, Vars, Waits, answered, folder_in, info,
+    install, script, side_by_side, start, start_as,
 };
 use crate::terminate::gone;
 
@@ -53,13 +52,24 @@ const STAND_IN_BRIDGED: &str = "LUNE_TEST_STAND_IN_BRIDGED_VERSION";
 const BRIDGED_FD: &str = "/dev/fd/3";
 
 fn watch(host: &Host, lune: &Path) -> api::Host {
-    written(host.vars().command(&lune.display().to_string()).arg("watch"))
+    written(
+        host.vars()
+            .command(&lune.display().to_string())
+            .arg("watch"),
+    )
 }
 
 fn refused(host: &Host, lune: &Path) -> String {
-    let output = answered(host.vars().command(&lune.display().to_string()).arg("watch"));
+    let output = answered(
+        host.vars()
+            .command(&lune.display().to_string())
+            .arg("watch"),
+    );
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(!output.status.success(), "lune watch was not refused: {said}");
+    assert!(
+        !output.status.success(),
+        "lune watch was not refused: {said}"
+    );
     said
 }
 
@@ -80,7 +90,10 @@ pub fn answering(host: &Host) -> Option<u32> {
 
 fn told(host: &Host) -> Option<InfoResponse> {
     let folder = folder_in(host.runtime.path())?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.ok()?;
         Some(daemon.info(()).await.ok()?.into_inner())
@@ -125,7 +138,10 @@ fn lune_watch_starts_a_detached_daemon_where_none_runs() {
     let mut handed = host.vars().command("sh");
     handed.args(["-c", "exec \"$0\" watch 7>&1", LUNE.as_str()]);
     let first = written(&mut handed);
-    let daemon = Detached { host: &host, pid: pid(&first) };
+    let daemon = Detached {
+        host: &host,
+        pid: pid(&first),
+    };
 
     let leader = Pid::from_raw(i32::try_from(daemon.pid).unwrap());
     assert_eq!(rustix::process::getsid(leader).unwrap(), leader.unwrap());
@@ -140,11 +156,18 @@ fn luned_says_in_lunes_log_when_and_which_daemon() {
     let daemon = start(host.vars()).unwrap();
     let log = fs::read_to_string(host.home.path().join(".local/state/lune/lune.log")).unwrap();
     let listening = format!("luned[{}] listening on ", daemon.pid());
-    let line = log.lines().find(|line| line.contains(&listening)).expect(&log);
+    let line = log
+        .lines()
+        .find(|line| line.contains(&listening))
+        .expect(&log);
     let (when, said) = line.split_once(' ').unwrap();
     assert!(said.starts_with(&listening), "{line}");
     let date = |at: usize| when.as_bytes().get(at).copied();
-    assert_eq!((when.len(), date(10), date(23)), (24, Some(b'T'), Some(b'Z')), "{when}");
+    assert_eq!(
+        (when.len(), date(10), date(23)),
+        (24, Some(b'T'), Some(b'Z')),
+        "{when}"
+    );
 }
 
 #[test]
@@ -156,7 +179,10 @@ fn luned_with_no_log_says_first_why_it_does_not_start() {
     assert!(!ended.success());
     let socket = runtime.join(SOCKET);
     let first = said.lines().next().unwrap_or_default();
-    assert!(first.starts_with(&format!("luned: {}: ", socket.display())), "{said}");
+    assert!(
+        first.starts_with(&format!("luned: {}: ", socket.display())),
+        "{said}"
+    );
 }
 
 #[test]
@@ -176,7 +202,10 @@ fn the_cli_says_that_no_daemon_runs_and_starts_none() {
     none_runs(&host);
 
     drop(start(host.vars()).unwrap());
-    assert!(host.runtime.path().join(SOCKET).exists(), "a crash leaves the socket behind");
+    assert!(
+        host.runtime.path().join(SOCKET).exists(),
+        "a crash leaves the socket behind"
+    );
     none_runs(&host);
 }
 
@@ -190,10 +219,16 @@ fn lune_starts_a_fresh_daemon_in_the_place_of_one_that_aborted() {
     rustix::process::kill_process(aborting, Signal::ABORT).unwrap();
     let ended = aborted.ended("luned aborts");
     assert_eq!(ended.signal(), Some(Signal::ABORT.as_raw()), "{ended}");
-    assert!(host.runtime.path().join(SOCKET).exists(), "an abort leaves the socket behind");
+    assert!(
+        host.runtime.path().join(SOCKET).exists(),
+        "an abort leaves the socket behind"
+    );
 
     let fresh = pid(&watch(&host, Path::new(LUNE.as_str())));
-    let _fresh = Detached { host: &host, pid: fresh };
+    let _fresh = Detached {
+        host: &host,
+        pid: fresh,
+    };
     assert_ne!(fresh, aborted.pid());
     assert_eq!(answering(&host), Some(fresh));
 }
@@ -217,15 +252,24 @@ fn lunes_that_start_a_daemon_at_once_reach_the_same_one() {
     script(&elsewhere.path().join("luned"), &stand_in);
     let lune = elsewhere.path().join("lune");
     let pids: Vec<u32> = thread::scope(|scope| {
-        let asking: Vec<_> =
-            (0..LUNES).map(|_| scope.spawn(|| pid(&watch(&host, &lune)))).collect();
-        asking.into_iter().map(|asked| asked.join().unwrap()).collect()
+        let asking: Vec<_> = (0..LUNES)
+            .map(|_| scope.spawn(|| pid(&watch(&host, &lune))))
+            .collect();
+        asking
+            .into_iter()
+            .map(|asked| asked.join().unwrap())
+            .collect()
     });
-    let _daemon = Detached { host: &host, pid: pids[0] };
+    let _daemon = Detached {
+        host: &host,
+        pid: pids[0],
+    };
     assert!(pids.iter().all(|pid| *pid == pids[0]), "{pids:?}");
     assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), LUNES);
     let lost = || log(&host).matches("another luned already runs").count();
-    eventually("the other luneds lose", || (lost() == LUNES - 1).then_some(()));
+    eventually("the other luneds lose", || {
+        (lost() == LUNES - 1).then_some(())
+    });
     let log = log(&host);
     assert_eq!(log.matches("luned: listening on ").count(), 1, "{log}");
 }
@@ -234,7 +278,10 @@ fn lunes_that_start_a_daemon_at_once_reach_the_same_one() {
 fn a_lune_whose_daemon_finds_the_folder_held_waits_for_it() {
     let host = Host::new();
     let elsewhere = moved();
-    let (hold, spawned) = (elsewhere.path().join("hold"), elsewhere.path().join("spawned"));
+    let (hold, spawned) = (
+        elsewhere.path().join("hold"),
+        elsewhere.path().join("spawned"),
+    );
     let stand_in = format!(
         "echo >> '{}'\nwhile [ -e '{}' ]; do sleep 0.01; done\nexec '{LUNED}' \"$@\"\n",
         spawned.display(),
@@ -250,12 +297,17 @@ fn a_lune_whose_daemon_finds_the_folder_held_waits_for_it() {
         let claim = Claim::take(&host.folder()).unwrap();
         fs::remove_file(&hold).unwrap();
         eventually("the luned finds the folder held", || {
-            log(&host).contains("another luned already runs").then_some(())
+            log(&host)
+                .contains("another luned already runs")
+                .then_some(())
         });
         drop(claim);
         asking.join().unwrap()
     });
-    let _daemon = Detached { host: &host, pid: pid(&answer) };
+    let _daemon = Detached {
+        host: &host,
+        pid: pid(&answer),
+    };
     assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), 2);
 }
 
@@ -279,9 +331,15 @@ fn a_lune_whose_luned_is_stopped_as_it_starts_waits_for_the_next() {
     thread::scope(|scope| {
         let asking = scope.spawn(|| watch(&host, &lune));
         let stopped = eventually("lune starts a luned", || {
-            fs::read_to_string(&spawned).ok()?.trim().parse::<u32>().ok()
+            fs::read_to_string(&spawned)
+                .ok()?
+                .trim()
+                .parse::<u32>()
+                .ok()
         });
-        eventually("lune sees its luned stopped", || gone(stopped).then_some(()));
+        eventually("lune sees its luned stopped", || {
+            gone(stopped).then_some(())
+        });
         let next = start(host.vars()).unwrap();
         assert_eq!(pid(&asking.join().unwrap()), next.pid());
     });
@@ -295,10 +353,17 @@ fn a_lune_whose_luned_is_stopped_as_it_starts_says_it_was_stopped() {
     let spawned = stopped_as_it_starts(&elsewhere);
     let lune = elsewhere.path().join("lune");
 
-    let output = answered(host.vars().command(&lune.display().to_string()).arg("watch"));
+    let output = answered(
+        host.vars()
+            .command(&lune.display().to_string())
+            .arg("watch"),
+    );
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{said}");
-    assert!(said.contains("the luned lune started was stopped"), "{said}");
+    assert!(
+        said.contains("the luned lune started was stopped"),
+        "{said}"
+    );
     assert!(!said.contains("did not start"), "{said}");
     assert_eq!(fs::read_to_string(&spawned).unwrap().lines().count(), 1);
 }
@@ -309,16 +374,24 @@ fn lune_starts_the_luned_beside_it_or_else_the_one_on_the_path() {
     let elsewhere = moved();
     let started = elsewhere.path().join("started");
     let stand_in = |name: &str| {
-        format!("echo {name} >> '{}'\nexec '{LUNED}' \"$@\"\n", started.display())
+        format!(
+            "echo {name} >> '{}'\nexec '{LUNED}' \"$@\"\n",
+            started.display()
+        )
     };
     script(&elsewhere.path().join("luned"), &stand_in("beside"));
     script(&host.bin().join("luned"), &stand_in("path"));
     let lune = elsewhere.path().join("lune");
 
     stop(pid(&watch(&host, &lune)));
-    eventually("the daemon beside lune ends", || (!held(&host)).then_some(()));
+    eventually("the daemon beside lune ends", || {
+        (!held(&host)).then_some(())
+    });
     fs::remove_file(elsewhere.path().join("luned")).unwrap();
-    let _daemon = Detached { host: &host, pid: pid(&watch(&host, &lune)) };
+    let _daemon = Detached {
+        host: &host,
+        pid: pid(&watch(&host, &lune)),
+    };
     assert_eq!(fs::read_to_string(&started).unwrap(), "beside\npath\n");
 }
 
@@ -327,7 +400,10 @@ fn lune_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     let host = Host::new();
     let mut older = stand_in(&host, OLDER, None);
     let said = info(host.vars());
-    assert!(said.starts_with(&format!("luned {OLDER} (pid {})", older.pid())), "{said}");
+    assert!(
+        said.starts_with(&format!("luned {OLDER} (pid {})", older.pid())),
+        "{said}"
+    );
 
     let elsewhere = moved();
     let other = "if [ \"$1\" = --version ]; then echo 'luned 0.0.0'; exit; fi\nexit 1\n";
@@ -335,13 +411,22 @@ fn lune_watch_starts_a_daemon_of_its_version_in_the_place_of_an_older_one() {
     script(&beside, other);
     let said = refused(&host, &elsewhere.path().join("lune"));
     let real = beside.canonicalize().unwrap();
-    let kept = format!("but {} is 0.0.0, no newer, so lune leaves it be", real.display());
-    assert!(said.contains(&format!("luned {OLDER} (pid {})", older.pid())), "{said}");
+    let kept = format!(
+        "but {} is 0.0.0, no newer, so lune leaves it be",
+        real.display()
+    );
+    assert!(
+        said.contains(&format!("luned {OLDER} (pid {})", older.pid())),
+        "{said}"
+    );
     assert!(said.contains(&kept), "{said}");
     assert_eq!(older.exit_status(), None);
 
     let current = watch(&host, Path::new(LUNE.as_str()));
-    let _daemon = Detached { host: &host, pid: pid(&current) };
+    let _daemon = Detached {
+        host: &host,
+        pid: pid(&current),
+    };
     let ended = older.ended("lune stops the older daemon");
     assert_eq!(ended.signal(), Some(Signal::TERM.as_raw()));
     assert_ne!(pid(&current), older.pid());
@@ -357,19 +442,28 @@ fn lune_watch_goes_by_the_stamp_of_a_daemon_of_its_release() {
     let later = Host::new();
     let mut after = stand_in(&later, &stamped(u64::MAX), None);
     let said = refused(&later, Path::new(LUNE.as_str()));
-    assert!(said.contains(&format!("is newer than this lune, {}", *release::SAID)), "{said}");
+    assert!(
+        said.contains(&format!("is newer than this lune, {}", *release::SAID)),
+        "{said}"
+    );
     assert_eq!(after.exit_status(), None);
 
     let host = Host::new();
     let mut before = stand_in(&host, &stamped(0), None);
     if release::BUILT.is_some() {
         let reached = pid(&watch(&host, Path::new(LUNE.as_str())));
-        let _daemon = Detached { host: &host, pid: reached };
+        let _daemon = Detached {
+            host: &host,
+            pid: reached,
+        };
         before.ended("lune stops the stamped daemon");
         assert_ne!(reached, before.pid());
     } else {
         let said = refused(&host, Path::new(LUNE.as_str()));
-        assert!(said.contains(&format!("luned {} (pid ", stamped(0))), "{said}");
+        assert!(
+            said.contains(&format!("luned {} (pid ", stamped(0))),
+            "{said}"
+        );
         assert_eq!(before.exit_status(), None);
     }
 }
@@ -379,7 +473,10 @@ fn lune_and_luned_say_their_build_alike() {
     for (program, name) in [(LUNE.as_str(), "lune"), (LUNED, "luned")] {
         let said = Command::new(program).arg("--version").output().unwrap();
         assert!(said.status.success(), "{name} --version failed");
-        assert_eq!(String::from_utf8_lossy(&said.stdout), format!("{name} {}\n", *release::SAID));
+        assert_eq!(
+            String::from_utf8_lossy(&said.stdout),
+            format!("{name} {}\n", *release::SAID)
+        );
     }
 }
 
@@ -392,11 +489,21 @@ fn lunes_that_find_an_older_daemon_at_once_reach_the_one_in_its_place() {
         let asking: Vec<_> = (0..LUNES)
             .map(|_| scope.spawn(|| pid(&watch(&host, Path::new(LUNE.as_str())))))
             .collect();
-        asking.into_iter().map(|asked| asked.join().unwrap()).collect()
+        asking
+            .into_iter()
+            .map(|asked| asked.join().unwrap())
+            .collect()
     });
-    let _daemon = Detached { host: &host, pid: pids[0] };
+    let _daemon = Detached {
+        host: &host,
+        pid: pids[0],
+    };
     older.ended("lune stops the older daemon");
-    assert!(pids.iter().all(|pid| *pid == pids[0] && *pid != older.pid()), "{pids:?}");
+    assert!(
+        pids.iter()
+            .all(|pid| *pid == pids[0] && *pid != older.pid()),
+        "{pids:?}"
+    );
 }
 
 #[test]
@@ -428,7 +535,10 @@ fn the_cli_asks_no_daemon_of_another_build_and_info_says_it_is_one() {
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(), "{said}");
         assert!(out.starts_with(&theirs), "{out}");
-        assert!(said.contains(&theirs) && said.contains(release::SAID.as_str()), "{said}");
+        assert!(
+            said.contains(&theirs) && said.contains(release::SAID.as_str()),
+            "{said}"
+        );
         assert_eq!(other.exit_status(), None);
     }
 }
@@ -451,7 +561,11 @@ fn the_daemon_says_the_folder_it_reads_claude_code_s_sessions_in() {
     let home = tempfile::tempdir().unwrap();
     let claude = home.path().join(".claude");
     fs::create_dir_all(claude.join("sessions")).unwrap();
-    let _daemon = start(Vars { home: Some(home.path()), ..host.vars() }).unwrap();
+    let _daemon = start(Vars {
+        home: Some(home.path()),
+        ..host.vars()
+    })
+    .unwrap();
     let reads = told(&host).and_then(|info| info.claude_folder);
     assert_eq!(reads.as_deref(), Some(claude.as_os_str().as_bytes()));
 }
@@ -463,7 +577,9 @@ fn stand_in(host: &Host, version: &str, says: Option<u32>) -> Running {
     }
     let stand_in = Running::spawn(&mut command);
     let said = says.unwrap_or(stand_in.pid());
-    eventually("the stand-in answers", || (answering(host)? == said).then_some(()));
+    eventually("the stand-in answers", || {
+        (answering(host)? == said).then_some(())
+    });
     stand_in
 }
 
@@ -487,11 +603,18 @@ fn stand_in_luned() {
     let (version, built) = build_of(env::var(STAND_IN_VERSION).unwrap());
     let pid = env::var(STAND_IN_PID).map_or(std::process::id(), |pid| pid.parse().unwrap());
     let claim = Claim::take(Path::new(&folder)).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(claim.socket()).unwrap();
         tonic::transport::Server::builder()
-            .add_service(DaemonServer::new(StandIn { version, built, pid }))
+            .add_service(DaemonServer::new(StandIn {
+                version,
+                built,
+                pid,
+            }))
             .serve_with_incoming(UnixListenerStream::new(listener))
             .await
             .unwrap();
@@ -509,7 +632,10 @@ pub fn bridged_stand_in(version: &str) -> String {
     let program = env::current_exe().unwrap();
     let test = "demand::stand_in_bridged_luned --exact --ignored";
     let to = "3>&1 1>/dev/null 2>/dev/null";
-    format!("exec env {STAND_IN_BRIDGED}='{version}' '{}' {test} {to}\n", program.display())
+    format!(
+        "exec env {STAND_IN_BRIDGED}='{version}' '{}' {test} {to}\n",
+        program.display()
+    )
 }
 
 #[test]
@@ -531,11 +657,18 @@ fn stand_in_bridged_luned() {
     });
     thread::spawn(move || relay(&mut down, &mut out));
     served.set_nonblocking(true).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let served = tokio::net::UnixStream::from_std(served).unwrap();
         let pid = std::process::id();
-        let stand_in = StandIn { version, built, pid };
+        let stand_in = StandIn {
+            version,
+            built,
+            pid,
+        };
         tonic::transport::Server::builder()
             .add_service(DaemonServer::new(stand_in))
             .serve_with_incoming(tokio_stream::once(Ok::<_, io::Error>(served)).chain(pending()))
@@ -563,7 +696,12 @@ struct StandIn {
 impl Daemon for StandIn {
     async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
         let (version, built, pid) = (self.version.clone(), self.built, self.pid);
-        let info = InfoResponse { version, built, pid, ..InfoResponse::default() };
+        let info = InfoResponse {
+            version,
+            built,
+            pid,
+            ..InfoResponse::default()
+        };
         Ok(Response::new(info))
     }
 
@@ -572,8 +710,14 @@ impl Daemon for StandIn {
     }
 
     async fn watch(&self, _: Request<WatchRequest>) -> Result<Response<api::Host>, Status> {
-        let version = Version { pid: self.pid, seq: 0 };
-        Ok(Response::new(api::Host { version: Some(version), ..api::Host::default() }))
+        let version = Version {
+            pid: self.pid,
+            seq: 0,
+        };
+        Ok(Response::new(api::Host {
+            version: Some(version),
+            ..api::Host::default()
+        }))
     }
 
     async fn watch_changes(
@@ -581,7 +725,10 @@ impl Daemon for StandIn {
         _: Request<WatchChangesRequest>,
     ) -> Result<Response<api::WatchResponse>, Status> {
         let version = HostVersion::new(NonZeroU32::new(self.pid).unwrap(), 0);
-        Ok(Response::new(api::WatchResponse::host(version, api::Host::default())))
+        Ok(Response::new(api::WatchResponse::host(
+            version,
+            api::Host::default(),
+        )))
     }
 
     async fn watch_local_changes(
@@ -589,7 +736,10 @@ impl Daemon for StandIn {
         _: Request<WatchLocalChangesRequest>,
     ) -> Result<Response<api::WatchLocalResponse>, Status> {
         let version = LocalVersion::new(NonZeroU32::new(self.pid).unwrap(), 0);
-        Ok(Response::new(api::WatchLocalResponse::host(version, api::remote::Host::default())))
+        Ok(Response::new(api::WatchLocalResponse::host(
+            version,
+            api::remote::Host::default(),
+        )))
     }
 
     type KeepChecksStream = tokio_stream::Empty<Result<KeepChecksResponse, Status>>;
@@ -711,7 +861,10 @@ impl Daemon for StandIn {
 
     type PrunesStream = tokio_stream::Empty<Result<PrunesResponse, Status>>;
 
-    async fn prunes(&self, _: Request<PrunesRequest>) -> Result<Response<Self::PrunesStream>, Status> {
+    async fn prunes(
+        &self,
+        _: Request<PrunesRequest>,
+    ) -> Result<Response<Self::PrunesStream>, Status> {
         Err(Status::unimplemented("a stand-in deletes no worktree"))
     }
 
@@ -778,21 +931,32 @@ impl Daemon for StandIn {
 
 #[test]
 fn the_waits_of_half_a_minute_hold_side_by_side() {
-    side_by_side(const {
-        Waits::of([
-            ("the daemon ends alone", the_daemon_ends_once_nothing_has_kept_it_for_a_while),
-            ("a terminal keeps the daemon", crate::own::the_daemon_runs_on_while_a_terminal_does),
-            ("a client keeps the daemon", the_daemon_runs_on_while_a_client_watches_it),
-            (
-                "a client keeps the machines it watches",
-                crate::remote::a_daemon_a_client_keeps_keeps_the_machines_it_watches_running,
-            ),
-            (
-                "two daemons that watch each other end",
-                crate::remote::two_daemons_that_watch_each_other_and_nothing_else_end,
-            ),
-        ])
-    });
+    side_by_side(
+        const {
+            Waits::of([
+                (
+                    "the daemon ends alone",
+                    the_daemon_ends_once_nothing_has_kept_it_for_a_while,
+                ),
+                (
+                    "a terminal keeps the daemon",
+                    crate::own::the_daemon_runs_on_while_a_terminal_does,
+                ),
+                (
+                    "a client keeps the daemon",
+                    the_daemon_runs_on_while_a_client_watches_it,
+                ),
+                (
+                    "a client keeps the machines it watches",
+                    crate::remote::a_daemon_a_client_keeps_keeps_the_machines_it_watches_running,
+                ),
+                (
+                    "two daemons that watch each other end",
+                    crate::remote::two_daemons_that_watch_each_other_and_nothing_else_end,
+                ),
+            ])
+        },
+    );
 }
 
 fn the_daemon_ends_once_nothing_has_kept_it_for_a_while(_: Slot) {
@@ -817,7 +981,10 @@ fn the_daemon_runs_on_while_a_client_watches_it(_: Slot) {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut watching = luned::connect(&folder, PATIENT).await.unwrap();
         let mut after: Option<HostVersion> = None;

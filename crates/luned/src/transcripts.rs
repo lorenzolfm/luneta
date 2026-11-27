@@ -24,8 +24,12 @@ const STEP_CHARS: usize = 300;
 
 const CUT_CHARS: usize = 100;
 
-const KINDS: [&str; 4] =
-    [r#""type":"ai-title""#, r#""type":"last-prompt""#, r#""type":"user""#, r#""type":"assistant""#];
+const KINDS: [&str; 4] = [
+    r#""type":"ai-title""#,
+    r#""type":"last-prompt""#,
+    r#""type":"user""#,
+    r#""type":"assistant""#,
+];
 
 const AGY_KINDS: [&str; 2] = [r#""type":"USER_INPUT""#, r#""type":"PLANNER_RESPONSE""#];
 
@@ -143,7 +147,10 @@ impl TranscriptEnd {
             Ok(api::Harness::Antigravity) => Ok(TranscriptEnd::Antigravity(lines)),
             Ok(api::Harness::Pi) => Err("pi keeps no transcript this lune reads".to_owned()),
             Ok(api::Harness::Unspecified) => Err("it names no harness".to_owned()),
-            Err(_) => Err(format!("harness {} is one this lune does not know", said.harness)),
+            Err(_) => Err(format!(
+                "harness {} is one this lune does not know",
+                said.harness
+            )),
         }
     }
 }
@@ -154,8 +161,14 @@ pub struct SessionId(String);
 impl SessionId {
     #[must_use]
     pub fn parse(id: &str) -> Option<Self> {
-        let first = id.bytes().next().is_some_and(|byte| byte.is_ascii_hexdigit());
-        let uuid = first && id.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
+        let first = id
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_hexdigit());
+        let uuid = first
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-');
         uuid.then(|| SessionId(id.to_owned()))
     }
 
@@ -211,14 +224,20 @@ impl Reading {
             return Err(too_many(count));
         }
         let share = TAILS_BYTES / count.max(1);
-        Ok(groups.into_iter().map(|(with, ids)| (with, Reading { ids, share })).collect())
+        Ok(groups
+            .into_iter()
+            .map(|(with, ids)| (with, Reading { ids, share }))
+            .collect())
     }
 
     pub fn of(ids: &[String], share: u32) -> Result<Reading, String> {
         let parsed: Option<Vec<SessionId>> = ids.iter().map(|id| SessionId::parse(id)).collect();
         let Some(parsed) = parsed else {
             let named = ids.iter().find(|id| SessionId::parse(id).is_none());
-            return Err(format!("ids: {:?} names no session", named.map_or("", String::as_str)));
+            return Err(format!(
+                "ids: {:?} names no session",
+                named.map_or("", String::as_str)
+            ));
         };
         Reading::new(parsed, usize::try_from(share).unwrap_or(usize::MAX))
     }
@@ -232,7 +251,10 @@ impl Reading {
 
     #[must_use]
     pub(crate) fn ends(&self, folders: &Folders) -> HashMap<SessionId, TranscriptEnd> {
-        let dirs = folders.claude.as_deref().map(|claude| project_dirs(&claude.join("projects")));
+        let dirs = folders
+            .claude
+            .as_deref()
+            .map(|claude| project_dirs(&claude.join("projects")));
         let mut ends = HashMap::new();
         for id in &self.ids {
             if let Some(path) = dirs.as_deref().and_then(|dirs| found_in(dirs, id))
@@ -254,7 +276,10 @@ impl Reading {
 fn agy_file(agy: &Path, id: &SessionId) -> Option<PathBuf> {
     assert_ne!(id.as_str(), "");
     assert!(!id.as_str().contains('/'));
-    let path = agy.join("brain").join(id.as_str()).join(".system_generated/logs/transcript.jsonl");
+    let path = agy
+        .join("brain")
+        .join(id.as_str())
+        .join(".system_generated/logs/transcript.jsonl");
     path.is_file().then_some(path)
 }
 
@@ -270,7 +295,9 @@ fn project_dirs(projects: &Path) -> Vec<PathBuf> {
 
 fn found_in(dirs: &[PathBuf], id: &SessionId) -> Option<PathBuf> {
     let file = format!("{}.jsonl", id.as_str());
-    dirs.iter().map(|dir| dir.join(&file)).find(|path| path.is_file())
+    dirs.iter()
+        .map(|dir| dir.join(&file))
+        .find(|path| path.is_file())
 }
 
 #[must_use]
@@ -296,7 +323,10 @@ impl ShareBytes {
     pub const fn constant<const BYTES: usize>() -> Self {
         const {
             assert!(BYTES > 0, "a tail keeps at least one byte");
-            assert!(BYTES <= WINDOW_BYTES as usize, "a tail's share fits within the window");
+            assert!(
+                BYTES <= WINDOW_BYTES as usize,
+                "a tail's share fits within the window"
+            );
         }
         Self(BYTES)
     }
@@ -341,7 +371,10 @@ pub struct TailLimits {
 impl TailLimits {
     #[must_use]
     pub const fn new(share_bytes_max: ShareBytes, steps_max: StepsMax) -> Self {
-        Self { share_bytes_max, steps_max }
+        Self {
+            share_bytes_max,
+            steps_max,
+        }
     }
 
     #[must_use]
@@ -374,11 +407,17 @@ impl FileStamp {
         #[cfg(unix)]
         let identity = {
             use std::os::unix::fs::MetadataExt as _;
-            FileIdentity { dev: meta.dev(), ino: meta.ino() }
+            FileIdentity {
+                dev: meta.dev(),
+                ino: meta.ino(),
+            }
         };
         #[cfg(not(unix))]
         let identity = FileIdentity {};
-        FileStamp { identity, bytes: meta.len() }
+        FileStamp {
+            identity,
+            bytes: meta.len(),
+        }
     }
 }
 
@@ -398,12 +437,19 @@ struct KeptWindow {
 
 impl KeptWindow {
     fn new(share_bytes_max: ShareBytes) -> Self {
-        Self { records: VecDeque::new(), bytes: 0, share_bytes_max }
+        Self {
+            records: VecDeque::new(),
+            bytes: 0,
+            share_bytes_max,
+        }
     }
 
     fn push(&mut self, offset: u64, record: &str, harness: TranscriptHarness) {
         if let Some(last) = self.records.back() {
-            assert!(offset > last.offset, "records arrive at strictly increasing offsets");
+            assert!(
+                offset > last.offset,
+                "records arrive at strictly increasing offsets"
+            );
         }
         if !harness.kinds().iter().any(|kind| record.contains(kind)) {
             return;
@@ -414,7 +460,11 @@ impl KeptWindow {
             self.bytes = 0;
             return;
         }
-        self.records.push_back(KeptRecord { offset, bytes, note: noted(record, harness.note_fn()) });
+        self.records.push_back(KeptRecord {
+            offset,
+            bytes,
+            note: noted(record, harness.note_fn()),
+        });
         self.bytes += bytes;
         while self.bytes > self.share_bytes_max.get() {
             self.forget_first();
@@ -423,7 +473,11 @@ impl KeptWindow {
     }
 
     fn evict_before(&mut self, window_offset: u64) {
-        while self.records.front().is_some_and(|record| record.offset < window_offset) {
+        while self
+            .records
+            .front()
+            .is_some_and(|record| record.offset < window_offset)
+        {
             self.forget_first();
         }
         if let Some(first) = self.records.front() {
@@ -432,9 +486,14 @@ impl KeptWindow {
     }
 
     fn forget_first(&mut self) {
-        let forgot =
-            self.records.pop_front().expect("a tail forgetting a record keeps at least one");
-        assert!(self.bytes >= forgot.bytes, "kept bytes cover every kept record");
+        let forgot = self
+            .records
+            .pop_front()
+            .expect("a tail forgetting a record keeps at least one");
+        assert!(
+            self.bytes >= forgot.bytes,
+            "kept bytes cover every kept record"
+        );
         self.bytes -= forgot.bytes;
         if self.records.is_empty() {
             assert_eq!(self.bytes, 0);
@@ -442,7 +501,9 @@ impl KeptWindow {
     }
 
     fn notes(&self) -> impl Iterator<Item = Cow<'_, Note>> {
-        self.records.iter().map(|record| Cow::Borrowed(&record.note))
+        self.records
+            .iter()
+            .map(|record| Cow::Borrowed(&record.note))
     }
 }
 
@@ -465,12 +526,22 @@ impl TailState {
     fn seen_stamp(&self) -> Option<FileStamp> {
         match self {
             TailState::Unread => None,
-            TailState::Torn { identity, read_offset } => {
-                Some(FileStamp { identity: *identity, bytes: *read_offset })
-            },
-            TailState::Aligned { identity, read_offset, pending_bytes, .. } => {
-                Some(FileStamp { identity: *identity, bytes: *read_offset + *pending_bytes })
-            },
+            TailState::Torn {
+                identity,
+                read_offset,
+            } => Some(FileStamp {
+                identity: *identity,
+                bytes: *read_offset,
+            }),
+            TailState::Aligned {
+                identity,
+                read_offset,
+                pending_bytes,
+                ..
+            } => Some(FileStamp {
+                identity: *identity,
+                bytes: *read_offset + *pending_bytes,
+            }),
         }
     }
 }
@@ -492,7 +563,12 @@ impl Tail {
         if path.as_os_str().is_empty() {
             return Err("a tail reads a named path");
         }
-        Ok(Tail { path, harness, limits, state: TailState::Unread })
+        Ok(Tail {
+            path,
+            harness,
+            limits,
+            state: TailState::Unread,
+        })
     }
 
     pub fn grown(&mut self) -> io::Result<Option<Digest>> {
@@ -507,10 +583,12 @@ impl Tail {
         let limits = self.limits;
         let harness = self.harness;
         match &mut self.state {
-            TailState::Torn { identity, read_offset }
-                if *identity == stamp.identity
-                    && stamp.bytes >= *read_offset
-                    && stamp.bytes - *read_offset <= WINDOW_BYTES =>
+            TailState::Torn {
+                identity,
+                read_offset,
+            } if *identity == stamp.identity
+                && stamp.bytes >= *read_offset
+                && stamp.bytes - *read_offset <= WINDOW_BYTES =>
             {
                 let appended_bytes =
                     read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
@@ -522,17 +600,22 @@ impl Tail {
                     limits.share_bytes_max,
                     harness,
                 );
-            },
-            TailState::Aligned { identity, read_offset, pending_bytes, kept }
-                if *identity == stamp.identity
-                    && stamp.bytes >= *read_offset + *pending_bytes
-                    && stamp.bytes - *read_offset <= WINDOW_BYTES =>
+            }
+            TailState::Aligned {
+                identity,
+                read_offset,
+                pending_bytes,
+                kept,
+            } if *identity == stamp.identity
+                && stamp.bytes >= *read_offset + *pending_bytes
+                && stamp.bytes - *read_offset <= WINDOW_BYTES =>
             {
-                let appended_bytes = read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
+                let appended_bytes =
+                    read_slice(&mut file, *read_offset, stamp.bytes - *read_offset)?;
                 let trailing = take_aligned(read_offset, kept, &appended_bytes, harness);
                 kept.evict_before(stamp.bytes.saturating_sub(WINDOW_BYTES));
                 *pending_bytes = trailing;
-            },
+            }
             _ => {
                 let window_offset = stamp.bytes.saturating_sub(WINDOW_BYTES);
                 if window_offset == 0 {
@@ -560,11 +643,13 @@ impl Tail {
                         harness,
                     );
                 }
-            },
+            }
         }
         let digest = match &self.state {
-            TailState::Unread | TailState::Torn { .. } => {
-                Digest { title: None, asked: None, steps: Vec::new() }
+            TailState::Unread | TailState::Torn { .. } => Digest {
+                title: None,
+                asked: None,
+                steps: Vec::new(),
             },
             TailState::Aligned { kept, .. } => fold(kept.notes(), self.limits.steps_max),
         };
@@ -574,7 +659,10 @@ impl Tail {
 }
 
 fn read_slice(file: &mut File, seek_offset: u64, read_bytes: u64) -> io::Result<Vec<u8>> {
-    assert!(read_bytes <= WINDOW_BYTES + 1, "a look reads no more than the window");
+    assert!(
+        read_bytes <= WINDOW_BYTES + 1,
+        "a look reads no more than the window"
+    );
     file.seek(SeekFrom::Start(seek_offset))?;
     let capacity = usize::try_from(read_bytes).expect("window read fits in memory");
     let mut appended_bytes = Vec::with_capacity(capacity);
@@ -599,16 +687,32 @@ fn apply_torn(
     harness: TranscriptHarness,
 ) -> TailState {
     let read_len = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
-    assert_eq!(read_offset + read_len, file_bytes, "torn read reaches the file's end");
+    assert_eq!(
+        read_offset + read_len,
+        file_bytes,
+        "torn read reaches the file's end"
+    );
     let Some(end) = appended_bytes.iter().position(|&byte| byte == b'\n') else {
-        return TailState::Torn { identity, read_offset: file_bytes };
+        return TailState::Torn {
+            identity,
+            read_offset: file_bytes,
+        };
     };
     read_offset += u64::try_from(end).expect("line length fits in u64") + 1;
     let mut kept = KeptWindow::new(share_bytes_max);
-    let pending_bytes =
-        take_aligned(&mut read_offset, &mut kept, &appended_bytes[end + 1..], harness);
+    let pending_bytes = take_aligned(
+        &mut read_offset,
+        &mut kept,
+        &appended_bytes[end + 1..],
+        harness,
+    );
     kept.evict_before(file_bytes.saturating_sub(WINDOW_BYTES));
-    TailState::Aligned { identity, read_offset, pending_bytes, kept }
+    TailState::Aligned {
+        identity,
+        read_offset,
+        pending_bytes,
+        kept,
+    }
 }
 
 fn take_aligned(
@@ -618,7 +722,10 @@ fn take_aligned(
     harness: TranscriptHarness,
 ) -> u64 {
     let read_max = usize::try_from(WINDOW_BYTES + 1).expect("window fits in memory");
-    assert!(appended_bytes.len() <= read_max, "a look takes no more than the window");
+    assert!(
+        appended_bytes.len() <= read_max,
+        "a look takes no more than the window"
+    );
     let read_before = *read_offset;
     let mut rest = appended_bytes;
     while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
@@ -632,12 +739,19 @@ fn take_aligned(
     let consumed = *read_offset - read_before;
     let trailing = u64::try_from(rest.len()).expect("slice length fits in u64");
     let total = u64::try_from(appended_bytes.len()).expect("slice length fits in u64");
-    assert_eq!(consumed + trailing, total, "every byte read is consumed or awaits newline");
+    assert_eq!(
+        consumed + trailing,
+        total,
+        "every byte read is consumed or awaits newline"
+    );
     trailing
 }
 
 pub fn last_said(path: &Path, chars_max: usize) -> io::Result<Option<String>> {
-    Ok(last_said_in(end(path, TAILS_BYTES, &ALL_KINDS)?.as_str(), chars_max))
+    Ok(last_said_in(
+        end(path, TAILS_BYTES, &ALL_KINDS)?.as_str(),
+        chars_max,
+    ))
 }
 
 fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
@@ -650,8 +764,10 @@ fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
             continue;
         }
         if record["type"] == "PLANNER_RESPONSE" {
-            if let Some(said) =
-                record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+            if let Some(said) = record["content"]
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
             {
                 return Some(cut(said, chars_max));
             }
@@ -660,9 +776,15 @@ fn last_said_in(end: &str, chars_max: usize) -> Option<String> {
         if record["type"] != "assistant" {
             continue;
         }
-        let blocks = record["message"]["content"].as_array().into_iter().flatten().rev();
+        let blocks = record["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .rev();
         let texts = blocks.filter(|block| block["type"] == "text");
-        let mut texts = texts.filter_map(|block| block["text"].as_str()).map(str::trim);
+        let mut texts = texts
+            .filter_map(|block| block["text"].as_str())
+            .map(str::trim);
         if let Some(said) = texts.find(|text| !text.is_empty()) {
             return Some(cut(said, chars_max));
         }
@@ -675,7 +797,10 @@ fn cut(text: &str, chars_max: usize) -> String {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.to_owned(),
     };
-    assert!(kept.chars().count() <= chars_max + 1, "the cut keeps {chars_max} and an ellipsis");
+    assert!(
+        kept.chars().count() <= chars_max + 1,
+        "the cut keeps {chars_max} and an ellipsis"
+    );
     if !text.is_empty() {
         assert!(!kept.is_empty(), "a cut of some text keeps some");
     }
@@ -758,14 +883,19 @@ impl Note {
     fn stepped(steps: Vec<Said>) -> Self {
         let mut steps = steps.into_iter();
         match steps.next() {
-            Some(first) => Note::Stepped { first, rest: steps.collect() },
+            Some(first) => Note::Stepped {
+                first,
+                rest: steps.collect(),
+            },
             None => Note::Silent,
         }
     }
 }
 
 fn notes(end: &TailLines, of: fn(&Value) -> Note) -> impl Iterator<Item = Cow<'static, Note>> + '_ {
-    end.as_str().lines().map(move |line| Cow::Owned(noted(line, of)))
+    end.as_str()
+        .lines()
+        .map(move |line| Cow::Owned(noted(line, of)))
 }
 
 fn noted(line: &str, of: fn(&Value) -> Note) -> Note {
@@ -788,19 +918,19 @@ fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: StepsMax)
     let mut last: VecDeque<Cow<'a, str>> = VecDeque::with_capacity(steps_max);
     for note in notes {
         match note {
-            Cow::Borrowed(Note::Silent) | Cow::Owned(Note::Silent) => {},
+            Cow::Borrowed(Note::Silent) | Cow::Owned(Note::Silent) => {}
             Cow::Borrowed(Note::Titled(said)) => title = Some(Cow::Borrowed(said)),
             Cow::Owned(Note::Titled(said)) => title = Some(Cow::Owned(said)),
             Cow::Borrowed(Note::Recorded(prompt)) => {
                 if asked.as_deref().is_none_or(|typed| !prompt.cuts(typed)) {
                     asked = Some(Cow::Borrowed(prompt));
                 }
-            },
+            }
             Cow::Owned(Note::Recorded(prompt)) => {
                 if asked.as_deref().is_none_or(|typed| !prompt.cuts(typed)) {
                     asked = Some(Cow::Owned(prompt));
                 }
-            },
+            }
             Cow::Borrowed(Note::Typed(typed)) => asked = Some(Cow::Borrowed(typed)),
             Cow::Owned(Note::Typed(typed)) => asked = Some(Cow::Owned(typed)),
             Cow::Borrowed(Note::Stepped { first, rest }) => {
@@ -808,13 +938,13 @@ fn fold<'a>(notes: impl IntoIterator<Item = Cow<'a, Note>>, steps_max: StepsMax)
                 for step in rest {
                     push_step(&mut last, Cow::Borrowed(step.as_str()), steps_max);
                 }
-            },
+            }
             Cow::Owned(Note::Stepped { first, rest }) => {
                 push_step(&mut last, Cow::Owned(String::from(first)), steps_max);
                 for step in rest {
                     push_step(&mut last, Cow::Owned(String::from(step)), steps_max);
                 }
-            },
+            }
         }
     }
     assert!(last.len() <= steps_max);
@@ -835,7 +965,7 @@ fn note_claude(record: &Value) -> Note {
         Some("last-prompt") => {
             let prompt = record["lastPrompt"].as_str().and_then(Asked::recorded);
             prompt.map_or(Note::Silent, Note::Recorded)
-        },
+        }
         Some("user") => {
             let is_meta = record["isMeta"].as_bool() == Some(true);
             let is_compact_summary = record["isCompactSummary"].as_bool() == Some(true);
@@ -844,11 +974,14 @@ fn note_claude(record: &Value) -> Note {
             }
             typed_by_you(&record["message"]["content"])
                 .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(&typed)))
-        },
+        }
         Some("assistant") => {
-            let blocks = record["message"]["content"].as_array().into_iter().flatten();
+            let blocks = record["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten();
             Note::stepped(blocks.filter_map(step).collect())
-        },
+        }
         _ => Note::Silent,
     }
 }
@@ -864,11 +997,13 @@ fn note_agy(record: &Value) -> Note {
                 .as_str()
                 .and_then(agy_user_text)
                 .map_or(Note::Silent, |typed| Note::Typed(Asked::typed(typed)))
-        },
+        }
         Some("PLANNER_RESPONSE") => {
             let mut stepped = Vec::new();
-            if let Some(text) =
-                record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+            if let Some(text) = record["content"]
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
             {
                 stepped.extend(Said::new(format!("said: {}", one_line(text, STEP_CHARS))));
             }
@@ -884,7 +1019,7 @@ fn note_agy(record: &Value) -> Note {
                 stepped.extend(Said::new(text));
             }
             Note::stepped(stepped)
-        },
+        }
         _ => Note::Silent,
     }
 }
@@ -904,7 +1039,11 @@ struct ClaudeCall {
 impl ClaudeCall {
     fn of(block: &Value) -> Option<Self> {
         let (id, name) = (block["id"].as_str()?, block["name"].as_str()?);
-        Some(ClaudeCall { id: id.to_owned(), name: name.to_owned(), input: block["input"].clone() })
+        Some(ClaudeCall {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            input: block["input"].clone(),
+        })
     }
 }
 
@@ -928,28 +1067,34 @@ fn turn_of_claude(end: &str) -> Turn {
         if record["isSidechain"].as_bool() == Some(true) {
             continue;
         }
-        let blocks = record["message"]["content"].as_array().into_iter().flatten();
+        let blocks = record["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten();
         match record["type"].as_str() {
             Some("assistant") => {
                 for block in blocks {
                     match block["type"].as_str() {
                         Some("text") => {
-                            let text = block["text"].as_str().map(str::trim).filter(|t| !t.is_empty());
+                            let text = block["text"]
+                                .as_str()
+                                .map(str::trim)
+                                .filter(|t| !t.is_empty());
                             said = text.map(str::to_owned).or(said);
-                        },
+                        }
                         Some("tool_use") => calls.extend(ClaudeCall::of(block)),
-                        _ => {},
+                        _ => {}
                     }
                 }
-            },
+            }
             Some("user") => {
                 for block in blocks.filter(|block| block["type"] == "tool_result") {
                     if let Some(answered) = block["tool_use_id"].as_str() {
                         calls.retain(|call| call.id != answered);
                     }
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
     let tool = calls.pop().map(|call| (call.name, call.input));
@@ -969,10 +1114,12 @@ fn turn_of_agy(end: &str) -> Turn {
         match record["type"].as_str() {
             Some("USER_INPUT") => {
                 tool = None;
-            },
+            }
             Some("PLANNER_RESPONSE") => {
-                if let Some(text) =
-                    record["content"].as_str().map(str::trim).filter(|text| !text.is_empty())
+                if let Some(text) = record["content"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
                 {
                     said = Some(text.to_owned());
                 }
@@ -983,8 +1130,8 @@ fn turn_of_agy(end: &str) -> Turn {
                         tool = Some((name.to_owned(), input));
                     }
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
     Turn { tool, said }
@@ -1004,7 +1151,8 @@ fn push_step<T>(last: &mut VecDeque<T>, step: T, steps_max: usize) {
 
 fn agy_user_text(content: &str) -> Option<&str> {
     let text = if let Some((_, rest)) = content.split_once("<USER_REQUEST>") {
-        rest.split_once("</USER_REQUEST>").map_or(rest, |(inner, _)| inner)
+        rest.split_once("</USER_REQUEST>")
+            .map_or(rest, |(inner, _)| inner)
     } else if content.trim_start().starts_with("<SYSTEM_MESSAGE>") {
         return None;
     } else {
@@ -1028,9 +1176,9 @@ fn agy_args(raw: &Value) -> Value {
             continue;
         };
         let value = match value {
-            Value::String(text) => Value::String(
-                serde_json::from_str::<String>(text).unwrap_or_else(|_| text.clone()),
-            ),
+            Value::String(text) => {
+                Value::String(serde_json::from_str::<String>(text).unwrap_or_else(|_| text.clone()))
+            }
             other => other.clone(),
         };
         decoded.insert(key.to_owned(), value);
@@ -1039,7 +1187,7 @@ fn agy_args(raw: &Value) -> Value {
         let value = match value {
             Value::String(text) => {
                 serde_json::from_str::<Value>(text).unwrap_or_else(|_| value.clone())
-            },
+            }
             other => other.clone(),
         };
         decoded.insert("questions".to_owned(), value);
@@ -1071,7 +1219,7 @@ impl Asked {
         Some(match line.strip_suffix('…') {
             Some(start) if line.chars().count() >= CUT_CHARS => {
                 Asked::Cut(start.chars().take(ASKED_CHARS - 1).collect())
-            },
+            }
             _ => Asked::typed(&line),
         })
     }
@@ -1103,9 +1251,10 @@ const INTERRUPTED: &str = "[Request interrupted by user";
 fn typed_by_you(content: &Value) -> Option<String> {
     let text = match content {
         Value::String(text) => Some(text.as_str()),
-        Value::Array(blocks) => {
-            blocks.iter().find(|b| b["type"] == "text").and_then(|b| b["text"].as_str())
-        },
+        Value::Array(blocks) => blocks
+            .iter()
+            .find(|b| b["type"] == "text")
+            .and_then(|b| b["text"].as_str()),
         _ => None,
     }?;
     let text = without_paste_marks(text);
@@ -1130,14 +1279,14 @@ fn step(block: &Value) -> Option<Said> {
         "text" => {
             let text = block["text"].as_str()?.trim();
             (!text.is_empty()).then(|| format!("said: {}", one_line(text, STEP_CHARS)))?
-        },
+        }
         "tool_use" => {
             let name = block["name"].as_str()?;
             match on_what(&block["input"]) {
                 Some(what) => format!("ran {name}: {}", one_line(what, STEP_CHARS)),
                 None => format!("ran {name}"),
             }
-        },
+        }
         _ => return None,
     };
     Said::new(text)
@@ -1193,7 +1342,10 @@ mod tests {
 
     fn asked(records: &[serde_json::Value]) -> Option<String> {
         let end: Vec<String> = records.iter().map(ToString::to_string).collect();
-        digest(&end.join("\n"), 1).asked.as_ref().map(ToString::to_string)
+        digest(&end.join("\n"), 1)
+            .asked
+            .as_ref()
+            .map(ToString::to_string)
     }
 
     fn typed(text: &str) -> serde_json::Value {
@@ -1212,8 +1364,14 @@ mod tests {
         assert_eq!(asked(&[typed(&long), last(&cut)]), Some(long));
         let one = "fold the sessions";
         assert_eq!(asked(&[typed(spaced), last(one)]).unwrap(), one);
-        assert_eq!(asked(&[typed("fold them"), last("/review this")]).unwrap(), "/review this");
-        assert_eq!(asked(&[last("fold them"), typed("now the tabs")]).unwrap(), "now the tabs");
+        assert_eq!(
+            asked(&[typed("fold them"), last("/review this")]).unwrap(),
+            "/review this"
+        );
+        assert_eq!(
+            asked(&[last("fold them"), typed("now the tabs")]).unwrap(),
+            "now the tabs"
+        );
         assert_eq!(asked(&[last(&cut)]), Some(cut));
     }
 
@@ -1231,13 +1389,19 @@ mod tests {
     fn a_compacted_session_s_summary_is_not_what_you_asked() {
         let summary = json!({"type": "user", "isCompactSummary": true, "message": {
             "content": "This session is being continued from a previous conversation"}});
-        assert_eq!(asked(&[typed("fold them"), summary.clone()]).unwrap(), "fold them");
+        assert_eq!(
+            asked(&[typed("fold them"), summary.clone()]).unwrap(),
+            "fold them"
+        );
         assert_eq!(asked(&[summary]), None);
     }
 
     #[test]
     fn a_blank_record_of_a_prompt_is_not_what_you_asked() {
-        assert_eq!(asked(&[typed("fold them"), last(" \n ")]).unwrap(), "fold them");
+        assert_eq!(
+            asked(&[typed("fold them"), last(" \n ")]).unwrap(),
+            "fold them"
+        );
         assert_eq!(asked(&[last("")]), None);
     }
 
@@ -1256,11 +1420,24 @@ mod tests {
 
     #[test]
     fn a_prompt_you_ended_in_an_ellipsis_is_not_cut_short() {
-        assert_eq!(Asked::recorded("fold…"), Some(Asked::Whole("fold…".to_owned())));
-        assert!(!Asked::recorded("fold…").unwrap().same(&Asked::typed("fold them")));
-        assert_eq!(asked(&[typed("fold them"), last("fold…")]).unwrap(), "fold…");
+        assert_eq!(
+            Asked::recorded("fold…"),
+            Some(Asked::Whole("fold…".to_owned()))
+        );
+        assert!(
+            !Asked::recorded("fold…")
+                .unwrap()
+                .same(&Asked::typed("fold them"))
+        );
+        assert_eq!(
+            asked(&[typed("fold them"), last("fold…")]).unwrap(),
+            "fold…"
+        );
         let start = "fold ".repeat(CUT_CHARS / 5);
-        assert_eq!(Asked::recorded(&format!("{start}…")), Some(Asked::Cut(start)));
+        assert_eq!(
+            Asked::recorded(&format!("{start}…")),
+            Some(Asked::Cut(start))
+        );
     }
 
     #[test]
@@ -1275,16 +1452,28 @@ mod tests {
     #[test]
     fn a_reading_is_of_a_few_transcripts_by_their_ids() {
         let ids = |count: usize| -> Vec<String> {
-            (0..count).map(|n| format!("{n:08x}-0000-4000-8000-000000000000")).collect()
+            (0..count)
+                .map(|n| format!("{n:08x}-0000-4000-8000-000000000000"))
+                .collect()
         };
         let share = |count| u32::try_from(TAILS_BYTES / count).unwrap();
         let most = Reading::of(&ids(IDS_MAX), share(IDS_MAX)).unwrap();
         let asked = most.asked(None);
         assert_eq!(Reading::of(&asked.ids, asked.share), Ok(most));
-        assert!(Reading::of(&ids(IDS_MAX + 1), 1).unwrap_err().starts_with("ids: 33 transcripts"));
+        assert!(
+            Reading::of(&ids(IDS_MAX + 1), 1)
+                .unwrap_err()
+                .starts_with("ids: 33 transcripts")
+        );
         let long = Reading::of(&ids(2), share(1)).unwrap_err();
-        assert!(long.starts_with("share: 524288 bytes of each of 2"), "{long}");
-        assert_eq!(Reading::of(&ids(1), 0), Err("share: no bytes of each transcript".to_owned()));
+        assert!(
+            long.starts_with("share: 524288 bytes of each of 2"),
+            "{long}"
+        );
+        assert_eq!(
+            Reading::of(&ids(1), 0),
+            Err("share: no bytes of each transcript".to_owned())
+        );
         let named = Reading::of(&["../x".to_owned()], 1).unwrap_err();
         assert_eq!(named, r#"ids: "../x" names no session"#);
     }
@@ -1293,18 +1482,38 @@ mod tests {
     fn shared_readings_keep_no_more_than_one_reading_does() {
         let ids = |from: usize, count: usize| -> Vec<SessionId> {
             let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
-            (from..from + count).map(|n| SessionId::parse(&id(n)).unwrap()).collect()
+            (from..from + count)
+                .map(|n| SessionId::parse(&id(n)).unwrap())
+                .collect()
         };
         let shared = Reading::shared(vec![("here", ids(0, 3)), ("there", ids(3, 1))]).unwrap();
         let share = TAILS_BYTES / 4;
-        let here = Reading { ids: ids(0, 3), share };
-        assert_eq!(shared, [("here", here), ("there", Reading { ids: ids(3, 1), share })]);
+        let here = Reading {
+            ids: ids(0, 3),
+            share,
+        };
+        assert_eq!(
+            shared,
+            [
+                ("here", here),
+                (
+                    "there",
+                    Reading {
+                        ids: ids(3, 1),
+                        share
+                    }
+                )
+            ]
+        );
         for (_, reading) in shared {
             let asked = reading.asked(None);
             assert_eq!(Reading::of(&asked.ids, asked.share), Ok(reading));
         }
         let many = Reading::shared(vec![(1, ids(0, IDS_MAX)), (2, ids(IDS_MAX, 1))]);
-        assert_eq!(many, Err("ids: 33 transcripts, of 32 at the most".to_owned()));
+        assert_eq!(
+            many,
+            Err("ids: 33 transcripts, of 32 at the most".to_owned())
+        );
     }
 
     #[test]
@@ -1313,8 +1522,15 @@ mod tests {
             let content = serde_json::json!([{ "type": "text", "text": text }, { "type": "tool_use", "name": "Bash", "input": {} }]);
             serde_json::json!({ "type": "assistant", "isSidechain": sidechain, "message": { "content": content } }).to_string()
         };
-        let user = serde_json::json!({ "type": "user", "message": { "content": "go" } }).to_string();
-        let end = [said("first", false), said("  last  ", false), said("a subagent", true), user].join("\n");
+        let user =
+            serde_json::json!({ "type": "user", "message": { "content": "go" } }).to_string();
+        let end = [
+            said("first", false),
+            said("  last  ", false),
+            said("a subagent", true),
+            user,
+        ]
+        .join("\n");
         assert_eq!(last_said_in(&end, 100), Some("last".to_owned()));
         assert_eq!(last_said_in(&end, 2), Some("la…".to_owned()));
         assert_eq!(last_said_in("", 100), None);
@@ -1356,13 +1572,22 @@ mod tests {
         });
         let end = [user, tool, reply].map(|v| v.to_string()).join("\n");
         let parsed = digest_with(&end, TranscriptHarness::Antigravity, 4);
-        assert_eq!(parsed.asked, Some(Asked::Whole("fix the sidebar".to_owned())));
-        assert_eq!(parsed.steps, [
-            "ran run_command: Run tests",
-            "ran ask_question: Keep or drop?",
-            "said: Fixed the sidebar.",
-        ]);
-        assert_eq!(last_said_in(&end, 100), Some("Fixed the sidebar.".to_owned()));
+        assert_eq!(
+            parsed.asked,
+            Some(Asked::Whole("fix the sidebar".to_owned()))
+        );
+        assert_eq!(
+            parsed.steps,
+            [
+                "ran run_command: Run tests",
+                "ran ask_question: Keep or drop?",
+                "said: Fixed the sidebar.",
+            ]
+        );
+        assert_eq!(
+            last_said_in(&end, 100),
+            Some("Fixed the sidebar.".to_owned())
+        );
     }
 
     #[test]
@@ -1370,14 +1595,20 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let agy = scratch.path().join("agy");
         let id = SessionId::parse("9c696c75-660f-4097-934f-e1cc290e4bd1").unwrap();
-        let path = agy.join("brain").join(id.as_str()).join(".system_generated/logs/transcript.jsonl");
+        let path = agy
+            .join("brain")
+            .join(id.as_str())
+            .join(".system_generated/logs/transcript.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let line = json!({"type": "USER_INPUT", "source": "USER_EXPLICIT", "content": "<USER_REQUEST>\nhi\n</USER_REQUEST>"});
         let generic = json!({"type": "GENERIC", "content": "big output"});
         fs::write(&path, format!("{line}\n{generic}\n")).unwrap();
 
         let reading = Reading::new(vec![id.clone()], 4096).unwrap();
-        let folders = Folders { claude: None, agy: Some(agy) };
+        let folders = Folders {
+            claude: None,
+            agy: Some(agy),
+        };
         let ends = reading.ends(&folders);
         let expected = TranscriptEnd::Antigravity(TailLines::new(line.to_string()).unwrap());
         assert_eq!(ends.get(&id), Some(&expected));
@@ -1415,8 +1646,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(summary.asked, Some(Asked::Whole("audit this".to_owned())));
-        assert_eq!(summary.steps, ["ran write_file: /w/a.rs", "said: Done auditing."]);
-        assert_eq!(last_said(&path, 100).unwrap(), Some("Done auditing.".to_owned()));
+        assert_eq!(
+            summary.steps,
+            ["ran write_file: /w/a.rs", "said: Done auditing."]
+        );
+        assert_eq!(
+            last_said(&path, 100).unwrap(),
+            Some("Done auditing.".to_owned())
+        );
         assert_eq!(
             digest_with(&format!("{reply}\n"), TranscriptHarness::Antigravity, 0).steps,
             Vec::<String>::new()
@@ -1440,7 +1677,10 @@ mod tests {
 
     fn said(text: &str) -> String {
         let content = json!([{"type": "text", "text": text}]);
-        format!("{}\n", json!({"type": "assistant", "message": {"content": content}}))
+        format!(
+            "{}\n",
+            json!({"type": "assistant", "message": {"content": content}})
+        )
     }
 
     fn unsaid(bytes: usize) -> String {
@@ -1450,7 +1690,11 @@ mod tests {
     }
 
     fn added(path: &Path, text: &str) {
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
         io::Write::write_all(&mut file, text.as_bytes()).unwrap();
     }
 
@@ -1498,13 +1742,19 @@ mod tests {
             0 => format!("{}\n", typed(&format!("prompt {n}"))),
             1 => said(&format!("step {n}")),
             2 => unsaid(100 + n),
-            3 => format!("{}\n", json!({"type": "ai-title", "aiTitle": format!("title {n}")})),
+            3 => format!(
+                "{}\n",
+                json!({"type": "ai-title", "aiTitle": format!("title {n}")})
+            ),
             _ => format!("{aside}\n"),
         };
         for n in 0..40 {
             added(&path, &records(n));
             let whole = fold(
-                notes(&end(&path, limits.share_bytes_max().get(), &KINDS).unwrap(), note_claude),
+                notes(
+                    &end(&path, limits.share_bytes_max().get(), &KINDS).unwrap(),
+                    note_claude,
+                ),
                 limits.steps_max(),
             );
             assert_eq!(tail.grown().unwrap(), Some(whole), "after record {n}");
@@ -1593,7 +1843,10 @@ mod tests {
         assert!(oversized.len() > limits.share_bytes_max().get());
         added(&path, &oversized);
         let whole = fold(
-            notes(&end(&path, limits.share_bytes_max().get(), &KINDS).unwrap(), note_claude),
+            notes(
+                &end(&path, limits.share_bytes_max().get(), &KINDS).unwrap(),
+                note_claude,
+            ),
             limits.steps_max(),
         );
         assert_eq!(tail.grown().unwrap(), Some(whole));
@@ -1626,7 +1879,10 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
         assert!(tail.grown().is_err());
         assert_eq!(tail.state.seen_stamp(), stamp_before);
-        let TailState::Aligned { read_offset, kept, .. } = &tail.state else {
+        let TailState::Aligned {
+            read_offset, kept, ..
+        } = &tail.state
+        else {
             panic!("expected aligned tail, got {:?}", tail.state);
         };
         assert_eq!(*read_offset, offset_before);
@@ -1693,11 +1949,17 @@ mod tests {
         let initial_len = window + 10;
         fs::write(&path, "x".repeat(initial_len)).unwrap();
         assert_eq!(steps(&mut tail), Vec::<String>::new());
-        assert!(matches!(tail.state, TailState::Torn { read_offset, .. } if read_offset == initial_len as u64));
+        assert!(
+            matches!(tail.state, TailState::Torn { read_offset, .. } if read_offset == initial_len as u64)
+        );
         assert_eq!(tail.grown().unwrap(), None);
 
         let hidden = format!("\n{}", said("hidden"));
-        fs::write(&path, format!("{}{}", "x".repeat(initial_len - hidden.len()), hidden)).unwrap();
+        fs::write(
+            &path,
+            format!("{}{}", "x".repeat(initial_len - hidden.len()), hidden),
+        )
+        .unwrap();
         added(&path, &"y".repeat(50));
         assert_eq!(steps(&mut tail), Vec::<String>::new());
         assert!(matches!(

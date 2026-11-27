@@ -5,12 +5,12 @@ use std::time::Duration;
 
 use lune_domain::mux::TerminalKey;
 
-use crate::api::{answer_request, waiting_response, WaitingResponse};
-use crate::choices::{Choices, Moves, Seen, CHOICES_MAX, SCREEN_LINES_MAX};
+use crate::api::{WaitingResponse, answer_request, waiting_response};
+use crate::choices::{CHOICES_MAX, Choices, Moves, SCREEN_LINES_MAX, Seen};
 use crate::log;
-use crate::mux::own::api::{self as mux, pressed, Named};
-use crate::mux::own::server::{Looked, Pressed, Shown, Terminals, PRESSES_MAX};
 use crate::mux::Failure;
+use crate::mux::own::api::{self as mux, Named, pressed};
+use crate::mux::own::server::{Looked, PRESSES_MAX, Pressed, Shown, Terminals};
 use crate::transcripts;
 
 pub const ANSWER_BYTES_MAX: usize = 64 * 1024;
@@ -79,22 +79,28 @@ impl Answer {
                     return Err("the answer's text is blank".to_owned());
                 }
                 if text.len() > ANSWER_BYTES_MAX {
-                    return Err(format!("the answer's text is over {ANSWER_BYTES_MAX} bytes"));
+                    return Err(format!(
+                        "the answer's text is over {ANSWER_BYTES_MAX} bytes"
+                    ));
                 }
                 Asked::Text(text)
-            },
+            }
             Some(answer_request::Answer::Choice(answer_request::Choice { index, label })) => {
-                let index = usize::try_from(index).ok().filter(|index| *index < CHOICES_MAX);
+                let index = usize::try_from(index)
+                    .ok()
+                    .filter(|index| *index < CHOICES_MAX);
                 let past = || format!("the choice is past the {CHOICES_MAX} of any menu");
                 let index = index.ok_or_else(past)?;
                 if label.trim().is_empty() {
                     return Err("the choice's label is blank".to_owned());
                 }
                 if label.len() > ANSWER_BYTES_MAX {
-                    return Err(format!("the choice's label is over {ANSWER_BYTES_MAX} bytes"));
+                    return Err(format!(
+                        "the choice's label is over {ANSWER_BYTES_MAX} bytes"
+                    ));
                 }
                 Asked::Choice { index, label }
-            },
+            }
             Some(answer_request::Answer::Escape(())) => Asked::Escape,
         };
         Ok(Answer { shown, asked })
@@ -118,9 +124,14 @@ pub fn waiting(key: TerminalKey, runs: &Runs) -> Result<WaitingResponse, Failure
                 Seen::Alone(chosen) => Asks::Unread(alone(&chosen)),
             };
             (asks, transcript.as_deref().and_then(said_in))
-        },
+        }
     };
-    Ok(WaitingResponse { screen, shown: shown.said(), asks: Some(asks), said })
+    Ok(WaitingResponse {
+        screen,
+        shown: shown.said(),
+        asks: Some(asks),
+        said,
+    })
 }
 
 pub fn answer(key: TerminalKey, runs: &Runs, answer: Answer) -> Result<(), Unanswered> {
@@ -136,32 +147,36 @@ pub fn answer(key: TerminalKey, runs: &Runs, answer: Answer) -> Result<(), Unans
         (Asked::Escape, _) => press(key, shown, vec![named_key(Named::Escape)]),
         (Asked::Text(_) | Asked::Choice { .. }, Seen::TooMany(count)) => {
             Err(Unanswered::Refused(too_many(count)))
-        },
+        }
         (Asked::Text(_) | Asked::Choice { .. }, Seen::Alone(chosen)) => {
             Err(Unanswered::Refused(alone(&chosen)))
-        },
+        }
         (Asked::Text(_), Seen::Menu(menu)) => {
             let count = menu.labels().len();
             let why = format!("the screen shows {count} choices: answer with one of them");
             Err(Unanswered::Refused(why))
-        },
+        }
         (Asked::Text(text), Seen::Words) => {
             let pasted = pressed::Event::Paste(mux::Paste { text });
             press(key, shown, vec![pasted, named_key(Named::Enter)])
-        },
-        (Asked::Choice { .. }, Seen::Words) => {
-            Err(Unanswered::Refused("the screen shows no choices".to_owned()))
-        },
+        }
+        (Asked::Choice { .. }, Seen::Words) => Err(Unanswered::Refused(
+            "the screen shows no choices".to_owned(),
+        )),
         (Asked::Choice { index, label }, Seen::Menu(menu)) => {
             let moves = match menu.moves_to(index, &label).map_err(Unanswered::Refused)? {
                 Moves::Up(steps) => vec![named_key(Named::Up); steps],
                 Moves::Down(steps) => vec![named_key(Named::Down); steps],
                 Moves::Stay => return press(key, shown, vec![named_key(Named::Enter)]),
             };
-            assert!(!moves.is_empty() && moves.len() <= PRESSES_MAX, "{} moves", moves.len());
+            assert!(
+                !moves.is_empty() && moves.len() <= PRESSES_MAX,
+                "{} moves",
+                moves.len()
+            );
             press(key, shown, moves)?;
             entered_at(key, &menu, index)
-        },
+        }
     }
 }
 
@@ -183,13 +198,14 @@ fn entered_at(key: TerminalKey, asked: &Choices, index: usize) -> Result<(), Una
         if there {
             match Terminals.pressed(key, shown, vec![named_key(Named::Enter)])? {
                 Pressed::Done => return Ok(()),
-                Pressed::Changed => {},
+                Pressed::Changed => {}
             }
         }
         thread::sleep(MOVED_LOOK);
     }
     let number = index + 1;
-    let why = format!("the cursor did not reach choice {number}, {label:?}, so Enter was not pressed");
+    let why =
+        format!("the cursor did not reach choice {number}, {label:?}, so Enter was not pressed");
     Err(Unanswered::Refused(why))
 }
 
@@ -205,7 +221,11 @@ fn alone(chosen: &str) -> String {
 fn tail(text: &str, lines_max: usize) -> String {
     let shown: Vec<&str> = text.trim_end().lines().collect();
     let kept = shown[shown.len().saturating_sub(lines_max)..].join("\n");
-    assert!(kept.lines().count() <= lines_max, "{} lines kept", kept.lines().count());
+    assert!(
+        kept.lines().count() <= lines_max,
+        "{} lines kept",
+        kept.lines().count()
+    );
     kept
 }
 
@@ -213,9 +233,12 @@ fn said_in(transcript: &Path) -> Option<String> {
     match transcripts::last_said(transcript, SAID_CHARS_MAX) {
         Ok(said) => said,
         Err(error) => {
-            log::say(&format!("{} is unread, so no last words: {error}", transcript.display()));
+            log::say(&format!(
+                "{} is unread, so no last words: {error}",
+                transcript.display()
+            ));
             None
-        },
+        }
     }
 }
 
@@ -234,32 +257,69 @@ mod tests {
 
     #[test]
     fn the_screen_is_its_last_lines_with_no_blank_end() {
-        let text = format!("{}\n\n\n", (1..=50).map(|n| n.to_string()).collect::<Vec<_>>().join("\n"));
+        let text = format!(
+            "{}\n\n\n",
+            (1..=50)
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
         let screen = tail(&text, SCREEN_LINES_MAX);
         assert_eq!(screen.lines().count(), SCREEN_LINES_MAX);
-        assert!(screen.starts_with("11\n") && screen.ends_with("\n50"), "{screen}");
+        assert!(
+            screen.starts_with("11\n") && screen.ends_with("\n50"),
+            "{screen}"
+        );
     }
 
     #[test]
     fn an_answer_is_read_from_what_was_asked() {
         use answer_request::Answer as Said;
-        let asked = |asked: Asked| Ok(Answer { shown: Shown::of(7), asked });
+        let asked = |asked: Asked| {
+            Ok(Answer {
+                shown: Shown::of(7),
+                asked,
+            })
+        };
         let text = |text: &str| Answer::of(Some(7), Some(Said::Text(text.to_owned())));
-        assert_eq!(text("yes, go on"), asked(Asked::Text("yes, go on".to_owned())));
+        assert_eq!(
+            text("yes, go on"),
+            asked(Asked::Text("yes, go on".to_owned()))
+        );
         assert_eq!(text(" \n "), Err("the answer's text is blank".to_owned()));
         let long = "x".repeat(ANSWER_BYTES_MAX + 1);
-        assert_eq!(text(&long), Err(format!("the answer's text is over {ANSWER_BYTES_MAX} bytes")));
-        assert_eq!(Answer::of(Some(7), Some(Said::Escape(()))), asked(Asked::Escape));
-        assert_eq!(Answer::of(Some(7), None), Err("it gives no answer".to_owned()));
+        assert_eq!(
+            text(&long),
+            Err(format!(
+                "the answer's text is over {ANSWER_BYTES_MAX} bytes"
+            ))
+        );
+        assert_eq!(
+            Answer::of(Some(7), Some(Said::Escape(()))),
+            asked(Asked::Escape)
+        );
+        assert_eq!(
+            Answer::of(Some(7), None),
+            Err("it gives no answer".to_owned())
+        );
         let unshown = Answer::of(None, Some(Said::Escape(())));
         assert_eq!(unshown, Err("it names no screen it answers".to_owned()));
         let chose = |index: u32, label: &str| {
-            let choice = answer_request::Choice { index, label: label.to_owned() };
+            let choice = answer_request::Choice {
+                index,
+                label: label.to_owned(),
+            };
             Answer::of(Some(7), Some(Said::Choice(choice)))
         };
-        let no = Asked::Choice { index: 2, label: "No".to_owned() };
+        let no = Asked::Choice {
+            index: 2,
+            label: "No".to_owned(),
+        };
         assert_eq!(chose(2, "No"), asked(no));
-        assert_eq!(chose(16, "No"), Err("the choice is past the 16 of any menu".to_owned()));
+        assert_eq!(
+            chose(16, "No"),
+            Err("the choice is past the 16 of any menu".to_owned())
+        );
         assert_eq!(chose(1, " "), Err("the choice's label is blank".to_owned()));
         let over = format!("the choice's label is over {ANSWER_BYTES_MAX} bytes");
         assert_eq!(chose(1, &long), Err(over));

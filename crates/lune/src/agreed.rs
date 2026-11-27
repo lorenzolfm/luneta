@@ -3,8 +3,8 @@ use std::fmt;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Component, Path, PathBuf};
 
-use luned::asks::{Turn, BEFORE_VAR, TURN_VAR};
-use luned::{prunes, var, Directory};
+use luned::asks::{BEFORE_VAR, TURN_VAR, Turn};
+use luned::{Directory, prunes, var};
 
 use crate::machines::Machine;
 use crate::terminate;
@@ -42,7 +42,8 @@ impl fmt::Display for Agreed {
 
 pub fn agreed(spelled: &str) -> Result<Agreed, String> {
     let read = u64::from_str_radix(spelled, 16);
-    read.map(Agreed).map_err(|_| format!("{spelled} is no plan lune said"))
+    read.map(Agreed)
+        .map_err(|_| format!("{spelled} is no plan lune said"))
 }
 
 pub fn turn_here() -> Result<Option<Turn>, String> {
@@ -64,10 +65,10 @@ fn plain(path: &Path) -> PathBuf {
     let mut plain = PathBuf::new();
     for part in path.components() {
         match part {
-            Component::CurDir => {},
+            Component::CurDir => {}
             Component::ParentDir => {
                 plain.pop();
-            },
+            }
             part => plain.push(part),
         }
     }

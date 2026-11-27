@@ -29,7 +29,7 @@ pub fn said(terminal: TerminalKey, view: &View, before: Option<&View>, flags: Fl
                 })
                 .collect();
             api::frame::Rows::Changed(api::Changed { rows })
-        },
+        }
         _ => api::frame::Rows::Whole(api::Whole {
             lines: view.lines().iter().map(line_said).collect(),
         }),
@@ -63,13 +63,18 @@ fn line_said(line: &Line) -> api::Line {
 fn glyph_said(cell: &Cell) -> api::Glyph {
     let shows = match &cell.glyph {
         Glyph::Blank => api::glyph::Shows::Blank(api::Blank {}),
-        Glyph::Narrow(grapheme) => {
-            api::glyph::Shows::Narrow(api::Narrow { grapheme: grapheme.clone() })
-        },
-        Glyph::Wide(grapheme) => api::glyph::Shows::Wide(api::Wide { grapheme: grapheme.clone() }),
+        Glyph::Narrow(grapheme) => api::glyph::Shows::Narrow(api::Narrow {
+            grapheme: grapheme.clone(),
+        }),
+        Glyph::Wide(grapheme) => api::glyph::Shows::Wide(api::Wide {
+            grapheme: grapheme.clone(),
+        }),
     };
     let style = (cell.style != Style::default()).then(|| style_said(&cell.style));
-    api::Glyph { shows: Some(shows), style }
+    api::Glyph {
+        shows: Some(shows),
+        style,
+    }
 }
 
 fn style_said(style: &Style) -> api::Style {

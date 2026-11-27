@@ -58,7 +58,10 @@ pub fn of(program: &str) -> Option<&'static str> {
     if SHELLS.contains(&program) {
         return Some(TERMINAL);
     }
-    ICONS.iter().find(|(name, _)| *name == program).map(|(_, icon)| *icon)
+    ICONS
+        .iter()
+        .find(|(name, _)| *name == program)
+        .map(|(_, icon)| *icon)
 }
 
 pub fn program(command: &str) -> Option<&str> {
@@ -75,7 +78,7 @@ pub fn program(command: &str) -> Option<&str> {
                 let installable = words.find(|word| !word.starts_with('-'))?;
                 let (_, attribute) = installable.split_once('#')?;
                 return attribute.rsplit('.').next().filter(|name| !name.is_empty());
-            },
+            }
             "" => return None,
             name => return Some(name),
         }
@@ -104,7 +107,10 @@ const SUDO_TAKES: Takes = Takes {
     ],
 };
 
-const ENV_TAKES: Takes = Takes { letters: "Cu", names: &["chdir", "unset"] };
+const ENV_TAKES: Takes = Takes {
+    letters: "Cu",
+    names: &["chdir", "unset"],
+};
 
 impl Takes {
     fn next_word(&self, option: &str) -> bool {
@@ -167,7 +173,10 @@ mod tests {
             ("sudo --user=postgres psql", Some("psql")),
             ("sudo FOO=1 env -i -C /w PATH=/bin htop", Some("htop")),
             ("nix run nixpkgs#htop", Some("htop")),
-            ("nix run --impure nixpkgs#python3Packages.ipython -- -i", Some("ipython")),
+            (
+                "nix run --impure nixpkgs#python3Packages.ipython -- -i",
+                Some("ipython"),
+            ),
             ("nix build .#lune", Some("nix")),
             ("nix run .", None),
             ("sudo -i", None),
@@ -182,7 +191,11 @@ mod tests {
     #[test]
     fn every_icon_takes_the_columns_a_row_keeps_for_one() {
         for program in SHELLS.into_iter().chain(ICONS.map(|(program, _)| program)) {
-            assert_eq!(of(program).map(UnicodeWidthStr::width), Some(WIDTH), "{program}");
+            assert_eq!(
+                of(program).map(UnicodeWidthStr::width),
+                Some(WIDTH),
+                "{program}"
+            );
         }
     }
 }

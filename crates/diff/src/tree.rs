@@ -157,7 +157,10 @@ fn push_children<'a>(
     depth: usize,
     dir: &'a DirBuilder,
 ) {
-    assert!(depth <= PATH_DEPTH_MAX, "child depth stays within PATH_DEPTH_MAX");
+    assert!(
+        depth <= PATH_DEPTH_MAX,
+        "child depth stays within PATH_DEPTH_MAX"
+    );
     let mut files = dir.files.clone();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, file, status, added, deleted) in files.into_iter().rev() {
@@ -281,7 +284,11 @@ diff --git a/crates/diff/src/patch.rs b/crates/diff/src/patch.rs
         patch.push_untracked(FilePath::parse(&deep).unwrap(), "fn ok() {}\n");
         let tree = FileTree::build(&patch, &BTreeSet::new());
         assert!(tree.entries.len() >= 2);
-        assert!(tree.entries.iter().all(|entry| entry.depth <= PATH_DEPTH_MAX));
+        assert!(
+            tree.entries
+                .iter()
+                .all(|entry| entry.depth <= PATH_DEPTH_MAX)
+        );
         assert!(tree.entries.iter().any(|entry| matches!(
             &entry.node,
             TreeNode::File { name, .. } if name.ends_with("leaf.rs")

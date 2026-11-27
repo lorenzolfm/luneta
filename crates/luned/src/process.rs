@@ -9,8 +9,8 @@ use std::process::ChildStdout;
 use lune_protocol::program_resume::{ProcessArgv, ProcessPlacement, is_shell_ancestor};
 use rustix::io::Errno;
 use rustix::process::Pid;
-use tokio::io::unix::AsyncFd;
 use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -25,7 +25,7 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
-pub use os::{cwd, environ, meta, parent, same_root, signalled, start, started, Domain};
+pub use os::{Domain, cwd, environ, meta, parent, same_root, signalled, start, started};
 
 pub const ANCESTOR_DEPTH_MAX: usize = 64;
 
@@ -131,7 +131,10 @@ impl AgentId {
 
     #[must_use]
     pub fn to_process_id(&self) -> Id {
-        Id { pid: self.pid.get(), start: self.start.clone() }
+        Id {
+            pid: self.pid.get(),
+            start: self.start.clone(),
+        }
     }
 }
 
@@ -185,7 +188,10 @@ pub struct Mine<P> {
 
 impl<P> Default for Mine<P> {
     fn default() -> Mine<P> {
-        Mine { found: Vec::new(), unreadable: Vec::new() }
+        Mine {
+            found: Vec::new(),
+            unreadable: Vec::new(),
+        }
     }
 }
 
@@ -200,18 +206,24 @@ pub const NAME_BYTES_MAX: usize = 15;
 
 #[must_use]
 pub fn mine<P: Copy + Eq>(programs: &[(P, &str)]) -> Mine<P> {
-    let Mine { mut found, unreadable } = os::listed(programs);
+    let Mine {
+        mut found,
+        unreadable,
+    } = os::listed(programs);
     found.retain(|it| {
         let named = os::named(it.id.pid);
-        programs.iter().any(|&(program, name)| {
-            program == it.program && named.as_deref() == Some(name)
-        })
+        programs
+            .iter()
+            .any(|&(program, name)| program == it.program && named.as_deref() == Some(name))
     });
     Mine { found, unreadable }
 }
 
 fn program_named<P: Copy>(programs: &[(P, &str)], name: &str) -> Option<P> {
-    programs.iter().find(|&&(_, named)| named == name).map(|&(program, _)| program)
+    programs
+        .iter()
+        .find(|&&(_, named)| named == name)
+        .map(|&(program, _)| program)
 }
 
 pub fn var(name: &str) -> Result<Option<String>, String> {
@@ -245,7 +257,7 @@ impl Exit {
     }
 }
 
-pub use lune_protocol::{ReadyPrefix, READY_BYTES_MAX};
+pub use lune_protocol::{READY_BYTES_MAX, ReadyPrefix};
 
 const READY_READS_MAX: usize = READY_BYTES_MAX * 2;
 
@@ -278,15 +290,17 @@ pub async fn read_ready_line(stdout: ChildStdout, prefix: ReadyPrefix) -> io::Re
     let mut bytes_total = 0_usize;
     for _ in 0..READY_READS_MAX {
         let mut guard = ready.readable().await?;
-        let read = guard.try_io(|inner| {
-            rustix::io::read(inner.get_ref(), &mut chunk).map_err(io::Error::from)
-        });
+        let read = guard
+            .try_io(|inner| rustix::io::read(inner.get_ref(), &mut chunk).map_err(io::Error::from));
         match read {
             Ok(Ok(0)) => return Ok(ReadyLine::Ended),
-            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {},
+            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => {}
             Ok(Err(error)) => return Err(error),
             Ok(Ok(bytes_read)) => {
-                assert!(bytes_read <= chunk.len(), "read returned more bytes than chunk capacity");
+                assert!(
+                    bytes_read <= chunk.len(),
+                    "read returned more bytes than chunk capacity"
+                );
                 for &byte in &chunk[..bytes_read] {
                     bytes_total += 1;
                     if bytes_total > READY_BYTES_MAX {
@@ -301,11 +315,13 @@ pub async fn read_ready_line(stdout: ChildStdout, prefix: ReadyPrefix) -> io::Re
                         line.push(byte);
                     }
                 }
-            },
-            Err(_would_block) => {},
+            }
+            Err(_would_block) => {}
         }
     }
-    Err(io::Error::other("stdout stayed unread across too many wakeups"))
+    Err(io::Error::other(
+        "stdout stayed unread across too many wakeups",
+    ))
 }
 
 #[cfg(test)]
@@ -329,8 +345,14 @@ mod tests {
             child.kill().unwrap();
             child.wait().unwrap();
             let started = started.expect("a process that runs is dated");
-            assert!(before <= started, "dated {started:?}, started after {before:?}");
-            assert!(started <= after + Duration::from_secs(1), "dated {started:?}, by {after:?}");
+            assert!(
+                before <= started,
+                "dated {started:?}, started after {before:?}"
+            );
+            assert!(
+                started <= after + Duration::from_secs(1),
+                "dated {started:?}, by {after:?}"
+            );
         }
     }
 
@@ -365,9 +387,17 @@ mod tests {
         let mut given = Command::new("sh");
         given.arg0("").args(["-c", "echo; read -r line"]);
         given.stdin(Stdio::piped()).stdout(Stdio::piped());
-        given.env_clear().env("PATH", &path).env("LUNE_GIVEN", "a b=c");
+        given
+            .env_clear()
+            .env("PATH", &path)
+            .env("LUNE_GIVEN", "a b=c");
         let mut child = given.spawn().unwrap();
-        child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut [0; 1])
+            .expect("it says it runs");
         let read = super::environ(child.id());
         child.kill().unwrap();
         child.wait().unwrap();
@@ -377,7 +407,11 @@ mod tests {
         given.sort_unstable();
         let mut path_given = OsString::from("PATH=");
         path_given.push(path);
-        assert_eq!(given, [OsString::from("LUNE_GIVEN=a b=c"), path_given], "{read:?}");
+        assert_eq!(
+            given,
+            [OsString::from("LUNE_GIVEN=a b=c"), path_given],
+            "{read:?}"
+        );
     }
 
     #[test]
@@ -386,9 +420,17 @@ mod tests {
         let mut given = Command::new("sh");
         given.args(["-c", "echo; read -r line", "", ""]);
         given.stdin(Stdio::piped()).stdout(Stdio::piped());
-        given.env_clear().env("PATH", &path).env("LUNE_GIVEN", "a b=c");
+        given
+            .env_clear()
+            .env("PATH", &path)
+            .env("LUNE_GIVEN", "a b=c");
         let mut child = given.spawn().unwrap();
-        child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut [0; 1])
+            .expect("it says it runs");
         let mine = super::mine(&[("sh", "sh"), ("bash", "bash")]);
         let pid = child.id();
         child.kill().unwrap();
@@ -397,10 +439,19 @@ mod tests {
         assert_eq!(unreadable, None, "{:?}", mine.unreadable);
         let found = mine.found.into_iter().find(|it| it.id.pid == pid);
         let found = found.expect("this user's shell is found");
-        assert_eq!(found.argv[1..], ["-c", "echo; read -r line", "", ""], "{found:?}");
+        assert_eq!(
+            found.argv[1..],
+            ["-c", "echo; read -r line", "", ""],
+            "{found:?}"
+        );
         let given = OsString::from("LUNE_GIVEN=a b=c");
         assert!(found.environ.contains(&given), "{found:?}");
-        assert!(found.environ.iter().any(|it| it.as_encoded_bytes().starts_with(b"PATH=")));
+        assert!(
+            found
+                .environ
+                .iter()
+                .any(|it| it.as_encoded_bytes().starts_with(b"PATH="))
+        );
     }
 
     #[expect(
@@ -423,9 +474,13 @@ mod tests {
             });
         }
         let forks = thread::Builder::new().name(NAMED_ON_LINUX_AS.to_owned());
-        let spawned = forks.spawn(move || held.spawn().unwrap().wait().unwrap()).unwrap();
+        let spawned = forks
+            .spawn(move || held.spawn().unwrap().wait().unwrap())
+            .unwrap();
         let mut forked = [0; 4];
-        forked_heard.read_exact(&mut forked).expect("the child says its pid once forked");
+        forked_heard
+            .read_exact(&mut forked)
+            .expect("the child says its pid once forked");
         let forked = u32::from_ne_bytes(forked);
         let names = [own.as_str(), NAMED_ON_LINUX_AS];
         let held_as = super::os::named(forked);
@@ -433,22 +488,36 @@ mod tests {
         go_said.write_all(&[1]).unwrap();
         assert!(spawned.join().unwrap().success());
         let held_as = held_as.expect("the held child has a name");
-        assert!(names.contains(&held_as.as_str()), "{held_as} is a name asked for");
+        assert!(
+            names.contains(&held_as.as_str()),
+            "{held_as} is a name asked for"
+        );
         let pids: Vec<u32> = mine.found.iter().map(|it| it.id.pid).collect();
         assert!(pids.contains(&me), "{pids:?} lists this test's process");
-        assert!(!pids.contains(&forked), "{pids:?} lists the held child {forked}");
+        assert!(
+            !pids.contains(&forked),
+            "{pids:?} lists the held child {forked}"
+        );
     }
 
     #[test]
     fn where_a_process_runs_reads_while_it_runs_and_is_gone_once_it_ended() {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path().canonicalize().unwrap();
-        let mut child = Command::new("sleep").arg("60").current_dir(&dir).spawn().unwrap();
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .current_dir(&dir)
+            .spawn()
+            .unwrap();
         let pid = child.id();
         assert_eq!(super::cwd(pid), Ok(dir));
         child.kill().unwrap();
         hears_it_ended(pid, "ended, and not waited for");
-        assert_eq!(super::cwd(pid), Err(super::Unread::Gone), "an ended process runs nowhere");
+        assert_eq!(
+            super::cwd(pid),
+            Err(super::Unread::Gone),
+            "an ended process runs nowhere"
+        );
         child.wait().unwrap();
         assert_eq!(super::cwd(pid), Err(super::Unread::Gone));
     }
@@ -463,14 +532,21 @@ mod tests {
     fn an_exit_watch_wakes_as_its_process_ends_and_not_before() {
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
         let pid = rustix::process::Pid::from_child(&child);
-        let exit = super::Exit::watch(pid).unwrap().expect("a running child is watched");
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let exit = super::Exit::watch(pid)
+            .unwrap()
+            .expect("a running child is watched");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let (done, heard) = mpsc::channel();
         let waiter = thread::spawn(move || {
             let ended = runtime.block_on(exit.wait());
             let _ = done.send(ended);
         });
-        lune_waits::never("an exit watch wakes while its process runs", || heard.try_recv().ok());
+        lune_waits::never("an exit watch wakes while its process runs", || {
+            heard.try_recv().ok()
+        });
         child.kill().unwrap();
         lune_waits::heard("an exit watch wakes when its process ends", &heard).unwrap();
         waiter.join().unwrap();
@@ -480,9 +556,15 @@ mod tests {
     #[test]
     fn a_ready_line_wakes_on_its_prefix_or_eof() {
         let prefix = super::ReadyPrefix::try_new("luned: listening on ").unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut child = Command::new("sh")
-            .args(["-c", "echo noise; echo 'luned: listening on /tmp/s'; exec sleep 60"])
+            .args([
+                "-c",
+                "echo noise; echo 'luned: listening on /tmp/s'; exec sleep 60",
+            ])
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
@@ -492,7 +574,10 @@ mod tests {
             super::read_ready_line(stdout, prefix),
         ));
         assert_eq!(heard.unwrap(), super::ReadyLine::Matched);
-        assert!(child.try_wait().unwrap().is_none(), "the child keeps running after saying it listens");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the child keeps running after saying it listens"
+        );
         child.kill().unwrap();
         child.wait().unwrap();
 

@@ -18,7 +18,10 @@ pub const ABORTS: &str = "a thread panicked, so luned aborts";
 pub struct Hooked(());
 
 pub fn abort_on_panic() -> Hooked {
-    assert!(!HOOKED.swap(true, Ordering::Relaxed), "the hook that aborts is set once");
+    assert!(
+        !HOOKED.swap(true, Ordering::Relaxed),
+        "the hook that aborts is set once"
+    );
     let default = panic::take_hook();
     panic::set_hook(Box::new(move |panic| {
         log::panicked(panic);
@@ -35,7 +38,13 @@ pub fn abort_on_panic() -> Hooked {
 fn undumped() {
     let core = rustix::process::Resource::Core;
     let maximum = rustix::process::getrlimit(core).maximum;
-    let _ = rustix::process::setrlimit(core, rustix::process::Rlimit { current: Some(0), maximum });
+    let _ = rustix::process::setrlimit(
+        core,
+        rustix::process::Rlimit {
+            current: Some(0),
+            maximum,
+        },
+    );
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -45,7 +54,10 @@ pub fn contained<T>(run: impl FnOnce() -> T) -> Result<T, Panicked> {
     let was = CONTAINED.replace(true);
     let ran = panic::catch_unwind(AssertUnwindSafe(run));
     let held = CONTAINED.replace(was);
-    assert!(held, "a contained run leaves its thread contained as it found it");
+    assert!(
+        held,
+        "a contained run leaves its thread contained as it found it"
+    );
     ran.map_err(|_| Panicked)
 }
 
@@ -77,7 +89,9 @@ pub fn spawn_in<'scope, T: Send + 'scope>(
     scope: &'scope Scope<'scope, '_>,
     run: impl FnOnce() -> T + Send + 'scope,
 ) -> io::Result<ContainedIn<'scope, T>> {
-    thread.spawn_scoped(scope, move || contained(run)).map(ContainedIn)
+    thread
+        .spawn_scoped(scope, move || contained(run))
+        .map(ContainedIn)
 }
 
 #[cfg(test)]
@@ -87,7 +101,7 @@ mod tests {
     use std::process::{Command, ExitStatus, Stdio};
     use std::thread;
 
-    use super::{abort_on_panic, contained, spawn, undumped, Panicked};
+    use super::{Panicked, abort_on_panic, contained, spawn, undumped};
 
     const PANICS: &str = "LUNED_TEST_PANICS";
 
@@ -133,16 +147,32 @@ mod tests {
 
     fn panicking(way: Way) -> (ExitStatus, String) {
         let mut command = Command::new(env::current_exe().unwrap());
-        command.args(["panics::tests::panics", "--exact", "--ignored", "--nocapture"]);
-        command.env(PANICS, way.name()).stdin(Stdio::null()).stdout(Stdio::null());
+        command.args([
+            "panics::tests::panics",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ]);
+        command
+            .env(PANICS, way.name())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null());
         let output = command.output().unwrap();
-        (output.status, String::from_utf8_lossy(&output.stderr).into_owned())
+        (
+            output.status,
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
     }
 
     fn assert_aborts(way: Way) {
         let (status, said) = panicking(way);
         let abort = rustix::process::Signal::ABORT.as_raw();
-        assert_eq!(status.signal(), Some(abort), "{}: {status}\n{said}", way.name());
+        assert_eq!(
+            status.signal(),
+            Some(abort),
+            "{}: {status}\n{said}",
+            way.name()
+        );
         assert!(!said.contains(RAN_ON), "{}: {said}", way.name());
     }
 
@@ -150,7 +180,11 @@ mod tests {
         let (status, said) = panicking(way);
         assert_eq!(status.code(), Some(0), "{}: {status}\n{said}", way.name());
         let panicked = said.contains("a gh answer's assertion fails");
-        assert!(panicked, "{}: the child ran no panic, so nothing proves it ran on\n{said}", way.name());
+        assert!(
+            panicked,
+            "{}: the child ran no panic, so nothing proves it ran on\n{said}",
+            way.name()
+        );
         assert!(said.contains(RAN_ON), "{}: {said}", way.name());
     }
 
@@ -162,48 +196,60 @@ mod tests {
         };
         let way = Way::ALL.into_iter().find(|way| way.name() == name);
         let way = way.unwrap_or_else(|| panic!("{name} is no way to panic"));
-        let undumped = rustix::process::Rlimit { current: Some(0), maximum: Some(0) };
+        let undumped = rustix::process::Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        };
         rustix::process::setrlimit(rustix::process::Resource::Core, undumped).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let _hooked = abort_on_panic();
         match way {
             Way::InAThread => {
                 let core = thread::Builder::new().name("core".to_owned());
                 let ran = core.spawn(|| panic!("the core's assertion fails")).unwrap();
                 assert!(ran.join().is_err(), "the thread panicked");
-            },
+            }
             Way::InATask => {
                 let task = runtime.spawn(async { panic!("a task's assertion fails") });
                 assert!(runtime.block_on(task).is_err(), "the task panicked");
-            },
+            }
             Way::Caught => {
                 let caught = std::panic::catch_unwind(|| panic!("a handler's assertion fails"));
                 assert!(caught.is_err(), "the panic was caught");
-            },
+            }
             Way::Contained => {
                 let asks = thread::Builder::new().name("gh ask".to_owned());
                 let ran = spawn(asks, || panic!("a gh answer's assertion fails")).unwrap();
                 assert_eq!(ran.join(), Err(Panicked));
-            },
+            }
             Way::ContainedInContained => {
                 let ran = contained(|| {
                     assert_eq!(contained(|| ()), Ok(()));
                     panic!("a gh answer's assertion fails");
                 });
                 assert_eq!(ran, Err(Panicked));
-            },
+            }
             Way::AfterContained => {
                 assert_eq!(contained(|| ()), Ok(()));
                 let caught = std::panic::catch_unwind(|| panic!("the core's assertion fails"));
                 assert!(caught.is_err(), "the panic was caught");
-            },
+            }
             Way::SpawnedInContained => {
                 let ran = contained(|| {
                     let reader = thread::Builder::new().name("program".to_owned());
-                    reader.spawn(|| panic!("a reader's assertion fails")).unwrap().join()
+                    reader
+                        .spawn(|| panic!("a reader's assertion fails"))
+                        .unwrap()
+                        .join()
                 });
-                assert!(ran.is_ok_and(|joined| joined.is_err()), "the reader panicked");
-            },
+                assert!(
+                    ran.is_ok_and(|joined| joined.is_err()),
+                    "the reader panicked"
+                );
+            }
             Way::HookedTwice => _ = abort_on_panic(),
         }
         eprintln!("{RAN_ON}");

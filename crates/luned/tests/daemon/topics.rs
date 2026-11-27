@@ -2,14 +2,14 @@ use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use lune_waits::{eventually, Span};
-use luned::api::{self, remote::Reached, ClientWaiter, WatchChangesRequest};
+use lune_waits::{Span, eventually};
 use luned::SWEEP;
+use luned::api::{self, ClientWaiter, WatchChangesRequest, remote::Reached};
 use serde_json::json;
 
 use crate::agents::{file_for, process};
-use crate::host::{folder_in, script, side_by_side, start, Host, Running, Slot, Waits, PATIENT};
-use crate::remote::{hosts, FakeSsh};
+use crate::host::{Host, PATIENT, Running, Slot, Waits, folder_in, script, side_by_side, start};
+use crate::remote::{FakeSsh, hosts};
 
 const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
@@ -37,7 +37,9 @@ fn told_file(host: &Host) -> PathBuf {
 
 fn calls(host: &Host) -> Vec<String> {
     let told = fs::read_to_string(told_file(host)).unwrap_or_default();
-    told.split_inclusive("end-of-call\n").map(str::to_owned).collect()
+    told.split_inclusive("end-of-call\n")
+        .map(str::to_owned)
+        .collect()
 }
 
 fn agent_at_work(host: &Host) -> Running {
@@ -53,35 +55,66 @@ fn prompted(host: &Host, words: &str) {
     let project = host.home.path().join(".claude/projects/-w");
     fs::create_dir_all(&project).unwrap();
     let path = project.join(format!("{ID}.jsonl"));
-    let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
-    writeln!(file, "{}", json!({"type": "user", "message": {"content": words}})).unwrap();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(
+        file,
+        "{}",
+        json!({"type": "user", "message": {"content": words}})
+    )
+    .unwrap();
 }
 
 fn seen(host: &Host) -> api::Host {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
     runtime.block_on(async {
         let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-        let asked = WatchChangesRequest { after: None, waiter: ClientWaiter::Window.into() };
-        daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().into_host()
+        let asked = WatchChangesRequest {
+            after: None,
+            waiter: ClientWaiter::Window.into(),
+        };
+        daemon
+            .watch_changes(asked)
+            .await
+            .unwrap()
+            .into_inner()
+            .read_host()
+            .unwrap()
+            .into_host()
     })
 }
 
 fn topic(agents: &[api::Agent]) -> Option<&str> {
-    agents.iter().find(|agent| agent.session_id.as_deref() == Some(ID))?.topic.as_deref()
+    agents
+        .iter()
+        .find(|agent| agent.session_id.as_deref() == Some(ID))?
+        .topic
+        .as_deref()
 }
 
 #[test]
 fn the_topics_a_window_has_named_hold_side_by_side() {
-    side_by_side(const {
-        Waits::of([
-            ("this daemon names the topic", a_window_has_the_daemon_name_the_topic_on_each_new_prompt),
-            (
-                "another machine names its agents' topics",
-                a_window_here_has_another_machine_name_its_agents_topics,
-            ),
-        ])
-    });
+    side_by_side(
+        const {
+            Waits::of([
+                (
+                    "this daemon names the topic",
+                    a_window_has_the_daemon_name_the_topic_on_each_new_prompt,
+                ),
+                (
+                    "another machine names its agents' topics",
+                    a_window_here_has_another_machine_name_its_agents_topics,
+                ),
+            ])
+        },
+    );
 }
 
 fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt(_: Slot) {
@@ -104,14 +137,26 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt(_: Slot) {
         panic!("{called:?}");
     };
     let home = fs::canonicalize(host.home.path()).unwrap();
-    assert!(call.starts_with(&format!("cwd={}\n", home.display())), "{call}");
-    let flags = ["-p", "--model\nhaiku", "--tools\n", "--safe-mode", "--no-session-persistence"];
+    assert!(
+        call.starts_with(&format!("cwd={}\n", home.display())),
+        "{call}"
+    );
+    let flags = [
+        "-p",
+        "--model\nhaiku",
+        "--tools\n",
+        "--safe-mode",
+        "--no-session-persistence",
+    ];
     for flag in flags {
         assert!(call.contains(&format!("{flag}\n")), "{call}");
     }
     let (argv, stdin) = call.split_once("stdin:\n").unwrap();
     assert!(!argv.contains("fold the sessions"), "{call}");
-    assert!(stdin.contains("The developer last asked it: fold the sessions"), "{call}");
+    assert!(
+        stdin.contains("The developer last asked it: fold the sessions"),
+        "{call}"
+    );
 
     prompted(&host, "please-fail on this one");
     eventually("the call on it is made", || {
@@ -121,7 +166,8 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt(_: Slot) {
     eventually("the log says why it failed", || {
         let log = host.home.path().join(".local/state/lune/lune.log");
         let log = fs::read_to_string(log).unwrap_or_default();
-        log.contains("the model named no topic: claude: Not logged in").then_some(())
+        log.contains("the model named no topic: claude: Not logged in")
+            .then_some(())
     });
     prompted(&host, "and now the tabs");
     eventually("the topic moves with the prompt", || {
@@ -129,8 +175,14 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt(_: Slot) {
     });
     let called = calls(&host);
     assert_eq!(called.len(), 3, "{called:?}");
-    assert!(called[1].contains("The topic the row goes by now: Session folds"), "{called:?}");
-    assert!(called[2].contains("The topic the row goes by now: Session folds"), "{called:?}");
+    assert!(
+        called[1].contains("The topic the row goes by now: Session folds"),
+        "{called:?}"
+    );
+    assert!(
+        called[2].contains("The topic the row goes by now: Session folds"),
+        "{called:?}"
+    );
 
     assert_eq!(topic(&host.host().agents), Some("Tab order"));
 }
@@ -150,7 +202,10 @@ fn a_window_here_has_another_machine_name_its_agents_topics(_: Slot) {
     prompted(&far, "fold the sessions");
 
     let far_agents = |host: &api::Host| {
-        let remote = host.remotes.iter().find(|remote| remote.destination == "far");
+        let remote = host
+            .remotes
+            .iter()
+            .find(|remote| remote.destination == "far");
         match remote.and_then(|remote| remote.reached.as_ref()) {
             Some(Reached::Host(far)) => far.agents.clone(),
             _ => Vec::new(),
@@ -165,7 +220,11 @@ fn a_window_here_has_another_machine_name_its_agents_topics(_: Slot) {
         (topic(&far_agents(&seen(&here))) == Some("Session folds")).then_some(())
     });
     assert_eq!(calls(&far).len(), 1);
-    assert_eq!(calls(&here), Vec::<String>::new(), "each machine pays for its own");
+    assert_eq!(
+        calls(&here),
+        Vec::<String>::new(),
+        "each machine pays for its own"
+    );
 
     let mut prompts = 0;
     eventually("two daemons stop keeping each other shown", || {
@@ -174,7 +233,8 @@ fn a_window_here_has_another_machine_name_its_agents_topics(_: Slot) {
         let before = calls(&far).len();
         prompts += 1;
         prompted(&far, &format!("prompt {prompts}"));
-        let called = lune_waits::seen_within(SWEEPS, || (calls(&far).len() != before).then_some(()));
+        let called =
+            lune_waits::seen_within(SWEEPS, || (calls(&far).len() != before).then_some(()));
         called.is_none().then_some(())
     });
 }

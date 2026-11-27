@@ -3,10 +3,10 @@ use std::io::{self, ErrorKind, Read as _, Write as _};
 use std::process::{Command, Stdio};
 
 use luned::api::{ClientWaiter, WatchChangesRequest};
-use luned::{Unbridged, BRIDGED};
+use luned::{BRIDGED, Unbridged};
 
 use crate::demand::Detached;
-use crate::host::{folder_in, start, Host, Running, LUNE, PATIENT, PATIENT_ROUND_TRIP};
+use crate::host::{Host, LUNE, PATIENT, PATIENT_ROUND_TRIP, Running, folder_in, start};
 
 const OPENING: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00";
 
@@ -34,7 +34,10 @@ fn went(error: &(dyn Error + 'static)) -> bool {
 }
 
 fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
 }
 
 fn unbridged(command: Command, is: impl Fn(&Unbridged) -> bool) {
@@ -51,11 +54,23 @@ fn a_client_asks_the_daemon_of_the_folder_through_lune_bridge() {
     let host = Host::new();
     let daemon = start(host.vars()).unwrap();
     runtime().block_on(async {
-        let mut bridged = luned::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
+        let mut bridged = luned::through(bridge(&host), PATIENT_ROUND_TRIP)
+            .await
+            .unwrap();
         let info = bridged.info(()).await.unwrap().into_inner();
         assert_eq!(info.pid, daemon.pid());
-        let first = WatchChangesRequest { after: None, waiter: ClientWaiter::Client.into() };
-        let version = bridged.watch_changes(first).await.unwrap().into_inner().read_host().unwrap().version();
+        let first = WatchChangesRequest {
+            after: None,
+            waiter: ClientWaiter::Client.into(),
+        };
+        let version = bridged
+            .watch_changes(first)
+            .await
+            .unwrap()
+            .into_inner()
+            .read_host()
+            .unwrap()
+            .version();
         assert_eq!(version.pid().get(), daemon.pid());
     });
 }
@@ -70,8 +85,14 @@ fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
         assert_eq!(daemon.info(()).await.unwrap().into_inner().pid, first.pid());
         drop(first);
         let second = start(host.vars()).unwrap();
-        let lost = daemon.info(()).await.expect_err("it reached the second daemon");
-        let again = daemon.info(()).await.expect_err("it reached the second daemon");
+        let lost = daemon
+            .info(())
+            .await
+            .expect_err("it reached the second daemon");
+        let again = daemon
+            .info(())
+            .await
+            .expect_err("it reached the second daemon");
         assert!(went(&again), "{lost:?}, then {again:?}");
         let mut fresh = luned::connect(&folder, PATIENT).await.unwrap();
         assert_eq!(fresh.info(()).await.unwrap().into_inner().pid, second.pid());
@@ -82,7 +103,9 @@ fn a_client_reaches_no_daemon_but_the_one_it_dialed() {
 fn lune_bridge_starts_a_daemon_where_none_runs() {
     let host = Host::new();
     let pid = runtime().block_on(async {
-        let mut bridged = luned::through(bridge(&host), PATIENT_ROUND_TRIP).await.unwrap();
+        let mut bridged = luned::through(bridge(&host), PATIENT_ROUND_TRIP)
+            .await
+            .unwrap();
         bridged.info(()).await.unwrap().into_inner().pid
     });
     let daemon = Detached { host: &host, pid };
@@ -97,12 +120,14 @@ fn lune_bridge_starts_a_daemon_where_none_runs() {
 
 #[test]
 fn a_client_is_told_why_a_command_reached_no_daemon() {
-    unbridged(sh("exit 127"), |why| {
-        matches!(why, Unbridged::Ended(ended) if ended.code() == Some(127))
-    });
-    unbridged(sh("echo hello; exec sleep 10"), |why| {
-        matches!(why, Unbridged::Said(said) if said == "hello\n")
-    });
+    unbridged(
+        sh("exit 127"),
+        |why| matches!(why, Unbridged::Ended(ended) if ended.code() == Some(127)),
+    );
+    unbridged(
+        sh("echo hello; exec sleep 10"),
+        |why| matches!(why, Unbridged::Said(said) if said == "hello\n"),
+    );
     unbridged(sh("exec sleep 60"), |why| matches!(why, Unbridged::Silent));
 }
 

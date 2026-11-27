@@ -193,6 +193,10 @@ jobs:
         if: fromJSON(needs.code.outputs.plan).dev != false
         run: nix build --no-link .#dev
 
+      - name: Formatting
+        if: ${{ !cancelled() && (success() || steps.dev.outcome == 'failure') }}
+        run: nix run .#dev.commands.fmt -- --check
+
       - name: Lints, bans, licenses, sources, and clippy for Linux and the Mac
         if: ${{ !cancelled() && (success() || steps.dev.outcome == 'failure') }}
         run: nix build -L --keep-going --out-link checks .#checks.x86_64-linux.lints

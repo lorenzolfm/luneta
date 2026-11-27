@@ -32,19 +32,26 @@ pub fn of_terminal(snapshot: Snapshot, program: ProcessId, group: Group) -> Fron
     if said != Front::Interactive {
         return said;
     }
-    let relays = front.iter().filter(|process| RELAYS.contains(&process.name.as_str()));
+    let relays = front
+        .iter()
+        .filter(|process| RELAYS.contains(&process.name.as_str()));
     let children = relays.flat_map(|relay| {
-        processes.iter().filter(move |child| child.parent == Some(relay.pid))
+        processes
+            .iter()
+            .filter(move |child| child.parent == Some(relay.pid))
     });
     let inner = children.filter_map(|child| Some((child, child.terminal?)));
-    match inner.into_iter().find(|(_, terminal)| terminal.device != snapshot.device.raw()) {
+    match inner
+        .into_iter()
+        .find(|(_, terminal)| terminal.device != snapshot.device.raw())
+    {
         Some((child, terminal)) => {
             let Some(inner) = terminal.front else {
                 return behind(modes_at(terminal.device), &[]);
             };
             let below = tree(child.pid);
             behind(modes_at(terminal.device), &in_front(&below, inner))
-        },
+        }
         None => said,
     }
 }
@@ -58,7 +65,11 @@ fn of(modes: Modes, front: &[&Process], shell: bool) -> Front {
 
 fn by_modes(modes: Modes, front: &[&Process]) -> Front {
     let Modes { lines, echo } = modes;
-    let reading = || front.iter().any(|process| READING.contains(&process.sleeps.as_str()));
+    let reading = || {
+        front
+            .iter()
+            .any(|process| READING.contains(&process.sleeps.as_str()))
+    };
     if !lines {
         Front::Interactive
     } else if !echo || reading() {
@@ -72,7 +83,10 @@ fn behind(modes: Option<Modes>, front: &[&Process]) -> Front {
     if let Some(modes) = modes {
         return by_modes(modes, front);
     }
-    if front.iter().any(|process| TAKING_OVER.contains(&process.name.as_str())) {
+    if front
+        .iter()
+        .any(|process| TAKING_OVER.contains(&process.name.as_str()))
+    {
         Front::Interactive
     } else {
         Front::Working
@@ -92,9 +106,7 @@ fn tree(root: ProcessId) -> Vec<Process> {
             if processes.len() == PROCESSES_MAX {
                 return processes;
             }
-            if let Some(child) =
-                process::process(child).filter(|child| child.parent == Some(pid))
-            {
+            if let Some(child) = process::process(child).filter(|child| child.parent == Some(pid)) {
                 processes.push(child);
             }
         }
@@ -104,7 +116,10 @@ fn tree(root: ProcessId) -> Vec<Process> {
 }
 
 fn in_front(processes: &[Process], group: Group) -> Vec<&Process> {
-    processes.iter().filter(|process| process.group == group).collect()
+    processes
+        .iter()
+        .filter(|process| process.group == group)
+        .collect()
 }
 
 fn modes_at(device: u64) -> Option<Modes> {
@@ -146,9 +161,18 @@ mod tests {
         }
     }
 
-    const LINES: Modes = Modes { lines: true, echo: true };
-    const KEYS: Modes = Modes { lines: false, echo: false };
-    const HIDDEN: Modes = Modes { lines: true, echo: false };
+    const LINES: Modes = Modes {
+        lines: true,
+        echo: true,
+    };
+    const KEYS: Modes = Modes {
+        lines: false,
+        echo: false,
+    };
+    const HIDDEN: Modes = Modes {
+        lines: true,
+        echo: false,
+    };
 
     #[test]
     fn the_modes_and_a_read_say_what_the_command_does() {

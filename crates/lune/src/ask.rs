@@ -18,7 +18,7 @@ use crate::cadence::Cadence;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::{self, Hint, ViewRow, ProjectTarget, Target};
+use crate::menu::{self, Hint, ProjectTarget, Target, ViewRow};
 use crate::moonlight;
 use crate::reach::{self, Luned};
 use crate::sidebar::{self, ACCENT};
@@ -44,7 +44,11 @@ pub enum Heard {
 #[derive(Debug, PartialEq, Eq)]
 enum Said {
     You(String),
-    Ran { id: String, command: String, denied: bool },
+    Ran {
+        id: String,
+        command: String,
+        denied: bool,
+    },
     Agent(String),
     Wrong(String),
 }
@@ -52,7 +56,10 @@ enum Said {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Works {
     Here(PathBuf),
-    There { on: Destination, cwd: Option<Directory> },
+    There {
+        on: Destination,
+        cwd: Option<Directory>,
+    },
 }
 
 #[derive(Debug)]
@@ -75,9 +82,10 @@ impl Ask {
             (_, Machine::Local) => {
                 let cwd = target.cwd().map(|cwd| PathBuf::from(cwd.as_str()));
                 Works::Here(cwd.unwrap_or_else(|| dir.to_owned()))
-            },
-            (_, Machine::Remote(on)) => {
-                Works::There { on: on.clone(), cwd: target.cwd().cloned() }
+            }
+            (_, Machine::Remote(on)) => Works::There {
+                on: on.clone(),
+                cwd: target.cwd().cloned(),
             },
         };
         Ask {
@@ -97,7 +105,10 @@ impl Ask {
     pub fn homed(number: u64, on: &Machine, dir: &Dir, project: &str) -> Self {
         let works = match on {
             Machine::Local => Works::Here(PathBuf::from(dir.as_str())),
-            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(Directory::from(dir)) },
+            Machine::Remote(on) => Works::There {
+                on: on.clone(),
+                cwd: Some(Directory::from(dir)),
+            },
         };
         let dir = dir.as_str();
         let highlighted = format!(
@@ -128,12 +139,15 @@ impl Ask {
     ) -> Self {
         let works = match on {
             Machine::Local => Works::Here(PathBuf::from(dir.as_str())),
-            Machine::Remote(on) => Works::There { on: on.clone(), cwd: Some(Directory::from(dir)) },
+            Machine::Remote(on) => Works::There {
+                on: on.clone(),
+                cwd: Some(Directory::from(dir)),
+            },
         };
         let range = match excerpt.lines {
             Some(lines) if lines.start() == lines.end() => {
                 format!("{}:{}", excerpt.path, lines.start())
-            },
+            }
             Some(lines) => format!("{}:{}-{}", excerpt.path, lines.start(), lines.end()),
             None => excerpt.path.as_str().to_owned(),
         };
@@ -170,7 +184,9 @@ impl Ask {
         if self.turn.is_some() {
             return;
         }
-        let Ask { works, highlighted, .. } = Ask::homed(self.number, on, dir, project);
+        let Ask {
+            works, highlighted, ..
+        } = Ask::homed(self.number, on, dir, project);
         self.works = works;
         self.highlighted = highlighted;
         self.context = None;
@@ -191,10 +207,10 @@ impl Ask {
             KeyCode::Enter if bare && !self.typed.trim().is_empty() => return Keyed::Send,
             KeyCode::Backspace if bare => {
                 self.typed.pop();
-            },
+            }
             KeyCode::Char('u') if control => self.typed.clear(),
             KeyCode::Char(c) if bare => self.typed.push(c),
-            _ => {},
+            _ => {}
         }
         Keyed::Nothing
     }
@@ -230,7 +246,7 @@ impl Ask {
             Works::There { on, cwd } => {
                 let cwd = cwd.as_ref().map(|cwd| PathBuf::from(cwd.as_str()));
                 (Machine::Remote(on.clone()), cwd)
-            },
+            }
         };
         let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
         let sent_words = match self.context.as_deref() {
@@ -240,7 +256,11 @@ impl Ask {
         let review_only = self.review_only;
         let asked = Asked::new(cwd, &sent_words, resumed, highlighted, turn).map(|asked| {
             let asked = asked.marking(marked);
-            let asked = if review_only { asked.review_only() } else { asked };
+            let asked = if review_only {
+                asked.review_only()
+            } else {
+                asked
+            };
             (on, asked)
         });
         self.talk.push(Said::You(words));
@@ -252,12 +272,20 @@ impl Ask {
         self.turned = Some(turn.key());
         let (number, events) = (self.number, events.clone());
         let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
-            let ended = ended.and_then(|ended| ended).map_err(|why| format!("ask: {why}"));
-            Event::Heard { number, heard: Heard::Ended(ended) }
+            let ended = ended
+                .and_then(|ended| ended)
+                .map_err(|why| format!("ask: {why}"));
+            Event::Heard {
+                number,
+                heard: Heard::Ended(ended),
+            }
         });
         self.turn = Some(Asking::on_thread(move |wanted| {
             let hear = |step| {
-                let _ = events.send(Event::Heard { number, heard: Heard::Step(step) });
+                let _ = events.send(Event::Heard {
+                    number,
+                    heard: Heard::Step(step),
+                });
             };
             let ended = match Luned::on(&on, reach::ANSWER) {
                 Ok(mut luned) => luned.talk(&asked, wanted, &hear),
@@ -273,23 +301,29 @@ impl Ask {
         match heard {
             Heard::Step(Step::Session(session)) => self.session = Some(session),
             Heard::Step(Step::Ran { id, command }) => {
-                self.talk.push(Said::Ran { id, command, denied: false });
-            },
+                self.talk.push(Said::Ran {
+                    id,
+                    command,
+                    denied: false,
+                });
+            }
             Heard::Step(Step::Denied(id)) => {
                 for said in &mut self.talk {
-                    if let Said::Ran { id: ran, denied, .. } = said
+                    if let Said::Ran {
+                        id: ran, denied, ..
+                    } = said
                         && *ran == id
                     {
                         *denied = true;
                     }
                 }
-            },
+            }
             Heard::Step(Step::Said(said)) => self.talk.push(Said::Agent(said)),
             Heard::Ended(Ok(())) => self.turn = None,
             Heard::Ended(Err(why)) => {
                 self.talk.push(Said::Wrong(why));
                 self.turn = None;
-            },
+            }
         }
     }
 
@@ -298,7 +332,10 @@ impl Ask {
     }
 
     pub fn stop(&mut self, number: u64) {
-        assert!(number > self.number, "a stopped talk is numbered past its turn's");
+        assert!(
+            number > self.number,
+            "a stopped talk is numbered past its turn's"
+        );
         if self.turn.take().is_some() {
             self.talk.push(Said::Wrong(STOPPED.to_owned()));
             self.turned = None;
@@ -318,7 +355,11 @@ impl Ask {
         let (mut lines, spinner) = self.lines(inner, sidebar::frame(wall));
         let keys: &[(Hint, &str)] = match self.turn {
             Some(_) => &[(Hint::Esc, "Close")],
-            None => &[(Hint::Enter, "Send"), (Hint::Alt('r'), "Dictate"), (Hint::Esc, "Close")],
+            None => &[
+                (Hint::Enter, "Send"),
+                (Hint::Alt('r'), "Dictate"),
+                (Hint::Esc, "Close"),
+            ],
         };
         let footer = [Line::default(), menu::keys_line(inner, keys)];
         let lines_room = room.saturating_sub(footer.len());
@@ -329,7 +370,10 @@ impl Ask {
             kept_spinner = inner > 0 && spinner.is_some_and(|at| at >= drained);
             lines.drain(..drained);
             if lines_room > 0 {
-                lines.insert(0, Line::styled(" …", Style::new().add_modifier(Modifier::DIM)));
+                lines.insert(
+                    0,
+                    Line::styled(" …", Style::new().add_modifier(Modifier::DIM)),
+                );
             }
         }
         lines.extend(footer);
@@ -337,7 +381,7 @@ impl Ask {
             Works::Here(cwd) => sidebar::short_cwd(&cwd.to_string_lossy()),
             Works::There { on, cwd: Some(cwd) } => {
                 format!("{} on {on}", sidebar::short_cwd(cwd.as_str()))
-            },
+            }
             Works::There { on, cwd: None } => format!("~ on {on}"),
         };
         brief::boxed(buffer, over, TITLE, &right, &lines);
@@ -358,23 +402,36 @@ impl Ask {
                         lines.push(Line::default());
                     }
                     lines.extend(menu::wrap(&format!("› {words}"), inner, yours));
-                },
-                Said::Ran { command, denied, .. } => {
+                }
+                Said::Ran {
+                    command, denied, ..
+                } => {
                     let command = sidebar::cut(&plain(command), inner.saturating_sub(5));
                     lines.push(match denied {
                         false => Line::styled(format!("   $ {command}"), dim),
-                        true => Line::styled(format!("   ✗ {command}"), Style::new().fg(moonlight::RED)),
+                        true => {
+                            Line::styled(format!("   ✗ {command}"), Style::new().fg(moonlight::RED))
+                        }
                     });
-                },
+                }
                 Said::Agent(said) => lines.extend(brief::paragraphs(said, inner, Style::new())),
                 Said::Wrong(why) => {
-                    lines.extend(brief::paragraphs(why, inner, Style::new().fg(moonlight::RED)));
-                },
+                    lines.extend(brief::paragraphs(
+                        why,
+                        inner,
+                        Style::new().fg(moonlight::RED),
+                    ));
+                }
             }
         }
         if self.turn.is_some() {
             let start = lines.len();
-            lines.extend(menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame));
+            lines.extend(menu::waiting(
+                &format!("Asking {}…", asks::MODEL),
+                inner,
+                dim,
+                frame,
+            ));
             let spinner = (lines.len() > start).then_some(start);
             return (lines, spinner);
         }
@@ -401,7 +458,10 @@ fn backtick_fence(text: &str) -> String {
 }
 
 fn plain(text: &str) -> String {
-    let spaced: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -409,17 +469,23 @@ fn highlighted(target: &Target) -> String {
     let row = match target {
         Target::Project(_, ProjectTarget { project, .. }) => {
             format!("project {}", project.listed().name())
-        },
+        }
         Target::Worktree(_, row) => {
-            format!("worktree {} of project {}", row.name, row.place.project.listed().name())
-        },
+            format!(
+                "worktree {} of project {}",
+                row.name,
+                row.place.project.listed().name()
+            )
+        }
         Target::View(_, ViewRow { place, .. }) => {
             format!("view {}:{}", place.listed().name(), place.view())
-        },
+        }
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
     let cwd = target.cwd().map_or_default(|cwd| format!(", in {cwd}"));
-    let branch = target.branch().map(|branch| format!(", on branch {branch}"));
+    let branch = target
+        .branch()
+        .map(|branch| format!(", on branch {branch}"));
     let row = format!("{row}{cwd}{}", branch.unwrap_or_default());
     format!(
         "The row highlighted in lune's sidebar as they opened the box is {row}: \"this\" or \
@@ -432,12 +498,18 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{Cwd, Folder, ViewRow, Ran};
+    use crate::menu::{Cwd, Folder, Ran, ViewRow};
     use crate::sidebar::{Listed, ProjectRow, ViewPlace};
 
     fn project_on(on: Machine) -> Target {
         let project = ProjectRow::of(Listed::new_project("lune", 3));
-        Target::Project(on, ProjectTarget { project, dir: "/w/lune".to_owned() })
+        Target::Project(
+            on,
+            ProjectTarget {
+                project,
+                dir: "/w/lune".to_owned(),
+            },
+        )
     }
 
     fn nixos() -> Machine {
@@ -448,10 +520,18 @@ mod tests {
         let row = ViewRow {
             place: ViewPlace::new_in("lune", 3, 1, 4),
             terminal: None,
-            cwd: Cwd::of(Some(Directory::parse("/w/lune/main".to_owned()).unwrap()), |dir| {
-                let branch = lune_protocol::said::Said::new("feat/ask".to_owned());
-                Folder { dir, branch, repository: None, pull_request: None }
-            }),
+            cwd: Cwd::of(
+                Some(Directory::parse("/w/lune/main".to_owned()).unwrap()),
+                |dir| {
+                    let branch = lune_protocol::said::Said::new("feat/ask".to_owned());
+                    Folder {
+                        dir,
+                        branch,
+                        repository: None,
+                        pull_request: None,
+                    }
+                },
+            ),
             ran: Ran::Unhooked,
             arranged: None,
         };
@@ -480,10 +560,19 @@ mod tests {
         }
         ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(
+                moonlight::ALL.contains(&cell.fg),
+                "{:?} in {:?}",
+                cell.symbol(),
+                cell.fg
+            );
         }
         (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -530,10 +619,15 @@ mod tests {
         ask.turn = Some(at_a_turn());
         let session = SessionId::parse("7c22").unwrap();
         ask.heard(Heard::Step(Step::Session(session.clone())));
-        let ran = |id: &str, command: &str| Step::Ran { id: id.to_owned(), command: command.to_owned() };
+        let ran = |id: &str, command: &str| Step::Ran {
+            id: id.to_owned(),
+            command: command.to_owned(),
+        };
         ask.heard(Heard::Step(ran("toolu_1", "lune close bipa\nelo")));
         ask.heard(Heard::Step(ran("toolu_2", "touch elo")));
-        ask.heard(Heard::Step(Step::Said("This kills bipa and elo.\n\nClose them?".to_owned())));
+        ask.heard(Heard::Step(Step::Said(
+            "This kills bipa and elo.\n\nClose them?".to_owned(),
+        )));
         assert_eq!(ask.session, Some(session));
         assert_eq!(ask.key(&key(KeyCode::Char('y'))), Keyed::Nothing);
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Nothing);
@@ -578,7 +672,9 @@ mod tests {
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Send);
         ask.talk.push(Said::You(std::mem::take(&mut ask.typed)));
         ask.turn = Some(at_a_turn());
-        ask.heard(Heard::Ended(Err("ask: claude failed: no such session".to_owned())));
+        ask.heard(Heard::Ended(Err(
+            "ask: claude failed: no such session".to_owned()
+        )));
         let lines = shown(&ask, 50, 15);
         assert_eq!(lines[..7], asked);
         assert_eq!(
@@ -634,11 +730,18 @@ mod tests {
         let session = Ask::new(2, &project_on(Machine::Local), Path::new("/w"));
         assert_eq!(session.works, Works::Here(PathBuf::from("/w")));
         let session_row = "is project lune: \"this\"";
-        assert!(session.highlighted.contains(session_row), "{}", session.highlighted);
+        assert!(
+            session.highlighted.contains(session_row),
+            "{}",
+            session.highlighted
+        );
 
         let there = |cwd: Option<&str>| {
             let cwd = cwd.map(|cwd| Directory::parse(cwd.to_owned()).unwrap());
-            Works::There { on: "nixos".parse().unwrap(), cwd }
+            Works::There {
+                on: "nixos".parse().unwrap(),
+                cwd,
+            }
         };
         let view = Ask::new(3, &view_row_on(nixos()), Path::new("/w"));
         assert_eq!(view.works, there(Some("/w/lune/main")));
@@ -666,12 +769,26 @@ mod tests {
         ask.heard(Heard::Step(Step::Session(session.clone())));
         ask.stop(2);
         assert!(!ask.turning());
-        assert_eq!((ask.number(), ask.session.clone()), (2, Some(session)), "the next turn resumes it");
-        let stopped = [Said::You("tackle these".to_owned()), Said::Wrong(STOPPED.to_owned())];
+        assert_eq!(
+            (ask.number(), ask.session.clone()),
+            (2, Some(session)),
+            "the next turn resumes it"
+        );
+        let stopped = [
+            Said::You("tackle these".to_owned()),
+            Said::Wrong(STOPPED.to_owned()),
+        ];
         assert_eq!(ask.talk, stopped);
-        assert_eq!(ask.turned, None, "the next turn has none before it, so no plan the user never read is agreed to");
+        assert_eq!(
+            ask.turned, None,
+            "the next turn has none before it, so no plan the user never read is agreed to"
+        );
         ask.stop(3);
-        assert_eq!((ask.number(), ask.talk.len()), (3, 2), "a stop with no turn says nothing");
+        assert_eq!(
+            (ask.number(), ask.talk.len()),
+            (3, 2),
+            "a stop with no turn says nothing"
+        );
     }
 
     #[test]
@@ -681,7 +798,10 @@ mod tests {
         let (events, _heard) = mpsc::channel();
         ask.send(Marked::default(), &events);
         let wrong = "ask: cwd: w is no absolute path".to_owned();
-        assert_eq!(ask.talk, [Said::You("close it".to_owned()), Said::Wrong(wrong)]);
+        assert_eq!(
+            ask.talk,
+            [Said::You("close it".to_owned()), Said::Wrong(wrong)]
+        );
         assert!(!ask.turning());
         assert_eq!(ask.turned, None);
     }
@@ -702,11 +822,21 @@ mod tests {
         );
         assert!(ask.review_only);
         assert!(!ask.highlighted.contains("ignore"), "{}", ask.highlighted);
-        assert!(ask.highlighted.contains("src/lib.rs:10-12"), "{}", ask.highlighted);
-        let context = ask.context.as_deref().expect("non-empty snippet sets user context");
+        assert!(
+            ask.highlighted.contains("src/lib.rs:10-12"),
+            "{}",
+            ask.highlighted
+        );
+        let context = ask
+            .context
+            .as_deref()
+            .expect("non-empty snippet sets user context");
         assert!(context.contains("````patch\n"), "{context}");
         assert!(context.contains("\n````\n"), "{context}");
-        assert!(!context.contains('\0'), "NUL bytes are stripped from excerpt");
+        assert!(
+            !context.contains('\0'),
+            "NUL bytes are stripped from excerpt"
+        );
     }
 
     #[test]
@@ -723,8 +853,20 @@ mod tests {
             let mut buffer = Buffer::empty(area);
             ask.draw(&mut buffer, area, drawn.system)
         };
-        assert_eq!(paint(50, 4).wait(drawn, drawn), None, "height 4 leaves zero body lines");
-        assert_eq!(paint(50, 5).wait(drawn, drawn), None, "height 5 drains the spinner to show ellipsis");
-        assert_eq!(paint(50, 6).wait(drawn, drawn), Some(sidebar::SPIN), "height 6 keeps the spinner on screen");
+        assert_eq!(
+            paint(50, 4).wait(drawn, drawn),
+            None,
+            "height 4 leaves zero body lines"
+        );
+        assert_eq!(
+            paint(50, 5).wait(drawn, drawn),
+            None,
+            "height 5 drains the spinner to show ellipsis"
+        );
+        assert_eq!(
+            paint(50, 6).wait(drawn, drawn),
+            Some(sidebar::SPIN),
+            "height 6 keeps the spinner on screen"
+        );
     }
 }

@@ -71,7 +71,7 @@ impl ShellKind {
             "fish" => Some(ShellKind::Fish),
             "sh" | "dash" | "ash" | "ksh" | "mksh" | "oksh" | "pdksh" | "yash" => {
                 Some(ShellKind::Posix)
-            },
+            }
             "nu" | "nushell" => Some(ShellKind::Nushell),
             _ => None,
         }
@@ -214,11 +214,16 @@ fn is_pure_shell_flag(word: &str, shell_name: &str) -> bool {
         return false;
     }
     match shell_name {
-        "fish" => short.bytes().all(|b| matches!(b, b'i' | b'l' | b'N' | b'P')),
-        "nu" | "nushell" => short.bytes().all(|b| matches!(b, b'i' | b'l' | b'n')),
-        _ => short
+        "fish" => short
             .bytes()
-            .all(|b| matches!(b, b'i' | b'l' | b'm' | b'f' | b'd' | b'p' | b'r' | b's' | b'v' | b'x' | b'V')),
+            .all(|b| matches!(b, b'i' | b'l' | b'N' | b'P')),
+        "nu" | "nushell" => short.bytes().all(|b| matches!(b, b'i' | b'l' | b'n')),
+        _ => short.bytes().all(|b| {
+            matches!(
+                b,
+                b'i' | b'l' | b'm' | b'f' | b'd' | b'p' | b'r' | b's' | b'v' | b'x' | b'V'
+            )
+        }),
     }
 }
 
@@ -399,7 +404,7 @@ impl ProcessPlacement {
             Ok(mux::ProcessPlacement::Wrapped) => Ok(ProcessPlacement::Wrapped),
             Ok(mux::ProcessPlacement::Unspecified) | Err(_) => {
                 Err("resume record placement is invalid".to_owned())
-            },
+            }
         }
     }
 }
@@ -543,7 +548,10 @@ impl ResumeCwd {
             return Err("resume cwd is empty".to_owned());
         }
         if raw.len() > CWD_BYTES_MAX {
-            return Err(format!("resume cwd is {} bytes, over {CWD_BYTES_MAX}", raw.len()));
+            return Err(format!(
+                "resume cwd is {} bytes, over {CWD_BYTES_MAX}",
+                raw.len()
+            ));
         }
         if !raw.starts_with('/') {
             return Err("resume cwd is not an absolute path".to_owned());
@@ -693,10 +701,10 @@ impl ResumeRecord {
         let cwd = self.cwd.as_ref().map(|source| match source {
             ResumeCwdSource::Explicit(dir) => {
                 mux::resume_record::Cwd::ExplicitCwd(dir.as_str().to_owned())
-            },
+            }
             ResumeCwdSource::Inferred(dir) => {
                 mux::resume_record::Cwd::InferredCwd(dir.as_str().to_owned())
-            },
+            }
         });
         mux::ResumeRecord {
             pid: self.pid.get(),
@@ -704,10 +712,9 @@ impl ResumeRecord {
             uid: self.uid,
             process_name: self.process_name.as_str().to_owned(),
             process_exe: self.process_exe.as_ref().map(|exe| exe.as_str().to_owned()),
-            process_argv: self
-                .process_argv
-                .as_ref()
-                .map(|argv| mux::Program { argv: argv.words().to_vec() }),
+            process_argv: self.process_argv.as_ref().map(|argv| mux::Program {
+                argv: argv.words().to_vec(),
+            }),
             placement: self.placement.to_mux().into(),
             argv: self.argv.words().to_vec(),
             cwd,
@@ -729,10 +736,10 @@ impl ResumeRecord {
         let cwd = match raw.cwd {
             Some(mux::resume_record::Cwd::ExplicitCwd(dir)) => {
                 Some(ResumeCwdSource::Explicit(ResumeCwd::parse(&dir)?))
-            },
+            }
             Some(mux::resume_record::Cwd::InferredCwd(dir)) => {
                 Some(ResumeCwdSource::Inferred(ResumeCwd::parse(&dir)?))
-            },
+            }
             None => None,
         };
         let reported_at = raw
@@ -816,15 +823,19 @@ impl TerminalResumes {
         };
         let mut warnings = Vec::new();
         let Some(raw_chosen) = raw.chosen else {
-            warnings.push(format!("terminal {terminal_id} sent resumes without a chosen record"));
+            warnings.push(format!(
+                "terminal {terminal_id} sent resumes without a chosen record"
+            ));
             return (None, warnings);
         };
         let chosen = match ResumeRecord::of_mux(raw_chosen) {
             Ok(record) => record,
             Err(why) => {
-                warnings.push(format!("terminal {terminal_id}'s chosen resume record: {why}"));
+                warnings.push(format!(
+                    "terminal {terminal_id}'s chosen resume record: {why}"
+                ));
                 return (None, warnings);
-            },
+            }
         };
         let max_others = RECORDS_PER_TERMINAL_MAX - 1;
         if raw.others.len() > max_others {
@@ -847,10 +858,10 @@ impl TerminalResumes {
                             record.pid()
                         ));
                     }
-                },
+                }
                 Err(why) => {
                     warnings.push(format!("terminal {terminal_id}'s resume record: {why}"));
-                },
+                }
             }
         }
         assert!(others.len() < RECORDS_PER_TERMINAL_MAX);
@@ -860,8 +871,16 @@ impl TerminalResumes {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AcceptedReport {
-    Set { pid: ProcessPid, time: u64, argv: ResumeArgv, cwd: Option<ResumeCwd> },
-    Clear { pid: ProcessPid, time: u64 },
+    Set {
+        pid: ProcessPid,
+        time: u64,
+        argv: ResumeArgv,
+        cwd: Option<ResumeCwd>,
+    },
+    Clear {
+        pid: ProcessPid,
+        time: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -902,14 +921,19 @@ impl fmt::Display for RejectReason {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verified {
     Ignore,
-    Reject { owner: Option<ProcessPid>, reason: RejectReason },
+    Reject {
+        owner: Option<ProcessPid>,
+        reason: RejectReason,
+    },
     Accept(AcceptedReport),
 }
 
 #[must_use]
 pub fn is_valid_token(token: &str) -> bool {
     (TOKEN_LEN_MIN..=TOKEN_LEN_MAX).contains(&token.len())
-        && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 pub fn verify_and_parse(
@@ -956,7 +980,11 @@ fn split_trailing_mac(body: &[u8]) -> Option<(&[u8], &[u8])> {
     let prefix = &body[..split_at];
     let rest = &body[split_at..];
     let mac_hex = rest.strip_prefix(MAC_SUFFIX_PREFIX)?;
-    if mac_hex.len() != MAC_HEX_LEN || !mac_hex.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+    if mac_hex.len() != MAC_HEX_LEN
+        || !mac_hex
+            .iter()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return None;
     }
     Some((prefix, mac_hex))
@@ -1025,12 +1053,12 @@ fn parse_verified_pairs(prefix: &[u8], time: u64) -> Result<AcceptedReport, Reje
         match key {
             b"pid" => {
                 pid = Some(parse_positive_pid(value).ok_or(RejectReason::InvalidPid)?);
-            },
+            }
             b"argv" => argv_raw = Some(value),
             b"cwd" => cwd_raw = Some(value),
             b"clear" => clear_raw = Some(value),
             b"need" => need_raw = Some(value),
-            _ => {},
+            _ => {}
         }
     }
 
@@ -1047,14 +1075,19 @@ fn parse_verified_pairs(prefix: &[u8], time: u64) -> Result<AcceptedReport, Reje
     match (argv_raw, clear_raw) {
         (Some(raw_argv), None) => {
             let argv = decode_argv(raw_argv)?;
-            Ok(AcceptedReport::Set { pid, time, argv, cwd })
-        },
+            Ok(AcceptedReport::Set {
+                pid,
+                time,
+                argv,
+                cwd,
+            })
+        }
         (None, Some(raw_clear)) => {
             if raw_clear != b"1" {
                 return Err(RejectReason::InvalidClear);
             }
             Ok(AcceptedReport::Clear { pid, time })
-        },
+        }
         (Some(_), Some(_)) | (None, None) => Err(RejectReason::ArgvClearConflict),
     }
 }
@@ -1209,7 +1242,7 @@ pub fn decode_base64_standard(input: &[u8]) -> Option<Vec<u8>> {
         out.push((c << 6) | d);
     }
     match tail.len() {
-        0 => {},
+        0 => {}
         2 => {
             let a = base64_value(tail[0])?;
             let b = base64_value(tail[1])?;
@@ -1217,7 +1250,7 @@ pub fn decode_base64_standard(input: &[u8]) -> Option<Vec<u8>> {
                 return None;
             }
             out.push((a << 2) | (b >> 4));
-        },
+        }
         3 => {
             let a = base64_value(tail[0])?;
             let b = base64_value(tail[1])?;
@@ -1227,7 +1260,7 @@ pub fn decode_base64_standard(input: &[u8]) -> Option<Vec<u8>> {
             }
             out.push((a << 2) | (b >> 4));
             out.push((b << 4) | (c >> 2));
-        },
+        }
         _ => return None,
     }
     assert_eq!(out.len(), out_len);
@@ -1261,8 +1294,16 @@ fn encode_base64_with(input: &[u8], table: &[u8; 64], pad: bool) -> String {
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = u32::from(chunk[0]);
-        let b1 = if chunk.len() > 1 { u32::from(chunk[1]) } else { 0 };
-        let b2 = if chunk.len() > 2 { u32::from(chunk[2]) } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            u32::from(chunk[1])
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            u32::from(chunk[2])
+        } else {
+            0
+        };
         let triple = (b0 << 16) | (b1 << 8) | b2;
         let index0 = usize::try_from((triple >> 18) & 0x3F).expect("6-bit index fits usize");
         let index1 = usize::try_from((triple >> 12) & 0x3F).expect("6-bit index fits usize");
@@ -1323,23 +1364,30 @@ struct Sha256 {
 
 impl Sha256 {
     const INIT: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
 
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     fn new() -> Self {
-        Self { state: Self::INIT, buffer: [0; 64], buffer_len: 0, total_len: 0 }
+        Self {
+            state: Self::INIT,
+            buffer: [0; 64],
+            buffer_len: 0,
+            total_len: 0,
+        }
     }
 
     fn update(&mut self, mut input: &[u8]) {
@@ -1373,7 +1421,10 @@ impl Sha256 {
 
     fn finalize(mut self) -> [u8; 32] {
         assert!(self.buffer_len < 64);
-        let bit_len = self.total_len.checked_mul(8).expect("sha256 bit length fits u64");
+        let bit_len = self
+            .total_len
+            .checked_mul(8)
+            .expect("sha256 bit length fits u64");
         self.buffer[self.buffer_len] = 0x80;
         self.buffer_len += 1;
         if self.buffer_len > 56 {
@@ -1410,7 +1461,16 @@ impl Sha256 {
                 .wrapping_add(schedule[index - 7])
                 .wrapping_add(s1);
         }
-        let [mut r0, mut r1, mut r2, mut r3, mut r4, mut r5, mut r6, mut r7] = self.state;
+        let [
+            mut r0,
+            mut r1,
+            mut r2,
+            mut r3,
+            mut r4,
+            mut r5,
+            mut r6,
+            mut r7,
+        ] = self.state;
         for (&round_k, &word) in Self::K.iter().zip(&schedule) {
             let s1 = r4.rotate_right(6) ^ r4.rotate_right(11) ^ r4.rotate_right(25);
             let ch = (r4 & r5) ^ ((!r4) & r6);
@@ -1502,7 +1562,10 @@ mod tests {
         let clear = b"pid=74877:time=1795543200:clear=1:mac=c30603369f98fef581a4098be889175b0c74f0641e49f8b25f4326cb38f97c93";
         assert_eq!(
             verify_and_parse(clear, SPEC_TOKEN, SPEC_TIME, |_| Some(SPEC_TIME)),
-            Verified::Accept(AcceptedReport::Clear { pid: pid(74877), time: SPEC_TIME })
+            Verified::Accept(AcceptedReport::Clear {
+                pid: pid(74877),
+                time: SPEC_TIME
+            })
         );
 
         let lazygit = b"pid=74877:time=1795543200:argv=bGF6eWdpdA==:cwd=L2hvbWUvdXNlci9zcmMvcHJvamVjdA==:mac=35cb909805c380336efd3689a125acc774a9dec8422a1d21492ebec06ca758e1";
@@ -1535,111 +1598,211 @@ mod tests {
 
     #[test]
     fn spec_rev_0_5_invalid_test_vectors_distinguish_ignore_and_reject() {
-        let wrong_mac = format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:mac={}", "0".repeat(64));
-        assert_eq!(verify_and_parse(wrong_mac.as_bytes(), SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        let wrong_mac = format!(
+            "pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:mac={}",
+            "0".repeat(64)
+        );
+        assert_eq!(
+            verify_and_parse(wrong_mac.as_bytes(), SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
         let no_mac = format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==");
-        assert_eq!(verify_and_parse(no_mac.as_bytes(), SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        assert_eq!(
+            verify_and_parse(no_mac.as_bytes(), SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
         let body_before_mac = format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==");
         let mac = sha256_body_token_hex(body_before_mac.as_bytes(), SPEC_TOKEN.as_bytes());
-        let mac_not_last = format!("mac={}:{body_before_mac}", std::str::from_utf8(&mac).unwrap());
-        assert_eq!(verify_and_parse(mac_not_last.as_bytes(), SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        let mac_not_last = format!(
+            "mac={}:{body_before_mac}",
+            std::str::from_utf8(&mac).unwrap()
+        );
+        assert_eq!(
+            verify_and_parse(mac_not_last.as_bytes(), SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
         let old_time = signed("pid=74877:time=1000000000:argv=bnZpbQ==", SPEC_TOKEN);
-        assert_eq!(verify_and_parse(&old_time, SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        assert_eq!(
+            verify_and_parse(&old_time, SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
         let no_time = signed("pid=74877:argv=bnZpbQ==", SPEC_TOKEN);
-        assert_eq!(verify_and_parse(&no_time, SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        assert_eq!(
+            verify_and_parse(&no_time, SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
-        let rel_argv = signed(&format!("pid=74877:time={SPEC_TIME}:argv=Li9ydW4uc2g="), SPEC_TOKEN);
+        let rel_argv = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=Li9ydW4uc2g="),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&rel_argv, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidArgv }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidArgv
+            }
         );
 
-        let both = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:clear=1"), SPEC_TOKEN);
+        let both = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:clear=1"),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&both, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::ArgvClearConflict }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::ArgvClearConflict
+            }
         );
 
-        let rel_cwd = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:cwd=cHJvamVjdA=="), SPEC_TOKEN);
+        let rel_cwd = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:cwd=cHJvamVjdA=="),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&rel_cwd, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidCwd }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidCwd
+            }
         );
 
-        let unknown_need = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:need=later"), SPEC_TOKEN);
+        let unknown_need = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:need=later"),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&unknown_need, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::UnknownNeed }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::UnknownNeed
+            }
         );
     }
 
     #[test]
     fn parser_enforces_edge_cases_and_monotonic_time() {
-        assert_eq!(verify_and_parse(b"?", SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        assert_eq!(
+            verify_and_parse(b"?", SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
-        let earlier = signed(&format!("pid=74877:time={}:argv=bnZpbQ==", SPEC_TIME - 1), SPEC_TOKEN);
+        let earlier = signed(
+            &format!("pid=74877:time={}:argv=bnZpbQ==", SPEC_TIME - 1),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&earlier, SPEC_TOKEN, SPEC_TIME, |_| Some(SPEC_TIME)),
             Verified::Ignore
         );
 
-        let edge_future = signed(&format!("pid=74877:time={}:argv=bnZpbQ==", SPEC_TIME + 60), SPEC_TOKEN);
-        assert!(matches!(verify_and_parse(&edge_future, SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Accept(_)));
-        let past_future = signed(&format!("pid=74877:time={}:argv=bnZpbQ==", SPEC_TIME + 61), SPEC_TOKEN);
-        assert_eq!(verify_and_parse(&past_future, SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Ignore);
+        let edge_future = signed(
+            &format!("pid=74877:time={}:argv=bnZpbQ==", SPEC_TIME + 60),
+            SPEC_TOKEN,
+        );
+        assert!(matches!(
+            verify_and_parse(&edge_future, SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Accept(_)
+        ));
+        let past_future = signed(
+            &format!("pid=74877:time={}:argv=bnZpbQ==", SPEC_TIME + 61),
+            SPEC_TOKEN,
+        );
+        assert_eq!(
+            verify_and_parse(&past_future, SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Ignore
+        );
 
-        let unpadded_empty_arg = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ,,LVM:future=ok"), SPEC_TOKEN);
+        let unpadded_empty_arg = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ,,LVM:future=ok"),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&unpadded_empty_arg, SPEC_TOKEN, SPEC_TIME, |_| None),
             Verified::Accept(AcceptedReport::Set {
                 pid: pid(74877),
                 time: SPEC_TIME,
-                argv: ResumeArgv::parse(vec!["nvim".to_owned(), String::new(), "-S".to_owned()]).unwrap(),
+                argv: ResumeArgv::parse(vec!["nvim".to_owned(), String::new(), "-S".to_owned()])
+                    .unwrap(),
                 cwd: None,
             })
         );
 
-        let empty_first = signed(&format!("pid=74877:time={SPEC_TIME}:argv=,bnZpbQ=="), SPEC_TOKEN);
+        let empty_first = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=,bnZpbQ=="),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&empty_first, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidArgv }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidArgv
+            }
         );
 
-        let bad_pad = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ="), SPEC_TOKEN);
+        let bad_pad = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ="),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&bad_pad, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidArgv }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidArgv
+            }
         );
 
         let dash_program = signed(&format!("pid=74877:time={SPEC_TIME}:argv=LXNo"), SPEC_TOKEN);
         assert_eq!(
             verify_and_parse(&dash_program, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidArgv }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidArgv
+            }
         );
 
         let control_in_arg = signed(
-            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==,{}", encode_base64_standard(b"a\nb")),
+            &format!(
+                "pid=74877:time={SPEC_TIME}:argv=bnZpbQ==,{}",
+                encode_base64_standard(b"a\nb")
+            ),
             SPEC_TOKEN,
         );
         assert_eq!(
             verify_and_parse(&control_in_arg, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidArgv }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidArgv
+            }
         );
 
-        let dup_key = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:argv=bnZpbQ=="), SPEC_TOKEN);
+        let dup_key = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:argv=bnZpbQ=="),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&dup_key, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::DuplicateKey }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::DuplicateKey
+            }
         );
 
-        let huge_pid = signed(&format!("pid=999999999999999999999:time={SPEC_TIME}:argv=bnZpbQ=="), SPEC_TOKEN);
+        let huge_pid = signed(
+            &format!("pid=999999999999999999999:time={SPEC_TIME}:argv=bnZpbQ=="),
+            SPEC_TOKEN,
+        );
         assert_eq!(
             verify_and_parse(&huge_pid, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: None, reason: RejectReason::InvalidPid }
+            Verified::Reject {
+                owner: None,
+                reason: RejectReason::InvalidPid
+            }
         );
 
         let many_args: Vec<String> = (0..=ARGV_ELEMENTS_MAX).map(|_| "YQ==".to_owned()).collect();
@@ -1649,11 +1812,20 @@ mod tests {
         );
         assert_eq!(
             verify_and_parse(&over_args, SPEC_TOKEN, SPEC_TIME, |_| None),
-            Verified::Reject { owner: Some(pid(74877)), reason: RejectReason::InvalidArgv }
+            Verified::Reject {
+                owner: Some(pid(74877)),
+                reason: RejectReason::InvalidArgv
+            }
         );
 
-        let known_need = signed(&format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:need=pid,time,argv"), SPEC_TOKEN);
-        assert!(matches!(verify_and_parse(&known_need, SPEC_TOKEN, SPEC_TIME, |_| None), Verified::Accept(_)));
+        let known_need = signed(
+            &format!("pid=74877:time={SPEC_TIME}:argv=bnZpbQ==:need=pid,time,argv"),
+            SPEC_TOKEN,
+        );
+        assert!(matches!(
+            verify_and_parse(&known_need, SPEC_TOKEN, SPEC_TIME, |_| None),
+            Verified::Accept(_)
+        ));
     }
 
     #[test]
@@ -1706,7 +1878,10 @@ mod tests {
             )
         };
         let (none, warnings) = TerminalResumes::of_mux(
-            Some(mux::TerminalResumes { chosen: None, others: vec![mk(20).to_mux()] }),
+            Some(mux::TerminalResumes {
+                chosen: None,
+                others: vec![mk(20).to_mux()],
+            }),
             7,
         );
         assert!(none.is_none());
@@ -1730,7 +1905,10 @@ mod tests {
     fn escape_for_display_neutralizes_controls_and_bidi_overrides() {
         let hostile = "nvim \u{202e}evil\u{202c}\x1b[31m\n\u{200b}ok";
         let escaped = escape_for_display(hostile);
-        assert_eq!(escaped, "nvim \\u{202e}evil\\u{202c}\\x1b[31m\\x0a\\u{200b}ok");
+        assert_eq!(
+            escaped,
+            "nvim \\u{202e}evil\\u{202c}\\x1b[31m\\x0a\\u{200b}ok"
+        );
         assert!(!escaped.chars().any(is_invisible_formatting));
     }
 
@@ -1742,16 +1920,46 @@ mod tests {
         assert!(!is_shell_ancestor("bash", Some("/bin/bash"), None, false));
 
         for (name, exe, words, is_root) in [
-            ("fish", "/usr/bin/fish", &["fish", "--command=claude"][..], false),
-            ("fish", "/usr/bin/fish", &["fish", "--command=claude"][..], true),
-            ("fish", "/usr/bin/fish", &["fish", "--init-command=claude"][..], false),
-            ("fish", "/usr/bin/fish", &["fish", "--init-command=claude"][..], true),
+            (
+                "fish",
+                "/usr/bin/fish",
+                &["fish", "--command=claude"][..],
+                false,
+            ),
+            (
+                "fish",
+                "/usr/bin/fish",
+                &["fish", "--command=claude"][..],
+                true,
+            ),
+            (
+                "fish",
+                "/usr/bin/fish",
+                &["fish", "--init-command=claude"][..],
+                false,
+            ),
+            (
+                "fish",
+                "/usr/bin/fish",
+                &["fish", "--init-command=claude"][..],
+                true,
+            ),
             ("fish", "/usr/bin/fish", &["fish", "-Cpi"][..], false),
             ("fish", "/usr/bin/fish", &["fish", "-Cpi"][..], true),
-            ("fish", "/usr/bin/fish", &["fish", "-i", "-C", "claude"][..], false),
+            (
+                "fish",
+                "/usr/bin/fish",
+                &["fish", "-i", "-C", "claude"][..],
+                false,
+            ),
             ("nu", "/usr/bin/nu", &["nu", "--commands=claude"][..], false),
             ("nu", "/usr/bin/nu", &["nu", "-epi"][..], false),
-            ("bash", "/bin/bash", &["bash", "--rcfile", "/tmp/rc", "-i"][..], false),
+            (
+                "bash",
+                "/bin/bash",
+                &["bash", "--rcfile", "/tmp/rc", "-i"][..],
+                false,
+            ),
             ("bash", "/bin/bash", &["bash", "-c", "claude"][..], true),
         ] {
             assert!(
@@ -1761,12 +1969,32 @@ mod tests {
         }
 
         for (name, exe, words, is_root) in [
-            ("bash", "/bin/bash", &["/bin/bash", "--rcfile", "/tmp/rc", "-i"][..], true),
-            ("fish", "/usr/bin/fish", &["/usr/bin/fish", "-i", "-C", "status job-control full"][..], true),
-            ("nu", "/usr/bin/nu", &["/usr/bin/nu", "-i", "-e", "^lune-mux"][..], true),
+            (
+                "bash",
+                "/bin/bash",
+                &["/bin/bash", "--rcfile", "/tmp/rc", "-i"][..],
+                true,
+            ),
+            (
+                "fish",
+                "/usr/bin/fish",
+                &["/usr/bin/fish", "-i", "-C", "status job-control full"][..],
+                true,
+            ),
+            (
+                "nu",
+                "/usr/bin/nu",
+                &["/usr/bin/nu", "-i", "-e", "^lune-mux"][..],
+                true,
+            ),
             ("bash", "/bin/bash", &["-bash", "-il"][..], false),
             ("fish", "/usr/bin/fish", &["fish", "--login"][..], false),
-            (".bash-wrapped", "/nix/store/x/bin/.bash-wrapped", &[".bash-wrapped", "-i"][..], true),
+            (
+                ".bash-wrapped",
+                "/nix/store/x/bin/.bash-wrapped",
+                &[".bash-wrapped", "-i"][..],
+                true,
+            ),
         ] {
             assert!(
                 is_shell_ancestor(name, Some(exe), Some(&own(words)), is_root),

@@ -325,7 +325,10 @@ impl Patch {
             }
         }
         let patch = parser.finish();
-        assert!(patch.files.len() <= FILES_MAX, "parsed file count stays bounded");
+        assert!(
+            patch.files.len() <= FILES_MAX,
+            "parsed file count stays bounded"
+        );
         patch
     }
 
@@ -396,7 +399,10 @@ impl Patch {
             added: count,
             deleted: 0,
         });
-        assert!(self.files.len() <= FILES_MAX, "file count stays within FILES_MAX");
+        assert!(
+            self.files.len() <= FILES_MAX,
+            "file count stays within FILES_MAX"
+        );
     }
 }
 
@@ -500,8 +506,16 @@ impl HunkBuilder {
         let deleted_refs: Vec<&str> = deleted.iter().map(|line| line.text.as_str()).collect();
         let added_refs: Vec<&str> = added.iter().map(|line| line.text.as_str()).collect();
         let (deleted_emphasis, added_emphasis) = pair_emphasis(&deleted_refs, &added_refs);
-        assert_eq!(deleted_emphasis.len(), deleted.len(), "deleted emphasis matches lines");
-        assert_eq!(added_emphasis.len(), added.len(), "added emphasis matches lines");
+        assert_eq!(
+            deleted_emphasis.len(),
+            deleted.len(),
+            "deleted emphasis matches lines"
+        );
+        assert_eq!(
+            added_emphasis.len(),
+            added.len(),
+            "added emphasis matches lines"
+        );
         for (line, emphasis) in deleted.iter_mut().zip(deleted_emphasis) {
             line.emphasis = emphasis;
         }
@@ -568,9 +582,18 @@ impl HunkBuilder {
     fn finish(mut self) -> Hunk {
         self.flush_context();
         self.flush_changed();
-        assert!(self.pending_context.is_empty(), "all pending context flushed");
-        assert!(self.pending_deleted.is_empty(), "all pending deletions flushed");
-        assert!(self.pending_added.is_empty(), "all pending additions flushed");
+        assert!(
+            self.pending_context.is_empty(),
+            "all pending context flushed"
+        );
+        assert!(
+            self.pending_deleted.is_empty(),
+            "all pending deletions flushed"
+        );
+        assert!(
+            self.pending_added.is_empty(),
+            "all pending additions flushed"
+        );
         Hunk {
             old_start: self.old_start,
             old_count: self.old_count,
@@ -721,9 +744,18 @@ impl Parser {
 
     fn finish(mut self) -> Patch {
         self.finish_file();
-        assert!(self.files.len() <= FILES_MAX, "parsed files respect FILES_MAX");
-        assert!(self.total_hunks <= HUNKS_MAX, "parsed hunks respect HUNKS_MAX");
-        assert!(self.total_lines <= LINES_MAX, "parsed lines respect LINES_MAX");
+        assert!(
+            self.files.len() <= FILES_MAX,
+            "parsed files respect FILES_MAX"
+        );
+        assert!(
+            self.total_hunks <= HUNKS_MAX,
+            "parsed hunks respect HUNKS_MAX"
+        );
+        assert!(
+            self.total_lines <= LINES_MAX,
+            "parsed lines respect LINES_MAX"
+        );
         let added = self
             .files
             .iter()
@@ -750,8 +782,14 @@ fn bound_line(line: &str) -> String {
         while end > 0 && !line.is_char_boundary(end) {
             end -= 1;
         }
-        assert!(end <= LINE_BYTES_MAX, "bounded line stays within LINE_BYTES_MAX");
-        assert!(line.is_char_boundary(end), "bounded line ends on UTF-8 boundary");
+        assert!(
+            end <= LINE_BYTES_MAX,
+            "bounded line stays within LINE_BYTES_MAX"
+        );
+        assert!(
+            line.is_char_boundary(end),
+            "bounded line ends on UTF-8 boundary"
+        );
         &line[..end]
     };
     if slice.as_bytes().contains(&0) {
@@ -951,8 +989,14 @@ deleted file mode 100644
         let patch = Patch::parse(raw.as_bytes());
         assert_eq!(patch.files.len(), 3);
         assert_eq!(patch.files[0].status(), FileStatus::Renamed);
-        assert_eq!(patch.files[0].change.old_path().map(FilePath::as_str), Some("old name.rs"));
-        assert_eq!(patch.files[0].change.new_path().map(FilePath::as_str), Some("new name.rs"));
+        assert_eq!(
+            patch.files[0].change.old_path().map(FilePath::as_str),
+            Some("old name.rs")
+        );
+        assert_eq!(
+            patch.files[0].change.new_path().map(FilePath::as_str),
+            Some("new name.rs")
+        );
         assert!(patch.files[1].is_binary());
         assert_eq!(patch.files[1].hunks(), []);
         assert_eq!(patch.files[1].status(), FileStatus::Added);

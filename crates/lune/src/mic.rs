@@ -15,7 +15,9 @@ impl Mic {
     pub fn open(heard: Sender<Heard>) -> Result<Mic, String> {
         crate::hush::alsa_errors();
         let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("this machine has no microphone")?;
+        let device = host
+            .default_input_device()
+            .ok_or("this machine has no microphone")?;
         let config = chosen(&device)?;
         let stream = match config.sample_format() {
             SampleFormat::F32 => stream::<f32>(&device, &config, heard),
@@ -23,20 +25,29 @@ impl Mic {
             SampleFormat::I32 => stream::<i32>(&device, &config, heard),
             SampleFormat::U16 => stream::<u16>(&device, &config, heard),
             SampleFormat::U8 => stream::<u8>(&device, &config, heard),
-            other => return Err(format!("the microphone gives {other} samples, lune reads none")),
+            other => {
+                return Err(format!(
+                    "the microphone gives {other} samples, lune reads none"
+                ));
+            }
         }?;
-        stream.play().map_err(|error| format!("the microphone does not start: {error}"))?;
+        stream
+            .play()
+            .map_err(|error| format!("the microphone does not start: {error}"))?;
         Ok(Mic { _stream: stream })
     }
 }
 
 fn chosen(device: &Device) -> Result<SupportedStreamConfig, String> {
-    let as_taken = device.supported_input_configs().ok().and_then(|mut configs| {
-        configs.find_map(|range| {
-            let fits = range.channels() == 1 && range.sample_format() == SampleFormat::F32;
-            fits.then(|| range.try_with_sample_rate(RATE)).flatten()
-        })
-    });
+    let as_taken = device
+        .supported_input_configs()
+        .ok()
+        .and_then(|mut configs| {
+            configs.find_map(|range| {
+                let fits = range.channels() == 1 && range.sample_format() == SampleFormat::F32;
+                fits.then(|| range.try_with_sample_rate(RATE)).flatten()
+            })
+        });
     match as_taken {
         Some(config) => Ok(config),
         None => device
@@ -60,7 +71,10 @@ where
         config.config(),
         move |samples: &[T], _: &_| {
             let mut batch = Vec::with_capacity(samples.len());
-            down.push(samples.iter().map(|sample| sample.to_sample::<f32>()), &mut batch);
+            down.push(
+                samples.iter().map(|sample| sample.to_sample::<f32>()),
+                &mut batch,
+            );
             let _ = heard.send(Ok(batch));
         },
         move |error| {
@@ -86,7 +100,15 @@ impl Down {
     fn new(channels: u16, rate: u32) -> Down {
         let channels = usize::from(channels.max(1));
         let step = f64::from(rate.max(1)) / f64::from(RATE);
-        Down { channels, step, frames: 0, edge: step, sum: 0.0, summed: 0, frame: Vec::new() }
+        Down {
+            channels,
+            step,
+            frames: 0,
+            edge: step,
+            sum: 0.0,
+            summed: 0,
+            frame: Vec::new(),
+        }
     }
 
     fn push(&mut self, samples: impl Iterator<Item = f32>, taken: &mut Vec<f32>) {
@@ -135,7 +157,10 @@ mod tests {
 
     #[test]
     fn a_higher_rate_takes_the_mean_of_the_frames_each_sample_stands_for() {
-        assert_eq!(down(1, 48_000, &[0.0, 0.25, 0.5, 1.0, 1.0, 1.0]), [0.25, 1.0]);
+        assert_eq!(
+            down(1, 48_000, &[0.0, 0.25, 0.5, 1.0, 1.0, 1.0]),
+            [0.25, 1.0]
+        );
     }
 
     #[test]
@@ -143,7 +168,11 @@ mod tests {
         for rate in [8_000, 22_050, 44_100, 48_000, 96_000] {
             let second = vec![0.25; rate as usize * 2];
             let taken = down(2, rate, &second);
-            assert!(taken.len().abs_diff(RATE as usize) <= 1, "{rate}: {}", taken.len());
+            assert!(
+                taken.len().abs_diff(RATE as usize) <= 1,
+                "{rate}: {}",
+                taken.len()
+            );
         }
     }
 

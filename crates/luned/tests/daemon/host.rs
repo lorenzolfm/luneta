@@ -6,11 +6,11 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc::{self, Receiver};
 use std::sync::LazyLock;
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use lune_waits::{Patience, Span, PATIENCE};
+use lune_waits::{PATIENCE, Patience, Span};
 use luned::api;
 use luned::folder::{self, Folder};
 use luned::{Answer, RoundTrip};
@@ -21,8 +21,15 @@ pub const LUNED: &str = env!("CARGO_BIN_EXE_luned");
 pub static LUNE: LazyLock<String> = LazyLock::new(|| {
     let beside = Path::new(LUNED).with_file_name("lune");
     let built = beside.is_file();
-    assert!(built, "no lune is built beside luned, at {}: test with -p lune too", beside.display());
-    beside.into_os_string().into_string().expect("cargo builds lune at a UTF-8 path")
+    assert!(
+        built,
+        "no lune is built beside luned, at {}: test with -p lune too",
+        beside.display()
+    );
+    beside
+        .into_os_string()
+        .into_string()
+        .expect("cargo builds lune at a UTF-8 path")
 });
 
 pub const SOCKET: &str = "lune/luned.sock";
@@ -41,7 +48,10 @@ pub struct Vars<'a> {
 
 impl<'a> Vars<'a> {
     pub fn runtime(root: &'a Path) -> Self {
-        Vars { runtime: Some(root), ..Vars::default() }
+        Vars {
+            runtime: Some(root),
+            ..Vars::default()
+        }
     }
 
     pub fn command(self, program: &str) -> Command {
@@ -83,7 +93,9 @@ impl<'a> Vars<'a> {
             let paths = std::iter::once(bin.to_owned()).chain(std::env::split_paths(&path));
             command.env("PATH", std::env::join_paths(paths).unwrap());
         }
-        command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
         command
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "maintenance.auto")
@@ -94,8 +106,18 @@ impl<'a> Vars<'a> {
 
 pub fn install(from: &Path, to: &Path) {
     let mut install = Command::new("install");
-    let installed = install.args(["-m", "755"]).arg(from).arg(to).status().unwrap();
-    assert!(installed.success(), "{} was not installed at {}", from.display(), to.display());
+    let installed = install
+        .args(["-m", "755"])
+        .arg(from)
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(
+        installed.success(),
+        "{} was not installed at {}",
+        from.display(),
+        to.display()
+    );
 }
 
 pub fn script(path: &Path, text: &str) {
@@ -131,7 +153,9 @@ pub struct FakeGh {
 
 impl FakeGh {
     fn new(bin: &Path) -> Self {
-        let gh = FakeGh { pulls: bin.join("pulls") };
+        let gh = FakeGh {
+            pulls: bin.join("pulls"),
+        };
         fs::create_dir(&gh.pulls).unwrap();
         let text = r#"pulls="${0%/*}/pulls"
 if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; then
@@ -293,7 +317,11 @@ exec cat "$said"
     }
 
     pub fn issue(&self, number: u32, page: &str) {
-        fs::write(self.pulls.join(format!("issue-{number}")), format!("{page}\n")).unwrap();
+        fs::write(
+            self.pulls.join(format!("issue-{number}")),
+            format!("{page}\n"),
+        )
+        .unwrap();
     }
 
     pub fn issues(&self) -> Vec<String> {
@@ -323,7 +351,11 @@ exec cat "$said"
             "headRefOid": head,
             "statusCheckRollup": rollup,
         });
-        fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
+        fs::write(
+            self.pulls.join(format!("checks-{number}")),
+            said.to_string(),
+        )
+        .unwrap();
     }
 
     pub fn log(&self, job: u64, log: &str) {
@@ -467,8 +499,12 @@ pub struct NotedGit {
 impl NotedGit {
     fn new(bin: &Path) -> Self {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let git = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|it| it.is_file());
-        let noted = NotedGit { notes: bin.join("statuses") };
+        let git = std::env::split_paths(&path)
+            .map(|dir| dir.join("git"))
+            .find(|it| it.is_file());
+        let noted = NotedGit {
+            notes: bin.join("statuses"),
+        };
         let text = format!(
             r#"for arg; do
     if [ "$arg" = status ]; then
@@ -482,7 +518,11 @@ exec "{git}" "$@"
         );
         let path = bin.join("git");
         shared_script(&path, &text);
-        let ran = Command::new(&path).arg("--version").stdout(Stdio::null()).status().unwrap();
+        let ran = Command::new(&path)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
         assert!(ran.success(), "the git of the test's own does not run");
         noted
     }
@@ -507,7 +547,12 @@ impl Host {
     pub fn new() -> Self {
         let bin = tempfile::tempdir().unwrap();
         let gh = FakeGh::new(bin.path());
-        Host { runtime: tempfile::tempdir().unwrap(), home: tempfile::tempdir().unwrap(), bin, gh }
+        Host {
+            runtime: tempfile::tempdir().unwrap(),
+            home: tempfile::tempdir().unwrap(),
+            bin,
+            gh,
+        }
     }
 
     pub fn bin(&self) -> &Path {
@@ -533,14 +578,24 @@ impl Host {
 
     pub fn host(&self) -> api::Host {
         let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             let asked = api::WatchChangesRequest {
                 after: None,
                 waiter: api::ClientWaiter::Client.into(),
             };
-            daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().into_host()
+            daemon
+                .watch_changes(asked)
+                .await
+                .unwrap()
+                .into_inner()
+                .read_host()
+                .unwrap()
+                .into_host()
         })
     }
 }
@@ -555,7 +610,9 @@ pub struct Running {
 
 impl Running {
     pub fn spawn(command: &mut Command) -> Self {
-        Running { child: command.spawn().unwrap() }
+        Running {
+            child: command.spawn().unwrap(),
+        }
     }
 
     pub fn pid(&self) -> u32 {
@@ -567,7 +624,10 @@ impl Running {
     }
 
     pub fn piped(&mut self) -> (ChildStdin, ChildStdout) {
-        (self.child.stdin.take().unwrap(), self.child.stdout.take().unwrap())
+        (
+            self.child.stdin.take().unwrap(),
+            self.child.stdout.take().unwrap(),
+        )
     }
 
     pub fn ended(&mut self, what: &str) -> ExitStatus {
@@ -674,7 +734,11 @@ pub fn start_as(mut luned: Command) -> Result<Daemon, (ExitStatus, String)> {
     let mut said = Vec::new();
     while let Ok(line) = heard.recv() {
         if line.starts_with("luned: listening on ") {
-            return Ok(Daemon { process, said, heard });
+            return Ok(Daemon {
+                process,
+                said,
+                heard,
+            });
         }
         said.push(line);
     }
@@ -682,10 +746,18 @@ pub fn start_as(mut luned: Command) -> Result<Daemon, (ExitStatus, String)> {
 }
 
 pub fn answered(command: &mut Command) -> Output {
-    let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let (tell, heard) = mpsc::channel();
     thread::spawn(move || tell.send(child.wait_with_output()));
-    lune_waits::heard("it answers, and leaves nothing running that holds what it writes", &heard).unwrap()
+    lune_waits::heard(
+        "it answers, and leaves nothing running that holds what it writes",
+        &heard,
+    )
+    .unwrap()
 }
 
 pub fn info(vars: Vars) -> String {
@@ -715,7 +787,10 @@ impl<const N: usize> Waits<N> {
     #[must_use]
     pub const fn of(items: [Wait; N]) -> Self {
         assert!(N >= 2, "side_by_side overlaps at least two waits");
-        assert!(N <= SIDE_BY_SIDE_MAX, "side_by_side runs too many waits in one test slot");
+        assert!(
+            N <= SIDE_BY_SIDE_MAX,
+            "side_by_side runs too many waits in one test slot"
+        );
         let mut index = 0;
         while index < N {
             let name = items[index].0.as_bytes();
@@ -730,7 +805,10 @@ impl<const N: usize> Waits<N> {
                 }
                 byte_index += 1;
             }
-            assert!(has_non_space, "a side_by_side wait name is not only whitespace");
+            assert!(
+                has_non_space,
+                "a side_by_side wait name is not only whitespace"
+            );
             let mut prior = 0;
             while prior < index {
                 assert!(
@@ -888,7 +966,9 @@ impl<'de> serde::Deserialize<'de> for ExactUnionFilter {
         for (index, token) in tokens.iter().enumerate() {
             if !index.is_multiple_of(2) {
                 if *token != "or" {
-                    return Err(serde::de::Error::custom(format!("expected `or`, got {token:?}")));
+                    return Err(serde::de::Error::custom(format!(
+                        "expected `or`, got {token:?}"
+                    )));
                 }
                 continue;
             }
@@ -958,7 +1038,9 @@ fn parse_exact_test_token(token: &str) -> Result<String, String> {
         .and_then(|rest| rest.strip_suffix(')'))
         .ok_or_else(|| format!("expected exact test(=...) filter, got {token:?}"))?;
     if name.is_empty()
-        || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
     {
         return Err(format!("invalid daemon test name {name:?}"));
     }
@@ -985,7 +1067,11 @@ fn listed_daemon_tests(extra_args: &[&str]) -> BTreeSet<String> {
         .args(extra_args)
         .output()
         .expect("test binary lists its tests");
-    assert!(output.status.success(), "test binary --list failed: {}", output.status);
+    assert!(
+        output.status.success(),
+        "test binary --list failed: {}",
+        output.status
+    );
     let stdout = String::from_utf8(output.stdout).expect("test names are UTF-8");
     let mut tests = BTreeSet::new();
     for (line_index, line) in stdout.lines().enumerate() {
@@ -1003,9 +1089,15 @@ fn listed_daemon_tests(extra_args: &[&str]) -> BTreeSet<String> {
 fn active_daemon_tests() -> BTreeSet<String> {
     let all = listed_daemon_tests(&[]);
     let ignored = listed_daemon_tests(&["--ignored"]);
-    assert!(ignored.is_subset(&all), "ignored daemon tests are a subset of all listed tests");
+    assert!(
+        ignored.is_subset(&all),
+        "ignored daemon tests are a subset of all listed tests"
+    );
     let active: BTreeSet<String> = all.difference(&ignored).cloned().collect();
-    assert!(!active.is_empty(), "daemon test binary lists at least one active test");
+    assert!(
+        !active.is_empty(),
+        "daemon test binary lists at least one active test"
+    );
     active
 }
 
@@ -1061,7 +1153,10 @@ fn nextest_toml_names_only_existing_daemon_tests() {
     );
 
     let quick_excluded = &config.profile.quick.default_filter.0;
-    assert!(!quick_excluded.is_empty(), "nextest.toml [profile.quick] excludes at least one test");
+    assert!(
+        !quick_excluded.is_empty(),
+        "nextest.toml [profile.quick] excludes at least one test"
+    );
     for name in quick_excluded {
         assert!(
             active.contains(name),
@@ -1134,7 +1229,10 @@ test-threads = 4
 "#,
     ];
     for raw in invalid_configs {
-        assert!(toml::from_str::<NextestConfig>(raw).is_err(), "expected rejection for:\n{raw}");
+        assert!(
+            toml::from_str::<NextestConfig>(raw).is_err(),
+            "expected rejection for:\n{raw}"
+        );
     }
 
     let shadowed: NextestConfig = toml::from_str(
@@ -1159,7 +1257,10 @@ priority = 0
     assert!(
         !effective_priority(
             "a::one",
-            &[&shadowed.profile.ci.overrides, &shadowed.profile.default.overrides]
+            &[
+                &shadowed.profile.ci.overrides,
+                &shadowed.profile.default.overrides
+            ]
         )
         .is_positive(),
         "ci override priority = 0 shadows default priority = 100"

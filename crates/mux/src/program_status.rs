@@ -6,8 +6,8 @@ use libghostty_vt::effect::{ProgramStatus as VtStatus, ProgramStatusKind, Progra
 pub use lune_protocol::program_status::TerminalPhase;
 pub use lune_protocol::program_status::{
     AppName, ChildId, ChildProgramStatus, EndedChildProgramStatus, EndedProgramStatus,
-    EndedProgramStatuses, Message, OscBlockedKind, ProgramPhase, ProgramStatus,
-    ProgramStatuses as Snapshot, Progress, Title, ID_DEPTH_MAX, RECORDS_MAX,
+    EndedProgramStatuses, ID_DEPTH_MAX, Message, OscBlockedKind, ProgramPhase, ProgramStatus,
+    ProgramStatuses as Snapshot, Progress, RECORDS_MAX, Title,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,12 +60,13 @@ impl ProgramStatuses {
                     let had_children = !self.children.is_empty();
                     self.children.clear();
                     had_root || had_children
-                },
+                }
                 Target::Child(prefix) => {
                     let before = self.children.len();
-                    self.children.retain(|key, _| !key.is_self_or_child(&prefix));
+                    self.children
+                        .retain(|key, _| !key.is_self_or_child(&prefix));
                     self.children.len() != before
-                },
+                }
             };
             if changed {
                 self.bump_version();
@@ -74,11 +75,11 @@ impl ProgramStatuses {
         }
         let phase = match raw_state {
             ProgramStatusState::Idle => ProgramPhase::Idle,
-            ProgramStatusState::Working => {
-                ProgramPhase::Working { progress: report.progress().and_then(Progress::new) }
+            ProgramStatusState::Working => ProgramPhase::Working {
+                progress: report.progress().and_then(Progress::new),
             },
-            ProgramStatusState::Done => {
-                ProgramPhase::Done { message: Message::from_raw_bytes(report.message()) }
+            ProgramStatusState::Done => ProgramPhase::Done {
+                message: Message::from_raw_bytes(report.message()),
             },
             ProgramStatusState::Blocked => {
                 let kind = match report.kind() {
@@ -87,10 +88,13 @@ impl ProgramStatuses {
                     Ok(ProgramStatusKind::Auth) => Some(OscBlockedKind::Auth),
                     _ => None,
                 };
-                ProgramPhase::Blocked { kind, message: Message::from_raw_bytes(report.message()) }
-            },
-            ProgramStatusState::Error => {
-                ProgramPhase::Error { message: Message::from_raw_bytes(report.message()) }
+                ProgramPhase::Blocked {
+                    kind,
+                    message: Message::from_raw_bytes(report.message()),
+                }
+            }
+            ProgramStatusState::Error => ProgramPhase::Error {
+                message: Message::from_raw_bytes(report.message()),
             },
             _ => return,
         };
@@ -98,12 +102,21 @@ impl ProgramStatuses {
             .ok()
             .and_then(|raw| AppName::parse(raw).ok());
         let title = Title::from_raw_bytes(report.title());
-        self.seq = self.seq.checked_add(1).expect("program statuses update fewer than 2^64 times");
-        let record = Record { phase, app, title, at, seq: self.seq };
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .expect("program statuses update fewer than 2^64 times");
+        let record = Record {
+            phase,
+            app,
+            title,
+            at,
+            seq: self.seq,
+        };
         match target {
             Target::Root => {
                 self.root = Some(record);
-            },
+            }
             Target::Child(id) => {
                 if !self.children.contains_key(&id) && self.children.len() >= RECORDS_MAX {
                     let oldest = self
@@ -118,7 +131,7 @@ impl ProgramStatuses {
                 }
                 self.children.insert(id, record);
                 assert!(self.children.len() <= RECORDS_MAX);
-            },
+            }
         }
         self.bump_version();
     }
@@ -135,7 +148,11 @@ impl ProgramStatuses {
                 kept_children.insert(id.clone(), kept);
             }
         }
-        if self.root.as_ref().is_some_and(|record| record.phase.is_active()) {
+        if self
+            .root
+            .as_ref()
+            .is_some_and(|record| record.phase.is_active())
+        {
             self.root = None;
             changed = true;
         }
@@ -191,14 +208,17 @@ impl ProgramStatuses {
                     changed = true;
                     None
                 }
-            },
+            }
             None => None,
         };
         self.children = kept_children;
         if changed {
             self.bump_version();
         }
-        EndedProgramStatuses { root: ended_root, children: ended_children }
+        EndedProgramStatuses {
+            root: ended_root,
+            children: ended_children,
+        }
     }
 
     #[must_use]
@@ -226,8 +246,10 @@ impl ProgramStatuses {
     }
 
     fn bump_version(&mut self) {
-        self.version =
-            self.version.checked_add(1).expect("program statuses change fewer than 2^64 times");
+        self.version = self
+            .version
+            .checked_add(1)
+            .expect("program statuses change fewer than 2^64 times");
     }
 
     fn resolved_app_for_child(&self, id: &ChildId) -> Option<AppName> {
@@ -236,7 +258,11 @@ impl ProgramStatuses {
         while let Some(key) = cursor {
             steps += 1;
             assert!(steps <= ID_DEPTH_MAX);
-            if let Some(app) = self.children.get(key).and_then(|record| record.app.as_ref()) {
+            if let Some(app) = self
+                .children
+                .get(key)
+                .and_then(|record| record.app.as_ref())
+            {
                 return Some(app.clone());
             }
             cursor = key.rfind('/').map(|slash| &key[..slash]);

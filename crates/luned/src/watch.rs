@@ -56,21 +56,23 @@ pub fn watch_ending<T: 'static>(
     if !tell(read()) {
         return Ok(());
     }
-    thread::Builder::new().name(name.to_owned()).spawn(move || {
-        loop {
-            if watcher.is_none() {
-                watcher = watching(&dir, mode, wanted, &changed, &mut troubles);
-                troubles.done();
+    thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            loop {
+                if watcher.is_none() {
+                    watcher = watching(&dir, mode, wanted, &changed, &mut troubles);
+                    troubles.done();
+                }
+                match heard.recv_timeout(sweep) {
+                    Ok(()) => settle(&heard),
+                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+                }
+                if !tell(read()) {
+                    return;
+                }
             }
-            match heard.recv_timeout(sweep) {
-                Ok(()) => settle(&heard),
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {},
-            }
-            if !tell(read()) {
-                return;
-            }
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -85,9 +87,12 @@ pub fn watching(
         Ok(watcher) => Some(watcher),
         Err(error) if missing(&error) => None,
         Err(error) => {
-            troubles.say(format!("{} is read on the sweep alone: {error}", dir.display()));
+            troubles.say(format!(
+                "{} is read on the sweep alone: {error}",
+                dir.display()
+            ));
             None
-        },
+        }
     }
 }
 
@@ -109,7 +114,7 @@ fn watcher(
 
 fn wake(changed: &SyncSender<()>) {
     match changed.try_send(()) {
-        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
+        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
     }
 }
 
@@ -121,11 +126,16 @@ struct Ends {
 
 impl Ends {
     fn new(changed: SyncSender<()>) -> Self {
-        Ends { changed, hearing: HashMap::new(), troubles: Troubles::default() }
+        Ends {
+            changed,
+            hearing: HashMap::new(),
+            troubles: Troubles::default(),
+        }
     }
 
     fn hear(&mut self, pids: &[u32]) {
-        self.hearing.retain(|pid, thread| !thread.is_finished() || pids.contains(pid));
+        self.hearing
+            .retain(|pid, thread| !thread.is_finished() || pids.contains(pid));
         for &pid in pids {
             let Entry::Vacant(place) = self.hearing.entry(pid) else {
                 continue;
@@ -135,10 +145,13 @@ impl Ends {
                 Ok(()) => wake(&changed),
                 Err(error) => log::say(&unheard(pid, &error)),
             };
-            match thread::Builder::new().name("ends".to_owned()).spawn(hearing) {
+            match thread::Builder::new()
+                .name("ends".to_owned())
+                .spawn(hearing)
+            {
                 Ok(thread) => {
                     place.insert(thread);
-                },
+                }
                 Err(error) => self.troubles.say(unheard(pid, &error)),
             }
         }
@@ -169,7 +182,7 @@ pub fn settle(heard: &Receiver<()>) {
     let deadline = Instant::now() + SETTLE_MAX;
     while Instant::now() < deadline {
         match heard.recv_timeout(SETTLE) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return,
         }
     }
@@ -276,16 +289,26 @@ impl FolderWatch {
             Ok(mut watcher) => match watcher.watch(folder, RecursiveMode::NonRecursive) {
                 Ok(()) => watcher,
                 Err(error) => {
-                    log::say(&format!("{} is polled on fallback alone: {error}", folder.display()));
+                    log::say(&format!(
+                        "{} is polled on fallback alone: {error}",
+                        folder.display()
+                    ));
                     return None;
-                },
+                }
             },
             Err(error) => {
-                log::say(&format!("{} is polled on fallback alone: {error}", folder.display()));
+                log::say(&format!(
+                    "{} is polled on fallback alone: {error}",
+                    folder.display()
+                ));
                 return None;
-            },
+            }
         };
-        Some(FolderWatch { _watcher: watcher, _sender: changed, events })
+        Some(FolderWatch {
+            _watcher: watcher,
+            _sender: changed,
+            events,
+        })
     }
 
     #[must_use]
@@ -311,9 +334,15 @@ fn folder_event(event: &notify::Result<Event>, names: FolderNames) -> bool {
         return true;
     }
     let matches_name = |target: &str| {
-        event.paths.iter().any(|path| path.file_name().and_then(OsStr::to_str) == Some(target))
+        event
+            .paths
+            .iter()
+            .any(|path| path.file_name().and_then(OsStr::to_str) == Some(target))
     };
-    if matches!(event.kind, EventKind::Access(AccessKind::Close(AccessMode::Write))) {
+    if matches!(
+        event.kind,
+        EventKind::Access(AccessKind::Close(AccessMode::Write))
+    ) {
         return matches_name(names.lock);
     }
     if event.kind.is_access() {
@@ -343,7 +372,9 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         let () = lune_waits::heard("it ended", &heard);
-        eventually("its hearing ends", || ends.hearing[&pid].is_finished().then_some(()));
+        eventually("its hearing ends", || {
+            ends.hearing[&pid].is_finished().then_some(())
+        });
         ends.hear(&[pid]);
         never("one end is heard twice", || heard.try_recv().ok());
 
@@ -366,8 +397,16 @@ mod tests {
             found.send(count).is_ok()
         };
         let any = |_: &Path| true;
-        watch("test", dir.path().to_owned(), RecursiveMode::NonRecursive, any, OUTLASTING, read, tell)
-            .unwrap();
+        watch(
+            "test",
+            dir.path().to_owned(),
+            RecursiveMode::NonRecursive,
+            any,
+            OUTLASTING,
+            read,
+            tell,
+        )
+        .unwrap();
         assert_eq!(lune_waits::heard("the first read", &heard), 0);
         assert_eq!(lune_waits::heard("the read before the sweep", &heard), 1);
     }
@@ -382,10 +421,22 @@ mod tests {
             folder_event(&event, names)
         };
         assert!(read(EventKind::Create(CreateKind::File), "luned.sock"));
-        assert!(!read(EventKind::Modify(ModifyKind::Data(DataChange::Any)), "luned.log"));
-        assert!(read(EventKind::Access(AccessKind::Close(AccessMode::Write)), "luned.lock"));
-        assert!(!read(EventKind::Access(AccessKind::Close(AccessMode::Read)), "luned.lock"));
-        assert!(!read(EventKind::Access(AccessKind::Close(AccessMode::Write)), "luned.log"));
+        assert!(!read(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "luned.log"
+        ));
+        assert!(read(
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            "luned.lock"
+        ));
+        assert!(!read(
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            "luned.lock"
+        ));
+        assert!(!read(
+            EventKind::Access(AccessKind::Close(AccessMode::Write)),
+            "luned.log"
+        ));
         assert!(!read(EventKind::Create(CreateKind::File), "other"));
     }
 
@@ -408,7 +459,10 @@ mod tests {
         let mut watch = FolderWatch::on(scratch.path(), names).expect("scratch folder is watched");
         let mark = watch.mark();
         fs::write(scratch.path().join("luned.sock"), "").unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(lune_waits::awaited(
             "creating the watched socket wakes FolderWatch",
             mark.changed(),

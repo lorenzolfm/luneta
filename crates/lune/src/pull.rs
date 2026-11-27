@@ -39,12 +39,20 @@ pub struct Asking {
 
 pub fn prepare(menu: u64, asking: Asking, events: &Sender<Event>) {
     let due = Due::new(events, move |found| Event::Pulled { menu, found });
-    let Asking { on, work, wanted, worked, others } = asking;
+    let Asking {
+        on,
+        work,
+        wanted,
+        worked,
+        others,
+    } = asking;
     thread::spawn(move || due.pay(first_found(on, &work, wanted, worked, others, asked)));
 }
 
 fn asked(on: &Machine, pasted: &Pasted) -> Result<links::Ready<usize>, Unready> {
-    Luned::on(on, reach::ANSWER).map_err(Unready::Failed)?.paste(pasted)
+    Luned::on(on, reach::ANSWER)
+        .map_err(Unready::Failed)?
+        .paste(pasted)
 }
 
 fn first_found(
@@ -79,13 +87,16 @@ fn first_found(
     let mut nowhere = vec![on];
     let mut failed: Vec<String> = Vec::new();
     for (other, worked) in others {
-        match worked.map_err(Unready::Failed).and_then(|worked| found_on(other.clone(), worked)) {
+        match worked
+            .map_err(Unready::Failed)
+            .and_then(|worked| found_on(other.clone(), worked))
+        {
             Ok(found) => {
                 for why in &failed {
                     log::say(why);
                 }
                 return Ok(found);
-            },
+            }
             Err(Unready::Nowhere(_)) => nowhere.push(other),
             Err(Unready::Failed(why)) => failed.push(naming(&other, why)),
             Err(Unready::InDoubt(why)) => {
@@ -93,8 +104,11 @@ fn first_found(
                 let note = format!(
                     "{why}; it may have made the worktree there, so lune asked no other machine"
                 );
-                return Err(std::iter::once(note).chain(failed).collect::<Vec<_>>().join("; "));
-            },
+                return Err(std::iter::once(note)
+                    .chain(failed)
+                    .collect::<Vec<_>>()
+                    .join("; "));
+            }
         }
     }
     let on = nowhere.iter().map(|machine| match machine {
@@ -106,7 +120,10 @@ fn first_found(
         on.collect::<Vec<_>>().join(" or "),
         link.repository(),
     );
-    Err(std::iter::once(note).chain(failed).collect::<Vec<_>>().join("; "))
+    Err(std::iter::once(note)
+        .chain(failed)
+        .collect::<Vec<_>>()
+        .join("; "))
 }
 
 fn naming(machine: &Machine, why: String) -> String {
@@ -143,18 +160,33 @@ mod tests {
     }
 
     fn view(id: u32, dir: &str) -> Worked {
-        let works = links::Worked { dir: directory(dir), pull: None, here: false };
-        Worked { place: ViewPlace::new_in("main", 1, 1, id), works }
+        let works = links::Worked {
+            dir: directory(dir),
+            pull: None,
+            here: false,
+        };
+        Worked {
+            place: ViewPlace::new_in("main", 1, 1, id),
+            works,
+        }
     }
 
     fn there(at: usize) -> links::Ready<usize> {
         let work = Readied::Link(Link::parse("https://github.com/cashubtc/cdk/pull/5").unwrap());
         let folder = directory("/w/x");
-        links::Ready { at: At::There(at), folder, branch: None, moved_off: false, work }
+        links::Ready {
+            at: At::There(at),
+            folder,
+            branch: None,
+            moved_off: false,
+            work,
+        }
     }
 
     fn nowhere() -> Result<links::Ready<usize>, Unready> {
-        Err(Unready::Nowhere("no session works in cashubtc/cdk".to_owned()))
+        Err(Unready::Nowhere(
+            "no session works in cashubtc/cdk".to_owned(),
+        ))
     }
 
     fn asking(
@@ -164,10 +196,17 @@ mod tests {
     ) -> (Result<Found, String>, Vec<Machine>) {
         let asked = RefCell::new(Vec::new());
         let views = vec![view(1, "/m")];
-        let found = first_found(Machine::Local, work, Wanted::AsItIs, views, others, |on, _| {
-            asked.borrow_mut().push(on.clone());
-            say(on)
-        });
+        let found = first_found(
+            Machine::Local,
+            work,
+            Wanted::AsItIs,
+            views,
+            others,
+            |on, _| {
+                asked.borrow_mut().push(on.clone());
+                say(on)
+            },
+        );
         (found, asked.into_inner())
     }
 
@@ -200,7 +239,11 @@ mod tests {
         let Found { on, ready } = found.unwrap();
         assert_eq!(on, Machine::Remote(vps()));
         assert_eq!(ready.at, At::There(view(9, "/w").place));
-        let order = vec![Machine::Local, Machine::Remote(far()), Machine::Remote(vps())];
+        let order = vec![
+            Machine::Local,
+            Machine::Remote(far()),
+            Machine::Remote(vps()),
+        ];
         assert_eq!(asked, order);
     }
 
@@ -209,10 +252,21 @@ mod tests {
         for (wanted, at_head) in [(Wanted::AsItIs, false), (Wanted::AtHead, true)] {
             let others = vec![remote(far(), vec![view(7, "/f")])];
             let heard = RefCell::new(Vec::new());
-            let found = first_found(Machine::Local, &link(), wanted, Vec::new(), others, |on, it| {
-                heard.borrow_mut().push(it.asked(None).at_head);
-                if *on == Machine::Local { nowhere() } else { Ok(there(0)) }
-            });
+            let found = first_found(
+                Machine::Local,
+                &link(),
+                wanted,
+                Vec::new(),
+                others,
+                |on, it| {
+                    heard.borrow_mut().push(it.asked(None).at_head);
+                    if *on == Machine::Local {
+                        nowhere()
+                    } else {
+                        Ok(there(0))
+                    }
+                },
+            );
             assert!(found.is_ok(), "{found:?}");
             assert_eq!(heard.into_inner(), [at_head, at_head]);
         }
@@ -233,14 +287,20 @@ mod tests {
         let alone = asking(&link(), Vec::new(), |_| nowhere()).0;
         assert_eq!(alone, Err("no session works in cashubtc/cdk".to_owned()));
 
-        let others = vec![remote(far(), vec![view(7, "/f")]), remote(vps(), Vec::new())];
+        let others = vec![
+            remote(far(), vec![view(7, "/f")]),
+            remote(vps(), Vec::new()),
+        ];
         let all = asking(&link(), others, |_| nowhere()).0;
         let none = "no session on this machine or far or me@vps works in cashubtc/cdk, nor does \
                     zoxide there know a clone of it; wt clone it first";
         assert_eq!(all, Err(none.to_owned()));
 
         let others = vec![
-            (Machine::Remote(vps()), Err("luned does not reach me@vps now".to_owned())),
+            (
+                Machine::Remote(vps()),
+                Err("luned does not reach me@vps now".to_owned()),
+            ),
             remote(far(), vec![view(7, "/f")]),
         ];
         let (said, asked) = asking(&link(), others, |on| match on {
@@ -257,7 +317,10 @@ mod tests {
     #[test]
     fn another_machine_that_fails_is_passed_over() {
         let others = vec![
-            (Machine::Remote(vps()), Err("luned does not reach me@vps now".to_owned())),
+            (
+                Machine::Remote(vps()),
+                Err("luned does not reach me@vps now".to_owned()),
+            ),
             remote(far(), vec![view(7, "/f")]),
         ];
         let (found, _) = asking(&link(), others, |on| match on {
@@ -268,10 +331,17 @@ mod tests {
 
         let others = vec![(Machine::Local, Ok(Vec::new()))];
         let far = Machine::Remote(far());
-        let said = first_found(far, &link(), Wanted::AsItIs, Vec::new(), others, |on, _| match on {
-            Machine::Local => Err(Unready::Failed("zoxide is no program".to_owned())),
-            Machine::Remote(_) => nowhere(),
-        });
+        let said = first_found(
+            far,
+            &link(),
+            Wanted::AsItIs,
+            Vec::new(),
+            others,
+            |on, _| match on {
+                Machine::Local => Err(Unready::Failed("zoxide is no program".to_owned())),
+                Machine::Remote(_) => nowhere(),
+            },
+        );
         let note = "no session on far works in cashubtc/cdk, nor does zoxide there know a clone of \
                     it; wt clone it first; this machine: zoxide is no program";
         assert_eq!(said, Err(note.to_owned()));
@@ -281,7 +351,10 @@ mod tests {
     fn a_machine_that_may_have_made_the_worktree_ends_the_search() {
         let others = || {
             vec![
-                (Machine::Remote(vps()), Err("luned does not reach me@vps now".to_owned())),
+                (
+                    Machine::Remote(vps()),
+                    Err("luned does not reach me@vps now".to_owned()),
+                ),
                 remote(far(), vec![view(7, "/f")]),
                 remote("pi".parse().unwrap(), vec![view(8, "/p")]),
             ]
@@ -299,16 +372,32 @@ mod tests {
             Machine::Local => nowhere(),
             Machine::Remote(_) => Ok(there(3)),
         });
-        assert!(said.unwrap_err().starts_with(&format!("far: {UNASKED}; it may have")));
+        assert!(
+            said.unwrap_err()
+                .starts_with(&format!("far: {UNASKED}; it may have"))
+        );
         assert_eq!(asked, [Machine::Local, Machine::Remote(far())]);
 
-        let others = vec![(Machine::Local, Ok(vec![view(1, "/m")])), remote(vps(), Vec::new())];
+        let others = vec![
+            (Machine::Local, Ok(vec![view(1, "/m")])),
+            remote(vps(), Vec::new()),
+        ];
         let on = Machine::Remote(far());
-        let said = first_found(on, &link(), Wanted::AsItIs, Vec::new(), others, |on, _| match on {
-            Machine::Local => Err(Unready::InDoubt("no answer".to_owned())),
-            Machine::Remote(_) => nowhere(),
-        });
-        assert!(said.unwrap_err().starts_with("this machine: no answer; it may have"));
+        let said = first_found(
+            on,
+            &link(),
+            Wanted::AsItIs,
+            Vec::new(),
+            others,
+            |on, _| match on {
+                Machine::Local => Err(Unready::InDoubt("no answer".to_owned())),
+                Machine::Remote(_) => nowhere(),
+            },
+        );
+        assert!(
+            said.unwrap_err()
+                .starts_with("this machine: no answer; it may have")
+        );
     }
 
     #[test]
@@ -323,8 +412,14 @@ mod tests {
     #[test]
     fn a_view_lune_did_not_ask_of_is_no_place_to_go() {
         let on = Machine::Remote(far());
-        let found =
-            first_found(on, &link(), Wanted::AsItIs, Vec::new(), Vec::new(), |_, _| Ok(there(3)));
+        let found = first_found(
+            on,
+            &link(),
+            Wanted::AsItIs,
+            Vec::new(),
+            Vec::new(),
+            |_, _| Ok(there(3)),
+        );
         assert_eq!(found, Err(format!("far: {UNASKED}")));
     }
 }

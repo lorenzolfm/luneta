@@ -8,7 +8,7 @@ use std::thread;
 
 use hyper_util::rt::TokioIo;
 use lune_mux::api::{self, mux_client::MuxClient};
-use lune_waits::{shell, Patience};
+use lune_waits::{Patience, shell};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -20,7 +20,10 @@ use tower::service_fn;
 pub const LUNE_MUX: &str = env!("CARGO_BIN_EXE_lune-mux");
 
 pub fn run<F: Future<Output = ()>>(test: F) {
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(test);
 }
 
@@ -67,15 +70,24 @@ impl Server {
             line.starts_with("lune-mux: listening on ").then_some(())
         };
         let what = "lune-mux says it listens";
-        Patience::begun().awaited_first(what, async || heard.recv().await, listens).await;
+        Patience::begun()
+            .awaited_first(what, async || heard.recv().await, listens)
+            .await;
         Server { child, runtime }
     }
 
     #[cfg(target_os = "linux")]
     pub fn resident_kib(&self) -> u64 {
         let pid = self.child.id().to_string();
-        let listed = Command::new("ps").args(["-o", "rss=", "-p", &pid]).output().unwrap();
-        String::from_utf8(listed.stdout).unwrap().trim().parse().unwrap()
+        let listed = Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid])
+            .output()
+            .unwrap();
+        String::from_utf8(listed.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     }
 
     #[cfg(target_os = "macos")]
@@ -121,7 +133,9 @@ impl Drop for Server {
 pub fn shell() -> api::Opens {
     api::Opens {
         cwd: "/".to_owned(),
-        program: Some(api::Program { argv: shell::AT_A_PROMPT.map(str::to_owned).to_vec() }),
+        program: Some(api::Program {
+            argv: shell::AT_A_PROMPT.map(str::to_owned).to_vec(),
+        }),
         ends: api::Ends::Closes.into(),
         resume_in_shell: None,
     }
@@ -143,9 +157,17 @@ pub async fn new_terminal(
     tag: &[u8],
     size: api::Size,
 ) -> api::TerminalKey {
-    let request =
-        api::NewTerminalRequest { opens: Some(opens), tag: tag.to_vec(), size: Some(size) };
-    mux.new_terminal(request).await.unwrap().into_inner().terminal.unwrap()
+    let request = api::NewTerminalRequest {
+        opens: Some(opens),
+        tag: tag.to_vec(),
+        size: Some(size),
+    };
+    mux.new_terminal(request)
+        .await
+        .unwrap()
+        .into_inner()
+        .terminal
+        .unwrap()
 }
 
 pub fn size(columns: u32, rows: u32) -> api::Size {
@@ -183,7 +205,9 @@ pub async fn watched_end(watch: &mut Streaming<api::Watched>) -> api::watched::e
         }
     };
     let what = "the watch says why it ended";
-    let ended = patience.awaited_first(what, async || watch.message().await, ends).await;
+    let ended = patience
+        .awaited_first(what, async || watch.message().await, ends)
+        .await;
     let after = patience.awaited("the watch ends", watch.message()).await;
     assert!(after.unwrap().is_none(), "the watch ends once it says why");
     ended.why.expect("the watch says why it ended")
@@ -213,9 +237,17 @@ impl Viewer {
         greeting: api::Greeting,
     ) -> Result<Viewer, tonic::Status> {
         let (to, said) = mpsc::channel(64);
-        to.send(viewer_said(api::from_viewer::Event::Hello(greeting))).await.unwrap();
+        to.send(viewer_said(api::from_viewer::Event::Hello(greeting)))
+            .await
+            .unwrap();
         let from = mux.show(ReceiverStream::new(said)).await?.into_inner();
-        Ok(Viewer { refused: Vec::new(), closed: Vec::new(), screens: BTreeMap::new(), to, from })
+        Ok(Viewer {
+            refused: Vec::new(),
+            closed: Vec::new(),
+            screens: BTreeMap::new(),
+            to,
+            from,
+        })
     }
 
     pub async fn send(&self, said: api::from_viewer::Event) {
@@ -223,7 +255,9 @@ impl Viewer {
     }
 
     pub async fn show(&self, terminals: &[api::TerminalKey]) {
-        let showing = api::Showing { terminals: terminals.to_vec() };
+        let showing = api::Showing {
+            terminals: terminals.to_vec(),
+        };
         self.send(api::from_viewer::Event::Showing(showing)).await;
     }
 
@@ -234,19 +268,30 @@ impl Viewer {
     async fn type_line(&self, terminal: api::TerminalKey, text: &str) {
         for key in line_keys(text) {
             let (terminal, event) = (Some(terminal), Some(api::typed::Event::Key(key)));
-            self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;
+            self.send(api::from_viewer::Event::Typed(api::Typed {
+                terminal,
+                event,
+            }))
+            .await;
         }
     }
 
     pub async fn press_ctrl(&self, terminal: api::TerminalKey, character: char) {
         let key = api::Key {
             press: api::Press::Down.into(),
-            modifiers: Some(api::Modifiers { ctrl: true, ..api::Modifiers::default() }),
+            modifiers: Some(api::Modifiers {
+                ctrl: true,
+                ..api::Modifiers::default()
+            }),
             key: Some(api::key::Key::Character(character.into())),
             text: String::new(),
         };
         let (terminal, event) = (Some(terminal), Some(api::typed::Event::Key(key)));
-        self.send(api::from_viewer::Event::Typed(api::Typed { terminal, event })).await;
+        self.send(api::from_viewer::Event::Typed(api::Typed {
+            terminal,
+            event,
+        }))
+        .await;
     }
 
     pub async fn next(
@@ -256,7 +301,9 @@ impl Viewer {
     ) -> Result<Option<api::to_viewer::Event>, tonic::Status> {
         let screens = &self.screens;
         let awaited_and_seen = fmt::from_fn(|f| write!(f, "{what}, but {}", seen(screens)));
-        let next = patience.awaited(awaited_and_seen, self.from.message()).await;
+        let next = patience
+            .awaited(awaited_and_seen, self.from.message())
+            .await;
         let Some(message) = next? else {
             return Ok(None);
         };
@@ -270,7 +317,8 @@ impl Viewer {
     }
 
     pub async fn until(&mut self, what: &str, test: impl Fn(&Viewer) -> bool) {
-        self.until_found(what, |viewer| test(viewer).then_some(())).await;
+        self.until_found(what, |viewer| test(viewer).then_some(()))
+            .await;
     }
 
     async fn until_found<T>(&mut self, what: &str, find: impl Fn(&Viewer) -> Option<T>) -> T {
@@ -285,35 +333,54 @@ impl Viewer {
     }
 
     pub async fn until_row(&mut self, terminal: u32, text: &str) {
-        self.until(&format!("a row of terminal {terminal} reads {text:?}"), |viewer| {
-            viewer.rows_of(terminal).iter().any(|row| row == text)
-        })
+        self.until(
+            &format!("a row of terminal {terminal} reads {text:?}"),
+            |viewer| viewer.rows_of(terminal).iter().any(|row| row == text),
+        )
         .await;
     }
 
     pub async fn until_prompted(&mut self, terminal: u32) -> shell::Prompted {
         let what = format!("terminal {terminal}'s shell prompts");
-        self.until_found(&what, |viewer| shell::prompted(&viewer.screen_of(terminal))).await
+        self.until_found(&what, |viewer| shell::prompted(&viewer.screen_of(terminal)))
+            .await
     }
 
-    pub async fn type_at(&self, terminal: api::TerminalKey, prompted: &shell::Prompted, line: &str) -> shell::Typed {
+    pub async fn type_at(
+        &self,
+        terminal: api::TerminalKey,
+        prompted: &shell::Prompted,
+        line: &str,
+    ) -> shell::Typed {
         let typed = prompted.typed(line);
         self.type_line(terminal, typed.line()).await;
         typed
     }
 
     pub async fn until_said(&mut self, terminal: u32, typed: &shell::Typed) -> Vec<String> {
-        let what = format!("terminal {terminal} says what {:?} does, then prompts", typed.line());
-        self.until_found(&what, |viewer| typed.said(&viewer.screen_of(terminal)).map(<[String]>::to_vec)).await
+        let what = format!(
+            "terminal {terminal} says what {:?} does, then prompts",
+            typed.line()
+        );
+        self.until_found(&what, |viewer| {
+            typed
+                .said(&viewer.screen_of(terminal))
+                .map(<[String]>::to_vec)
+        })
+        .await
     }
 
     fn screen_of(&self, terminal: u32) -> shell::Screen {
         let rows = self.rows_of(terminal).to_vec();
-        let cursor = self.frame_of(terminal).and_then(|frame| frame.cursor.as_ref()).map(|cursor| shell::Cursor {
-            row: usize::try_from(cursor.row).unwrap(),
-            column: usize::try_from(cursor.column).unwrap(),
-        });
-        shell::Screen::new(rows, cursor).unwrap_or_else(|why| panic!("terminal {terminal}'s screen is broken: {why}"))
+        let cursor = self
+            .frame_of(terminal)
+            .and_then(|frame| frame.cursor.as_ref())
+            .map(|cursor| shell::Cursor {
+                row: usize::try_from(cursor.row).unwrap(),
+                column: usize::try_from(cursor.column).unwrap(),
+            });
+        shell::Screen::new(rows, cursor)
+            .unwrap_or_else(|why| panic!("terminal {terminal}'s screen is broken: {why}"))
     }
 
     pub fn rows_of(&self, terminal: u32) -> &[String] {
@@ -348,7 +415,7 @@ fn applied(screens: &mut Screens, frame: &api::Frame) {
         api::frame::Rows::Whole(whole) => {
             let rows = whole.lines.iter().map(line_text).collect();
             screens.insert(terminal, (rows, frame.clone()));
-        },
+        }
         api::frame::Rows::Changed(changed) => {
             let Some((rows, last)) = screens.get_mut(&terminal) else {
                 return;
@@ -358,7 +425,7 @@ fn applied(screens: &mut Screens, frame: &api::Frame) {
                 rows[index] = line_text(row.line.as_ref().unwrap());
             }
             *last = frame.clone();
-        },
+        }
     }
 }
 

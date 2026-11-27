@@ -17,17 +17,24 @@ pub enum Typos {
 impl Typos {
     pub fn found<T>(mut find: impl FnMut(Typos) -> Vec<T>) -> Vec<T> {
         let found = find(Typos::None);
-        if found.is_empty() { find(Typos::Forgiven) } else { found }
+        if found.is_empty() {
+            find(Typos::Forgiven)
+        } else {
+            found
+        }
     }
 
     fn allowed(self, term: &str) -> u16 {
-        assert!(term.len() <= TERM_BYTES_MAX, "a longer term is matched by no one");
+        assert!(
+            term.len() <= TERM_BYTES_MAX,
+            "a longer term is matched by no one"
+        );
         match self {
             Typos::None => 0,
             Typos::Forgiven => {
                 let typos = term.chars().count().div_euclid(TYPED_PER_TYPO);
                 u16::try_from(typos).expect("a bounded term's typos fit a u16")
-            },
+            }
         }
     }
 }
@@ -44,8 +51,11 @@ impl Fuzzy {
 
     pub fn anywhere(term: &str, typos: Typos) -> Self {
         let scoring = Scoring::default();
-        let at_start =
-            Scoring { prefix_bonus: scoring.delimiter_bonus, exact_match_bonus: 0, ..scoring };
+        let at_start = Scoring {
+            prefix_bonus: scoring.delimiter_bonus,
+            exact_match_bonus: 0,
+            ..scoring
+        };
         Self::scored(term, typos, at_start)
     }
 
@@ -53,7 +63,9 @@ impl Fuzzy {
         if term.len() > TERM_BYTES_MAX {
             return Fuzzy::TooLong;
         }
-        let config = Config::default().max_typos(Some(typos.allowed(term))).scoring(scoring);
+        let config = Config::default()
+            .max_typos(Some(typos.allowed(term)))
+            .scoring(scoring);
         Fuzzy::Matching(Box::new(RefCell::new(Matcher::new(term, &config))))
     }
 
@@ -71,7 +83,10 @@ impl Fuzzy {
         };
         let byte = |at: &u32| usize::try_from(*at).expect("a text's byte is a usize");
         let lit: Vec<usize> = found.indices.iter().map(byte).collect();
-        assert!(lit.iter().all(|byte| *byte < text.len()), "frizbee lights the text's own bytes");
+        assert!(
+            lit.iter().all(|byte| *byte < text.len()),
+            "frizbee lights the text's own bytes"
+        );
         let hit = |(at, c): &(usize, char)| {
             let bytes = *at..at + c.len_utf8();
             lit.iter().any(|byte| bytes.contains(byte))
@@ -98,7 +113,10 @@ mod tests {
         let find = |typed: &str| {
             Typos::found(|typos| {
                 let fuzzy = Fuzzy::new(typed, typos);
-                texts.into_iter().filter(|text| fuzzy.score(text).is_some()).collect::<Vec<_>>()
+                texts
+                    .into_iter()
+                    .filter(|text| fuzzy.score(text).is_some())
+                    .collect::<Vec<_>>()
             })
         };
         assert_eq!(find("lune-m"), ["lune-main"]);
@@ -111,13 +129,19 @@ mod tests {
         let long = "a".repeat(TERM_BYTES_MAX + 1);
         assert!(Fuzzy::new(&long, Typos::Forgiven).hits(&long).is_none());
         let longest = "a".repeat(TERM_BYTES_MAX);
-        assert!(Fuzzy::new(&longest, Typos::Forgiven).hits(&longest).is_some());
+        assert!(
+            Fuzzy::new(&longest, Typos::Forgiven)
+                .hits(&longest)
+                .is_some()
+        );
     }
 
     #[test]
     fn the_hits_are_characters_not_bytes() {
         let hits = |typed: &str, text: &str| {
-            Fuzzy::new(typed, Typos::None).hits(text).map(|(_, hits)| hits)
+            Fuzzy::new(typed, Typos::None)
+                .hits(text)
+                .map(|(_, hits)| hits)
         };
         assert_eq!(hits("fe", "café-fe"), Some(vec![5, 6]));
         assert_eq!(hits("é", "café"), Some(vec![3]));

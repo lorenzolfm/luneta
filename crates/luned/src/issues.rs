@@ -7,7 +7,7 @@ use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 use tonic::{Code, Status};
 
@@ -26,7 +26,9 @@ pub const GH: Duration = Duration::from_mins(1);
 
 const GIT: Duration = Duration::from_secs(30);
 
-pub const AT_MOST: Duration = WRITING.saturating_add(GH.saturating_mul(3)).saturating_add(GIT);
+pub const AT_MOST: Duration = WRITING
+    .saturating_add(GH.saturating_mul(3))
+    .saturating_add(GIT);
 
 const GH_UNAUTHENTICATED: i32 = 4;
 
@@ -35,7 +37,11 @@ const SHOWN: &str = "5";
 const TOOLS: &str = "Read,Grep,Glob";
 
 fn schema(labels: &[String]) -> String {
-    let label: Vec<Value> = labels.iter().map(|name| json!(name)).chain([Value::Null]).collect();
+    let label: Vec<Value> = labels
+        .iter()
+        .map(|name| json!(name))
+        .chain([Value::Null])
+        .collect();
     let properties = json!({
         "title": {"type": "string", "minLength": 1},
         "body": {"type": "string"},
@@ -110,7 +116,10 @@ impl OnGitHub {
             .split_once('/')
             .filter(named)
             .ok_or_else(|| format!("{spelled:?} is no repository's owner/name"))?;
-        Ok(OnGitHub { owner: owner.to_owned(), name: name.to_owned() })
+        Ok(OnGitHub {
+            owner: owner.to_owned(),
+            name: name.to_owned(),
+        })
     }
 
     #[must_use]
@@ -132,7 +141,10 @@ impl fmt::Display for OnGitHub {
 impl Remote {
     #[must_use]
     pub fn answer(self) -> IssueRepository {
-        IssueRepository { remote: self.name, repository: self.on.to_string() }
+        IssueRepository {
+            remote: self.name,
+            repository: self.on.to_string(),
+        }
     }
 
     pub fn of(answer: IssueRepository) -> Result<Remote, String> {
@@ -140,7 +152,10 @@ impl Remote {
         if remote.is_empty() {
             return Err(format!("a remote of {repository:?} has no name"));
         }
-        Ok(Remote { name: remote, on: OnGitHub::parse(&repository)? })
+        Ok(Remote {
+            name: remote,
+            on: OnGitHub::parse(&repository)?,
+        })
     }
 }
 
@@ -148,7 +163,7 @@ pub(crate) fn remotes(dir: &Directory) -> Result<Vec<Remote>, String> {
     match links::remotes_gh_reads(dir.as_str()) {
         Remotes::Listed(listed) | Remotes::InBare(listed) => {
             Ok(on_github(&listed, links::ssh_host))
-        },
+        }
         Remotes::Unlisted => Ok(Vec::new()),
         Remotes::Unsaid(why) => Err(format!("git did not say the remotes of {dir}: {why}")),
     }
@@ -183,9 +198,15 @@ fn on_github(listed: &str, mut ssh_host: impl FnMut(&str) -> Option<String>) -> 
         let Some((owner, repository)) = links::github_repository_of(url, &mut ssh_host) else {
             continue;
         };
-        let on = OnGitHub { owner: owner.to_owned(), name: repository.to_owned() };
+        let on = OnGitHub {
+            owner: owner.to_owned(),
+            name: repository.to_owned(),
+        };
         if remotes.iter().all(|remote| !remote.on.is(&on)) {
-            remotes.push(Remote { name: name.to_owned(), on });
+            remotes.push(Remote {
+                name: name.to_owned(),
+                on,
+            });
         }
     }
     remotes
@@ -197,13 +218,23 @@ impl Filing {
         if words.is_empty() {
             return Err("words: nothing said".to_owned());
         }
-        Ok(Filing { dir, on, words: words.to_owned() })
+        Ok(Filing {
+            dir,
+            on,
+            words: words.to_owned(),
+        })
     }
 
     pub fn of(request: FileIssueRequest) -> Result<(Option<On>, Filing), String> {
-        let FileIssueRequest { on, dir, words, repository } = request;
+        let FileIssueRequest {
+            on,
+            dir,
+            words,
+            repository,
+        } = request;
         let dir = Directory::parse(dir).map_err(|why| format!("dir: {why}"))?;
-        let repository = OnGitHub::parse(&repository).map_err(|why| format!("repository: {why}"))?;
+        let repository =
+            OnGitHub::parse(&repository).map_err(|why| format!("repository: {why}"))?;
         Ok((on, Filing::new(dir, repository, &words)?))
     }
 
@@ -221,12 +252,16 @@ impl Filing {
         let listing = ["label", "list", "--limit", "100", "--json", "name"];
         let listed = self.listed(&listing).map_err(Unfiled::Refused)?;
         let labels = names(&listed).map_err(Unfiled::Refused)?;
-        let mine = ["issue", "list", "--author", "@me", "--state", "all", "--limit", SHOWN];
+        let mine = [
+            "issue", "list", "--author", "@me", "--state", "all", "--limit", SHOWN,
+        ];
         let issues = self.listed(&[&mine[..], &["--json", "title,body,labels"]].concat());
         let issues = issues.map_err(Unfiled::Refused)?;
         let unread = unread(&self.dir);
         let told = told(&self.words, &listed, &issues);
-        let written = self.write(&told, &labels, &unread).map_err(Unfiled::Refused)?;
+        let written = self
+            .write(&told, &labels, &unread)
+            .map_err(Unfiled::Refused)?;
         self.create(&written)
     }
 
@@ -256,21 +291,36 @@ impl Filing {
         let minutes = WRITING.as_secs() / 60;
         match ran {
             Ran::Stuck => Err(format!("claude was still writing after {minutes} minutes")),
-            Ran::Ended { status, stdout, stderr } => {
+            Ran::Ended {
+                status,
+                stdout,
+                stderr,
+            } => {
                 if let Ok(record) = serde_json::from_slice(&stdout) {
                     return written(&record, labels);
                 }
-                let ran = Ran::Ended { status, stdout, stderr };
+                let ran = Ran::Ended {
+                    status,
+                    stdout,
+                    stderr,
+                };
                 let why = ran.answer_why_on_either().err();
                 let why = why.unwrap_or_else(|| "it said nothing it wrote".to_owned());
                 Err(format!("claude failed: {why}"))
-            },
+            }
         }
     }
 
     fn claude(&self, labels: &[String], settings: &Path) -> Command {
         let mut claude = Command::new("claude");
-        claude.args(["-p", "--model", MODEL, "--safe-mode", "--setting-sources", "user"]);
+        claude.args([
+            "-p",
+            "--model",
+            MODEL,
+            "--safe-mode",
+            "--setting-sources",
+            "user",
+        ]);
         claude.arg("--settings").arg(settings);
         claude.args(["--permission-mode", "dontAsk", "--tools", TOOLS]);
         claude.args(["--no-session-persistence", "--output-format", "json"]);
@@ -283,7 +333,14 @@ impl Filing {
     }
 
     fn create(&self, written: &Written) -> Result<Filed, Unfiled> {
-        let mut gh = self.gh(&["issue", "create", "--title", &written.title, "--body-file", "-"]);
+        let mut gh = self.gh(&[
+            "issue",
+            "create",
+            "--title",
+            &written.title,
+            "--body-file",
+            "-",
+        ]);
         if let Some(label) = &written.label {
             gh.args(["--label", label]);
         }
@@ -307,10 +364,14 @@ impl Filing {
                 } else {
                     Unfiled::InDoubt(said)
                 });
-            },
+            }
         };
         let said = String::from_utf8_lossy(&said);
-        let url = said.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or_default();
+        let url = said
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
+            .unwrap_or_default();
         Filed::page(url, &written.title).map_err(Unfiled::InDoubt)
     }
 }
@@ -343,7 +404,10 @@ impl Filed {
 
     #[must_use]
     pub fn answer(self) -> FileIssueResponse {
-        FileIssueResponse { url: self.link.url(), title: self.title }
+        FileIssueResponse {
+            url: self.link.url(),
+            title: self.title,
+        }
     }
 
     pub fn of(answer: FileIssueResponse) -> Result<Filed, String> {
@@ -358,7 +422,7 @@ impl Unfiled {
         match code {
             Some(Code::FailedPrecondition | Code::InvalidArgument | Code::Unimplemented) => {
                 Unfiled::Refused(why)
-            },
+            }
             _ => Unfiled::InDoubt(why),
         }
     }
@@ -384,10 +448,14 @@ fn written(record: &Value, labels: &[String]) -> Result<Written, String> {
     let failed = record["is_error"].as_bool() != Some(false) || record["subtype"] != "success";
     if failed {
         let said = Some(said).filter(|said| !said.is_empty());
-        let why = said.or_else(|| record["subtype"].as_str()).unwrap_or("the run failed");
+        let why = said
+            .or_else(|| record["subtype"].as_str())
+            .unwrap_or("the run failed");
         return Err(format!("claude failed: {why}"));
     }
-    let structured = record.get("structured_output").filter(|output| !output.is_null());
+    let structured = record
+        .get("structured_output")
+        .filter(|output| !output.is_null());
     let structured = match structured {
         Some(structured) => structured.clone(),
         None => unstructured(record, said)?,
@@ -399,9 +467,15 @@ fn written(record: &Value, labels: &[String]) -> Result<Written, String> {
         return Err("claude wrote an issue with no title".to_owned());
     }
     if let Some(label) = label.as_ref().filter(|label| !labels.contains(label)) {
-        return Err(format!("claude took the label {label:?}, which the repository has not"));
+        return Err(format!(
+            "claude took the label {label:?}, which the repository has not"
+        ));
     }
-    Ok(Written { title, body: body.trim().to_owned(), label })
+    Ok(Written {
+        title,
+        body: body.trim().to_owned(),
+        label,
+    })
 }
 
 fn unstructured(record: &Value, said: &str) -> Result<Value, String> {
@@ -415,12 +489,19 @@ fn unstructured(record: &Value, said: &str) -> Result<Value, String> {
 }
 
 fn said_as_issue(said: &str) -> Result<Value, String> {
-    let fenced = said.strip_prefix("```json").or_else(|| said.strip_prefix("```"));
-    let json = fenced.and_then(|fenced| fenced.strip_suffix("```")).unwrap_or(said);
+    let fenced = said
+        .strip_prefix("```json")
+        .or_else(|| said.strip_prefix("```"));
+    let json = fenced
+        .and_then(|fenced| fenced.strip_suffix("```"))
+        .unwrap_or(said);
     match serde_json::from_str(json.trim()) {
         Ok(issue @ Value::Object(_)) => Ok(issue),
         _ if said.is_empty() => Err("claude ended without writing an issue".to_owned()),
-        _ => Err(format!("claude wrote no issue, and said: {}", one_line(said))),
+        _ => Err(format!(
+            "claude wrote no issue, and said: {}",
+            one_line(said)
+        )),
     }
 }
 
@@ -464,19 +545,37 @@ fn filed_none(why: &str, status: ExitStatus) -> bool {
 
 fn unread(dir: &Directory) -> Vec<String> {
     let said = ignored(dir).unwrap_or_else(|why| {
-        log::say(&format!("issue: git did not say what it ignores in {dir}: {why}"));
+        log::say(&format!(
+            "issue: git did not say what it ignores in {dir}: {why}"
+        ));
         b"./\0".to_vec()
     });
     let real = fs::canonicalize(dir.as_str()).ok();
-    let real = real.as_deref().and_then(Path::to_str).filter(|real| *real != dir.as_str());
+    let real = real
+        .as_deref()
+        .and_then(Path::to_str)
+        .filter(|real| *real != dir.as_str());
     let bases = [Some(dir.as_str()), real];
-    bases.into_iter().flatten().flat_map(|base| rules(base, &said)).collect()
+    bases
+        .into_iter()
+        .flatten()
+        .flat_map(|base| rules(base, &said))
+        .collect()
 }
 
 fn ignored(dir: &Directory) -> Result<Vec<u8>, String> {
     let mut git = git::Git::at(dir.as_str(), "ls-files");
-    git.args(["-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
-    match git.run(GIT).map_err(|error| unrun_in("git", None, &error))? {
+    git.args([
+        "-z",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+    ]);
+    match git
+        .run(GIT)
+        .map_err(|error| unrun_in("git", None, &error))?
+    {
         Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
         Ran::Ended { status, stderr, .. } => Err(refused(&stderr, status)),
         Ran::Stuck => Err(format!("it was still listing after {}s", GIT.as_secs())),
@@ -486,14 +585,19 @@ fn ignored(dir: &Directory) -> Result<Vec<u8>, String> {
 fn rules(base: &str, ignored: &[u8]) -> Vec<String> {
     let base = base.trim_end_matches('/');
     let mut paths = Vec::new();
-    for listed in ignored.split(|byte| *byte == 0).filter(|listed| !listed.is_empty()) {
+    for listed in ignored
+        .split(|byte| *byte == 0)
+        .filter(|listed| !listed.is_empty())
+    {
         let Ok(listed) = std::str::from_utf8(listed) else {
             return vec![denied(&format!("{base}/"))];
         };
         paths.push(listed.strip_prefix("./").unwrap_or(listed));
     }
-    let mut rules: Vec<String> =
-        paths.iter().map(|path| denied(&format!("{base}/{path}"))).collect();
+    let mut rules: Vec<String> = paths
+        .iter()
+        .map(|path| denied(&format!("{base}/{path}")))
+        .collect();
     rules.push(format!("Read(/{}/**/.git/**)", escaped(base)));
     rules
 }
@@ -515,7 +619,10 @@ fn escaped(path: &str) -> String {
 }
 
 fn settings(unread: &[String]) -> io::Result<NamedTempFile> {
-    let mut file = tempfile::Builder::new().prefix("lune-issue-").suffix(".json").tempfile()?;
+    let mut file = tempfile::Builder::new()
+        .prefix("lune-issue-")
+        .suffix(".json")
+        .tempfile()?;
     let settings = json!({"permissions": {"deny": unread}});
     file.write_all(settings.to_string().as_bytes())?;
     file.flush()?;
@@ -561,7 +668,10 @@ mod tests {
     }
 
     fn args(command: &Command) -> Vec<String> {
-        command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
@@ -569,7 +679,14 @@ mod tests {
         let labels = ["bug".to_owned(), "enhancement".to_owned()];
         let claude = filing().claude(&labels, Path::new("/tmp/lune-issue-1.json"));
         assert_eq!(claude.get_current_dir(), Some(Path::new("/w/lune/main")));
-        let model = ["-p", "--model", "sonnet", "--safe-mode", "--setting-sources", "user"];
+        let model = [
+            "-p",
+            "--model",
+            "sonnet",
+            "--safe-mode",
+            "--setting-sources",
+            "user",
+        ];
         let settings = ["--settings", "/tmp/lune-issue-1.json"];
         let permissions = ["--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob"];
         let output = ["--no-session-persistence", "--output-format", "json"];
@@ -578,7 +695,9 @@ mod tests {
         let expected = [&model[..], &settings, &permissions, &output, &schema].concat();
         assert_eq!(args(&claude), expected);
         let removed = |name: &str| {
-            claude.get_envs().any(|(key, value)| key.to_str() == Some(name) && value.is_none())
+            claude
+                .get_envs()
+                .any(|(key, value)| key.to_str() == Some(name) && value.is_none())
         };
         let terminal = ["LUNE_MUX_TERMINAL", "LUNE_MUX_TERMINAL_MADE"];
         for name in terminal.into_iter().chain(git::REPOSITORY_VARS) {
@@ -587,7 +706,10 @@ mod tests {
         assert_eq!(filing().words, "a red button");
         let schema: Value = serde_json::from_str(&asked).unwrap();
         assert_eq!(schema["required"], json!(["title", "body", "label"]));
-        assert_eq!(schema["properties"]["label"], json!({"enum": ["bug", "enhancement", null]}));
+        assert_eq!(
+            schema["properties"]["label"],
+            json!({"enum": ["bug", "enhancement", null]})
+        );
         let unlabelled: Value = serde_json::from_str(&super::schema(&[])).unwrap();
         assert_eq!(unlabelled["properties"]["label"], json!({"enum": [null]}));
     }
@@ -597,7 +719,11 @@ mod tests {
         let listed = r#"[{"name":"bug"},{"name":"ui"}]"#;
         assert_eq!(names(listed), Ok(vec!["bug".to_owned(), "ui".to_owned()]));
         assert_eq!(names("[]"), Ok(Vec::new()));
-        assert!(names("no labels").unwrap_err().starts_with("gh listed labels lune"));
+        assert!(
+            names("no labels")
+                .unwrap_err()
+                .starts_with("gh listed labels lune")
+        );
     }
 
     #[test]
@@ -618,12 +744,24 @@ mod tests {
         let asked = filing().asked(None);
         assert_eq!(asked.repository, "o/lune");
         assert_eq!(Filing::of(asked.clone()), Ok((None, filing())));
-        let relative = FileIssueRequest { dir: "w".to_owned(), ..asked.clone() };
-        assert_eq!(Filing::of(relative), Err("dir: \"w\" is no absolute path".to_owned()));
-        let nowhere = FileIssueRequest { repository: String::new(), ..asked.clone() };
+        let relative = FileIssueRequest {
+            dir: "w".to_owned(),
+            ..asked.clone()
+        };
+        assert_eq!(
+            Filing::of(relative),
+            Err("dir: \"w\" is no absolute path".to_owned())
+        );
+        let nowhere = FileIssueRequest {
+            repository: String::new(),
+            ..asked.clone()
+        };
         let why = "repository: \"\" is no repository's owner/name".to_owned();
         assert_eq!(Filing::of(nowhere), Err(why));
-        let blank = FileIssueRequest { words: " ".to_owned(), ..asked };
+        let blank = FileIssueRequest {
+            words: " ".to_owned(),
+            ..asked
+        };
         assert!(Filing::of(blank).is_err());
     }
 
@@ -639,7 +777,9 @@ mod tests {
         let ssh_host = |host: &str| (host == "github-work").then(|| "github.com".to_owned());
         let names = |listed: &str| -> Vec<(String, String)> {
             let remotes = on_github(listed, ssh_host).into_iter();
-            remotes.map(|remote| (remote.name, remote.on.to_string())).collect()
+            remotes
+                .map(|remote| (remote.name, remote.on.to_string()))
+                .collect()
         };
         let pair = |name: &str, on: &str| (name.to_owned(), on.to_owned());
         let fork = "remote.mine.url git@github-work:me/cdk.git\n\
@@ -647,13 +787,19 @@ mod tests {
                     remote.lab.url git@gitlab.com:o/cdk.git\n\
                     remote.upstream.url https://github.com/cashubtc/cdk\n\
                     remote.again.url https://github.com/CashuBTC/CDK.git\n";
-        assert_eq!(names(fork), [
-            pair("upstream", "cashubtc/cdk"),
-            pair("origin", "lorenzolfm/cdk"),
-            pair("mine", "me/cdk"),
-        ]);
+        assert_eq!(
+            names(fork),
+            [
+                pair("upstream", "cashubtc/cdk"),
+                pair("origin", "lorenzolfm/cdk"),
+                pair("mine", "me/cdk"),
+            ]
+        );
         let set = format!("{fork}remote.origin.gh-resolved base\n");
-        let first = [pair("origin", "lorenzolfm/cdk"), pair("upstream", "cashubtc/cdk")];
+        let first = [
+            pair("origin", "lorenzolfm/cdk"),
+            pair("upstream", "cashubtc/cdk"),
+        ];
         assert_eq!(names(&set)[..2], first);
         assert_eq!(names("remote.lab.url git@gitlab.com:o/cdk.git\n"), []);
         assert_eq!(names(""), []);
@@ -661,13 +807,22 @@ mod tests {
 
     #[test]
     fn a_daemon_s_remote_reads_as_it_was() {
-        let remote = Remote { name: "upstream".to_owned(), on: on("cashubtc/cdk") };
+        let remote = Remote {
+            name: "upstream".to_owned(),
+            on: on("cashubtc/cdk"),
+        };
         assert_eq!(Remote::of(remote.clone().answer()), Ok(remote.clone()));
-        let nameless = IssueRepository { remote: String::new(), ..remote.clone().answer() };
+        let nameless = IssueRepository {
+            remote: String::new(),
+            ..remote.clone().answer()
+        };
         assert!(Remote::of(nameless).unwrap_err().contains("has no name"));
         for spelled in ["cashubtc", "cashubtc/cdk/x", "/cdk", "o/..", "o n/cdk"] {
             let repository = spelled.to_owned();
-            let answer = IssueRepository { repository, ..remote.clone().answer() };
+            let answer = IssueRepository {
+                repository,
+                ..remote.clone().answer()
+            };
             assert!(Remote::of(answer).is_err(), "{spelled}");
         }
         assert!(on("CashuBTC/CDK").is(&on("cashubtc/cdk")));
@@ -685,7 +840,11 @@ mod tests {
         let wrote =
             ended(json!({"title": " Red\n button ", "body": "It is red.\n", "label": "bug"}));
         let label = Some("bug".to_owned());
-        let red = Written { title: "Red button".to_owned(), body: "It is red.".to_owned(), label };
+        let red = Written {
+            title: "Red button".to_owned(),
+            body: "It is red.".to_owned(),
+            label,
+        };
         assert_eq!(written(&wrote), Ok(red));
         let unlabelled = ended(json!({"title": "Red", "body": "", "label": null}));
         assert_eq!(written(&unlabelled).unwrap().label, None);
@@ -693,37 +852,51 @@ mod tests {
         let why = "claude took the label \"bugs\", which the repository has not".to_owned();
         assert_eq!(written(&mislabelled), Err(why));
         let untitled = ended(json!({"title": " ", "body": "", "label": null}));
-        assert_eq!(written(&untitled), Err("claude wrote an issue with no title".to_owned()));
+        assert_eq!(
+            written(&untitled),
+            Err("claude wrote an issue with no title".to_owned())
+        );
         let misshapen = ended(json!({"title": "Red"}));
-        assert!(written(&misshapen).unwrap_err().starts_with("claude wrote no issue lune reads"));
+        assert!(
+            written(&misshapen)
+                .unwrap_err()
+                .starts_with("claude wrote no issue lune reads")
+        );
         let unwritten = json!({"type": "result", "subtype": "success", "is_error": false});
         let why = "claude ended without writing an issue".to_owned();
         assert_eq!(written(&unwritten), Err(why.clone()));
         let empty = json!({"type": "result", "subtype": "success", "is_error": false,
                            "result": " ", "structured_output": null});
         assert_eq!(written(&empty), Err(why));
-        let talked = |said: &str| {
-            json!({"type": "result", "subtype": "success", "is_error": false, "result": said})
-        };
+        let talked = |said: &str| json!({"type": "result", "subtype": "success", "is_error": false, "result": said});
         let why = "claude wrote no issue, and said: Which button? The red one?".to_owned();
         assert_eq!(written(&talked("Which button?\n\nThe red one?")), Err(why));
         let issue = r#"{"title": "Red", "body": "It is red.", "label": "bug"}"#;
-        for said in [issue.to_owned(), format!("```json\n{issue}\n```"), format!("```\n{issue}```")]
-        {
+        for said in [
+            issue.to_owned(),
+            format!("```json\n{issue}\n```"),
+            format!("```\n{issue}```"),
+        ] {
             assert_eq!(written(&talked(&said)).unwrap().title, "Red", "{said}");
         }
         let misspelled = r#"{"title": "Red", "body": "", "labels": ["bug"]}"#;
         let unlabelled = r#"{"title": "Red", "body": ""}"#;
         for said in [misspelled, unlabelled] {
             let why = written(&talked(said)).unwrap_err();
-            assert!(why.starts_with("claude wrote no issue lune reads"), "{said}: {why}");
+            assert!(
+                why.starts_with("claude wrote no issue lune reads"),
+                "{said}: {why}"
+            );
         }
         let failed = json!({"type": "result", "subtype": "success", "is_error": true,
                             "result": "Not logged in · Please run /login"});
         let why = "claude failed: Not logged in · Please run /login".to_owned();
         assert_eq!(written(&failed), Err(why));
         let maxed = json!({"type": "result", "subtype": "error_max_turns", "is_error": true});
-        assert_eq!(written(&maxed), Err("claude failed: error_max_turns".to_owned()));
+        assert_eq!(
+            written(&maxed),
+            Err("claude failed: error_max_turns".to_owned())
+        );
     }
 
     #[test]
@@ -746,27 +919,39 @@ mod tests {
     #[test]
     fn the_agent_may_read_nothing_git_ignores_nor_a_git_directory() {
         let ignored = b".env\0target/\0a*b(1).secret\0";
-        assert_eq!(rules("/w/n/", ignored), [
-            "Read(//w/n/.env)",
-            "Read(//w/n/target/**)",
-            r"Read(//w/n/a\*b\(1\).secret)",
-            "Read(//w/n/**/.git/**)",
-        ]);
+        assert_eq!(
+            rules("/w/n/", ignored),
+            [
+                "Read(//w/n/.env)",
+                "Read(//w/n/target/**)",
+                r"Read(//w/n/a\*b\(1\).secret)",
+                "Read(//w/n/**/.git/**)",
+            ]
+        );
         assert_eq!(rules("/w/[n]", b""), [r"Read(//w/\[n\]/**/.git/**)"]);
-        assert_eq!(rules("/w/n", b"./\0.env\0"), [
-            "Read(//w/n/**)",
-            "Read(//w/n/.env)",
-            "Read(//w/n/**/.git/**)",
-        ]);
+        assert_eq!(
+            rules("/w/n", b"./\0.env\0"),
+            [
+                "Read(//w/n/**)",
+                "Read(//w/n/.env)",
+                "Read(//w/n/**/.git/**)",
+            ]
+        );
         assert_eq!(rules("/w/n", b".env\0\xff.env\0"), ["Read(//w/n/**)"]);
         let bare = tempfile::tempdir().unwrap();
         let real = bare.path().canonicalize().unwrap().display().to_string();
         git::scratch(&real, &["init", "--quiet", "--bare"]).unwrap();
         let all = denied(&format!("{real}/"));
-        assert!(unread(&Directory::parse(real).unwrap()).contains(&all), "{all}");
+        assert!(
+            unread(&Directory::parse(real).unwrap()).contains(&all),
+            "{all}"
+        );
         let file = settings(&["Read(//w/n/.env)".to_owned()]).unwrap();
         let written: Value = serde_json::from_slice(&fs::read(file.path()).unwrap()).unwrap();
-        assert_eq!(written, json!({"permissions": {"deny": ["Read(//w/n/.env)"]}}));
+        assert_eq!(
+            written,
+            json!({"permissions": {"deny": ["Read(//w/n/.env)"]}})
+        );
     }
 
     #[test]
@@ -800,7 +985,10 @@ mod tests {
         use std::os::unix::process::ExitStatusExt as _;
         let status = std::process::ExitStatus::from_raw(1 << 8);
         let said = b"\nCreating issue in o/n\n\ncould not add label: 'bugs' not found\n";
-        assert_eq!(refused(said, status), "could not add label: 'bugs' not found");
+        assert_eq!(
+            refused(said, status),
+            "could not add label: 'bugs' not found"
+        );
         assert_eq!(refused(b"", status), "exit status: 1");
     }
 
@@ -812,10 +1000,19 @@ mod tests {
         assert_eq!(said, (355, "Red button", url.clone()));
         assert_eq!(Filed::of(filed.clone().answer()), Ok(filed.clone()));
         let pull = "https://github.com/o/n/pull/355".to_owned();
-        let pageless = FileIssueResponse { url: pull, ..filed.clone().answer() };
+        let pageless = FileIssueResponse {
+            url: pull,
+            ..filed.clone().answer()
+        };
         assert!(Filed::of(pageless).unwrap_err().contains("no issue's page"));
-        let untitled = FileIssueResponse { title: " ".to_owned(), ..filed.answer() };
-        assert_eq!(Filed::of(untitled), Err("issue #355 has no title".to_owned()));
+        let untitled = FileIssueResponse {
+            title: " ".to_owned(),
+            ..filed.answer()
+        };
+        assert_eq!(
+            Filed::of(untitled),
+            Err("issue #355 has no title".to_owned())
+        );
     }
 
     #[test]
@@ -828,11 +1025,28 @@ mod tests {
             assert_eq!(read, unfiled);
         }
         let why = || "w".to_owned();
-        for code in [Code::FailedPrecondition, Code::InvalidArgument, Code::Unimplemented] {
-            assert_eq!(Unfiled::of(why(), Some(code)), Unfiled::Refused(why()), "{code:?}");
+        for code in [
+            Code::FailedPrecondition,
+            Code::InvalidArgument,
+            Code::Unimplemented,
+        ] {
+            assert_eq!(
+                Unfiled::of(why(), Some(code)),
+                Unfiled::Refused(why()),
+                "{code:?}"
+            );
         }
-        for code in [Some(Code::Unavailable), Some(Code::Internal), Some(Code::Unknown), None] {
-            assert_eq!(Unfiled::of(why(), code), Unfiled::InDoubt(why()), "{code:?}");
+        for code in [
+            Some(Code::Unavailable),
+            Some(Code::Internal),
+            Some(Code::Unknown),
+            None,
+        ] {
+            assert_eq!(
+                Unfiled::of(why(), code),
+                Unfiled::InDoubt(why()),
+                "{code:?}"
+            );
         }
     }
 }

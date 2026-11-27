@@ -26,19 +26,21 @@ async fn watch(folder: PathBuf, events: Sender<Event>) {
     loop {
         let reaching = Instant::now();
         let failure = match daemon::current(&folder).await {
-            Ok(Current { daemon, .. }) => match daemon.watching(luned::ANSWER, LocalWatch::Window) {
-                Ok(mut watching) => loop {
-                    match watching.next().await {
-                        Ok(watched) => {
-                            if events.send(Event::Daemon(Ok(watched.host))).is_err() {
-                                return;
+            Ok(Current { daemon, .. }) => {
+                match daemon.watching(luned::ANSWER, LocalWatch::Window) {
+                    Ok(mut watching) => loop {
+                        match watching.next().await {
+                            Ok(watched) => {
+                                if events.send(Event::Daemon(Ok(watched.host))).is_err() {
+                                    return;
+                                }
                             }
-                        },
-                        Err(error) => break causes(&error),
-                    }
-                },
-                Err(unsent) => unsent.to_string(),
-            },
+                            Err(error) => break causes(&error),
+                        }
+                    },
+                    Err(unsent) => unsent.to_string(),
+                }
+            }
             Err(why) => why,
         };
         if events.send(Event::Daemon(Err(failure))).is_err() {

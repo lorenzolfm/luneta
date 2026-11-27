@@ -1,6 +1,6 @@
 mod actions;
-mod agreed;
 mod agents;
+mod agreed;
 mod alerts;
 mod aloud;
 mod answers;
@@ -116,7 +116,8 @@ enum Command {
 #[must_use]
 pub fn main() -> ExitCode {
     let cli = Cli::parse();
-    let folder: Result<PathBuf, String> = folder::find().map_err(|unfound| format!("{unfound}, to find luned in"));
+    let folder: Result<PathBuf, String> =
+        folder::find().map_err(|unfound| format!("{unfound}, to find luned in"));
     let Some(command) = cli.command else {
         return host::run(cli.name.as_deref(), folder);
     };
@@ -127,9 +128,9 @@ pub fn main() -> ExitCode {
                 Err(error) => {
                     eprintln!("lune: {}: {error}", socket.display());
                     ExitCode::FAILURE
-                },
+                }
             };
-        },
+        }
         Command::Asked(command) => command,
     };
     match folder {
@@ -137,7 +138,7 @@ pub fn main() -> ExitCode {
         Err(why) => {
             eprintln!("lune: {why}");
             ExitCode::FAILURE
-        },
+        }
     }
 }
 
@@ -154,8 +155,9 @@ mod tests {
 
     const BY_THE_USER: &str = "## What the user does in lune\n";
 
-    const KEY_WORDS: [&str; 9] =
-        ["Ctrl", "Alt", "Shift", "Super", "Tab", "Enter", "Esc", "BS", "Space"];
+    const KEY_WORDS: [&str; 9] = [
+        "Ctrl", "Alt", "Shift", "Super", "Tab", "Enter", "Esc", "BS", "Space",
+    ];
 
     struct Read {
         prose: String,
@@ -169,32 +171,52 @@ mod tests {
     }
 
     fn listed(cli: &clap::Command) -> impl Iterator<Item = &clap::Command> {
-        let visible = cli.get_subcommands().filter(|command| !command.is_hide_set());
+        let visible = cli
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set());
         visible.filter(|command| command.get_name() != "help")
     }
 
     fn lists(command: &clap::Command, flag: &str) -> bool {
         let spelled = |argument: &clap::Arg| argument.get_long() == Some(flag);
-        command.get_arguments().any(|argument| spelled(argument) && !argument.is_hide_set())
+        command
+            .get_arguments()
+            .any(|argument| spelled(argument) && !argument.is_hide_set())
     }
 
     fn flags_listed(command: &clap::Command) -> impl Iterator<Item = &str> {
         let builtin = |argument: &&clap::Arg| {
-            let helps = matches!(argument.get_action(), ArgAction::Help | ArgAction::HelpShort);
-            helps || matches!(argument.get_action(), ArgAction::HelpLong | ArgAction::Version)
+            let helps = matches!(
+                argument.get_action(),
+                ArgAction::Help | ArgAction::HelpShort
+            );
+            helps
+                || matches!(
+                    argument.get_action(),
+                    ArgAction::HelpLong | ArgAction::Version
+                )
         };
-        let shown = command.get_arguments().filter(|argument| !argument.is_hide_set());
-        shown.filter(move |argument| !builtin(argument)).filter_map(clap::Arg::get_long)
+        let shown = command
+            .get_arguments()
+            .filter(|argument| !argument.is_hide_set());
+        shown
+            .filter(move |argument| !builtin(argument))
+            .filter_map(clap::Arg::get_long)
     }
 
     fn long(word: &str) -> Option<&str> {
         let (_, flag) = word.split_once("--")?;
-        let flag = flag.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').next();
+        let flag = flag
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .next();
         flag.filter(|flag| !flag.is_empty())
     }
 
     fn spans(text: &str) -> impl Iterator<Item = String> + '_ {
-        text.split('`').skip(1).step_by(2).map(|span| span.replace('\n', " "))
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .map(|span| span.replace('\n', " "))
     }
 
     fn read(skill: &str) -> Read {
@@ -208,32 +230,44 @@ mod tests {
                     let known = matches!(info, "sh" | "text");
                     assert!(known, "the skill opens a {info:?} block, not sh or text");
                     fence = Some(info);
-                },
+                }
                 (Some(_), Some(_)) => fence = None,
                 (Some("sh"), None) => {
                     let (command, comment) = line.split_once(" # ").unwrap_or((line, ""));
                     shown.push(command.to_owned());
                     let paired = comment.matches('`').count().is_multiple_of(2);
-                    assert!(paired, "the skill's comment {comment:?} has a backtick unpaired");
+                    assert!(
+                        paired,
+                        "the skill's comment {comment:?} has a backtick unpaired"
+                    );
                     shown.extend(spans(comment));
-                },
-                (Some(_), None) => {},
+                }
+                (Some(_), None) => {}
                 (None, None) => {
                     let tilde = line.trim_start().starts_with("~~~");
                     assert!(!tilde, "the skill opens a ~~~ block, not a ``` one");
                     let indented = line.starts_with("    ") || line.starts_with('\t');
-                    assert!(!indented, "the skill indents {line:?} as code, in no ``` block");
+                    assert!(
+                        !indented,
+                        "the skill indents {line:?} as code, in no ``` block"
+                    );
                     prose.push_str(line);
                     prose.push('\n');
-                },
+                }
             }
         }
         assert!(fence.is_none(), "the skill leaves a code block open");
         let ticks = prose.matches('`').count();
         let paired = ticks.is_multiple_of(2);
-        assert!(paired, "the skill's prose has {ticks} backticks, one unpaired");
+        assert!(
+            paired,
+            "the skill's prose has {ticks} backticks, one unpaired"
+        );
         shown.extend(spans(&prose));
-        let shown = shown.into_iter().map(|said| said.trim().to_owned()).collect();
+        let shown = shown
+            .into_iter()
+            .map(|said| said.trim().to_owned())
+            .collect();
         Read { prose, shown }
     }
 
@@ -263,7 +297,8 @@ mod tests {
     fn verb_of(said: &str) -> Option<&str> {
         let verb = said.split_whitespace().nth(1)?;
         let verb = verb.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
-        verb.starts_with(|c: char| c.is_ascii_lowercase()).then_some(verb)
+        verb.starts_with(|c: char| c.is_ascii_lowercase())
+            .then_some(verb)
     }
 
     fn unlisted(skill: &str) -> Vec<String> {
@@ -273,7 +308,9 @@ mod tests {
             let Some(verb) = verb_of(&said) else {
                 continue;
             };
-            let Some(command) = cli.find_subcommand(verb).filter(|command| !command.is_hide_set())
+            let Some(command) = cli
+                .find_subcommand(verb)
+                .filter(|command| !command.is_hide_set())
             else {
                 unlisted.push(format!("lune {verb}"));
                 continue;
@@ -308,7 +345,9 @@ mod tests {
                 unnamed.push(format!("lune {verb}"));
                 continue;
             }
-            let flags = with.iter().flat_map(|said| said.split_whitespace().filter_map(long));
+            let flags = with
+                .iter()
+                .flat_map(|said| said.split_whitespace().filter_map(long));
             let flags: Vec<&str> = flags.collect();
             let unflagged = flags_listed(command).filter(|flag| !flags.contains(flag));
             unnamed.extend(unflagged.map(|flag| format!("lune {verb} --{flag}")));
@@ -319,21 +358,30 @@ mod tests {
     fn unlabelled(skill: &str) -> Vec<String> {
         let section = skill.split_once(BY_THE_USER).map(|(_, section)| section);
         let section = section.expect("the skill says what the user does in lune");
-        let section = section.split_once("\n## ").map_or(section, |(section, _)| section);
+        let section = section
+            .split_once("\n## ")
+            .map_or(section, |(section, _)| section);
         let marks = section.matches('"').count();
         assert!(marks > 0, "the skill quotes no action of lune's by name");
         let paired = marks.is_multiple_of(2);
-        assert!(paired, "the skill's actions have {marks} quote marks, one unpaired");
+        assert!(
+            paired,
+            "the skill's actions have {marks} quote marks, one unpaired"
+        );
         let listed = Action::ALL.into_iter().filter(|action| action.in_palette());
         let labels: Vec<&str> = listed.map(|action| action.spec().name).collect();
         let quoted = section.split('"').skip(1).step_by(2);
         let quoted = quoted.map(|name| name.split_whitespace().collect::<Vec<_>>().join(" "));
-        quoted.filter(|name| !labels.contains(&name.as_str())).collect()
+        quoted
+            .filter(|name| !labels.contains(&name.as_str()))
+            .collect()
     }
 
     fn slug(heading: &str) -> String {
         let kept = heading.trim().to_lowercase();
-        let kept = kept.chars().filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'));
+        let kept = kept
+            .chars()
+            .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'));
         kept.map(|c| if c == ' ' { '-' } else { c }).collect()
     }
 
@@ -342,29 +390,47 @@ mod tests {
         let headings = prose.lines().filter(|line| line.starts_with('#'));
         let headings = headings.map(|line| slug(line.trim_start_matches('#')));
         let headings: Vec<String> = headings.collect();
-        let anchors = prose.split("](#").skip(1).filter_map(|rest| rest.split_once(')'));
+        let anchors = prose
+            .split("](#")
+            .skip(1)
+            .filter_map(|rest| rest.split_once(')'));
         let anchors = anchors.map(|(anchor, _)| anchor.to_owned());
-        anchors.filter(|anchor| !headings.contains(anchor)).collect()
+        anchors
+            .filter(|anchor| !headings.contains(anchor))
+            .collect()
     }
 
     fn keyed(said: &str) -> bool {
         let one = |word: &str| word.len() == 1 && word.chars().all(|c| c.is_ascii_alphanumeric());
-        said.split(' ').all(|word| KEY_WORDS.contains(&word) || one(word))
+        said.split(' ')
+            .all(|word| KEY_WORDS.contains(&word) || one(word))
     }
 
     fn unbound(skill: &str) -> Vec<String> {
         let origins = [Origin::Sidebar, Origin::Views];
         let spelled = |action| origins.map(|origin| menu::spelled(action, origin));
         let spelled = Action::ALL.into_iter().flat_map(spelled);
-        let moves = menu::MOVES.iter().chain(&menu::MENU_MOVES).map(|(label, _)| label.to_string());
+        let moves = menu::MOVES
+            .iter()
+            .chain(&menu::MENU_MOVES)
+            .map(|(label, _)| label.to_string());
         let bound: Vec<String> = spelled.chain(moves).collect();
-        shown(skill).into_iter().filter(|said| keyed(said) && !bound.contains(said)).collect()
+        shown(skill)
+            .into_iter()
+            .filter(|said| keyed(said) && !bound.contains(said))
+            .collect()
     }
 
     fn exits(skill: &str) -> BTreeSet<u8> {
         let skill = skill.split_whitespace().collect::<Vec<_>>().join(" ");
-        let after = ["exits ", "Exit "].into_iter().flat_map(|word| skill.split(word).skip(1));
-        let digits = |rest: &str| rest.chars().take_while(char::is_ascii_digit).collect::<String>();
+        let after = ["exits ", "Exit "]
+            .into_iter()
+            .flat_map(|word| skill.split(word).skip(1));
+        let digits = |rest: &str| {
+            rest.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        };
         let codes = after.map(digits);
         codes.filter_map(|code| code.parse().ok()).collect()
     }
@@ -389,11 +455,21 @@ mod tests {
         let why = "a verb gone, in a comment or past the span's start, a flag it lacks, a hidden \
                    flag, and a flag no command lists";
         assert_eq!(unlisted(stale), said, "{why}");
-        assert!(unnamed(stale).contains(&"lune agents".to_owned()), "{:?}", unnamed(stale));
+        assert!(
+            unnamed(stale).contains(&"lune agents".to_owned()),
+            "{:?}",
+            unnamed(stale)
+        );
         let flags = unnamed("Run `lune say <text>`.\n");
         let unflagged = ["lune say --now".to_owned(), "lune say --stop".to_owned()];
-        assert!(unflagged.iter().all(|flag| flags.contains(flag)), "{flags:?}");
-        assert!(!flags.iter().any(|flag| flag.ends_with("--help")), "{flags:?}");
+        assert!(
+            unflagged.iter().all(|flag| flags.contains(flag)),
+            "{flags:?}"
+        );
+        assert!(
+            !flags.iter().any(|flag| flag.ends_with("--help")),
+            "{flags:?}"
+        );
     }
 
     #[test]
@@ -428,7 +504,11 @@ mod tests {
         assert_eq!(unanchored(SKILL), Vec::<String>::new());
         let stale = "See [it](#reset-lune) and [that](#merged-worktrees).\n\n## Merged \
                      worktrees\n\n```text\n## Reset lune\n```\n";
-        assert_eq!(unanchored(stale), ["reset-lune"], "a heading in a block is no heading");
+        assert_eq!(
+            unanchored(stale),
+            ["reset-lune"],
+            "a heading in a block is no heading"
+        );
     }
 
     #[test]
@@ -444,11 +524,18 @@ mod tests {
     fn the_lune_skill_quotes_what_lune_says_and_how_it_exits() {
         let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
         let says = [rebase::IN_DOUBT, prune::UNTOLD, start::ELSEWHERE];
-        let unsaid: Vec<&str> = says.into_iter().filter(|said| !skill.contains(said)).collect();
+        let unsaid: Vec<&str> = says
+            .into_iter()
+            .filter(|said| !skill.contains(said))
+            .collect();
         assert_eq!(unsaid, Vec::<&str>::new());
         let codes = [0, 1, agreed::PLANNED, start::UNFINISHED, daemon::NONE_RUNS];
         assert_eq!(exits(SKILL), BTreeSet::from(codes));
         let stale = "It exits\n7, and with `--yes` it exits 3. Exit 1 means it failed.\n";
-        assert_eq!(exits(stale), BTreeSet::from([1, 3, 7]), "a code across a line");
+        assert_eq!(
+            exits(stale),
+            BTreeSet::from([1, 3, 7]),
+            "a code across a line"
+        );
     }
 }

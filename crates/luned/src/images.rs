@@ -38,12 +38,19 @@ impl Png {
 
     pub fn asked(self, on: Option<On>) -> impl Stream<Item = KeepImageRequest> + Send + 'static {
         let Png(bytes) = self;
-        let image = Image { on, size: bytes.len() as u64 };
-        let image = KeepImageRequest { part: Some(Part::Image(image)) };
+        let image = Image {
+            on,
+            size: bytes.len() as u64,
+        };
+        let image = KeepImageRequest {
+            part: Some(Part::Image(image)),
+        };
         let parts = (0..bytes.len().div_ceil(PART_BYTES)).map(move |part| {
             let end = bytes.len().min((part + 1) * PART_BYTES);
             let part = bytes[part * PART_BYTES..end].to_vec();
-            KeepImageRequest { part: Some(Part::Bytes(part)) }
+            KeepImageRequest {
+                part: Some(Part::Bytes(part)),
+            }
         });
         tokio_stream::once(image).chain(tokio_stream::iter(parts))
     }
@@ -59,7 +66,9 @@ impl Size {
         }
         if size > BYTES_MAX {
             let (size, most) = (size.div_ceil(1024 * 1024), BYTES_MAX / (1024 * 1024));
-            return Err(format!("the image is {size} MiB, and the most that goes is {most} MiB"));
+            return Err(format!(
+                "the image is {size} MiB, and the most that goes is {most} MiB"
+            ));
         }
         Ok(Size(size))
     }
@@ -79,7 +88,11 @@ impl Keeping {
     pub(crate) fn new(runtime: &Path, size: Size, now: SystemTime) -> Result<Keeping, String> {
         let draft = Draft::new(runtime, FOLDER, "png", now)?;
         draft.make_room(size.get(), FOLDER_BYTES_MAX);
-        Ok(Keeping { draft, left: size.get(), unseen: SIGNATURE })
+        Ok(Keeping {
+            draft,
+            left: size.get(),
+            unseen: SIGNATURE,
+        })
     }
 
     pub(crate) fn write(mut self, bytes: &[u8]) -> Result<Keeping, String> {
@@ -136,16 +149,23 @@ mod tests {
 
     #[test]
     fn an_image_goes_as_what_it_is_and_then_its_bytes_in_parts() {
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         for size in [SIGNATURE.len(), PART_BYTES, PART_BYTES + 1, 3 * PART_BYTES] {
-            let on = On { destination: "far".to_owned() };
+            let on = On {
+                destination: "far".to_owned(),
+            };
             let bytes = png(size);
             let asked = Png::new(bytes.clone()).unwrap().asked(Some(on.clone()));
             let asked: Vec<_> = runtime.block_on(asked.collect());
             let Some((first, parts)) = asked.split_first() else {
                 panic!("nothing went");
             };
-            let image = Image { on: Some(on), size: size as u64 };
+            let image = Image {
+                on: Some(on),
+                size: size as u64,
+            };
             assert_eq!(first.part, Some(Part::Image(image)));
             let parts: Vec<&Vec<u8>> = parts
                 .iter()
@@ -155,7 +175,11 @@ mod tests {
                 })
                 .collect();
             assert_eq!(parts.len(), size.div_ceil(PART_BYTES));
-            assert!(parts.iter().all(|part| !part.is_empty() && part.len() <= PART_BYTES));
+            assert!(
+                parts
+                    .iter()
+                    .all(|part| !part.is_empty() && part.len() <= PART_BYTES)
+            );
             let sent: Vec<u8> = parts.into_iter().flatten().copied().collect();
             assert!(sent == bytes, "{size}");
         }
@@ -185,19 +209,27 @@ mod tests {
         assert_eq!(folder(), 2);
         let pngs = || {
             let found = fs::read_dir(runtime.join(FOLDER)).unwrap().flatten();
-            found.filter(|file| file.path().extension() == Some("png".as_ref())).count()
+            found
+                .filter(|file| file.path().extension() == Some("png".as_ref()))
+                .count()
         };
         assert_eq!(pngs(), 1, "one on its way goes by no name of an image's");
         assert_eq!(short.kept().err().unwrap(), "the image ended 8 bytes short");
         assert_eq!(folder(), 1);
 
         let long = Keeping::new(&runtime, size(8), now).unwrap();
-        assert_eq!(long.write(&image).err().unwrap(), "the image is larger than it said");
+        assert_eq!(
+            long.write(&image).err().unwrap(),
+            "the image is larger than it said"
+        );
         assert_eq!(folder(), 1);
 
         let not_png = Keeping::new(&runtime, size(16), now).unwrap();
         let not_png = not_png.write(&image[..3]).unwrap();
-        assert_eq!(not_png.write(b"GIF89a").err().unwrap(), "the image is no PNG");
+        assert_eq!(
+            not_png.write(b"GIF89a").err().unwrap(),
+            "the image is no PNG"
+        );
         assert_eq!(folder(), 1);
 
         let hung_up = Keeping::new(&runtime, size(8), now).unwrap();
@@ -244,7 +276,8 @@ mod tests {
         let file = |name: &str, megabytes: u64, hours: u64| {
             let made = File::create(folder.join(name)).unwrap();
             made.set_len(megabytes * 1024 * 1024).unwrap();
-            made.set_modified(now - Duration::from_hours(hours)).unwrap();
+            made.set_modified(now - Duration::from_hours(hours))
+                .unwrap();
         };
         file("killed.png.part", 10, 4);
         file("oldest.png", 30, 3);
@@ -252,15 +285,25 @@ mod tests {
         file("last.png", 64, 1);
         let left = || {
             let found = fs::read_dir(&folder).unwrap().flatten();
-            let mut left: Vec<_> = found.map(|file| file.file_name().into_string().unwrap()).collect();
+            let mut left: Vec<_> = found
+                .map(|file| file.file_name().into_string().unwrap())
+                .collect();
             left.sort();
             left
         };
 
         keeping(8);
-        assert_eq!(left(), ["last.png", "older.png", "oldest.png"], "134 MiB, less the oldest");
+        assert_eq!(
+            left(),
+            ["last.png", "older.png", "oldest.png"],
+            "134 MiB, less the oldest"
+        );
         keeping(BYTES_MAX);
-        assert_eq!(left(), ["last.png"], "188 MiB, less the two oldest, is all there is room for");
+        assert_eq!(
+            left(),
+            ["last.png"],
+            "188 MiB, less the two oldest, is all there is room for"
+        );
         keeping(BYTES_MAX);
         assert_eq!(left(), ["last.png"], "room for two of the largest");
     }

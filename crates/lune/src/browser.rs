@@ -11,7 +11,11 @@ use crate::desktop;
 use crate::host::Event;
 use crate::pull::Link;
 
-const OPENER: &str = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+const OPENER: &str = if cfg!(target_os = "macos") {
+    "open"
+} else {
+    "xdg-open"
+};
 
 const HELD: Duration = Duration::from_secs(2);
 
@@ -39,12 +43,7 @@ impl Browser {
         self.open_str(url.as_str(), events, now)
     }
 
-    fn open_str(
-        &mut self,
-        url: &str,
-        events: &Sender<Event>,
-        now: Instant,
-    ) -> Result<(), String> {
+    fn open_str(&mut self, url: &str, events: &Sender<Event>, now: Instant) -> Result<(), String> {
         if desktop::elsewhere() {
             let why = "lune runs over ssh, far from your browser: `y p` copies the link";
             return Err(why.to_owned());
@@ -59,9 +58,10 @@ impl Browser {
         events: &Sender<Event>,
         now: Instant,
     ) -> Result<(), String> {
-        let held = self.asked.as_ref().is_some_and(|(page, then)| {
-            page == url && now.saturating_duration_since(*then) < HELD
-        });
+        let held = self
+            .asked
+            .as_ref()
+            .is_some_and(|(page, then)| page == url && now.saturating_duration_since(*then) < HELD);
         if !held {
             open_by(opener, url, events)?;
         }
@@ -72,11 +72,18 @@ impl Browser {
 
 fn open_by(mut opener: Command, url: &str, events: &Sender<Event>) -> Result<(), String> {
     let program = opener.get_program().to_string_lossy().into_owned();
-    opener.arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut opening = opener.process_group(0).spawn().map_err(|error| match error.kind() {
-        ErrorKind::NotFound => format!("{program} is not on the PATH"),
-        _ => format!("{program}: {error}"),
-    })?;
+    opener
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut opening = opener
+        .process_group(0)
+        .spawn()
+        .map_err(|error| match error.kind() {
+            ErrorKind::NotFound => format!("{program} is not on the PATH"),
+            _ => format!("{program}: {error}"),
+        })?;
     let events = events.clone();
     thread::spawn(move || {
         let why = match opening.wait() {
@@ -130,7 +137,10 @@ mod tests {
     #[test]
     fn what_is_not_there_to_open_a_page_says_so() {
         let (started, said) = said_by(Command::new("lune-no-such-opener"));
-        assert_eq!(started, Err("lune-no-such-opener is not on the PATH".to_owned()));
+        assert_eq!(
+            started,
+            Err("lune-no-such-opener is not on the PATH".to_owned())
+        );
         assert_eq!(said, Vec::<String>::new());
     }
 
@@ -141,11 +151,19 @@ mod tests {
         let other = Link::parse("https://github.com/owner/repo/pull/250").expect("a link");
         let mut browser = Browser::default();
         let start = Instant::now();
-        assert_eq!(browser.open_with(shell("exit 0"), &page.url(), &events, start), Ok(()));
+        assert_eq!(
+            browser.open_with(shell("exit 0"), &page.url(), &events, start),
+            Ok(())
+        );
 
         let mut asks = |link: &Link, at: Instant| {
             browser
-                .open_with(Command::new("lune-no-such-opener"), &link.url(), &events, at)
+                .open_with(
+                    Command::new("lune-no-such-opener"),
+                    &link.url(),
+                    &events,
+                    at,
+                )
                 .is_err()
         };
         let just_short = HELD.saturating_sub(Duration::from_millis(1));

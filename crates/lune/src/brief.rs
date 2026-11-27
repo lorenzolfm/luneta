@@ -9,9 +9,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
 use luned::program::{self, Cancel, Ran, Wanted};
 use luned::transcripts::{
-    digest_end, Digest, Reading, SessionId, StepsMax, TranscriptEnd, IDS_MAX,
+    Digest, IDS_MAX, Reading, SessionId, StepsMax, TranscriptEnd, digest_end,
 };
-use luned::{one_answer, Destination};
+use luned::{Destination, one_answer};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -82,7 +82,7 @@ impl Over {
             Over::Session(on, session) => note.on == *on && note.session == *session,
             Over::Agent(on, session, view) => {
                 note.on == *on && note.session == *session && note.view == *view
-            },
+            }
         }
     }
 
@@ -187,8 +187,7 @@ pub struct Brief {
 
 impl Brief {
     pub fn new(over: Over, notes: Vec<Note>) -> Result<Self, String> {
-        let mut notes: Vec<Note> =
-            notes.into_iter().filter(|note| over.covers(note)).collect();
+        let mut notes: Vec<Note> = notes.into_iter().filter(|note| over.covers(note)).collect();
         let alike: Vec<bool> = notes
             .iter()
             .map(|note| {
@@ -207,23 +206,28 @@ impl Brief {
             return Err(match &over {
                 Over::Sessions { unknown, .. } if unknown.is_empty() => {
                     "brief: no agents to brief you on".to_owned()
-                },
+                }
                 Over::Sessions { unknown, .. } => {
-                    let unknown: Vec<String> =
-                        unknown.iter().map(|(machine, _)| machine.to_string()).collect();
+                    let unknown: Vec<String> = unknown
+                        .iter()
+                        .map(|(machine, _)| machine.to_string())
+                        .collect();
                     format!(
                         "brief: no agents to brief you on; luned does not reach {} now",
                         unknown.join(", ")
                     )
-                },
+                }
                 Over::Machine(on, _) => format!("brief: no agents on {}", machine_named(on)),
                 Over::Session(on, session) => {
                     format!("brief: no agents in {}", session_on(on, session))
-                },
+                }
                 Over::Agent(..) => "brief: no agent in this view".to_owned(),
             });
         };
-        if notes.iter().all(|note| note.transcript == Transcript::NotRead) {
+        if notes
+            .iter()
+            .all(|note| note.transcript == Transcript::NotRead)
+        {
             return Err(format!("brief: {UNREAD_HARNESS}"));
         }
         let title = match &over {
@@ -232,7 +236,7 @@ impl Brief {
             Over::Session(on, session) => format!("Brief of {}", session_on(on, session)),
             Over::Agent(on, session, _) => {
                 format!("Brief of {}, in {}", first.name, session_on(on, session))
-            },
+            }
         };
         Ok(Brief { over, notes, title })
     }
@@ -248,11 +252,11 @@ impl Brief {
             match &note.transcript {
                 Transcript::Named(id) => {
                     machines.entry(&note.on).or_default().push((at, id.clone()));
-                },
+                }
                 Transcript::Unnamed => told.push((at, Told::NoId)),
                 Transcript::NotRead => {
                     told.push((at, Told::Unread(UNREAD_HARNESS.to_owned())));
-                },
+                }
             }
         }
         let groups = machines.into_iter().map(|(machine, placed)| {
@@ -290,12 +294,18 @@ impl Brief {
         let mut prompt = self.over.ask();
         prompt.push_str("\n\nThe notes:\n");
         let sessions: Option<Vec<String>> = match &self.over {
-            Over::Sessions { sessions, .. } => {
-                Some(sessions.iter().map(|(on, session)| session_on(on, session)).collect())
-            },
-            Over::Machine(on, sessions) => {
-                Some(sessions.iter().map(|session| session_on(on, session)).collect())
-            },
+            Over::Sessions { sessions, .. } => Some(
+                sessions
+                    .iter()
+                    .map(|(on, session)| session_on(on, session))
+                    .collect(),
+            ),
+            Over::Machine(on, sessions) => Some(
+                sessions
+                    .iter()
+                    .map(|session| session_on(on, session))
+                    .collect(),
+            ),
             Over::Session(..) | Over::Agent(..) => None,
         };
         if let Some(sessions) = sessions {
@@ -306,10 +316,14 @@ impl Brief {
         if let Over::Sessions { unknown, .. } = &self.over
             && !unknown.is_empty()
         {
-            let unknown: Vec<String> =
-                unknown.iter().map(|(machine, word)| format!("{machine} ({word})")).collect();
-            prompt.push_str("Machines whose sessions are unknown, as luned does not reach them \
-                             now: ");
+            let unknown: Vec<String> = unknown
+                .iter()
+                .map(|(machine, word)| format!("{machine} ({word})"))
+                .collect();
+            prompt.push_str(
+                "Machines whose sessions are unknown, as luned does not reach them \
+                             now: ",
+            );
             prompt.push_str(&unknown.join(", "));
             prompt.push('\n');
         }
@@ -338,11 +352,21 @@ pub fn read(on: &Machine, reading: &Reading) -> Result<HashMap<SessionId, Transc
 }
 
 fn leaves_out(left_out: &[Note]) -> String {
-    let mut sessions: Vec<String> =
-        left_out.iter().map(|note| session_on(&note.on, &note.session)).collect();
+    let mut sessions: Vec<String> = left_out
+        .iter()
+        .map(|note| session_on(&note.on, &note.session))
+        .collect();
     sessions.dedup();
-    let agents = if left_out.len() == 1 { "agent" } else { "agents" };
-    let of = if sessions.len() == 1 { "session" } else { "sessions" };
+    let agents = if left_out.len() == 1 {
+        "agent"
+    } else {
+        "agents"
+    };
+    let of = if sessions.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
     format!(
         "\nThe notes leave out {} more {agents} for room, in {of} {}. Say that the brief leaves \
          them out, and do not call their sessions empty.\n",
@@ -366,7 +390,7 @@ impl Note {
         match told {
             Told::NoId => {
                 lines.push("Its transcript is unknown: Claude Code names none for it.".to_owned());
-            },
+            }
             Told::NotFound => lines.push("Its transcript was not found.".to_owned()),
             Told::Unread(why) => lines.push(format!("Its transcript was not read: {why}")),
             Told::Read(digest) => lines.extend(digest.lines()),
@@ -384,7 +408,10 @@ enum Told {
 
 fn cut_bytes(mut text: String, bytes: usize) -> String {
     if text.len() > bytes {
-        let at = (0..=bytes).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0);
+        let at = (0..=bytes)
+            .rev()
+            .find(|at| text.is_char_boundary(*at))
+            .unwrap_or(0);
         text.truncate(at);
     }
     text
@@ -396,15 +423,17 @@ pub struct Written {
     said: Result<String, String>,
 }
 
-pub fn ask(
-    number: u64,
-    brief: Brief,
-    events: &Sender<Event>,
-) -> Briefing {
+pub fn ask(number: u64, brief: Brief, events: &Sender<Event>) -> Briefing {
     let title = brief.title().to_owned();
     let due = Due::new(events, move |written: Result<Written, String>| {
-        let unanswered = |why| Written { at: None, said: Err(format!("brief: {why}")) };
-        Event::Briefed { number, written: written.unwrap_or_else(unanswered) }
+        let unanswered = |why| Written {
+            at: None,
+            said: Err(format!("brief: {why}")),
+        };
+        Event::Briefed {
+            number,
+            written: written.unwrap_or_else(unanswered),
+        }
     });
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
@@ -418,12 +447,17 @@ pub fn ask(
                     return;
                 };
                 said
-            },
+            }
             Err(why) => Err(format!("brief: {why}")),
         };
         due.pay(Ok(Written { at, said }));
     });
-    Briefing { number, title, written: None, _asking: asking }
+    Briefing {
+        number,
+        title,
+        written: None,
+        _asking: asking,
+    }
 }
 
 #[derive(Debug)]
@@ -474,18 +508,27 @@ fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
                 return Err("brief: claude wrote nothing".to_owned());
             }
             Ok(said)
-        },
-        Ok(Ran::Ended { status, stdout, stderr }) => {
-            let said = [stderr, stdout].map(|said| String::from_utf8_lossy(&said).trim().to_owned());
+        }
+        Ok(Ran::Ended {
+            status,
+            stdout,
+            stderr,
+        }) => {
+            let said =
+                [stderr, stdout].map(|said| String::from_utf8_lossy(&said).trim().to_owned());
             let said = said.into_iter().find(|said| !said.is_empty());
-            Err(format!("brief: claude failed: {}", said.unwrap_or_else(|| status.to_string())))
-        },
-        Ok(Ran::Stuck) => {
-            Err(format!("brief: claude wrote nothing in {} seconds", WRITING.as_secs()))
-        },
+            Err(format!(
+                "brief: claude failed: {}",
+                said.unwrap_or_else(|| status.to_string())
+            ))
+        }
+        Ok(Ran::Stuck) => Err(format!(
+            "brief: claude wrote nothing in {} seconds",
+            WRITING.as_secs()
+        )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Err("brief: claude is not on the PATH".to_owned())
-        },
+        }
         Err(error) => Err(format!("brief: claude could not be run: {error}")),
     }
 }
@@ -537,14 +580,19 @@ impl Briefing {
                 let asking = menu::waiting(&asking, inner, dim, sidebar::frame(wall));
                 let spinner = (!asking.is_empty()).then_some(0);
                 (asking, (Hint::Esc, "Close"), None, spinner)
-            },
+            }
             Some(Written { at, said }) => {
                 let lines = match said {
                     Ok(said) => paragraphs(said, inner, Style::new()),
                     Err(why) => paragraphs(why, inner, Style::new().fg(moonlight::RED)),
                 };
-                (lines, (Hint::AnyKey, "Close"), at.as_ref().map(|at| format!("at {at}")), None)
-            },
+                (
+                    lines,
+                    (Hint::AnyKey, "Close"),
+                    at.as_ref().map(|at| format!("at {at}")),
+                    None,
+                )
+            }
         };
         let footer = [Line::default(), menu::keys_line(inner, &[keys])];
         let lines_room = room.saturating_sub(footer.len());
@@ -556,7 +604,13 @@ impl Briefing {
             lines.extend((lines_room > 0).then(|| Line::styled(" …", dim)));
         }
         lines.extend(footer);
-        boxed(buffer, over, &self.title, at.as_deref().unwrap_or(""), &lines);
+        boxed(
+            buffer,
+            over,
+            &self.title,
+            at.as_deref().unwrap_or(""),
+            &lines,
+        );
         if kept_spinner {
             cadence.spin();
         }
@@ -590,7 +644,10 @@ pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &
 pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for line in text.lines() {
-        let line: String = line.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let line: String = line
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
         let line = line.trim_end();
         if line.is_empty() {
             lines.push(Line::default());
@@ -608,8 +665,8 @@ mod tests {
     use std::sync::Mutex;
 
     use luned::api::TranscriptEndsRequest;
-    use luned::transcripts::{TailLines, TAILS_BYTES};
-    use serde_json::{json, Value};
+    use luned::transcripts::{TAILS_BYTES, TailLines};
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -638,13 +695,20 @@ mod tests {
     }
 
     fn every(sessions: &[&str]) -> Over {
-        let sessions = sessions.iter().map(|it| (Machine::Local, named(it))).collect();
-        Over::Sessions { sessions, unknown: Vec::new() }
+        let sessions = sessions
+            .iter()
+            .map(|it| (Machine::Local, named(it)))
+            .collect();
+        Over::Sessions {
+            sessions,
+            unknown: Vec::new(),
+        }
     }
 
     fn read_here(
         ends: HashMap<SessionId, TranscriptEnd>,
-    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync {
+    ) -> impl Fn(&Machine, &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> + Sync
+    {
         move |_, reading| {
             let TranscriptEndsRequest { ids, .. } = reading.asked(None);
             let asked =
@@ -668,22 +732,32 @@ mod tests {
         let fold = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
         let quiet = "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a";
         let gone = "9e8d7c6b-5a4f-4e3d-2c1b-0a9f8e7d6c5b";
-        let said = |text: &str| json!({"type": "assistant", "message": {"content": [
-            {"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": text}]}});
-        let ran = |name: &str, input: Value| json!({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "name": name, "input": input}]}});
+        let said = |text: &str| {
+            json!({"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "hmm"}, {"type": "text", "text": text}]}})
+        };
+        let ran = |name: &str, input: Value| {
+            json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": name, "input": input}]}})
+        };
         let fold_end = [
             json!({"type": "ai-title", "aiTitle": "Fold sessions"}),
             json!({"type": "user", "message": {"content": "fold the sessions"}}),
             said("Looking at the tree."),
             json!({"type": "user", "message": {"content": [
                 {"type": "tool_result", "content": "src/tree.rs"}]}}),
-            ran("Bash", json!({"command": "cargo test", "description": "Run the tests"})),
+            ran(
+                "Bash",
+                json!({"command": "cargo test", "description": "Run the tests"}),
+            ),
             json!({"type": "assistant", "isSidechain": true, "message": {"content": [
                 {"type": "text", "text": "a subagent's step"}]}}),
             ran("Read", json!({"file_path": "/w/b/src/tree.rs"})),
             said("Folded:\n\n  every   session."),
-            ran("AskUserQuestion", json!({"questions": [{"question": "Merge it?"}]})),
+            ran(
+                "AskUserQuestion",
+                json!({"questions": [{"question": "Merge it?"}]}),
+            ),
             json!({"type": "last-prompt", "lastPrompt": "fold them, and keep the cursor"}),
             json!({"type": "ai-title", "aiTitle": "Fold sessions in the sidebar"}),
         ];
@@ -695,14 +769,21 @@ mod tests {
             json!({"type": "user", "message": {"content": "<command-name>/clear</command-name>"}}),
             json!({"type": "user", "isMeta": true, "message": {"content": "a reminder"}}),
         ];
-        let lines = |records: &[Value]| -> Vec<String> {
-            records.iter().map(Value::to_string).collect()
-        };
+        let lines =
+            |records: &[Value]| -> Vec<String> { records.iter().map(Value::to_string).collect() };
         let cut = r#"me": "cut short", "type":"user"}]}}"#.to_owned();
-        let fold_lines = std::iter::once(cut).chain(lines(&fold_end)).collect::<Vec<_>>();
+        let fold_lines = std::iter::once(cut)
+            .chain(lines(&fold_end))
+            .collect::<Vec<_>>();
         let ends = HashMap::from([
-            (id(fold), TranscriptEnd::Claude(TailLines::new(fold_lines.join("\n")).unwrap())),
-            (id(quiet), TranscriptEnd::Claude(TailLines::new(lines(&quiet_end).join("\n")).unwrap())),
+            (
+                id(fold),
+                TranscriptEnd::Claude(TailLines::new(fold_lines.join("\n")).unwrap()),
+            ),
+            (
+                id(quiet),
+                TranscriptEnd::Claude(TailLines::new(lines(&quiet_end).join("\n")).unwrap()),
+            ),
         ]);
 
         let notes = vec![
@@ -710,7 +791,10 @@ mod tests {
             note("b", 4, "fold", Some(fold)),
             note("b", 5, "quiet", Some(quiet)),
             note("b", 6, "spare", Some(gone)),
-            Note { since: None, ..note("b", 7, "spare", None) },
+            Note {
+                since: None,
+                ..note("b", 7, "spare", None)
+            },
         ];
         let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
         let prompt = brief.prompt(&read_here(ends), now).expect("a reading");
@@ -757,14 +841,18 @@ Its transcript is unknown: Claude Code names none for it.
 
     #[test]
     fn a_brief_reads_a_share_of_each_transcript_of_what_the_notes_tell() {
-        let ids: Vec<String> =
-            (0..MAX_NOTES).map(|n| format!("{n:08x}-0000-4000-8000-000000000000")).collect();
+        let ids: Vec<String> = (0..MAX_NOTES)
+            .map(|n| format!("{n:08x}-0000-4000-8000-000000000000"))
+            .collect();
         let transcript = |(n, id): (usize, &String)| {
             let said = |step: usize| {
                 let text = format!("agent {n}, step {step}: {}", "y".repeat(1024));
                 json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
             };
-            (id.clone(), (0..64).map(|step| said(step).to_string()).collect())
+            (
+                id.clone(),
+                (0..64).map(|step| said(step).to_string()).collect(),
+            )
         };
         let transcripts: HashMap<String, Vec<String>> =
             ids.iter().enumerate().map(transcript).collect();
@@ -774,8 +862,12 @@ Its transcript is unknown: Claude Code names none for it.
                 taken += record.len() + 1;
                 taken <= share
             };
-            let mut kept: Vec<&str> =
-                records.iter().rev().map(String::as_str).take_while(fits).collect();
+            let mut kept: Vec<&str> = records
+                .iter()
+                .rev()
+                .map(String::as_str)
+                .take_while(fits)
+                .collect();
             kept.reverse();
             kept.join("\n")
         };
@@ -797,7 +889,11 @@ Its transcript is unknown: Claude Code names none for it.
         let told = brief.told(&|_, reading| {
             let TranscriptEndsRequest { ids, share, .. } = reading.asked(None);
             let share = usize::try_from(share).expect("a share");
-            assert!(ids.len() * share <= TAILS_BYTES, "{} shares of {share}", ids.len());
+            assert!(
+                ids.len() * share <= TAILS_BYTES,
+                "{} shares of {share}",
+                ids.len()
+            );
             let end = |asked: &String| {
                 let end = TranscriptEnd::Claude(
                     TailLines::new(tail(&transcripts[asked], share)).unwrap(),
@@ -805,7 +901,8 @@ Its transcript is unknown: Claude Code names none for it.
                 (id(asked), end)
             };
             let ends: HashMap<_, _> = ids.iter().map(end).collect();
-            *kept.lock().expect("no panic") += ends.values().map(|end| end.lines().len()).sum::<usize>();
+            *kept.lock().expect("no panic") +=
+                ends.values().map(|end| end.lines().len()).sum::<usize>();
             Ok(ends)
         });
 
@@ -816,7 +913,10 @@ Its transcript is unknown: Claude Code names none for it.
                 panic!("agent {n}: its transcript was not read");
             };
             let last = digest.steps.last().map_or_default(String::as_str);
-            assert!(last.starts_with(&format!("said: agent {n}, step 63: ")), "{last}");
+            assert!(
+                last.starts_with(&format!("said: agent {n}, step 63: ")),
+                "{last}"
+            );
         }
     }
 
@@ -834,11 +934,20 @@ Its transcript is unknown: Claude Code names none for it.
             transcript: Transcript::Unnamed,
         };
         let session = |view: usize| if view < MAX_NOTES { "a" } else { "b" };
-        let many = (0..MAX_NOTES + 2).map(|view| note(session(view), view, format!("agent {view}")));
+        let many =
+            (0..MAX_NOTES + 2).map(|view| note(session(view), view, format!("agent {view}")));
         let long = |session: &str, view: usize| note(session, view, "x".repeat(NOTES_BYTES / 2));
         for (notes, told, said) in [
-            (many.collect(), MAX_NOTES, "The notes leave out 2 more agents for room, in session b."),
-            (vec![long("a", 0), long("b", 1)], 1, "leave out 1 more agent for room, in session b."),
+            (
+                many.collect(),
+                MAX_NOTES,
+                "The notes leave out 2 more agents for room, in session b.",
+            ),
+            (
+                vec![long("a", 0), long("b", 1)],
+                1,
+                "leave out 1 more agent for room, in session b.",
+            ),
         ] {
             let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
             let prompt = brief.prompt(&none_read, now).expect("a reading");
@@ -865,10 +974,21 @@ Its transcript is unknown: Claude Code names none for it.
             on(nixos(), note("b", 2, "gone", Some(ids[2]))),
             on(vps(), note("c", 3, "far", Some(ids[3]))),
         ];
-        let sessions = [(Machine::Local, "a"), (nixos(), "a"), (nixos(), "b"), (vps(), "c")];
-        let sessions = sessions.into_iter().map(|(on, it)| (on, named(it))).collect();
+        let sessions = [
+            (Machine::Local, "a"),
+            (nixos(), "a"),
+            (nixos(), "b"),
+            (vps(), "c"),
+        ];
+        let sessions = sessions
+            .into_iter()
+            .map(|(on, it)| (on, named(it)))
+            .collect();
         let pi = || -> Destination { "pi".parse().expect("a destination") };
-        let over = Over::Sessions { sessions, unknown: vec![(pi(), "reaching…")] };
+        let over = Over::Sessions {
+            sessions,
+            unknown: vec![(pi(), "reaching…")],
+        };
         let brief = Brief::new(over, notes.clone()).expect("a brief");
         let asked = Mutex::new(HashMap::new());
         let said = |text: &str| {
@@ -881,14 +1001,22 @@ Its transcript is unknown: Claude Code names none for it.
             )
         };
         let reads = |machine: &Machine, reading: &Reading| {
-            let TranscriptEndsRequest { ids: read, share, .. } = reading.asked(None);
-            asked.lock().expect("no panic").insert(machine.clone(), (read, share));
+            let TranscriptEndsRequest {
+                ids: read, share, ..
+            } = reading.asked(None);
+            asked
+                .lock()
+                .expect("no panic")
+                .insert(machine.clone(), (read, share));
             let (id, end) = match machine {
                 Machine::Local => (ids[0], said("here")),
                 Machine::Remote(_) if *machine == nixos() => (ids[1], said("there")),
                 Machine::Remote(_) => return Err("me@vps: luned did not answer in 6s".to_owned()),
             };
-            Ok(HashMap::from([(SessionId::parse(id).expect("a UUID"), end)]))
+            Ok(HashMap::from([(
+                SessionId::parse(id).expect("a UUID"),
+                end,
+            )]))
         };
         let prompt = brief.prompt(&reads, now);
         let share = u32::try_from(TAILS_BYTES / 4).expect("a share");
@@ -931,25 +1059,52 @@ Its transcript was not read: me@vps: luned did not answer in 6s
 "
         );
 
-        assert!(prompt.contains("sessions of a machine are unknown, end with"), "{prompt}");
+        assert!(
+            prompt.contains("sessions of a machine are unknown, end with"),
+            "{prompt}"
+        );
         let of_nixos = Brief::new(Over::Machine(nixos(), Vec::new()), notes.clone());
-        let of_nixos = of_nixos.expect("a brief").prompt(&none_read, now).expect("a reading");
+        let of_nixos = of_nixos
+            .expect("a brief")
+            .prompt(&none_read, now)
+            .expect("a reading");
         assert_eq!(of_nixos.matches("\nAgent \"").count(), 2);
         assert!(!of_nixos.contains("unknown"), "{of_nixos}");
         let titled = |over| Brief::new(over, notes.clone()).map(|it| it.title().to_owned());
         let a = || named("a");
         for (over, title) in [
-            (Over::Machine(nixos(), vec![a()]), Ok("Brief of every session on nixos")),
+            (
+                Over::Machine(nixos(), vec![a()]),
+                Ok("Brief of every session on nixos"),
+            ),
             (Over::Session(nixos(), a()), Ok("Brief of a on nixos")),
-            (Over::Agent(nixos(), a(), ViewKey::terminal(1)), Ok("Brief of fold, in a on nixos")),
-            (Over::Machine(Machine::Local, vec![a()]), Ok("Brief of every session on this machine")),
-            (Over::Session(vps(), a()), Err("brief: no agents in a on me@vps")),
-            (Over::Machine(Machine::Remote(pi()), Vec::new()), Err("brief: no agents on pi")),
+            (
+                Over::Agent(nixos(), a(), ViewKey::terminal(1)),
+                Ok("Brief of fold, in a on nixos"),
+            ),
+            (
+                Over::Machine(Machine::Local, vec![a()]),
+                Ok("Brief of every session on this machine"),
+            ),
+            (
+                Over::Session(vps(), a()),
+                Err("brief: no agents in a on me@vps"),
+            ),
+            (
+                Over::Machine(Machine::Remote(pi()), Vec::new()),
+                Err("brief: no agents on pi"),
+            ),
         ] {
-            assert_eq!(titled(over), title.map(str::to_owned).map_err(str::to_owned));
+            assert_eq!(
+                titled(over),
+                title.map(str::to_owned).map_err(str::to_owned)
+            );
         }
         let unknown = ["pi", "me@vps"].map(|it| (it.parse().expect("a destination"), "lost"));
-        let nowhere = Over::Sessions { sessions: Vec::new(), unknown: unknown.into() };
+        let nowhere = Over::Sessions {
+            sessions: Vec::new(),
+            unknown: unknown.into(),
+        };
         let said = "brief: no agents to brief you on; luned does not reach pi, me@vps now";
         assert_eq!(Brief::new(nowhere, Vec::new()).err().as_deref(), Some(said));
     }
@@ -967,9 +1122,14 @@ Its transcript was not read: me@vps: luned did not answer in 6s
             cwd: "/w/a".to_owned(),
             transcript,
         };
-        let notes = vec![of(1, "fold", Transcript::NotRead), of(2, "tree", Transcript::Unnamed)];
+        let notes = vec![
+            of(1, "fold", Transcript::NotRead),
+            of(2, "tree", Transcript::Unnamed),
+        ];
         let brief = Brief::new(every(&["a"]), notes).expect("a brief");
-        let prompt = brief.prompt(&none_read, SystemTime::now).expect("a reading");
+        let prompt = brief
+            .prompt(&none_read, SystemTime::now)
+            .expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;
         assert_eq!(
             notes,
@@ -993,17 +1153,32 @@ Its transcript is unknown: Claude Code names none for it.
     fn a_run_of_claude_that_wrote_nothing_is_no_brief() {
         let ended = |stdout: &str| {
             let (status, stdout) = (ExitStatus::from_raw(0), stdout.as_bytes().to_vec());
-            Ok(Ran::Ended { status, stdout, stderr: Vec::new() })
+            Ok(Ran::Ended {
+                status,
+                stdout,
+                stderr: Vec::new(),
+            })
         };
         let brief = "You have 1 session open:\n- lune: the brief is back";
         assert_eq!(wrote(ended(&format!("{brief}\n"))), Ok(brief.to_owned()));
-        assert_eq!(wrote(ended(" \n\n")), Err("brief: claude wrote nothing".to_owned()));
+        assert_eq!(
+            wrote(ended(" \n\n")),
+            Err("brief: claude wrote nothing".to_owned())
+        );
     }
 
     fn asked(number: u64, title: &str) -> Briefing {
         let (cancel, _) = luned::program::cancel();
-        let asking = Asking { cancel, ended: mpsc::channel().1 };
-        Briefing { number, title: title.to_owned(), written: None, _asking: asking }
+        let asking = Asking {
+            cancel,
+            ended: mpsc::channel().1,
+        };
+        Briefing {
+            number,
+            title: title.to_owned(),
+            written: None,
+            _asking: asking,
+        }
     }
 
     fn shown(briefing: &Briefing, width: u16, height: u16) -> Vec<String> {
@@ -1014,10 +1189,19 @@ Its transcript is unknown: Claude Code names none for it.
         }
         briefing.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(
+                moonlight::ALL.contains(&cell.fg),
+                "{:?} in {:?}",
+                cell.symbol(),
+                cell.fg
+            );
         }
         (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -1047,8 +1231,12 @@ Its transcript is unknown: Claude Code names none for it.
         assert!(briefing.closes(&key(KeyCode::Esc)));
         assert!(briefing.turning());
 
-        let said = "You have 2 sessions open:\n- lune: the brief\tis back\x1b[31m\n\n- elo: no agents";
-        briefing.written(Written { at: Some("18:42".to_owned()), said: Ok(said.to_owned()) });
+        let said =
+            "You have 2 sessions open:\n- lune: the brief\tis back\x1b[31m\n\n- elo: no agents";
+        briefing.written(Written {
+            at: Some("18:42".to_owned()),
+            said: Ok(said.to_owned()),
+        });
         assert_eq!(
             shown(&briefing, 66, 9)[..8],
             [
@@ -1070,8 +1258,14 @@ Its transcript is unknown: Claude Code names none for it.
     #[test]
     fn a_brief_too_long_for_its_box_is_cut_and_one_that_failed_says_why() {
         let mut briefing = asked(1, "Brief of lune");
-        let said = (1..=9).map(|n| format!("- line {n}")).collect::<Vec<_>>().join("\n");
-        briefing.written(Written { at: None, said: Ok(said) });
+        let said = (1..=9)
+            .map(|n| format!("- line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        briefing.written(Written {
+            at: None,
+            said: Ok(said),
+        });
         assert_eq!(
             shown(&briefing, 40, 8),
             [
@@ -1087,8 +1281,14 @@ Its transcript is unknown: Claude Code names none for it.
         );
         let mut briefing = asked(2, "Brief of lune");
         let why = "brief: claude is not on the PATH".to_owned();
-        briefing.written(Written { at: Some("18:42".to_owned()), said: Err(why) });
-        assert_eq!(shown(&briefing, 40, 8)[2], "│ brief: claude is not on the PATH     │");
+        briefing.written(Written {
+            at: Some("18:42".to_owned()),
+            said: Err(why),
+        });
+        assert_eq!(
+            shown(&briefing, 40, 8)[2],
+            "│ brief: claude is not on the PATH     │"
+        );
     }
 
     #[test]
@@ -1103,8 +1303,20 @@ Its transcript is unknown: Claude Code names none for it.
             let mut buffer = Buffer::empty(area);
             briefing.draw(&mut buffer, area, drawn.system)
         };
-        assert_eq!(paint(40, 4).wait(drawn, drawn), None, "height 4 leaves zero body lines");
-        assert_eq!(paint(2, 8).wait(drawn, drawn), None, "zero inner width draws no spinner");
-        assert_eq!(paint(40, 5).wait(drawn, drawn), Some(sidebar::SPIN), "height 5 draws the waiting spinner");
+        assert_eq!(
+            paint(40, 4).wait(drawn, drawn),
+            None,
+            "height 4 leaves zero body lines"
+        );
+        assert_eq!(
+            paint(2, 8).wait(drawn, drawn),
+            None,
+            "zero inner width draws no spinner"
+        );
+        assert_eq!(
+            paint(40, 5).wait(drawn, drawn),
+            Some(sidebar::SPIN),
+            "height 5 draws the waiting spinner"
+        );
     }
 }

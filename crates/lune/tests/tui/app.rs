@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use lune::{App, Launch};
-use ratatui::backend::TestBackend;
 use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 
 const COLUMNS: u16 = 120;
 
@@ -29,12 +29,18 @@ fn screen(state_folder: &Path, folder: Result<&Path, &str>) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(COLUMNS, ROWS)).unwrap();
     terminal.draw(|frame| app.paint(frame)).unwrap();
     let buffer = terminal.backend().buffer();
-    let row = |y| (0..COLUMNS).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    let row = |y| {
+        (0..COLUMNS)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
     (0..ROWS).map(row).collect()
 }
 
 fn column_of(screen: &[String], text: &str) -> usize {
-    let found = screen.iter().find_map(|row| row.find(text).map(|at| row[..at].chars().count()));
+    let found = screen
+        .iter()
+        .find_map(|row| row.find(text).map(|at| row[..at].chars().count()));
     found.unwrap_or_else(|| panic!("{text:?} is not on the screen:\n{}", screen.join("\n")))
 }
 

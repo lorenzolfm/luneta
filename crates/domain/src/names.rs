@@ -37,7 +37,9 @@ impl SessionName {
     #[must_use]
     pub fn with_postfix(&self, n: usize) -> Self {
         let postfix = format!("-{n}");
-        let mut end = NAME_BYTES_MAX.saturating_sub(postfix.len()).min(self.0.len());
+        let mut end = NAME_BYTES_MAX
+            .saturating_sub(postfix.len())
+            .min(self.0.len());
         while !self.0.is_char_boundary(end) {
             end -= 1;
         }
@@ -85,7 +87,10 @@ mod tests {
             panic!("a name lune takes");
         };
         let postfixed = long.with_postfix(12);
-        assert_eq!(postfixed.as_str(), format!("{}-12", "x".repeat(NAME_BYTES_MAX - 3)));
+        assert_eq!(
+            postfixed.as_str(),
+            format!("{}-12", "x".repeat(NAME_BYTES_MAX - 3))
+        );
         assert!(SessionName::parse(postfixed.as_str()).is_ok());
     }
 

@@ -10,9 +10,21 @@ pub const SHELLS: [&str; 7] = ["bash", "dash", "elvish", "fish", "nu", "sh", "zs
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Doing {
     Ready,
-    Going { command: Option<Said>, since: SystemTime, front: Front },
-    Ended { command: Option<Said>, at: SystemTime, ending: Option<Ending>, took: Duration },
-    Stopped { command: Option<Said>, at: SystemTime },
+    Going {
+        command: Option<Said>,
+        since: SystemTime,
+        front: Front,
+    },
+    Ended {
+        command: Option<Said>,
+        at: SystemTime,
+        ending: Option<Ending>,
+        took: Duration,
+    },
+    Stopped {
+        command: Option<Said>,
+        at: SystemTime,
+    },
 }
 
 impl Doing {
@@ -21,12 +33,21 @@ impl Doing {
         use v1::shell::{Doing as Told, Ended, Going, Stopped};
         let doing = match self {
             Doing::Ready => Told::Ready(()),
-            Doing::Going { command, since, front } => Told::Going(Going {
+            Doing::Going {
+                command,
+                since,
+                front,
+            } => Told::Going(Going {
                 command: command_line(command.as_ref()),
                 since: Some((*since).into()),
                 front: front.to_api().into(),
             }),
-            Doing::Ended { command, at, ending, took } => Told::Ended(Ended {
+            Doing::Ended {
+                command,
+                at,
+                ending,
+                took,
+            } => Told::Ended(Ended {
                 command: command_line(command.as_ref()),
                 at: Some((*at).into()),
                 ending: ending.map(Ending::to_api),
@@ -68,12 +89,21 @@ impl Doing {
         use mux::ran::{Ended, Going, Is, Ready, Stopped};
         let is = match self {
             Doing::Ready => Is::Ready(Ready {}),
-            Doing::Going { command, since, front } => Is::Going(Going {
+            Doing::Going {
+                command,
+                since,
+                front,
+            } => Is::Going(Going {
                 command: command_line(command.as_ref()),
                 since: Some((*since).into()),
                 front: front.to_mux().into(),
             }),
-            Doing::Ended { command, at, ending, took } => Is::Ended(Ended {
+            Doing::Ended {
+                command,
+                at,
+                ending,
+                took,
+            } => Is::Ended(Ended {
                 command: command_line(command.as_ref()),
                 at: Some((*at).into()),
                 ending: ending.map(Ending::to_mux),
@@ -120,7 +150,9 @@ fn command_line(command: Option<&Said>) -> Option<String> {
 fn command_of(command: Option<&String>) -> Result<Option<Said>, String> {
     match command {
         None => Ok(None),
-        Some(command) => Said::new(command.clone()).map(Some).ok_or("an empty command line".into()),
+        Some(command) => Said::new(command.clone())
+            .map(Some)
+            .ok_or("an empty command line".into()),
     }
 }
 
@@ -130,7 +162,8 @@ fn time(at: Option<prost_types::Timestamp>, what: &str) -> Result<SystemTime, St
 }
 
 fn told_took(took: Duration) -> prost_types::Duration {
-    took.try_into().expect("a command ran for under 2^63 seconds")
+    took.try_into()
+        .expect("a command ran for under 2^63 seconds")
 }
 
 fn took(took: Option<prost_types::Duration>) -> Result<Duration, String> {
@@ -238,8 +271,16 @@ mod tests {
         let make = || Said::new("make".to_owned());
         let doings = [
             Doing::Ready,
-            Doing::Going { command: make(), since: at(1), front: Front::Asking },
-            Doing::Going { command: None, since: at(1), front: Front::Interactive },
+            Doing::Going {
+                command: make(),
+                since: at(1),
+                front: Front::Asking,
+            },
+            Doing::Going {
+                command: None,
+                since: at(1),
+                front: Front::Interactive,
+            },
             Doing::Ended {
                 command: make(),
                 at: at(2),
@@ -252,12 +293,28 @@ mod tests {
                 ending: Some(Ending::Resumed),
                 took: Duration::ZERO,
             },
-            Doing::Ended { command: make(), at: at(2), ending: None, took: Duration::ZERO },
-            Doing::Stopped { command: make(), at: at(3) },
+            Doing::Ended {
+                command: make(),
+                at: at(2),
+                ending: None,
+                took: Duration::ZERO,
+            },
+            Doing::Stopped {
+                command: make(),
+                at: at(3),
+            },
         ];
         for doing in doings {
-            assert_eq!(Doing::of_api(&doing.to_api()), Ok(doing.clone()), "{doing:?}");
-            assert_eq!(Doing::of_mux(&doing.to_mux()), Ok(doing.clone()), "{doing:?}");
+            assert_eq!(
+                Doing::of_api(&doing.to_api()),
+                Ok(doing.clone()),
+                "{doing:?}"
+            );
+            assert_eq!(
+                Doing::of_mux(&doing.to_mux()),
+                Ok(doing.clone()),
+                "{doing:?}"
+            );
         }
     }
 
@@ -266,16 +323,40 @@ mod tests {
         use v1::shell::{Doing as Told, Ended, Going};
         let since = Some(at(1).into());
         let (command, front) = (Some("make".to_owned()), v1::Front::Working.into());
-        let going = Going { command, since, front };
+        let going = Going {
+            command,
+            since,
+            front,
+        };
         let took = Some(prost_types::Duration::default());
-        let ended = Ended { command: None, at: since, ending: None, took };
+        let ended = Ended {
+            command: None,
+            at: since,
+            ending: None,
+            took,
+        };
         let holed = [
             None,
-            Some(Told::Going(Going { front: v1::Front::Unspecified.into(), ..going.clone() })),
-            Some(Told::Going(Going { command: Some(String::new()), ..going.clone() })),
-            Some(Told::Going(Going { since: None, ..going })),
-            Some(Told::Ended(Ended { at: None, ..ended.clone() })),
-            Some(Told::Ended(Ended { took: None, ..ended })),
+            Some(Told::Going(Going {
+                front: v1::Front::Unspecified.into(),
+                ..going.clone()
+            })),
+            Some(Told::Going(Going {
+                command: Some(String::new()),
+                ..going.clone()
+            })),
+            Some(Told::Going(Going {
+                since: None,
+                ..going
+            })),
+            Some(Told::Ended(Ended {
+                at: None,
+                ..ended.clone()
+            })),
+            Some(Told::Ended(Ended {
+                took: None,
+                ..ended
+            })),
         ];
         for doing in holed {
             let shell = v1::Shell { doing };
@@ -288,19 +369,52 @@ mod tests {
         use mux::ran::{Ended, Going, Is, Stopped};
         let since = Some(at(1).into());
         let (command, front) = (Some("make".to_owned()), mux::Front::Working.into());
-        let going = Going { command, since, front };
+        let going = Going {
+            command,
+            since,
+            front,
+        };
         let took = Some(prost_types::Duration::default());
-        let ended = Ended { command: None, at: since, ending: None, took };
-        let negative = Some(prost_types::Duration { seconds: -1, nanos: 0 });
+        let ended = Ended {
+            command: None,
+            at: since,
+            ending: None,
+            took,
+        };
+        let negative = Some(prost_types::Duration {
+            seconds: -1,
+            nanos: 0,
+        });
         let holed = [
             None,
-            Some(Is::Going(Going { front: mux::Front::Unspecified.into(), ..going.clone() })),
-            Some(Is::Going(Going { command: Some(String::new()), ..going.clone() })),
-            Some(Is::Going(Going { since: None, ..going })),
-            Some(Is::Ended(Ended { at: None, ..ended.clone() })),
-            Some(Is::Ended(Ended { took: negative, ..ended.clone() })),
-            Some(Is::Ended(Ended { took: None, ..ended })),
-            Some(Is::Stopped(Stopped { command: None, at: None })),
+            Some(Is::Going(Going {
+                front: mux::Front::Unspecified.into(),
+                ..going.clone()
+            })),
+            Some(Is::Going(Going {
+                command: Some(String::new()),
+                ..going.clone()
+            })),
+            Some(Is::Going(Going {
+                since: None,
+                ..going
+            })),
+            Some(Is::Ended(Ended {
+                at: None,
+                ..ended.clone()
+            })),
+            Some(Is::Ended(Ended {
+                took: negative,
+                ..ended.clone()
+            })),
+            Some(Is::Ended(Ended {
+                took: None,
+                ..ended
+            })),
+            Some(Is::Stopped(Stopped {
+                command: None,
+                at: None,
+            })),
         ];
         for is in holed {
             let ran = mux::Ran { is };
@@ -320,7 +434,12 @@ mod tests {
 
     #[test]
     fn an_ending_told_is_read_back_as_it_was() {
-        for ending in [Ending::Exited(0), Ending::Exited(-1), Ending::Exited(255), Ending::Resumed] {
+        for ending in [
+            Ending::Exited(0),
+            Ending::Exited(-1),
+            Ending::Exited(255),
+            Ending::Resumed,
+        ] {
             assert_eq!(Ending::of_api(&ending.to_api()), ending);
             assert_eq!(Ending::of_mux(&ending.to_mux()), ending);
         }

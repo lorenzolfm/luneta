@@ -5,14 +5,16 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::names::SessionName;
-use lune_domain::projects::{self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId};
+use lune_domain::projects::{
+    self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId,
+};
 use lune_protocol::github::{PullRequest, State};
 use lune_protocol::said::Said;
+use lune_protocol::shell::Ending;
 use luned::links::Branch;
 use luned::prunes;
 use luned::rebases::{self, Came, Rebased, Unrebased};
 use luned::{Destination, Directory};
-use lune_protocol::shell::Ending;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -20,7 +22,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::actions::{
-    self, Action, Command, Key, Noun, Pasted, MENU_GROUPS, OPEN, REVIEW, ROW_GROUPS, YANK,
+    self, Action, Command, Key, MENU_GROUPS, Noun, OPEN, Pasted, REVIEW, ROW_GROUPS, YANK,
 };
 use crate::agents::{self, Harness, Picked};
 use crate::brief;
@@ -33,10 +35,10 @@ use crate::machines::Machine;
 use crate::moonlight;
 use crate::printed::{self, Printed};
 use crate::prune;
-use crate::rebase;
 use crate::pull::{At, Found, Kind, Link, Readied, Ready, Wanted, Work};
+use crate::rebase;
 use crate::sidebar::{
-    self, ACCENT, LIT, Listed, Mark, NAME, ViewKey, ViewPlace, Place, ProjectRow, TAG,
+    self, ACCENT, LIT, Listed, Mark, NAME, Place, ProjectRow, TAG, ViewKey, ViewPlace,
     WorktreePlace,
 };
 use crate::skills::{Name, Search, Skills};
@@ -251,13 +253,22 @@ impl Pull {
             return None;
         }
         let mut offered = Pull::offered(work).into_iter();
-        offered.find(|(_, pasted)| pasted.key() == c).map(|(pull, _)| pull)
+        offered
+            .find(|(_, pasted)| pasted.key() == c)
+            .map(|(pull, _)| pull)
     }
 }
 
 enum Entry {
-    Group { key: char, name: &'static str, entries: Vec<Entry> },
-    Act { key: char, action: Action },
+    Group {
+        key: char,
+        name: &'static str,
+        entries: Vec<Entry>,
+    },
+    Act {
+        key: char,
+        action: Action,
+    },
 }
 
 impl Entry {
@@ -294,7 +305,11 @@ fn tree(
         let at = root.iter().position(held).unwrap_or_else(|| {
             let name = actions::group_name(groups, group);
             let name = name.expect("actions.rs names the group of every path two keys long");
-            root.push(Entry::Group { key: group, name, entries: Vec::new() });
+            root.push(Entry::Group {
+                key: group,
+                name,
+                entries: Vec::new(),
+            });
             root.len() - 1
         });
         let Some(Entry::Group { entries, .. }) = root.get_mut(at) else {
@@ -325,14 +340,24 @@ struct Keys {
 impl Keys {
     fn new(target: &Target, agent: Picked) -> Self {
         let fitting = Action::menu().filter(|(action, _)| target.fits(*action));
-        Keys { root: tree(fitting, &MENU_GROUPS), open: Vec::new(), search: None, agent }
+        Keys {
+            root: tree(fitting, &MENU_GROUPS),
+            open: Vec::new(),
+            search: None,
+            agent,
+        }
     }
 
     fn trail(&self) -> Vec<(&'static str, &[Entry])> {
         let mut trail = Vec::with_capacity(self.open.len());
         let mut entries = self.root.as_slice();
         for at in &self.open {
-            if let Some(Entry::Group { name, entries: inner, .. }) = entries.get(*at) {
+            if let Some(Entry::Group {
+                name,
+                entries: inner,
+                ..
+            }) = entries.get(*at)
+            {
                 trail.push((*name, inner.as_slice()));
                 entries = inner;
             }
@@ -341,7 +366,9 @@ impl Keys {
     }
 
     fn entries(&self) -> &[Entry] {
-        self.trail().last().map_or(self.root.as_slice(), |(_, entries)| entries)
+        self.trail()
+            .last()
+            .map_or(self.root.as_slice(), |(_, entries)| entries)
     }
 
     fn starts(&self) -> bool {
@@ -422,11 +449,11 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
         KeyCode::Down => {
             search.move_by(1);
             (Pressed::Moved, true)
-        },
+        }
         KeyCode::Up => {
             search.move_by(-1);
             (Pressed::Moved, true)
-        },
+        }
         KeyCode::Enter => match search.chosen() {
             Some(skill) => (Pressed::Start(skill.name.to_string()), true),
             None => (Pressed::Nothing, true),
@@ -434,7 +461,7 @@ fn searched(search: &mut Search, key: &KeyEvent) -> (Pressed, bool) {
         KeyCode::Char(c) => {
             search.push(c);
             (Pressed::Moved, true)
-        },
+        }
         _ => (Pressed::Nothing, true),
     }
 }
@@ -490,7 +517,10 @@ impl Rename {
     }
 }
 
-#[expect(clippy::large_enum_variant, reason = "one is made on each Enter, and goes at once")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one is made on each Enter, and goes at once"
+)]
 enum Entered {
     Done(Done),
     Wrong(String),
@@ -547,15 +577,19 @@ impl Typing {
                         named(typed, projects::ProjectName::parse)
                             .and_then(|name| name.ok_or_else(kept))
                             .map(|name| Rename::Project(project, name))
-                    },
+                    }
                 };
                 match rename {
                     Ok(rename) => renamed(rename),
                     Err(why) => Entered::Wrong(why),
                 }
-            },
+            }
             Typing::Browser(place) => match BrowserUrl::from_user(typed) {
-                Ok(url) => Entered::Done(Done::Browser { on: on.clone(), place, url }),
+                Ok(url) => Entered::Done(Done::Browser {
+                    on: on.clone(),
+                    place,
+                    url,
+                }),
                 Err(why) => Entered::Wrong(why),
             },
         }
@@ -563,7 +597,10 @@ impl Typing {
 }
 
 fn named<N>(typed: &str, parse: fn(&str) -> Result<N, String>) -> Result<Option<N>, String> {
-    Some(typed.trim()).filter(|name| !name.is_empty()).map(parse).transpose()
+    Some(typed.trim())
+        .filter(|name| !name.is_empty())
+        .map(parse)
+        .transpose()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -589,7 +626,11 @@ pub enum Says<'a> {
 
 impl Chain {
     fn new(typing: Typing, typed: String) -> Chain {
-        Chain { typing, typed, wrong: None }
+        Chain {
+            typing,
+            typed,
+            wrong: None,
+        }
     }
 
     #[must_use]
@@ -643,13 +684,13 @@ impl Chain {
             Typed::Typing => {
                 self.wrong = None;
                 Chained::Typing(self)
-            },
+            }
             Typed::Enter => match self.typing.clone().typed(&self.typed, on) {
                 Entered::Done(done) => Chained::Done(done),
                 Entered::Wrong(why) => {
                     self.wrong = Some(why);
                     Chained::Typing(self)
-                },
+                }
             },
         }
     }
@@ -703,12 +744,12 @@ fn type_key(key: &KeyEvent, typed: &mut String) -> Typed {
         KeyCode::Backspace => {
             typed.pop();
             Typed::Typing
-        },
+        }
         KeyCode::Enter => Typed::Enter,
         KeyCode::Char(c) => {
             typed.push(c);
             Typed::Typing
-        },
+        }
         _ => Typed::Typing,
     }
 }
@@ -871,9 +912,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(Place::Session(target.project.listed().clone())),
             Target::Worktree(_, row) => Some(Place::Worktree(row.place.clone())),
-            Target::View(_, row) => {
-                Some(Place::View(row.place.clone()))
-            },
+            Target::View(_, row) => Some(Place::View(row.place.clone())),
             Target::Machine(_) => None,
         }
     }
@@ -901,7 +940,7 @@ impl Target {
             (Action::SearchSkills, Target::View(_, row)) => Offer::SearchSkills(row),
             (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::View(_, row)) => {
                 Offer::Skill(row, action.skill()?)
-            },
+            }
             (Action::FixLast, Target::View(_, row)) => Offer::Last(row, Last::Fix),
             (Action::ExplainLast, Target::View(_, row)) => Offer::Last(row, Last::Explain),
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
@@ -913,44 +952,56 @@ impl Target {
             }),
             (Action::NewBrowser, Target::Worktree(_, row)) => {
                 Offer::NewBrowser(BrowserPlace::Worktree(row.place.worktree))
-            },
+            }
             (Action::NewReview, Target::View(_, row)) => Offer::NewReview(row),
             (Action::ShowTabs, Target::View(_, row)) if row.arranged == Some(Arranged::Panes) => {
                 Offer::Arrange(row, Arranged::Tabs)
-            },
+            }
             (Action::ShowPanes, Target::View(_, row)) if row.arranged == Some(Arranged::Tabs) => {
                 Offer::Arrange(row, Arranged::Panes)
-            },
+            }
             (Action::NewWorktree, _) => Offer::NewWorktree(self.project()?.id()),
             (Action::NewMachine, _) => Offer::NewMachine,
-            (Action::RenameView, Target::View(_, ViewRow { terminal: Some(terminal), .. })) => {
-                Offer::Rename(Renames::Terminal(*terminal))
-            },
+            (
+                Action::RenameView,
+                Target::View(
+                    _,
+                    ViewRow {
+                        terminal: Some(terminal),
+                        ..
+                    },
+                ),
+            ) => Offer::Rename(Renames::Terminal(*terminal)),
             (Action::RenameWorktree, Target::Worktree(_, row)) => {
                 Offer::Rename(Renames::Worktree(row.place.worktree))
-            },
+            }
             (Action::RenameProject, Target::Project(_, ProjectTarget { project, .. })) => {
                 Offer::Rename(Renames::Project(project.id()))
-            },
+            }
             (Action::CloseView, Target::View(_, row)) => Offer::CloseView(row),
             (Action::CloseWorktree, Target::Worktree(_, row)) => Offer::CloseWorktree(row),
             (Action::CloseProject, Target::Project(_, target)) => {
                 Offer::CloseProject(target.project.listed())
-            },
+            }
             (Action::ForgetMachine, Target::Machine(Machine::Remote(destination))) => {
                 Offer::ForgetMachine(destination)
-            },
+            }
             (Action::DeleteMerged, _) => Offer::DeleteMerged(self.merged_in()?),
             (Action::Rebase, Target::View(_, row)) => {
-                let Folder { branch: Some(branch), repository: Some(_), .. } = row.cwd.at()? else {
+                let Folder {
+                    branch: Some(branch),
+                    repository: Some(_),
+                    ..
+                } = row.cwd.at()?
+                else {
                     return None;
                 };
                 let beside = row.beside().expect("a view at a folder works beside it");
                 Offer::Rebase(Rebases::View(beside, branch))
-            },
+            }
             (Action::Rebase, Target::Worktree(_, row)) if row.repository.is_some() => {
                 Offer::Rebase(Rebases::Worktree(row, row.branch.as_ref()?))
-            },
+            }
             (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
             (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
             (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
@@ -981,25 +1032,36 @@ impl Target {
 
     fn in_repository(&self) -> Option<(&Directory, &str)> {
         match self {
-            Target::Worktree(_, WorktreeRow { folder, repository, .. }) => {
-                Some((folder, repository.as_deref()?))
-            },
+            Target::Worktree(
+                _,
+                WorktreeRow {
+                    folder, repository, ..
+                },
+            ) => Some((folder, repository.as_deref()?)),
             Target::View(_, row) => {
-                let Folder { dir, repository, .. } = row.cwd.at()?;
+                let Folder {
+                    dir, repository, ..
+                } = row.cwd.at()?;
                 Some((dir, repository.as_deref()?))
-            },
+            }
             Target::Project(..) | Target::Machine(_) => None,
         }
     }
 
     fn repository_name(&self) -> &str {
-        self.in_repository().map_or("", |(_, home)| prunes::name_of(home))
+        self.in_repository()
+            .map_or("", |(_, home)| prunes::name_of(home))
     }
 
     fn repository(&self) -> Option<Repository> {
         let (dir, home) = self.in_repository()?;
         let (on, name) = (self.machine().clone(), prunes::name_of(home).to_owned());
-        Some(Repository { on, dir: dir.clone(), home: home.to_owned(), name })
+        Some(Repository {
+            on,
+            dir: dir.clone(),
+            home: home.to_owned(),
+            name,
+        })
     }
 
     fn merged_in(&self) -> Option<Directory> {
@@ -1019,22 +1081,25 @@ impl Target {
             (_, brief::Scope::Every) => Briefed::Every,
             (Target::Machine(machine), brief::Scope::Session | brief::Scope::Highlighted) => {
                 Briefed::Machine(machine.clone())
-            },
+            }
             (Target::View(machine, row), brief::Scope::Highlighted) => {
                 let session = row.place.listed().name().session().clone();
                 Briefed::Agent(machine.clone(), session, row.place.view())
-            },
+            }
             (
                 Target::Worktree(machine, WorktreeRow { place, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), place.project.listed().name().session().clone()),
+            ) => Briefed::Session(
+                machine.clone(),
+                place.project.listed().name().session().clone(),
+            ),
             (
                 Target::Project(machine, ProjectTarget { project, .. }),
                 brief::Scope::Session | brief::Scope::Highlighted,
             ) => Briefed::Session(machine.clone(), project.listed().name().session().clone()),
             (Target::View(machine, ViewRow { place, .. }), brief::Scope::Session) => {
                 Briefed::Session(machine.clone(), place.listed().name().session().clone())
-            },
+            }
         }
     }
 }
@@ -1052,10 +1117,10 @@ pub fn spelled(action: Action, origin: Origin) -> String {
     match (action.key(), origin) {
         (Key::Menu(keys) | Key::RowAndMenu(keys), Origin::Views) => {
             format!("{menu} {}", typed_path(keys))
-        },
+        }
         (Key::Menu(keys @ [first, ..]), Origin::Sidebar) if Top::of(*first).is_some() => {
             format!("m {}", typed_path(keys))
-        },
+        }
         (Key::Menu(keys) | Key::RowAndMenu(keys) | Key::Row(keys), _) => typed_path(keys),
         (Key::Pasted(key), _) => key.to_string(),
         (Key::Chord((code, modifiers)), _) => Label::Key(code, modifiers).to_string(),
@@ -1071,28 +1136,42 @@ pub fn whence(work: &Work) -> String {
 }
 
 fn typed_path(path: &[char]) -> String {
-    path.iter().map(char::to_string).collect::<Vec<_>>().join(" ")
+    path.iter()
+        .map(char::to_string)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
     let Beside { session, view, .. } = row.beside()?;
     let argv = agents::on_skill(keys.agent.harness(), skill, None);
     let opens = Opens::Command(argv.map_err(|why| format!("menu: {skill}: {why}"))?);
-    Ok(Wants::Open { session, view, opens })
+    Ok(Wants::Open {
+        session,
+        view,
+        opens,
+    })
 }
 
 fn unstarted(what: impl std::fmt::Display, why: &str) -> Did {
     Did::Closed(Done::Wrong(format!("menu: {what}: {why}")))
 }
 
-const ASKS_FIRST: [Action; 4] =
-    [Action::CloseView, Action::CloseWorktree, Action::CloseProject, Action::DeleteMerged];
+const ASKS_FIRST: [Action; 4] = [
+    Action::CloseView,
+    Action::CloseWorktree,
+    Action::CloseProject,
+    Action::DeleteMerged,
+];
 
 const _: () = {
     let mut at = 0;
     while at < ASKS_FIRST.len() {
         let in_menu = matches!(ASKS_FIRST[at].key(), Key::Menu([_, ..]));
-        assert!(in_menu, "an action that asks first is said yes to with its menu key");
+        assert!(
+            in_menu,
+            "an action that asks first is said yes to with its menu key"
+        );
         at += 1;
     }
 };
@@ -1127,10 +1206,12 @@ impl Rebases<'_> {
             Rebases::View(beside, branch) => {
                 let dir = beside.cwd.clone();
                 (Resolves::Beside(beside), dir, branch.clone())
-            },
-            Rebases::Worktree(row, branch) => {
-                (Resolves::In(row.place.worktree), row.folder.clone(), branch.clone())
-            },
+            }
+            Rebases::Worktree(row, branch) => (
+                Resolves::In(row.place.worktree),
+                row.folder.clone(),
+                branch.clone(),
+            ),
         }
     }
 }
@@ -1148,14 +1229,23 @@ impl ViewRow {
 
     fn beside(&self) -> Result<Beside, String> {
         let cwd = self.folder()?.dir.clone();
-        Ok(Beside { session: self.place.listed().clone(), view: self.place.view(), cwd })
+        Ok(Beside {
+            session: self.place.listed().clone(),
+            view: self.place.view(),
+            cwd,
+        })
     }
 
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
         let (beside, view) = (self.beside()?, self.place.view());
-        let pull_request = self.cwd.at().and_then(|folder| folder.pull_request.as_ref());
+        let pull_request = self
+            .cwd
+            .at()
+            .and_then(|folder| folder.pull_request.as_ref());
         let Some(PullRequest { page, state, .. }) = pull_request else {
-            return Err(format!("menu: gh has found no pull request of view {view}'s branch"));
+            return Err(format!(
+                "menu: gh has found no pull request of view {view}'s branch"
+            ));
         };
         let number = page.number();
         match state {
@@ -1201,7 +1291,10 @@ impl ViewRow {
     }
 }
 
-#[expect(clippy::large_enum_variant, reason = "it lasts a key; a box would allocate on each")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "it lasts a key; a box would allocate on each"
+)]
 pub enum Did {
     Stays(Menu, Wants),
     Closed(Done),
@@ -1212,17 +1305,48 @@ pub enum Wants {
     Nothing,
     Cloned(ProjectId),
     Keep(Harness),
-    Skills { dir: Directory, agent: Harness },
-    Refind { dir: Directory, agent: Harness },
-    Plan { session: Listed, scope: Scope },
-    Prunes { dir: Directory },
-    Prune { dir: Directory, agreed: BTreeSet<prunes::Deleting> },
-    Rebase { dir: Directory, branch: Said },
-    Open { session: Listed, view: ViewKey, opens: Opens },
+    Skills {
+        dir: Directory,
+        agent: Harness,
+    },
+    Refind {
+        dir: Directory,
+        agent: Harness,
+    },
+    Plan {
+        session: Listed,
+        scope: Scope,
+    },
+    Prunes {
+        dir: Directory,
+    },
+    Prune {
+        dir: Directory,
+        agreed: BTreeSet<prunes::Deleting>,
+    },
+    Rebase {
+        dir: Directory,
+        branch: Said,
+    },
+    Open {
+        session: Listed,
+        view: ViewKey,
+        opens: Opens,
+    },
     Pull(Work, Wanted),
-    Printed { session: Listed, view: ViewKey, ended: Ended },
-    Checks { page: PullPage },
-    Make { cwd: Directory, name: String, agent: Option<Argv> },
+    Printed {
+        session: Listed,
+        view: ViewKey,
+        ended: Ended,
+    },
+    Checks {
+        page: PullPage,
+    },
+    Make {
+        cwd: Directory,
+        name: String,
+        agent: Option<Argv>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1237,11 +1361,32 @@ pub enum Done {
     Ssh(Destination),
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
-    Welcome { on: Machine, session: Listed, view: ViewKey },
-    Browser { on: Machine, place: BrowserPlace, url: Option<BrowserUrl> },
-    Review { on: Machine, session: Listed, view: ViewKey },
-    Arrange { on: Machine, session: Listed, view: ViewKey, arranged: Arranged },
-    OpenIn { on: Machine, worktree: WorktreeId, command: Argv },
+    Welcome {
+        on: Machine,
+        session: Listed,
+        view: ViewKey,
+    },
+    Browser {
+        on: Machine,
+        place: BrowserPlace,
+        url: Option<BrowserUrl>,
+    },
+    Review {
+        on: Machine,
+        session: Listed,
+        view: ViewKey,
+    },
+    Arrange {
+        on: Machine,
+        session: Listed,
+        view: ViewKey,
+        arranged: Arranged,
+    },
+    OpenIn {
+        on: Machine,
+        worktree: WorktreeId,
+        command: Argv,
+    },
     Said(String),
     Rename(Machine, Rename),
     Quit,
@@ -1269,17 +1414,59 @@ pub struct Menu {
 
 enum Stage {
     Choosing(Keys),
-    Planning { keys: Keys, close: Close, agreed: Option<Plan> },
-    Asking { keys: Keys, close: Close, plan: Plan, asks: String },
-    Sweeping { keys: Keys, dir: Directory },
-    Swept { keys: Keys, dir: Directory, plan: prunes::Plan },
-    Pruning { keys: Keys, dir: Directory, count: usize },
-    Opening { keys: Keys },
-    Reading { keys: Keys, last: Last, beside: Beside, ended: Ended },
-    Fetching { keys: Keys, beside: Beside, page: PullPage },
-    Rebasing { keys: Keys, resolves: Resolves, branch: Said },
-    Pull { work: Work, agent: Harness, step: Step },
-    Typing { keys: Keys, chain: Chain },
+    Planning {
+        keys: Keys,
+        close: Close,
+        agreed: Option<Plan>,
+    },
+    Asking {
+        keys: Keys,
+        close: Close,
+        plan: Plan,
+        asks: String,
+    },
+    Sweeping {
+        keys: Keys,
+        dir: Directory,
+    },
+    Swept {
+        keys: Keys,
+        dir: Directory,
+        plan: prunes::Plan,
+    },
+    Pruning {
+        keys: Keys,
+        dir: Directory,
+        count: usize,
+    },
+    Opening {
+        keys: Keys,
+    },
+    Reading {
+        keys: Keys,
+        last: Last,
+        beside: Beside,
+        ended: Ended,
+    },
+    Fetching {
+        keys: Keys,
+        beside: Beside,
+        page: PullPage,
+    },
+    Rebasing {
+        keys: Keys,
+        resolves: Resolves,
+        branch: Said,
+    },
+    Pull {
+        work: Work,
+        agent: Harness,
+        step: Step,
+    },
+    Typing {
+        keys: Keys,
+        chain: Chain,
+    },
 }
 
 enum Step {
@@ -1311,7 +1498,11 @@ impl Menu {
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
-        let menu = Menu { number, target, stage: Stage::Choosing(keys) };
+        let menu = Menu {
+            number,
+            target,
+            stage: Stage::Choosing(keys),
+        };
         Some(match key {
             Some(key) => menu.key(&KeyEvent::from(KeyCode::Char(key))),
             None => Did::Stays(menu, Wants::Nothing),
@@ -1320,23 +1511,44 @@ impl Menu {
 
     pub fn new(number: u64, target: Target, agent: Picked) -> Menu {
         let keys = Keys::new(&target, agent);
-        Menu { number, target, stage: Stage::Choosing(keys) }
+        Menu {
+            number,
+            target,
+            stage: Stage::Choosing(keys),
+        }
     }
 
     pub fn acting(number: u64, target: &Target, action: Action, agent: Picked) -> Did {
-        let offer = target.offer(action).expect("the palette lists only actions its target fits");
+        let offer = target
+            .offer(action)
+            .expect("the palette lists only actions its target fits");
         Menu::act(number, target, Keys::new(target, agent), offer)
     }
 
     pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
         let step = Step::Choosing { wrong: None };
-        Menu { number, target, stage: Stage::Pull { work, agent, step } }
+        Menu {
+            number,
+            target,
+            stage: Stage::Pull { work, agent, step },
+        }
     }
 
     pub fn start_pull(number: u64, target: Target, work: Work, agent: Harness, pull: Pull) -> Did {
         let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
-        let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) };
-        Did::Stays(Menu { number, target, stage }, wants)
+        let stage = Stage::Pull {
+            work,
+            agent,
+            step: Step::Waiting(Wait::Pulling(pull)),
+        };
+        Did::Stays(
+            Menu {
+                number,
+                target,
+                stage,
+            },
+            wants,
+        )
     }
 
     pub fn number(&self) -> u64 {
@@ -1368,7 +1580,13 @@ impl Menu {
     }
 
     pub fn pulling(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Pulling(_)), .. })
+        matches!(
+            self.stage,
+            Stage::Pull {
+                step: Step::Waiting(Wait::Pulling(_)),
+                ..
+            }
+        )
     }
 
     pub fn waits(&self) -> bool {
@@ -1380,7 +1598,10 @@ impl Menu {
                 | Stage::Fetching { .. }
                 | Stage::Rebasing { .. }
                 | Stage::Opening { .. }
-                | Stage::Pull { step: Step::Waiting(_), .. }
+                | Stage::Pull {
+                    step: Step::Waiting(_),
+                    ..
+                }
         )
     }
 
@@ -1391,24 +1612,41 @@ impl Menu {
             Stage::Reading { ended, .. } => Some(reading(ended)),
             Stage::Fetching { page, .. } => Some(fetching(page.number())),
             Stage::Rebasing { branch, .. } => Some(rebasing(branch)),
-            Stage::Pull { work, step: Step::Waiting(wait), .. } => Some(wait.doing(work)),
+            Stage::Pull {
+                work,
+                step: Step::Waiting(wait),
+                ..
+            } => Some(wait.doing(work)),
             Stage::Choosing(_)
             | Stage::Planning { .. }
             | Stage::Asking { .. }
             | Stage::Swept { .. }
             | Stage::Opening { .. }
-            | Stage::Pull { step: Step::Choosing { .. }, .. }
+            | Stage::Pull {
+                step: Step::Choosing { .. },
+                ..
+            }
             | Stage::Typing { .. } => None,
         }
     }
 
     pub fn opens_pulled(&self) -> bool {
-        matches!(self.stage, Stage::Pull { step: Step::Waiting(Wait::Unopened), .. })
+        matches!(
+            self.stage,
+            Stage::Pull {
+                step: Step::Waiting(Wait::Unopened),
+                ..
+            }
+        )
     }
 
     pub fn making(&self) -> Option<&Work> {
         match &self.stage {
-            Stage::Pull { work, step: Step::Waiting(Wait::Pulling(_)), .. } => Some(work),
+            Stage::Pull {
+                work,
+                step: Step::Waiting(Wait::Pulling(_)),
+                ..
+            } => Some(work),
             Stage::Pull {
                 step: Step::Choosing { .. } | Step::Waiting(Wait::Opening | Wait::Unopened),
                 ..
@@ -1429,14 +1667,19 @@ impl Menu {
 
     pub fn left(&self) -> Option<String> {
         match &self.stage {
-            Stage::Pull { work, step: Step::Choosing { wrong: Some(wrong) }, .. } => {
-                Some(format!("menu: {wrong} once {} is pasted again", work.tab()))
-            },
+            Stage::Pull {
+                work,
+                step: Step::Choosing { wrong: Some(wrong) },
+                ..
+            } => Some(format!("menu: {wrong} once {} is pasted again", work.tab())),
             Stage::Swept { .. } => Some(
                 "menu: nothing deleted: the menu closed before you said yes; d m asks again"
                     .to_owned(),
             ),
-            Stage::Pull { step: Step::Choosing { wrong: None } | Step::Waiting(_), .. }
+            Stage::Pull {
+                step: Step::Choosing { wrong: None } | Step::Waiting(_),
+                ..
+            }
             | Stage::Choosing(_)
             | Stage::Planning { .. }
             | Stage::Asking { .. }
@@ -1460,23 +1703,43 @@ impl Menu {
 
     fn act(number: u64, target: &Target, mut keys: Keys, offer: Offer<'_>) -> Did {
         let stays = |stage: Stage, wants: Wants| {
-            Did::Stays(Menu { number, target: target.clone(), stage }, wants)
+            Did::Stays(
+                Menu {
+                    number,
+                    target: target.clone(),
+                    stage,
+                },
+                wants,
+            )
         };
         let chained = Chain::offered(&offer);
         let closing = |keys: Keys, session: &Listed, scope: Scope| {
             let session = session.clone();
-            let wants = Wants::Plan { session: session.clone(), scope };
+            let wants = Wants::Plan {
+                session: session.clone(),
+                scope,
+            };
             let close = Close { session, scope };
-            stays(Stage::Planning { keys, close, agreed: None }, wants)
+            stays(
+                Stage::Planning {
+                    keys,
+                    close,
+                    agreed: None,
+                },
+                wants,
+            )
         };
         let wrong = |reason: String| Did::Closed(Done::Wrong(reason));
         match offer {
             Offer::SearchSkills(row) => match row.beside() {
                 Ok(Beside { cwd: dir, .. }) => {
                     keys.search = Some(Search::new(dir.clone()));
-                    let wants = Wants::Skills { dir, agent: keys.agent.harness() };
+                    let wants = Wants::Skills {
+                        dir,
+                        agent: keys.agent.harness(),
+                    };
                     stays(Stage::Choosing(keys), wants)
-                },
+                }
                 Err(reason) => wrong(reason),
             },
             Offer::Skill(row, skill) => match started(&keys, row, skill) {
@@ -1486,69 +1749,101 @@ impl Menu {
             Offer::Last(row, last) => match row.ended() {
                 Ok((beside, ended)) => {
                     let (session, view) = (beside.session.clone(), beside.view);
-                    let wants = Wants::Printed { session, view, ended: ended.clone() };
-                    stays(Stage::Reading { keys, last, beside, ended }, wants)
-                },
+                    let wants = Wants::Printed {
+                        session,
+                        view,
+                        ended: ended.clone(),
+                    };
+                    stays(
+                        Stage::Reading {
+                            keys,
+                            last,
+                            beside,
+                            ended,
+                        },
+                        wants,
+                    )
+                }
                 Err(reason) => wrong(reason),
             },
             Offer::FixChecks(row) => match row.pulled() {
                 Ok((beside, page)) => {
                     let wants = Wants::Checks { page: page.clone() };
                     stays(Stage::Fetching { keys, beside, page }, wants)
-                },
+                }
                 Err(reason) => wrong(reason),
             },
             Offer::NewView(row) => match row.beside() {
                 Ok(Beside { session, view, .. }) => {
                     let opens = Opens::Shell;
                     let stage = Stage::Opening { keys };
-                    stays(stage, Wants::Open { session, view, opens })
-                },
+                    stays(
+                        stage,
+                        Wants::Open {
+                            session,
+                            view,
+                            opens,
+                        },
+                    )
+                }
                 Err(reason) => wrong(reason),
             },
             Offer::NewWelcome(row) => {
                 let on = target.machine().clone();
                 let (session, view) = (row.place.listed().clone(), row.place.view());
                 Did::Closed(Done::Welcome { on, session, view })
-            },
+            }
             Offer::NewReview(row) => {
                 let on = target.machine().clone();
                 let (session, view) = (row.place.listed().clone(), row.place.view());
                 Did::Closed(Done::Review { on, session, view })
-            },
+            }
             Offer::Arrange(row, arranged) => {
                 let on = target.machine().clone();
                 let (session, view) = (row.place.listed().clone(), row.place.view());
-                Did::Closed(Done::Arrange { on, session, view, arranged })
-            },
+                Did::Closed(Done::Arrange {
+                    on,
+                    session,
+                    view,
+                    arranged,
+                })
+            }
             Offer::NewWorktree(project) => {
                 let chain = chained.expect("a new worktree is typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Cloned(project))
-            },
+            }
             Offer::NewMachine | Offer::Rename(_) | Offer::NewBrowser(_) => {
                 let chain = chained.expect("a machine, name or browser is typed in a chain");
                 stays(Stage::Typing { keys, chain }, Wants::Nothing)
-            },
+            }
             Offer::CloseView(row) => {
                 closing(keys, row.place.listed(), Scope::View(row.place.view()))
-            },
+            }
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
                 closing(keys, row.place.project.listed(), scope)
-            },
-            Offer::CloseProject(listed) => {
-                closing(keys, listed, Scope::Project)
-            },
+            }
+            Offer::CloseProject(listed) => closing(keys, listed, Scope::Project),
             Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
             Offer::DeleteMerged(dir) => {
                 let wants = Wants::Prunes { dir: dir.clone() };
                 stays(Stage::Sweeping { keys, dir }, wants)
-            },
+            }
             Offer::Rebase(rebases) => {
                 let (resolves, dir, branch) = rebases.asked();
-                let wants = Wants::Rebase { dir, branch: branch.clone() };
-                stays(Stage::Rebasing { keys, resolves, branch }, wants)
-            },
+                let wants = Wants::Rebase {
+                    dir,
+                    branch: branch.clone(),
+                };
+                stays(
+                    Stage::Rebasing {
+                        keys,
+                        resolves,
+                        branch,
+                    },
+                    wants,
+                )
+            }
             Offer::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
             Offer::Ask => Did::Closed(Done::Ask(target.clone())),
             Offer::FileIssue(repository) => Did::Closed(Done::Issue(repository)),
@@ -1557,28 +1852,42 @@ impl Menu {
     }
 
     pub fn key(self, key: &KeyEvent) -> Did {
-        let Menu { number, target, stage } = self;
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
         let stays = |stage: Stage, wants: Wants| {
-            Did::Stays(Menu { number, target: target.clone(), stage }, wants)
+            Did::Stays(
+                Menu {
+                    number,
+                    target: target.clone(),
+                    stage,
+                },
+                wants,
+            )
         };
         match stage {
             Stage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
                 (Pressed::Switched(agent), _) if let Some(search) = &mut keys.search => {
                     search.refind();
-                    let wants = Wants::Refind { dir: search.dir().clone(), agent };
+                    let wants = Wants::Refind {
+                        dir: search.dir().clone(),
+                        agent,
+                    };
                     stays(Stage::Choosing(keys), wants)
-                },
+                }
                 (Pressed::Switched(agent), _) => stays(Stage::Choosing(keys), Wants::Keep(agent)),
                 (Pressed::Moved | Pressed::Nothing, _) => {
                     stays(Stage::Choosing(keys), Wants::Nothing)
-                },
+                }
                 (Pressed::Start(skill), Target::View(_, row)) => {
                     match started(&keys, row, &skill) {
                         Ok(wants) => stays(Stage::Opening { keys }, wants),
                         Err(reason) => Did::Closed(Done::Wrong(reason)),
                     }
-                },
+                }
                 (Pressed::Start(_), _) => stays(Stage::Choosing(keys), Wants::Nothing),
                 (Pressed::Act(action), _) => match target.offer(action) {
                     Some(offer) => Menu::act(number, &target, keys, offer),
@@ -1602,23 +1911,26 @@ impl Menu {
                 if closes(key) =>
             {
                 Did::Closed(Done::Nothing)
-            },
-            Stage::Pull { step: Step::Choosing { .. }, .. }
-                if key.code == KeyCode::Backspace && bare(key) =>
-            {
-                Did::Closed(Done::Nothing)
-            },
-            Stage::Pull { work, agent, step: step @ Step::Choosing { .. } }
-                if key.code == KeyCode::Tab && bare(key) =>
-            {
+            }
+            Stage::Pull {
+                step: Step::Choosing { .. },
+                ..
+            } if key.code == KeyCode::Backspace && bare(key) => Did::Closed(Done::Nothing),
+            Stage::Pull {
+                work,
+                agent,
+                step: step @ Step::Choosing { .. },
+            } if key.code == KeyCode::Tab && bare(key) => {
                 let agent = agents::next(agent);
                 stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
-            },
-            Stage::Pull { work, agent, step: step @ Step::Choosing { .. } } => {
-                match Pull::pressed(key, &work) {
-                    Some(pull) => Menu::start_pull(number, target.clone(), work, agent, pull),
-                    None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
-                }
+            }
+            Stage::Pull {
+                work,
+                agent,
+                step: step @ Step::Choosing { .. },
+            } => match Pull::pressed(key, &work) {
+                Some(pull) => Menu::start_pull(number, target.clone(), work, agent, pull),
+                None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
             },
             stage @ (Stage::Planning { .. }
             | Stage::Sweeping { .. }
@@ -1630,82 +1942,219 @@ impl Menu {
             | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
             Stage::Swept { keys, dir, plan } => match answer(key, yes_key(Action::DeleteMerged)) {
                 Answer::Yes if !plan.goes.is_empty() => {
-                    let wants = Wants::Prune { dir: dir.clone(), agreed: plan.deletes() };
-                    stays(Stage::Pruning { keys, dir, count: plan.goes.len() }, wants)
-                },
+                    let wants = Wants::Prune {
+                        dir: dir.clone(),
+                        agreed: plan.deletes(),
+                    };
+                    stays(
+                        Stage::Pruning {
+                            keys,
+                            dir,
+                            count: plan.goes.len(),
+                        },
+                        wants,
+                    )
+                }
                 Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
                 Answer::Close => Did::Closed(Done::Nothing),
                 Answer::Yes | Answer::Nothing => {
                     stays(Stage::Swept { keys, dir, plan }, Wants::Nothing)
-                },
+                }
             },
-            Stage::Asking { keys, close, plan, asks } => match answer(key, close.key()) {
+            Stage::Asking {
+                keys,
+                close,
+                plan,
+                asks,
+            } => match answer(key, close.key()) {
                 Answer::Yes => {
                     let session = close.session.clone();
-                    let wants = Wants::Plan { session, scope: close.scope };
-                    stays(Stage::Planning { keys, close, agreed: Some(plan) }, wants)
-                },
+                    let wants = Wants::Plan {
+                        session,
+                        scope: close.scope,
+                    };
+                    stays(
+                        Stage::Planning {
+                            keys,
+                            close,
+                            agreed: Some(plan),
+                        },
+                        wants,
+                    )
+                }
                 Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
                 Answer::Close => Did::Closed(Done::Nothing),
-                Answer::Nothing => {
-                    stays(Stage::Asking { keys, close, plan, asks }, Wants::Nothing)
-                },
+                Answer::Nothing => stays(
+                    Stage::Asking {
+                        keys,
+                        close,
+                        plan,
+                        asks,
+                    },
+                    Wants::Nothing,
+                ),
             },
         }
     }
 
     pub fn planned(self, plan: Result<Plan, String>) -> Did {
-        let Menu { number, target, stage } = self;
-        let Stage::Planning { keys, close, agreed } = stage else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
+        let Stage::Planning {
+            keys,
+            close,
+            agreed,
+        } = stage
+        else {
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
         let plan = match plan {
             Ok(plan) => plan,
             Err(reason) => return Did::Closed(Done::Wrong(reason)),
         };
-        let asks = if agreed.as_ref() == Some(&plan) { None } else { plan.question() };
+        let asks = if agreed.as_ref() == Some(&plan) {
+            None
+        } else {
+            plan.question()
+        };
         if let Some(asks) = asks {
-            let stage = Stage::Asking { keys, close, plan, asks };
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+            let stage = Stage::Asking {
+                keys,
+                close,
+                plan,
+                asks,
+            };
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         }
         Did::Closed(Done::Act(target.machine().clone(), plan.act))
     }
 
     pub fn swept(self, plan: Result<prunes::Plan, String>) -> Did {
-        let Menu { number, target, stage } = self;
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
         let Stage::Sweeping { keys, dir } = stage else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
         let plan = match plan {
             Ok(plan) => plan,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: nothing deleted: {why}"))),
         };
-        Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
+        Did::Stays(
+            Menu {
+                number,
+                target,
+                stage: Stage::Swept { keys, dir, plan },
+            },
+            Wants::Nothing,
+        )
     }
 
     pub fn changed(self, plan: prunes::Plan) -> Did {
-        let Menu { number, target, stage } = self;
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
         let Stage::Pruning { keys, dir, .. } = stage else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
-        Did::Stays(Menu { number, target, stage: Stage::Swept { keys, dir, plan } }, Wants::Nothing)
+        Did::Stays(
+            Menu {
+                number,
+                target,
+                stage: Stage::Swept { keys, dir, plan },
+            },
+            Wants::Nothing,
+        )
     }
 
     pub fn pulled(self, found: Result<Found, String>) -> Did {
-        let Menu { number, target, stage } = self;
-        let Stage::Pull { work, agent, step: Step::Waiting(Wait::Pulling(pull)) } = stage else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
+        let Stage::Pull {
+            work,
+            agent,
+            step: Step::Waiting(Wait::Pulling(pull)),
+        } = stage
+        else {
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
-        let Found { on, ready: Ready { at, folder, branch, moved_off, work: readied } } =
-            match found {
-                Ok(found) => found,
-                Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
-            };
+        let Found {
+            on,
+            ready:
+                Ready {
+                    at,
+                    folder,
+                    branch,
+                    moved_off,
+                    work: readied,
+                },
+        } = match found {
+            Ok(found) => found,
+            Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
+        };
         if let (Pull::Agent, true) = (pull, moved_off) {
             let off = work.off_branch(branch.as_deref());
-            let wrong = Some(format!("{folder} is {off}, so no agent starts there; w opens it"));
-            let stage = Stage::Pull { work, agent, step: Step::Choosing { wrong } };
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+            let wrong = Some(format!(
+                "{folder} is {off}, so no agent starts there; w opens it"
+            ));
+            let stage = Stage::Pull {
+                work,
+                agent,
+                step: Step::Choosing { wrong },
+            };
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         }
         let argv = match (pull, &readied) {
             (Pull::Worktree, _) => None,
@@ -1716,7 +2165,7 @@ impl Menu {
             (Pull::Agent, Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
                 Some(Argv::on_words(agent, words, &[real.as_str()]))
-            },
+            }
         };
         let argv = match argv.transpose() {
             Ok(argv) => argv,
@@ -1726,7 +2175,12 @@ impl Menu {
             (At::There(place), None) => Did::Closed(Done::Go(on, Place::View(place))),
             (At::There(place), Some(argv)) => {
                 let (session, view) = (place.listed().clone(), place.view());
-                let folder = Folder { dir: folder, branch, repository: None, pull_request: None };
+                let folder = Folder {
+                    dir: folder,
+                    branch,
+                    repository: None,
+                    pull_request: None,
+                };
                 let row = ViewRow {
                     place,
                     terminal: None,
@@ -1735,28 +2189,70 @@ impl Menu {
                     arranged: None,
                 };
                 let target = Target::View(on, row);
-                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Opening) };
-                let wants = Wants::Open { session, view, opens: Opens::Command(argv) };
-                Did::Stays(Menu { number, target, stage }, wants)
-            },
+                let stage = Stage::Pull {
+                    work,
+                    agent,
+                    step: Step::Waiting(Wait::Opening),
+                };
+                let wants = Wants::Open {
+                    session,
+                    view,
+                    opens: Opens::Command(argv),
+                };
+                Did::Stays(
+                    Menu {
+                        number,
+                        target,
+                        stage,
+                    },
+                    wants,
+                )
+            }
             (At::Unopened, argv) => {
-                let wants = Wants::Make { cwd: folder, name: work.tab(), agent: argv };
-                let stage = Stage::Pull { work, agent, step: Step::Waiting(Wait::Unopened) };
-                Did::Stays(Menu { number, target: Target::Machine(on), stage }, wants)
-            },
+                let wants = Wants::Make {
+                    cwd: folder,
+                    name: work.tab(),
+                    agent: argv,
+                };
+                let stage = Stage::Pull {
+                    work,
+                    agent,
+                    step: Step::Waiting(Wait::Unopened),
+                };
+                Did::Stays(
+                    Menu {
+                        number,
+                        target: Target::Machine(on),
+                        stage,
+                    },
+                    wants,
+                )
+            }
         }
     }
 
     pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
-        let Stage::Pull { work, step: Step::Waiting(Wait::Pulling(Pull::Worktree)), .. } =
-            &self.stage
+        let Stage::Pull {
+            work,
+            step: Step::Waiting(Wait::Pulling(Pull::Worktree)),
+            ..
+        } = &self.stage
         else {
             return None;
         };
-        let Ready { moved_off: true, branch, .. } = &found.as_ref().ok()?.ready else {
+        let Ready {
+            moved_off: true,
+            branch,
+            ..
+        } = &found.as_ref().ok()?.ready
+        else {
             return None;
         };
-        Some(format!("{}'s worktree is {}", work.tab(), work.off_branch(branch.as_deref())))
+        Some(format!(
+            "{}'s worktree is {}",
+            work.tab(),
+            work.off_branch(branch.as_deref())
+        ))
     }
 
     pub fn reran(&mut self, ran: Ran) {
@@ -1766,16 +2262,34 @@ impl Menu {
     }
 
     pub fn printed(self, printed: Result<Printed, String>) -> Did {
-        let Menu { number, target, stage } = self;
-        let Stage::Reading { keys, last, beside: Beside { session, view, .. }, ended } = stage
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
+        let Stage::Reading {
+            keys,
+            last,
+            beside: Beside { session, view, .. },
+            ended,
+        } = stage
         else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
         let printed = match printed {
             Ok(printed) => printed,
             Err(why) => {
-                return Did::Closed(Done::Wrong(format!("menu: what view {view} printed: {why}")));
-            },
+                return Did::Closed(Done::Wrong(format!(
+                    "menu: what view {view} printed: {why}"
+                )));
+            }
         };
         let still = |row: &ViewRow| matches!(&row.ran, Ran::Ended(now) if *now == ended);
         if !matches!(&target, Target::View(_, row) if still(row)) {
@@ -1791,21 +2305,48 @@ impl Menu {
             Err(why) => return unstarted(format!("what view {view} printed"), &why),
         };
         let stage = Stage::Opening { keys };
-        let wants = Wants::Open { session, view, opens };
-        Did::Stays(Menu { number, target, stage }, wants)
+        let wants = Wants::Open {
+            session,
+            view,
+            opens,
+        };
+        Did::Stays(
+            Menu {
+                number,
+                target,
+                stage,
+            },
+            wants,
+        )
     }
 
     pub fn checked(self, checks: Result<Failing, String>) -> Did {
-        let Menu { number: menu, target, stage } = self;
-        let Stage::Fetching { keys, beside: Beside { session, view, .. }, page } = stage else {
-            return Did::Stays(Menu { number: menu, target, stage }, Wants::Nothing);
+        let Menu {
+            number: menu,
+            target,
+            stage,
+        } = self;
+        let Stage::Fetching {
+            keys,
+            beside: Beside { session, view, .. },
+            page,
+        } = stage
+        else {
+            return Did::Stays(
+                Menu {
+                    number: menu,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
         let number = page.number();
         let failing = match checks {
             Ok(failing) => failing,
             Err(why) => {
                 return Did::Closed(Done::Wrong(format!("menu: the checks of #{number}: {why}")));
-            },
+            }
         };
         if failing.failed.is_empty() {
             let pending = match failing.pending {
@@ -1824,24 +2365,51 @@ impl Menu {
             Err(why) => return unstarted(format!("the checks of #{number}"), &why),
         };
         let stage = Stage::Opening { keys };
-        let wants = Wants::Open { session, view, opens };
-        Did::Stays(Menu { number: menu, target, stage }, wants)
+        let wants = Wants::Open {
+            session,
+            view,
+            opens,
+        };
+        Did::Stays(
+            Menu {
+                number: menu,
+                target,
+                stage,
+            },
+            wants,
+        )
     }
 
     pub fn rebased(self, rebased: Result<Rebased, Unrebased>) -> Did {
-        let Menu { number, target, stage } = self;
-        let Stage::Rebasing { keys, resolves, branch } = stage else {
-            return Did::Stays(Menu { number, target, stage }, Wants::Nothing);
+        let Menu {
+            number,
+            target,
+            stage,
+        } = self;
+        let Stage::Rebasing {
+            keys,
+            resolves,
+            branch,
+        } = stage
+        else {
+            return Did::Stays(
+                Menu {
+                    number,
+                    target,
+                    stage,
+                },
+                Wants::Nothing,
+            );
         };
         let rebased = match rebased {
             Ok(rebased) => rebased,
             Err(Unrebased::Refused(why)) => {
                 return Did::Closed(Done::Wrong(format!("menu: {branch}: {why}")));
-            },
+            }
             Err(Unrebased::InDoubt(why)) => {
                 let why = format!("menu: {branch}: {}: {why}", rebase::IN_DOUBT);
                 return Did::Closed(Done::Wrong(why));
-            },
+            }
         };
         let Came::Stopped(stopped) = &rebased.came else {
             return Did::Closed(Done::Said(format!("menu: {}", rebase::said(&rebased))));
@@ -1855,13 +2423,28 @@ impl Menu {
             Resolves::Beside(Beside { session, view, .. }) => {
                 let stage = Stage::Opening { keys };
                 let opens = Opens::Command(command);
-                let wants = Wants::Open { session, view, opens };
-                Did::Stays(Menu { number, target, stage }, wants)
-            },
+                let wants = Wants::Open {
+                    session,
+                    view,
+                    opens,
+                };
+                Did::Stays(
+                    Menu {
+                        number,
+                        target,
+                        stage,
+                    },
+                    wants,
+                )
+            }
             Resolves::In(worktree) => {
                 let on = target.machine().clone();
-                Did::Closed(Done::OpenIn { on, worktree, command })
-            },
+                Did::Closed(Done::OpenIn {
+                    on,
+                    worktree,
+                    command,
+                })
+            }
         }
     }
 
@@ -1913,9 +2496,7 @@ impl Menu {
     pub fn quiet(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Planning { .. }
-                | Stage::Opening { .. }
-                | Stage::Reading { .. }
+            Stage::Planning { .. } | Stage::Opening { .. } | Stage::Reading { .. }
         )
     }
 
@@ -1933,14 +2514,23 @@ impl Menu {
         if spins {
             cadence.spin();
         }
-        (Drawn::Menu { number: self.number, area, spots }, cadence)
+        (
+            Drawn::Menu {
+                number: self.number,
+                area,
+                spots,
+            },
+            cadence,
+        )
     }
 
     pub fn turning(&self) -> bool {
         matches!(
             self.stage,
-            Stage::Pull { step: Step::Waiting(_), .. }
-                | Stage::Sweeping { .. }
+            Stage::Pull {
+                step: Step::Waiting(_),
+                ..
+            } | Stage::Sweeping { .. }
                 | Stage::Fetching { .. }
                 | Stage::Rebasing { .. }
                 | Stage::Pruning { .. }
@@ -1966,7 +2556,10 @@ impl Menu {
 
     fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
         let inner = width.saturating_sub(1);
-        let right = self.target.cwd().map_or_default(|cwd| sidebar::short_cwd(cwd.as_str()));
+        let right = self
+            .target
+            .cwd()
+            .map_or_default(|cwd| sidebar::short_cwd(cwd.as_str()));
         let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
             Stage::Pull { work, agent, step } => {
@@ -1978,21 +2571,32 @@ impl Menu {
                         };
                         let entries = Pull::offered(work).map(entry);
                         spots = entry_spots(&entries, width).map(Choice::Key);
-                        let mut body: Vec<_> =
-                            entries.iter().map(|entry| entry_line(entry, inner)).collect();
-                        spots.add(body.len(), 0..width, Choice::Key(KeyEvent::from(KeyCode::Tab)));
+                        let mut body: Vec<_> = entries
+                            .iter()
+                            .map(|entry| entry_line(entry, inner))
+                            .collect();
+                        spots.add(
+                            body.len(),
+                            0..width,
+                            Choice::Key(KeyEvent::from(KeyCode::Tab)),
+                        );
                         body.push(agent_line(Picked::ByYou(*agent), inner));
                         if let Some(wrong) = wrong {
                             body.extend(wrap(wrong, width, Style::new().fg(moonlight::RED)));
                         }
                         body
-                    },
+                    }
                     Step::Waiting(wait) => {
                         waiting(&wait.doing(work), width, Style::new().fg(NAME), frame)
-                    },
+                    }
                 };
-                (work.tab(), whence(work), body, keyed(width, &[(Hint::Esc, "Close")]))
-            },
+                (
+                    work.tab(),
+                    whence(work),
+                    body,
+                    keyed(width, &[(Hint::Esc, "Close")]),
+                )
+            }
             Stage::Choosing(keys)
             | Stage::Planning { keys, .. }
             | Stage::Opening { keys, .. }
@@ -2000,8 +2604,11 @@ impl Menu {
                 let choosing = matches!(self.stage, Stage::Choosing(_));
                 let tab = Choice::Key(KeyEvent::from(KeyCode::Tab));
                 if let Some(search) = &keys.search {
-                    let moves =
-                        [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Esc, "Back")];
+                    let moves = [
+                        (Hint::Moves, "Move"),
+                        (Hint::Enter, "Start"),
+                        (Hint::Esc, "Back"),
+                    ];
                     let listing = body_room.checked_sub(1).filter(|room| *room > 1);
                     let (mut body, skills) =
                         search_lines(search, width, listing.unwrap_or(body_room));
@@ -2022,8 +2629,10 @@ impl Menu {
                         &[(Hint::Backspace, "Back"), (Hint::Esc, "Close")]
                     };
                     let entries = keys.entries();
-                    let mut body: Vec<_> =
-                        entries.iter().map(|entry| entry_line(entry, inner)).collect();
+                    let mut body: Vec<_> = entries
+                        .iter()
+                        .map(|entry| entry_line(entry, inner))
+                        .collect();
                     if choosing {
                         spots = entry_spots(entries, width).map(Choice::Key);
                     }
@@ -2035,44 +2644,73 @@ impl Menu {
                     }
                     (title(keys), right, body, keyed(width, back))
                 }
-            },
+            }
             Stage::Asking { keys, asks, .. } => (
                 title(keys),
                 right,
                 wrap(asks, width, Style::new().fg(NAME)),
                 keyed(
                     width,
-                    &[(Hint::Char('y'), "Yes"), (Hint::Backspace, "Back"), (Hint::Esc, "Close")],
+                    &[
+                        (Hint::Char('y'), "Yes"),
+                        (Hint::Backspace, "Back"),
+                        (Hint::Esc, "Close"),
+                    ],
                 ),
             ),
             Stage::Sweeping { keys, .. } => {
                 let repository = self.target.repository_name();
                 let doing = sweeping(repository);
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
-                (title(keys), repository.to_owned(), body, keyed(width, &[(Hint::Esc, "Close")]))
-            },
+                (
+                    title(keys),
+                    repository.to_owned(),
+                    body,
+                    keyed(width, &[(Hint::Esc, "Close")]),
+                )
+            }
             Stage::Fetching { keys, page, .. } => {
                 let doing = fetching(page.number());
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
-                (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
-            },
+                (
+                    title(keys),
+                    right,
+                    body,
+                    keyed(width, &[(Hint::Esc, "Close")]),
+                )
+            }
             Stage::Rebasing { keys, branch, .. } => {
                 let body = waiting(&rebasing(branch), width, Style::new().fg(NAME), frame);
-                (title(keys), right, body, keyed(width, &[(Hint::Esc, "Close")]))
-            },
+                (
+                    title(keys),
+                    right,
+                    body,
+                    keyed(width, &[(Hint::Esc, "Close")]),
+                )
+            }
             Stage::Pruning { keys, count, .. } => {
                 let doing = pruning(*count);
                 let body = waiting(&doing, width, Style::new().fg(NAME), frame);
                 let repository = self.target.repository_name().to_owned();
-                (title(keys), repository, body, keyed(width, &[(Hint::Esc, "Close")]))
-            },
+                (
+                    title(keys),
+                    repository,
+                    body,
+                    keyed(width, &[(Hint::Esc, "Close")]),
+                )
+            }
             Stage::Swept { keys, plan, .. } => {
                 let back = [(Hint::Backspace, "Back"), (Hint::Esc, "Close")];
                 let yes = [(Hint::Char('y'), "Yes"), back[0], back[1]];
                 let hints: &[(Hint, &str)] = if plan.goes.is_empty() { &back } else { &yes };
                 let body = swept_lines(plan, width, body_room);
-                (title(keys), plan.repository_name().to_owned(), body, keyed(width, hints))
-            },
+                (
+                    title(keys),
+                    plan.repository_name().to_owned(),
+                    body,
+                    keyed(width, hints),
+                )
+            }
             Stage::Typing { chain, .. } => {
                 let typed = sidebar::tail(&format!("{}_", chain.typed()), width.saturating_sub(2));
                 let mut body = vec![Line::from(vec![
@@ -2081,11 +2719,24 @@ impl Menu {
                 ])];
                 body.extend(chain_says(chain, width));
                 let keys = [(Hint::Enter, chain.enter()), (Hint::Esc, "Back")];
-                (chain.title().to_owned(), String::new(), body, keyed(width, &keys))
-            },
+                (
+                    chain.title().to_owned(),
+                    String::new(),
+                    body,
+                    keyed(width, &keys),
+                )
+            }
         };
         let spinner = (self.turning() && !body.is_empty()).then_some(0);
-        Shown { title, right, body, spinner, spots, footer, keys }
+        Shown {
+            title,
+            right,
+            body,
+            spinner,
+            spots,
+            footer,
+            keys,
+        }
     }
 }
 
@@ -2111,12 +2762,28 @@ impl Shown {
     fn takes(&self) -> usize {
         let lines = self.body.iter().chain([&self.footer]);
         let widest = lines.map(|line| line.width() + 1).max().unwrap_or(0);
-        let tail = if self.right.is_empty() { 0 } else { self.right.width() + 3 };
+        let tail = if self.right.is_empty() {
+            0
+        } else {
+            self.right.width() + 3
+        };
         widest.max(4 + self.title.width() + tail)
     }
 
-    fn lines(self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
-        let Shown { title, right, body, spinner, spots, footer, keys } = self;
+    fn lines(
+        self,
+        width: usize,
+        room: usize,
+    ) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
+        let Shown {
+            title,
+            right,
+            body,
+            spinner,
+            spots,
+            footer,
+            keys,
+        } = self;
         let mut lines = Vec::with_capacity(room);
         if room >= 2 {
             lines.push(rule(&title, &right, width));
@@ -2124,7 +2791,9 @@ impl Shown {
         let ruled = lines.len();
         lines.extend(body.into_iter().take(room.saturating_sub(2)));
         let shown_body = lines.len() - ruled;
-        let spinner = spinner.filter(|at| width > 0 && *at < shown_body).map(|at| ruled + at);
+        let spinner = spinner
+            .filter(|at| width > 0 && *at < shown_body)
+            .map(|at| ruled + at);
         let mut spots = spots.first(shown_body).down(ruled);
         if room >= 1 {
             spots.extend(keys.map(Choice::Key).down(lines.len()));
@@ -2146,8 +2815,11 @@ fn float(
     if most == 0 || room < 2 {
         return None;
     }
-    let inner =
-        if widest { most } else { shown(most, room - 2).takes().clamp(fewest.min(most), most) };
+    let inner = if widest {
+        most
+    } else {
+        shown(most, room - 2).takes().clamp(fewest.min(most), most)
+    };
     let (lines, spots, spinner) = shown(inner, room - 2).lines(inner, room);
     let (rule, rest) = lines.split_first()?;
     let width = u16::try_from(inner + 2).unwrap_or(over.width);
@@ -2171,7 +2843,8 @@ pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
 }
 
 pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>]) {
-    let (Some(inner), Some(last)) = (area.width.checked_sub(2), area.bottom().checked_sub(1)) else {
+    let (Some(inner), Some(last)) = (area.width.checked_sub(2), area.bottom().checked_sub(1))
+    else {
         return;
     };
     let dim = Style::new().add_modifier(Modifier::DIM);
@@ -2188,7 +2861,12 @@ pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>
         buffer.set_line(area.x + 1, y, line, inner);
         buffer.set_string(area.right() - 1, y, "│", dim);
     }
-    buffer.set_string(area.x, last, format!("└{}┘", "─".repeat(usize::from(inner))), dim);
+    buffer.set_string(
+        area.x,
+        last,
+        format!("└{}┘", "─".repeat(usize::from(inner))),
+        dim,
+    );
 }
 
 pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
@@ -2208,7 +2886,9 @@ pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     if !line.is_empty() {
         lines.push(line);
     }
-    let lines = lines.into_iter().flat_map(|line| sidebar::wrapped(&line, width, style));
+    let lines = lines
+        .into_iter()
+        .flat_map(|line| sidebar::wrapped(&line, width, style));
     lines.collect()
 }
 
@@ -2234,16 +2914,30 @@ fn rebasing(branch: &Said) -> String {
 
 pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Line<'static>> {
     let (spinner, turning) = Mark::Busy.glyph(frame);
-    let lines = wrap(doing, width.saturating_sub(2), style).into_iter().enumerate();
+    let lines = wrap(doing, width.saturating_sub(2), style)
+        .into_iter()
+        .enumerate();
     let lines = lines.map(|(at, line)| {
-        let before = if at == 0 { Span::styled(spinner.clone(), turning) } else { Span::raw(" ") };
-        Line::from(vec![Span::raw(" "), before, Span::styled(line.to_string(), style)])
+        let before = if at == 0 {
+            Span::styled(spinner.clone(), turning)
+        } else {
+            Span::raw(" ")
+        };
+        Line::from(vec![
+            Span::raw(" "),
+            before,
+            Span::styled(line.to_string(), style),
+        ])
     });
     lines.collect()
 }
 
 fn merged_worktrees(count: usize) -> String {
-    if count == 1 { "1 merged worktree".to_owned() } else { format!("{count} merged worktrees") }
+    if count == 1 {
+        "1 merged worktree".to_owned()
+    } else {
+        format!("{count} merged worktrees")
+    }
 }
 
 fn asked_of(plan: &prunes::Plan) -> String {
@@ -2264,12 +2958,22 @@ fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'stat
         wrap(&asked_of(plan), width, style)
     };
     lines.push(Line::default());
-    let kept = plan.kept.iter().map(|kept| (&kept.folder, kept.why.as_str()));
-    let unasked = plan.unasked.iter().map(|unasked| (&unasked.folder, "lune could not ask"));
+    let kept = plan
+        .kept
+        .iter()
+        .map(|kept| (&kept.folder, kept.why.as_str()));
+    let unasked = plan
+        .unasked
+        .iter()
+        .map(|unasked| (&unasked.folder, "lune could not ask"));
     let keeps: Vec<Vec<Line<'static>>> = kept
         .chain(unasked)
         .map(|(worktree, why)| {
-            wrap(&format!("Keeps {}: {why}", prunes::name_of(worktree)), width, style)
+            wrap(
+                &format!("Keeps {}: {why}", prunes::name_of(worktree)),
+                width,
+                style,
+            )
         })
         .collect();
     let left = room.saturating_sub(lines.len());
@@ -2281,7 +2985,11 @@ fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'stat
     let mut used = 0;
     for (at, keep) in keeps.iter().enumerate() {
         let rest = keeps.len() - at;
-        let room_for_more = if rest > 1 { keep_room.saturating_sub(1) } else { keep_room };
+        let room_for_more = if rest > 1 {
+            keep_room.saturating_sub(1)
+        } else {
+            keep_room
+        };
         if used + keep.len() > room_for_more {
             if keep_room > used {
                 lines.push(Line::styled(format!(" …and {rest} more stay"), style));
@@ -2295,15 +3003,36 @@ fn swept_lines(plan: &prunes::Plan, width: usize, room: usize) -> Vec<Line<'stat
 }
 
 fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'static>> {
-    let shown = if goes.len() <= room { goes.len() } else { room.saturating_sub(1) };
-    let numbers: Vec<String> = goes.iter().map(|goes| format!("#{}", goes.number)).collect();
+    let shown = if goes.len() <= room {
+        goes.len()
+    } else {
+        room.saturating_sub(1)
+    };
+    let numbers: Vec<String> = goes
+        .iter()
+        .map(|goes| format!("#{}", goes.number))
+        .collect();
     let size = |goes: &prunes::Goes| goes.bytes.map_or("?".to_owned(), prune::size);
     let sizes: Vec<String> = goes.iter().map(size).collect();
-    let widest = |all: &[String]| all.iter().take(shown).map(|it| it.width()).max().unwrap_or(0);
+    let widest = |all: &[String]| {
+        all.iter()
+            .take(shown)
+            .map(|it| it.width())
+            .max()
+            .unwrap_or(0)
+    };
     let (numbers_wide, sizes_wide) = (widest(&numbers), widest(&sizes));
-    let names: Vec<&str> = goes.iter().map(|goes| prunes::name_of(&goes.folder)).collect();
+    let names: Vec<&str> = goes
+        .iter()
+        .map(|goes| prunes::name_of(&goes.folder))
+        .collect();
     let names_room = width.saturating_sub(numbers_wide + sizes_wide + 6);
-    let longest = names.iter().take(shown).map(|name| name.width()).max().unwrap_or(0);
+    let longest = names
+        .iter()
+        .take(shown)
+        .map(|name| name.width())
+        .max()
+        .unwrap_or(0);
     let names_wide = longest.min(names_room);
     let mut lines = Vec::with_capacity(room);
     for at in 0..shown {
@@ -2315,20 +3044,30 @@ fn goes_lines(goes: &[prunes::Goes], width: usize, room: usize) -> Vec<Line<'sta
         lines.push(Line::from(vec![
             Span::raw(" "),
             Span::styled(format!("{name}{gap}  "), Style::new().fg(NAME)),
-            Span::styled(format!("{number}{number_gap}  "), Style::new().fg(moonlight::MAUVE)),
+            Span::styled(
+                format!("{number}{number_gap}  "),
+                Style::new().fg(moonlight::MAUVE),
+            ),
             Span::styled(format!("{size_gap}{size}"), Style::new().fg(TAG)),
         ]));
     }
     if shown < goes.len() && room > 0 {
         let more = goes.len() - shown;
-        lines.push(Line::styled(format!(" …and {more} more"), Style::new().fg(NAME)));
+        lines.push(Line::styled(
+            format!(" …and {more} more"),
+            Style::new().fg(NAME),
+        ));
     }
     lines
 }
 
 fn title(keys: &Keys) -> String {
     let names: Vec<&str> = keys.trail().into_iter().map(|(name, _)| name).collect();
-    if names.is_empty() { TITLE.to_owned() } else { names.join(" › ") }
+    if names.is_empty() {
+        TITLE.to_owned()
+    } else {
+        names.join(" › ")
+    }
 }
 
 pub fn legend(
@@ -2353,7 +3092,11 @@ pub fn shortcuts(
 ) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     let inner = width.saturating_sub(1);
     let spelled: Vec<String> = keys.iter().map(|(label, _)| label.to_string()).collect();
-    let column = spelled.iter().map(|spelled| spelled.width()).max().unwrap_or(0);
+    let column = spelled
+        .iter()
+        .map(|spelled| spelled.width())
+        .max()
+        .unwrap_or(0);
     let rows = keys.iter().zip(&spelled).map(|((label, does), spelled)| {
         (keys_line_of(spelled, column, does, inner), label.pressed())
     });
@@ -2361,10 +3104,12 @@ pub fn shortcuts(
 }
 
 pub fn grouped(group: char, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
-    let found = tree(Action::row(), &ROW_GROUPS).into_iter().find_map(|entry| match entry {
-        Entry::Group { key, name, entries } if key == group => Some((name, entries)),
-        Entry::Group { .. } | Entry::Act { .. } => None,
-    });
+    let found = tree(Action::row(), &ROW_GROUPS)
+        .into_iter()
+        .find_map(|entry| match entry {
+            Entry::Group { key, name, entries } if key == group => Some((name, entries)),
+            Entry::Group { .. } | Entry::Act { .. } => None,
+        });
     let (name, entries) = found.expect("a row group the sidebar opens is in the catalogue");
     listed(name, &entries, width, room)
 }
@@ -2385,7 +3130,10 @@ fn listed(
 ) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
     let inner = width.saturating_sub(1);
     let line = |entry: &Entry| {
-        (entry_line(entry, inner), Some(KeyEvent::from(KeyCode::Char(entry.key()))))
+        (
+            entry_line(entry, inner),
+            Some(KeyEvent::from(KeyCode::Char(entry.key()))),
+        )
     };
     fitted(title, entries.iter().map(line).collect(), width, room)
 }
@@ -2405,7 +3153,11 @@ fn fitted(
     if all || room >= 2 {
         lines.push(rule(title, "", width));
     }
-    let shown = if all { rows.len() } else { room.saturating_sub(2) };
+    let shown = if all {
+        rows.len()
+    } else {
+        room.saturating_sub(2)
+    };
     for (line, pressed) in rows.into_iter().take(shown) {
         if let Some(pressed) = pressed {
             spots.add(lines.len(), 0..width, pressed);
@@ -2413,7 +3165,11 @@ fn fitted(
         lines.push(line);
     }
     if !all {
-        spots.add(lines.len(), 0..width, KeyEvent::from(KeyCode::Char(ALL_KEYS)));
+        spots.add(
+            lines.len(),
+            0..width,
+            KeyEvent::from(KeyCode::Char(ALL_KEYS)),
+        );
         lines.push(all_keys_line(width.saturating_sub(1)));
     }
     (lines, spots)
@@ -2432,7 +3188,10 @@ struct KeysRow {
 
 impl KeysRow {
     fn of(action: Action, keys: String) -> KeysRow {
-        KeysRow { keys, does: action.name().to_owned() }
+        KeysRow {
+            keys,
+            does: action.name().to_owned(),
+        }
     }
 }
 
@@ -2471,7 +3230,10 @@ impl AllKeys {
         for (name, keys) in AllKeys::groups() {
             rows.push(Line::from(vec![Span::raw(" "), Span::styled(name, bold)]));
             let column = keys.iter().map(|row| row.keys.width()).max().unwrap_or(0);
-            rows.extend(keys.iter().map(|row| keys_line_of(&row.keys, column, &row.does, inner)));
+            rows.extend(
+                keys.iter()
+                    .map(|row| keys_line_of(&row.keys, column, &row.does, inner)),
+            );
         }
         rows
     }
@@ -2487,8 +3249,11 @@ impl AllKeys {
         self.room.set(body);
         let first = self.first.min(rows.len().saturating_sub(body));
         let shown = rows.len().min(first + body);
-        let right =
-            if rows.len() > body { format!("{shown}/{}", rows.len()) } else { String::new() };
+        let right = if rows.len() > body {
+            format!("{shown}/{}", rows.len())
+        } else {
+            String::new()
+        };
         let mut lines = Vec::with_capacity(room);
         if room >= 2 {
             lines.push(rule(ALL_KEYS_DOES, &right, width));
@@ -2529,7 +3294,12 @@ pub fn rule(title: &str, right: &str, width: usize) -> Line<'static> {
     let stretch = width.saturating_sub(head - 1 + title.width() + tail);
     let mut spans = vec![
         Span::styled("─ ", dim),
-        Span::styled(title, Style::new().fg(moonlight::TEXT).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title,
+            Style::new()
+                .fg(moonlight::TEXT)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" "),
         Span::styled("─".repeat(stretch), dim),
     ];
@@ -2599,8 +3369,11 @@ fn agent_line(agent: Picked, inner: usize) -> Line<'static> {
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(does, Style::new().fg(NAME)));
             }
-        },
-        None => spans.push(Span::raw(sidebar::cut(name, inner.saturating_sub(icons::WIDTH + 1)))),
+        }
+        None => spans.push(Span::raw(sidebar::cut(
+            name,
+            inner.saturating_sub(icons::WIDTH + 1),
+        ))),
     }
     Line::from(spans)
 }
@@ -2661,14 +3434,21 @@ pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEv
     let labels: Vec<String> = keys.iter().map(|(hint, _)| hint.label()).collect();
     let spelled = |sep: &str| -> Vec<String> {
         let each = labels.iter().zip(keys);
-        each.map(|(label, (_, does))| format!("{label}{sep}{does}")).collect()
+        each.map(|(label, (_, does))| format!("{label}{sep}{does}"))
+            .collect()
     };
-    let candidates: [(Vec<String>, &str); 4] =
-        [(spelled(" - "), ", "), (spelled(" "), "  "), (spelled(" "), " "), (labels.clone(), "/")];
+    let candidates: [(Vec<String>, &str); 4] = [
+        (spelled(" - "), ", "),
+        (spelled(" "), "  "),
+        (spelled(" "), " "),
+        (labels.clone(), "/"),
+    ];
     let room = width.saturating_sub(1);
     let fits = |(each, joiner): &(Vec<String>, &str)| each.join(joiner).width() <= room;
-    let (each, joiner) =
-        candidates.into_iter().find(fits).unwrap_or_else(|| (labels.clone(), ""));
+    let (each, joiner) = candidates
+        .into_iter()
+        .find(fits)
+        .unwrap_or_else(|| (labels.clone(), ""));
     let dim = Style::new().add_modifier(Modifier::DIM);
     let mut spans = vec![Span::raw(" ")];
     let mut spots = Spots::default();
@@ -2691,11 +3471,7 @@ pub fn keyed(width: usize, keys: &[(Hint, &str)]) -> (Line<'static>, Spots<KeyEv
     (Line::from(spans), spots)
 }
 
-fn search_lines(
-    search: &Search,
-    width: usize,
-    room: usize,
-) -> (Vec<Line<'static>>, Spots<Choice>) {
+fn search_lines(search: &Search, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<Choice>) {
     let mut spots = Spots::default();
     let Some(list) = room.checked_sub(1) else {
         return (Vec::new(), spots);
@@ -2726,7 +3502,13 @@ fn search_lines(
         for (at, (skill, hits)) in shown {
             spots.add(lines.len(), 0..width, Choice::Skill(skill.name.clone()));
             let name = skill.name.to_string();
-            lines.push(skill_line(&name, &skill.description, hits, at == selected, width));
+            lines.push(skill_line(
+                &name,
+                &skill.description,
+                hits,
+                at == selected,
+                width,
+            ));
         }
     }
     lines.resize(1 + list, Line::default());
@@ -2746,7 +3528,10 @@ fn skill_line(
     let mut spans = vec![Span::raw(" ")];
     for (at, c) in name.chars().enumerate() {
         let hit = at > 0 && hits.contains(&(at - 1));
-        spans.push(Span::styled(c.to_string(), if hit { lit } else { Style::new().fg(NAME) }));
+        spans.push(Span::styled(
+            c.to_string(),
+            if hit { lit } else { Style::new().fg(NAME) },
+        ));
     }
     let room = inner.saturating_sub(name.width() + GAP);
     if room > 0 && !description.is_empty() {
@@ -2755,7 +3540,11 @@ fn skill_line(
         spans.push(Span::styled(sidebar::cut(description, room), dim));
     }
     let line = Line::from(spans);
-    if selected { line.patch_style(Style::new().bg(LIT)) } else { line }
+    if selected {
+        line.patch_style(Style::new().bg(LIT))
+    } else {
+        line
+    }
 }
 
 #[cfg(test)]
@@ -2822,7 +3611,11 @@ mod tests {
 
     fn own_row() -> ViewRow {
         let place = ViewPlace::new_in("lune", 3, 1, 4);
-        ViewRow { place, terminal: Some(terminal()), ..row() }
+        ViewRow {
+            place,
+            terminal: Some(terminal()),
+            ..row()
+        }
     }
 
     fn own_view() -> Target {
@@ -2831,7 +3624,13 @@ mod tests {
 
     fn project_on(on: Machine) -> Target {
         let dir = "/w/lune".to_owned();
-        Target::Project(on, ProjectTarget { project: project(), dir })
+        Target::Project(
+            on,
+            ProjectTarget {
+                project: project(),
+                dir,
+            },
+        )
     }
 
     fn session_row() -> Target {
@@ -2843,14 +3642,20 @@ mod tests {
     }
 
     fn worktree_on(on: Machine) -> Target {
-        let place = WorktreePlace { project: project(), worktree: worktree() };
-        Target::Worktree(on, WorktreeRow {
-            place,
-            name: "main".to_owned(),
-            folder: main_dir(),
-            branch: Said::new("feat/menu".to_owned()),
-            repository: Some("/w/lune".to_owned()),
-        })
+        let place = WorktreePlace {
+            project: project(),
+            worktree: worktree(),
+        };
+        Target::Worktree(
+            on,
+            WorktreeRow {
+                place,
+                name: "main".to_owned(),
+                folder: main_dir(),
+                branch: Said::new("feat/menu".to_owned()),
+                repository: Some("/w/lune".to_owned()),
+            },
+        )
     }
 
     fn char(key: char) -> KeyEvent {
@@ -2858,7 +3663,11 @@ mod tests {
     }
 
     fn beside_row(command: Vec<String>) -> Wants {
-        Wants::Open { session: listed(), view: ViewKey::terminal(4), opens: agent(command) }
+        Wants::Open {
+            session: listed(),
+            view: ViewKey::terminal(4),
+            opens: agent(command),
+        }
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
@@ -2922,10 +3731,20 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('v')));
         let opens = Opens::Shell;
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, view, opens });
+        assert_eq!(
+            wants,
+            Wants::Open {
+                session,
+                view,
+                opens
+            }
+        );
         let (menu, wants) = stays(menu.key(&char('v')));
         assert_eq!(wants, Wants::Nothing);
-        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+        assert_eq!(
+            closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
+            Done::Nothing
+        );
     }
 
     #[test]
@@ -2937,38 +3756,72 @@ mod tests {
             menu
         };
         let made = |target: Target, typed: &str| {
-            let menu = typed.chars().fold(asked(target), |menu, c| stays(menu.key(&char(c))).0);
+            let menu = typed
+                .chars()
+                .fold(asked(target), |menu, c| stays(menu.key(&char(c))).0);
             closed(menu.key(&enter))
         };
         let (id, here) = (project().id(), || Machine::Local);
         let branch = || Branch::parse("feat/x").unwrap();
-        assert_eq!(made(own_view(), "feat/x"), Done::Worktree(here(), id, branch()));
-        assert_eq!(made(worktree_on(here()), " feat/x "), Done::Worktree(here(), id, branch()));
-        assert_eq!(made(session_row(), "feat/x"), Done::Worktree(here(), id, branch()));
+        assert_eq!(
+            made(own_view(), "feat/x"),
+            Done::Worktree(here(), id, branch())
+        );
+        assert_eq!(
+            made(worktree_on(here()), " feat/x "),
+            Done::Worktree(here(), id, branch())
+        );
+        assert_eq!(
+            made(session_row(), "feat/x"),
+            Done::Worktree(here(), id, branch())
+        );
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let far = Target::View(vps(), own_row());
         assert_eq!(made(far, "feat/x"), Done::Worktree(vps(), id, branch()));
-        assert_eq!(made(worktree_on(vps()), "feat/x"), Done::Worktree(vps(), id, branch()));
-        assert_eq!(made(project_on(vps()), "feat/x"), Done::Worktree(vps(), id, branch()));
+        assert_eq!(
+            made(worktree_on(vps()), "feat/x"),
+            Done::Worktree(vps(), id, branch())
+        );
+        assert_eq!(
+            made(project_on(vps()), "feat/x"),
+            Done::Worktree(vps(), id, branch())
+        );
         let menu = asked(own_view());
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
-            "─ New worktree ────────────────",
-            " _",
-            " its branch: one git has is",
-        ]);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[..3],
+            [
+                "─ New worktree ────────────────",
+                " _",
+                " its branch: one git has is",
+            ]
+        );
         let refused = |typed: &str| {
-            let menu = typed.chars().fold(asked(own_view()), |menu, c| stays(menu.key(&char(c))).0);
+            let menu = typed
+                .chars()
+                .fold(asked(own_view()), |menu, c| stays(menu.key(&char(c))).0);
             let (menu, _) = stays(menu.key(&enter));
-            let Stage::Typing { chain: Chain { wrong: Some(wrong), .. }, .. } = &menu.stage else {
+            let Stage::Typing {
+                chain: Chain {
+                    wrong: Some(wrong), ..
+                },
+                ..
+            } = &menu.stage
+            else {
                 panic!("{typed:?} keeps the box open, saying why");
             };
             (wrong.clone(), menu)
         };
         assert_eq!(refused(" ").0, "it names no branch");
         let (wrong, menu) = refused("#12");
-        assert_eq!(wrong, "#12 names an issue or a pull request: paste its link");
+        assert_eq!(
+            wrong,
+            "#12 names an issue or a pull request: paste its link"
+        );
         let back = stays(menu.key(&KeyEvent::from(KeyCode::Esc))).0;
-        assert!(matches!(back.stage, Stage::Choosing(_)), "Esc goes back to the keys");
+        assert!(
+            matches!(back.stage, Stage::Choosing(_)),
+            "Esc goes back to the keys"
+        );
     }
 
     #[test]
@@ -2994,17 +3847,34 @@ mod tests {
         );
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[0], "─ lune ──────────── lune/main ─");
-        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Backspace))), Done::Nothing);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[0],
+            "─ lune ──────────── lune/main ─"
+        );
+        assert_eq!(
+            closed(menu.key(&KeyEvent::from(KeyCode::Backspace))),
+            Done::Nothing
+        );
         assert!(Menu::open(1, view_row(), Some('x'), PICKED).is_none());
     }
 
     #[test]
     fn an_own_session_s_view_opens_its_agents_beside_it() {
         let (_, wants) = stays(stays(opened(own_view(), Some('c'))).0.key(&char('t')));
-        let opens = agent(["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec());
+        let opens = agent(
+            ["claude", "/thermo-nuclear-review"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, view, opens });
+        assert_eq!(
+            wants,
+            Wants::Open {
+                session,
+                view,
+                opens
+            }
+        );
     }
 
     #[test]
@@ -3029,13 +3899,16 @@ mod tests {
                 " b  Brief ▸",
             ]
         );
-        assert_eq!(text(&legend(Some(&project_on(Machine::Local)), 31, 15).0)[7..], [
-            " a  Ask",
-            " n  New ▸",
-            " r  Rename the project…",
-            " d  Close ▸",
-            " b  Brief ▸",
-        ]);
+        assert_eq!(
+            text(&legend(Some(&project_on(Machine::Local)), 31, 15).0)[7..],
+            [
+                " a  Ask",
+                " n  New ▸",
+                " r  Rename the project…",
+                " d  Close ▸",
+                " b  Brief ▸",
+            ]
+        );
         assert_eq!(text(&legend(None, 31, 15).0).len(), 7);
         assert_eq!(Top::of('m'), Some(Top::Menu));
         assert_eq!(Top::of('/'), Some(Top::Command(Command::Search)));
@@ -3060,13 +3933,22 @@ mod tests {
         for (action, path) in Action::row().chain(Action::menu()) {
             let group = ROW_GROUPS.iter().any(|(key, _)| *key == path[0]);
             let handed_on = path[0] == GIT && Top::moves(GIT) == Some(Top::First);
-            assert!(Top::moves(path[0]).is_none() || group || handed_on, "{action:?} on {path:?}");
+            assert!(
+                Top::moves(path[0]).is_none() || group || handed_on,
+                "{action:?} on {path:?}"
+            );
         }
-        assert!(!in_menu_group(GIT, GIT), "g g goes to the first row, and to no git action");
+        assert!(
+            !in_menu_group(GIT, GIT),
+            "g g goes to the first row, and to no git action"
+        );
         assert!(in_menu_group(GIT, 'r'));
         for (_, path) in Action::row() {
             let group = |(key, _): &(char, &str)| *key == path[0];
-            assert!(!MENU_GROUPS.iter().any(group), "{path:?} opens a group of the menu");
+            assert!(
+                !MENU_GROUPS.iter().any(group),
+                "{path:?} opens a group of the menu"
+            );
         }
     }
 
@@ -3075,11 +3957,22 @@ mod tests {
         let on = |arranged| Target::View(Machine::Local, ViewRow { arranged, ..row() });
         let arrange = |arranged| {
             let (session, view) = (listed(), ViewKey::terminal(4));
-            Done::Arrange { on: Machine::Local, session, view, arranged }
+            Done::Arrange {
+                on: Machine::Local,
+                session,
+                view,
+                arranged,
+            }
         };
         let (tabs, panes) = (Some(Arranged::Tabs), Some(Arranged::Panes));
-        assert_eq!(closed(opened(on(tabs), Some('s'))), arrange(Arranged::Panes));
-        assert_eq!(closed(opened(on(panes), Some('t'))), arrange(Arranged::Tabs));
+        assert_eq!(
+            closed(opened(on(tabs), Some('s'))),
+            arrange(Arranged::Panes)
+        );
+        assert_eq!(
+            closed(opened(on(panes), Some('t'))),
+            arrange(Arranged::Tabs)
+        );
         let unoffered = |arranged, key| Menu::open(1, on(arranged), Some(key), PICKED).is_none();
         assert!(unoffered(tabs, 't'), "nothing that changes nothing");
         assert!(unoffered(panes, 's'), "nothing that changes nothing");
@@ -3096,10 +3989,19 @@ mod tests {
             worktree_on(Machine::Local),
             project_on(Machine::Local),
             Target::Machine(vps),
-            Target::View(Machine::Local, ViewRow { arranged: Some(Arranged::Panes), ..row() }),
+            Target::View(
+                Machine::Local,
+                ViewRow {
+                    arranged: Some(Arranged::Panes),
+                    ..row()
+                },
+            ),
         ];
         for (action, _) in Action::menu() {
-            assert!(rows.iter().any(|row| row.offer(action).is_some()), "{action:?}");
+            assert!(
+                rows.iter().any(|row| row.offer(action).is_some()),
+                "{action:?}"
+            );
         }
     }
 
@@ -3129,10 +4031,13 @@ mod tests {
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
         let lines = text(&menu.lines(31, 10, 0).0);
-        assert_eq!([lines[0].as_str(), lines[7].as_str()], [
-            "─ Skills ────────── lune/main ─",
-            " \u{f03ff} pi  <TAB> another agent",
-        ]);
+        assert_eq!(
+            [lines[0].as_str(), lines[7].as_str()],
+            [
+                "─ Skills ────────── lune/main ─",
+                " \u{f03ff} pi  <TAB> another agent",
+            ]
+        );
         let (_, wants) = stays(menu.key(&char('t')));
         let command = ["pi", "/skill:thermo-nuclear-review"].map(str::to_owned);
         assert_eq!(wants, beside_row(command.to_vec()));
@@ -3143,7 +4048,10 @@ mod tests {
         let pi = Picked::ByView(Harness::Pi);
         let (menu, _) = stays(Menu::open(1, view_row(), Some('c'), pi).unwrap());
         let line = |menu: &Menu, width| text(&menu.lines(width, 10, 0).0)[7].clone();
-        assert_eq!(line(&menu, 38), " \u{f03ff} pi, the view's  <TAB> another agent");
+        assert_eq!(
+            line(&menu, 38),
+            " \u{f03ff} pi, the view's  <TAB> another agent"
+        );
         assert_eq!(line(&menu, 37), " \u{f03ff} pi, the view's  <TAB> another");
         assert_eq!(line(&menu, 31), " \u{f03ff} pi, the view's  <TAB>");
         assert_eq!(line(&menu, 23), " \u{f03ff} pi  <TAB>");
@@ -3167,11 +4075,21 @@ mod tests {
 
     fn cargo_test() -> Ended {
         let at = SystemTime::UNIX_EPOCH + Duration::from_secs(130);
-        Ended { command: said("cargo test"), ending: Some(Ending::Exited(101)), at }
+        Ended {
+            command: said("cargo test"),
+            ending: Some(Ending::Exited(101)),
+            at,
+        }
     }
 
     fn ended_row() -> Target {
-        Target::View(Machine::Local, ViewRow { ran: Ran::Ended(cargo_test()), ..row() })
+        Target::View(
+            Machine::Local,
+            ViewRow {
+                ran: Ran::Ended(cargo_test()),
+                ..row()
+            },
+        )
     }
 
     #[test]
@@ -3182,20 +4100,37 @@ mod tests {
             menu.reran(ran);
             closed(menu.printed(Ok(Printed::Nothing)))
         };
-        let why =
-            "menu: view 4's shell went on as lune read what `cargo test` printed; ask again";
-        let again = Ended { at: cargo_test().at + Duration::from_secs(5), ..cargo_test() };
-        for ran in [Ran::Going(Some(said("ls"))), Ran::Ended(again), Ran::Ready, Ran::Unhooked] {
+        let why = "menu: view 4's shell went on as lune read what `cargo test` printed; ask again";
+        let again = Ended {
+            at: cargo_test().at + Duration::from_secs(5),
+            ..cargo_test()
+        };
+        for ran in [
+            Ran::Going(Some(said("ls"))),
+            Ran::Ended(again),
+            Ran::Ready,
+            Ran::Unhooked,
+        ] {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
-        let busy = ViewRow { ran: Ran::Going(Some(said("cargo test"))), ..row() };
+        let busy = ViewRow {
+            ran: Ran::Going(Some(said("cargo test"))),
+            ..row()
+        };
         let busy = Target::View(Machine::Local, busy);
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
         let view = ViewKey::terminal(4);
-        assert_eq!(wants, Wants::Printed { session: listed(), view, ended: cargo_test() });
+        assert_eq!(
+            wants,
+            Wants::Printed {
+                session: listed(),
+                view,
+                ended: cargo_test()
+            }
+        );
     }
 
     #[test]
@@ -3203,12 +4138,23 @@ mod tests {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
         let view = ViewKey::terminal(4);
-        assert_eq!(wants, Wants::Printed { session: listed(), view, ended: cargo_test() });
+        assert_eq!(
+            wants,
+            Wants::Printed {
+                session: listed(),
+                view,
+                ended: cargo_test()
+            }
+        );
         assert!(menu.reading());
         let (menu, wants) = stays(menu.key(&char('e')));
         assert_eq!(wants, Wants::Nothing);
         let file = "/run/lune/printed/1.txt".to_owned();
-        let kept = Kept { file, lines: 3, left_out: 0 };
+        let kept = Kept {
+            file,
+            lines: 3,
+            left_out: 0,
+        };
         let printed = Printed::After(kept);
         let (_, wants) = stays(menu.printed(Ok(printed)));
         let prompt = "Explain this. In my shell, `cargo test` ended with exit status 101. What it \
@@ -3221,7 +4167,11 @@ mod tests {
         let pi = Picked::ByView(Harness::Pi);
         let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), pi).unwrap());
         let (menu, _) = stays(menu.key(&char('e')));
-        let kept = Kept { file: "/run/lune/printed/1.txt".to_owned(), lines: 3, left_out: 0 };
+        let kept = Kept {
+            file: "/run/lune/printed/1.txt".to_owned(),
+            lines: 3,
+            left_out: 0,
+        };
         let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
         let command = vec!["pi".to_owned(), "--".to_owned(), prompt.to_owned()];
         assert_eq!(wants, beside_row(command));
@@ -3248,29 +4198,56 @@ mod tests {
             checks: None,
             stale: false,
         });
-        Target::View(Machine::Local, row_in(Folder { pull_request, ..folder() }))
+        Target::View(
+            Machine::Local,
+            row_in(Folder {
+                pull_request,
+                ..folder()
+            }),
+        )
     }
 
     const PULL: &str = "https://github.com/owner/lune/pull/328";
 
     fn failing(count: usize, pending: u32) -> Failing {
-        let kept = Kept { file: "/run/lune/checks/1.log".to_owned(), lines: 40, left_out: 0 };
-        let failed = |name: &str, log| checks::Failed { name: name.to_owned(), link: None, log };
+        let kept = Kept {
+            file: "/run/lune/checks/1.log".to_owned(),
+            lines: 40,
+            left_out: 0,
+        };
+        let failed = |name: &str, log| checks::Failed {
+            name: name.to_owned(),
+            link: None,
+            log,
+        };
         let failed = [
             failed("ci / test", checks::Log::Kept(kept)),
             failed("ext", checks::Log::Unkept("no job".to_owned())),
         ];
-        Failing { head: "abc".to_owned(), failed: failed[..count].to_vec(), pending, passed: 1 }
+        Failing {
+            head: "abc".to_owned(),
+            failed: failed[..count].to_vec(),
+            pending,
+            passed: 1,
+        }
     }
 
     #[test]
     fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
         let (menu, _) = stays(opened(pull_row(State::Draft), Some('c')));
         let (menu, wants) = stays(menu.key(&char('c')));
-        assert_eq!(wants, Wants::Checks { page: PullPage::parse(PULL).unwrap() });
+        assert_eq!(
+            wants,
+            Wants::Checks {
+                page: PullPage::parse(PULL).unwrap()
+            }
+        );
         assert!(menu.fetching());
         let body = text(&menu.lines(40, 4, 0).0);
-        assert!(body.iter().any(|line| line.ends_with("Asking gh about the checks of #328…")));
+        assert!(
+            body.iter()
+                .any(|line| line.ends_with("Asking gh about the checks of #328…"))
+        );
         let (menu, wants) = stays(menu.key(&char('c')));
         assert_eq!(wants, Wants::Nothing);
         let (_, wants) = stays(menu.checked(Ok(failing(2, 0))));
@@ -3290,7 +4267,10 @@ mod tests {
             fetched(Err("gh: not logged in".to_owned())),
             wrong("menu: the checks of #328: gh: not logged in")
         );
-        assert_eq!(fetched(Ok(failing(0, 0))), wrong("menu: no check failed on the head of #328"));
+        assert_eq!(
+            fetched(Ok(failing(0, 0))),
+            wrong("menu: no check failed on the head of #328")
+        );
         assert_eq!(
             fetched(Ok(failing(0, 1))),
             wrong("menu: no check failed on the head of #328, and one has yet to end")
@@ -3302,18 +4282,31 @@ mod tests {
     }
 
     fn rebased(came: Came) -> Rebased {
-        Rebased { branch: said("feat/menu"), onto: said("origin/main"), came }
+        Rebased {
+            branch: said("feat/menu"),
+            onto: said("origin/main"),
+            came,
+        }
     }
 
     fn on_conflicts() -> Came {
         let conflicted = rebases::Conflicted::of(vec!["menu.rs".to_owned()]);
-        Came::Stopped(rebases::Stopped { at: None, conflicted })
+        Came::Stopped(rebases::Stopped {
+            at: None,
+            conflicted,
+        })
     }
 
     fn rebasing(target: Target) -> Menu {
         let (menu, _) = stays(opened(target, Some(GIT)));
         let (menu, wants) = stays(menu.key(&char('r')));
-        assert_eq!(wants, Wants::Rebase { dir: main_dir(), branch: said("feat/menu") });
+        assert_eq!(
+            wants,
+            Wants::Rebase {
+                dir: main_dir(),
+                branch: said("feat/menu")
+            }
+        );
         assert!(menu.rebasing() && menu.waits());
         menu
     }
@@ -3322,27 +4315,46 @@ mod tests {
     fn g_r_rebases_a_view_s_branch_and_says_how_it_came_out() {
         let menu = rebasing(view_row());
         let body = text(&menu.lines(40, 4, 0).0);
-        assert!(body.iter().any(|line| line.ends_with("Rebasing feat/menu onto upstream…")));
+        assert!(
+            body.iter()
+                .any(|line| line.ends_with("Rebasing feat/menu onto upstream…"))
+        );
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         let clean = "menu: feat/menu is rebased onto origin/main, 2 commits on top";
         let done = closed(menu.rebased(Ok(rebased(Came::Clean { ahead: 2 }))));
         assert_eq!(done, Done::Said(clean.to_owned()));
         let already = closed(rebasing(view_row()).rebased(Ok(rebased(Came::Already))));
-        assert_eq!(already, Done::Said("menu: feat/menu is on origin/main already".to_owned()));
+        assert_eq!(
+            already,
+            Done::Said("menu: feat/menu is on origin/main already".to_owned())
+        );
         let refused = Err(Unrebased::Refused("git fetch: no route".to_owned()));
         let failed = closed(rebasing(view_row()).rebased(refused));
-        assert_eq!(failed, Done::Wrong("menu: feat/menu: git fetch: no route".to_owned()));
-        let doubt = Err(Unrebased::InDoubt("me@vps: luned said nothing for 1260s".to_owned()));
+        assert_eq!(
+            failed,
+            Done::Wrong("menu: feat/menu: git fetch: no route".to_owned())
+        );
+        let doubt = Err(Unrebased::InDoubt(
+            "me@vps: luned said nothing for 1260s".to_owned(),
+        ));
         let doubted = closed(rebasing(view_row()).rebased(doubt));
         let wrong = "menu: feat/menu: no telling how the rebase ended: me@vps: luned said \
                      nothing for 1260s";
-        assert_eq!(doubted, Done::Wrong(wrong.to_owned()), "no agent starts on a rebase in doubt");
+        assert_eq!(
+            doubted,
+            Done::Wrong(wrong.to_owned()),
+            "no agent starts on a rebase in doubt"
+        );
     }
 
     #[test]
     fn a_rebase_stopped_on_conflicts_starts_an_agent_on_them_where_it_was_asked() {
-        let Rebased { came: Came::Stopped(stopped), .. } = rebased(on_conflicts()) else {
+        let Rebased {
+            came: Came::Stopped(stopped),
+            ..
+        } = rebased(on_conflicts())
+        else {
             unreachable!("on_conflicts() is a stopped rebase");
         };
         let prompt = rebases::prompt("feat/menu", "origin/main", &stopped);
@@ -3355,20 +4367,36 @@ mod tests {
         let worktree_row = worktree_on(Machine::Local);
         let done = closed(rebasing(worktree_row).rebased(Ok(rebased(on_conflicts()))));
         let command = Argv::parse(command).unwrap();
-        assert_eq!(done, Done::OpenIn { on: Machine::Local, worktree: worktree(), command });
+        assert_eq!(
+            done,
+            Done::OpenIn {
+                on: Machine::Local,
+                worktree: worktree(),
+                command
+            }
+        );
     }
 
     #[test]
     fn only_a_view_or_worktree_on_a_branch_of_a_repository_is_rebased() {
-        let unbranched = row_in(Folder { branch: None, ..folder() });
-        let outside = row_in(Folder { repository: None, ..folder() });
+        let unbranched = row_in(Folder {
+            branch: None,
+            ..folder()
+        });
+        let outside = row_in(Folder {
+            repository: None,
+            ..folder()
+        });
         for target in [
             Target::View(Machine::Local, unbranched),
             Target::View(Machine::Local, outside),
             session_row(),
             Target::Machine(Machine::Local),
         ] {
-            assert!(Menu::open(1, target.clone(), Some(GIT), PICKED).is_none(), "{target:?}");
+            assert!(
+                Menu::open(1, target.clone(), Some(GIT), PICKED).is_none(),
+                "{target:?}"
+            );
         }
         let far = Machine::Remote("me@vps".parse().unwrap());
         let (_, wants) = stays(rebasing(worktree_on(far)).key(&char('x')));
@@ -3384,9 +4412,21 @@ mod tests {
         let wrong = |why: &str| Done::Wrong(why.to_owned());
         let none = "menu: gh has found no pull request of view 4's branch";
         assert_eq!(refused(view_row()), wrong(none));
-        assert_eq!(refused(pull_row(State::Merged)), wrong("menu: #328 is merged"));
-        assert_eq!(refused(pull_row(State::Closed)), wrong("menu: #328 is closed"));
-        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
+        assert_eq!(
+            refused(pull_row(State::Merged)),
+            wrong("menu: #328 is merged")
+        );
+        assert_eq!(
+            refused(pull_row(State::Closed)),
+            wrong("menu: #328 is closed")
+        );
+        let unsaid = Target::View(
+            Machine::Local,
+            ViewRow {
+                cwd: Cwd::Unsaid,
+                ..row()
+            },
+        );
         assert!(matches!(refused(unsaid), Done::Wrong(_)));
     }
 
@@ -3421,7 +4461,10 @@ mod tests {
             "menu: view 4's shell said no line of the command it ran last, by which lune \
              finds what it printed"
         );
-        assert_eq!(refused(ran(Ran::Ready)), "menu: view 4's shell has run nothing yet");
+        assert_eq!(
+            refused(ran(Ran::Ready)),
+            "menu: view 4's shell has run nothing yet"
+        );
         assert_eq!(
             refused(ran(Ran::Unhooked)),
             "menu: view 4's shell marks none of the commands it runs; a shell that writes OSC \
@@ -3450,17 +4493,39 @@ mod tests {
         for on in [Machine::Local, vps] {
             let row = Target::View(on.clone(), row());
             let (home, name) = ("/w/lune".to_owned(), "lune".to_owned());
-            let repository = Repository { on, dir: main_dir(), home, name };
+            let repository = Repository {
+                on,
+                dir: main_dir(),
+                home,
+                name,
+            };
             let did = Menu::open(1, row.clone(), Some('i'), PICKED).expect("the menu has `i`");
             assert_eq!(closed(did), Done::Issue(repository.clone()));
             let (menu, _) = stays(opened(row, None));
             assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
         }
-        let unrepositoried = row_in(Folder { repository: None, ..folder() });
+        let unrepositoried = row_in(Folder {
+            repository: None,
+            ..folder()
+        });
         let unrepositoried = Target::View(Machine::Local, unrepositoried);
-        let nowhere = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
-        for row in [session_row(), Target::Machine(Machine::Local), unrepositoried, nowhere] {
-            assert!(Menu::open(1, row.clone(), Some('i'), PICKED).is_none(), "{row:?}");
+        let nowhere = Target::View(
+            Machine::Local,
+            ViewRow {
+                cwd: Cwd::Unsaid,
+                ..row()
+            },
+        );
+        for row in [
+            session_row(),
+            Target::Machine(Machine::Local),
+            unrepositoried,
+            nowhere,
+        ] {
+            assert!(
+                Menu::open(1, row.clone(), Some('i'), PICKED).is_none(),
+                "{row:?}"
+            );
             let (menu, _) = stays(opened(row.clone(), None));
             let lines = text(&menu.lines(31, 12, 0).0);
             assert!(!lines.contains(&" i  File issue".to_owned()), "{lines:?}");
@@ -3484,7 +4549,11 @@ mod tests {
         for (row, key, briefed) in [
             (view_row(), 'z', Briefed::Every),
             (view_row(), 's', Briefed::Session(Machine::Local, lune())),
-            (view_row(), 'h', Briefed::Agent(Machine::Local, lune(), ViewKey::terminal(4))),
+            (
+                view_row(),
+                'h',
+                Briefed::Agent(Machine::Local, lune(), ViewKey::terminal(4)),
+            ),
             (session_row(), 'h', Briefed::Session(Machine::Local, lune())),
         ] {
             let (menu, _) = stays(opened(row, Some('b')));
@@ -3512,7 +4581,11 @@ mod tests {
             remote_header(),
         ];
         for row in rows {
-            assert_eq!(closed(opened(row.clone(), Some('q'))), Done::Quit, "{row:?}");
+            assert_eq!(
+                closed(opened(row.clone(), Some('q'))),
+                Done::Quit,
+                "{row:?}"
+            );
         }
     }
 
@@ -3528,41 +4601,76 @@ mod tests {
         let logs = || projects::Name::parse("logs").unwrap();
         let to = || Some(logs());
         let done = closed(renamed(own_view(), "logs"));
-        assert_eq!(done, Done::Rename(Machine::Local, Rename::Terminal(terminal(), to())));
+        assert_eq!(
+            done,
+            Done::Rename(Machine::Local, Rename::Terminal(terminal(), to()))
+        );
         let done = closed(renamed(Target::View(vps(), own_row()), ""));
-        assert_eq!(done, Done::Rename(vps(), Rename::Terminal(terminal(), None)));
+        assert_eq!(
+            done,
+            Done::Rename(vps(), Rename::Terminal(terminal(), None))
+        );
         let done = closed(renamed(worktree_on(vps()), "logs"));
-        assert_eq!(done, Done::Rename(vps(), Rename::Worktree(worktree(), to())));
+        assert_eq!(
+            done,
+            Done::Rename(vps(), Rename::Worktree(worktree(), to()))
+        );
         let done = closed(renamed(session_row(), "logs"));
         let logs = projects::ProjectName::parse("logs").unwrap();
         let project = Rename::Project(project().id(), logs);
         assert_eq!(done, Done::Rename(Machine::Local, project));
         let (menu, _) = stays(renamed(session_row(), " "));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[..3], [
-            "─ Rename ──────────────────────",
-            "  _",
-            " a project keeps a name: type",
-        ]);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[..3],
+            [
+                "─ Rename ──────────────────────",
+                "  _",
+                " a project keeps a name: type",
+            ]
+        );
         let long = "x".repeat(projects::NAME_CHARS_MAX + 1);
         let (menu, _) = stays(renamed(worktree_on(Machine::Local), &long));
-        let Stage::Typing { chain: Chain { typed, wrong: Some(wrong), .. }, .. } = &menu.stage
+        let Stage::Typing {
+            chain:
+                Chain {
+                    typed,
+                    wrong: Some(wrong),
+                    ..
+                },
+            ..
+        } = &menu.stage
         else {
             panic!("a name too long keeps its box open, saying why");
         };
         assert_eq!(*typed, long);
         assert!(wrong.contains("longer than 64 characters"), "{wrong}");
         let (menu, _) = stays(renamed(session_row(), "api/v2"));
-        let Stage::Typing { chain: Chain { wrong: Some(wrong), .. }, .. } = &menu.stage else {
+        let Stage::Typing {
+            chain: Chain {
+                wrong: Some(wrong), ..
+            },
+            ..
+        } = &menu.stage
+        else {
             panic!("a project's name the sidebar cannot list keeps its box open, saying why");
         };
         assert!(wrong.contains("names no project"), "{wrong}");
         let api = Some(projects::Name::parse("api/v2").unwrap());
         let done = closed(renamed(worktree_on(Machine::Local), "api/v2"));
-        assert_eq!(done, Done::Rename(Machine::Local, Rename::Worktree(worktree(), api)));
+        assert_eq!(
+            done,
+            Done::Rename(Machine::Local, Rename::Worktree(worktree(), api))
+        );
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('r')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [" _", " its new name; with none, it"]);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[1..3],
+            [" _", " its new name; with none, it"]
+        );
         for target in [view_row(), local_header(), remote_header()] {
-            assert!(Menu::open(1, target.clone(), Some('r'), PICKED).is_none(), "{target:?}");
+            assert!(
+                Menu::open(1, target.clone(), Some('r'), PICKED).is_none(),
+                "{target:?}"
+            );
         }
     }
 
@@ -3572,7 +4680,9 @@ mod tests {
             let (menu, wants) = stays(opened(target, Some('n')));
             let (menu, _) = stays(menu.key(&char('m')));
             assert_eq!(wants, Wants::Nothing);
-            let menu = "me x".chars().fold(menu, |menu, c| stays(menu.key(&char(c))).0);
+            let menu = "me x"
+                .chars()
+                .fold(menu, |menu, c| stays(menu.key(&char(c))).0);
             let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
             assert_eq!(
                 text(&menu.lines(31, 9, 0).0),
@@ -3597,10 +4707,13 @@ mod tests {
         let (menu, _) = stays(opened(view_row(), Some('n')));
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
-        assert_eq!(title(match &menu.stage {
-            Stage::Choosing(keys) => keys,
-            _ => panic!("back to the keys"),
-        }), "New");
+        assert_eq!(
+            title(match &menu.stage {
+                Stage::Choosing(keys) => keys,
+                _ => panic!("back to the keys"),
+            }),
+            "New"
+        );
     }
 
     #[test]
@@ -3611,41 +4724,64 @@ mod tests {
             text(&menu.lines(40, 13, 0).0)[1..].to_vec()
         };
         let view = Target::View(vps(), own_row());
-        assert_eq!(root(view.clone()), [
-            " /  Search skills",
-            " a  Ask",
-            " i  File issue",
-            " c  Skills ▸",
-            " n  New ▸",
-            " s  Show as panes",
-            " r  Rename the view…",
-            " d  Close ▸",
-            " g  Git ▸",
-            " b  Brief ▸",
-            " q  Quit lune",
-            " <ESC> - Close",
-        ]);
+        assert_eq!(
+            root(view.clone()),
+            [
+                " /  Search skills",
+                " a  Ask",
+                " i  File issue",
+                " c  Skills ▸",
+                " n  New ▸",
+                " s  Show as panes",
+                " r  Rename the view…",
+                " d  Close ▸",
+                " g  Git ▸",
+                " b  Brief ▸",
+                " q  Quit lune",
+                " <ESC> - Close",
+            ]
+        );
         let (_, wants) = stays(stays(opened(view.clone(), Some('c'))).0.key(&char('t')));
-        let opens = agent(["claude", "/thermo-nuclear-review"].map(str::to_owned).to_vec());
+        let opens = agent(
+            ["claude", "/thermo-nuclear-review"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Open { session, view: at, opens });
+        assert_eq!(
+            wants,
+            Wants::Open {
+                session,
+                view: at,
+                opens
+            }
+        );
         let (menu, _) = stays(opened(view.clone(), Some('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..7], [
-            " v  new view",
-            " h  new welcome view",
-            " b  new browser view…",
-            " r  new review view",
-            " w  new worktree…",
-            " m  new machine…",
-        ]);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[1..7],
+            [
+                " v  new view",
+                " h  new welcome view",
+                " b  new browser view…",
+                " r  new review view",
+                " w  new worktree…",
+                " m  new machine…",
+            ]
+        );
         let (menu, _) = stays(opened(view.clone(), Some('d')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
-            " d  close the view",
-            " m  delete merged worktrees",
-            " <BS> - Back, <ESC> - Close",
-        ]);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[1..4],
+            [
+                " d  close the view",
+                " m  delete merged worktrees",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
         let (_, wants) = stays(menu.key(&char('d')));
-        let (session, scope) = (project().listed().clone(), Scope::View(ViewKey::terminal(4)));
+        let (session, scope) = (
+            project().listed().clone(),
+            Scope::View(ViewKey::terminal(4)),
+        );
         assert_eq!(wants, Wants::Plan { session, scope });
 
         let (menu, _) = stays(opened(worktree_on(vps()), Some('d')));
@@ -3713,9 +4849,26 @@ mod tests {
         assert_eq!(wants, Wants::Prunes { dir: main_dir() });
         assert!(menu.sweeping() && menu.turning());
 
-        let outside = Target::View(Machine::Local, row_in(Folder { repository: None, ..folder() }));
-        let unplaced = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
-        for target in [outside, unplaced, project_on(Machine::Local), remote_header()] {
+        let outside = Target::View(
+            Machine::Local,
+            row_in(Folder {
+                repository: None,
+                ..folder()
+            }),
+        );
+        let unplaced = Target::View(
+            Machine::Local,
+            ViewRow {
+                cwd: Cwd::Unsaid,
+                ..row()
+            },
+        );
+        for target in [
+            outside,
+            unplaced,
+            project_on(Machine::Local),
+            remote_header(),
+        ] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
             let (menu, wants) = stays(menu.key(&char('m')));
             assert_eq!(wants, Wants::Nothing, "{target:?}");
@@ -3725,7 +4878,11 @@ mod tests {
 
     #[test]
     fn the_list_says_what_goes_as_far_as_there_is_room_and_why_the_rest_stay() {
-        let goes = [("issue-282", 297, 4608), ("dev-check", 293, 916), ("dev-ci", 303, 6)];
+        let goes = [
+            ("issue-282", 297, 4608),
+            ("dev-check", 293, 916),
+            ("dev-ci", 303, 6),
+        ];
         let mut plan = merged_plan(&goes);
         plan.kept.push(prunes::Kept {
             folder: "/w/lune/issue-308".to_owned(),
@@ -3798,7 +4955,13 @@ mod tests {
             assert_eq!(wants, Wants::Nothing);
             let (asked, wants) = stays(asked.key(&char(key)));
             let agreed = merged_plan(&[two, one]).deletes();
-            assert_eq!(wants, Wants::Prune { dir: main_dir(), agreed });
+            assert_eq!(
+                wants,
+                Wants::Prune {
+                    dir: main_dir(),
+                    agreed
+                }
+            );
             assert!(asked.pruning() && asked.turning());
             assert_eq!(
                 text(&asked.lines(40, 9, 0).0)[1],
@@ -3810,9 +4973,16 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&char('y')));
         let (menu, wants) = stays(menu.changed(merged_plan(&[one])));
-        assert_eq!(wants, Wants::Nothing, "it deleted what changed since you read it");
+        assert_eq!(
+            wants,
+            Wants::Nothing,
+            "it deleted what changed since you read it"
+        );
         assert!(!menu.pruning());
-        assert_eq!(text(&menu.lines(40, 9, 0).0)[1], " Delete 1 merged worktree?");
+        assert_eq!(
+            text(&menu.lines(40, 9, 0).0)[1],
+            " Delete 1 merged worktree?"
+        );
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the view");
         let (menu, _) = stays(menu.key(&char('m')));
@@ -3821,7 +4991,10 @@ mod tests {
         assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the view");
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
-        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+        assert_eq!(
+            closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
+            Done::Nothing
+        );
     }
 
     #[test]
@@ -3841,9 +5014,15 @@ mod tests {
         let mut plan = merged_plan(&[("one", 1, 5), ("two", 2, 5), ("tre", 3, 5)]);
         plan.goes[0].pushed = on_origin("one");
         plan.goes[1].pushed = prunes::Pushed::Stays("someone else wrote it".to_owned());
-        assert_eq!(asked(plan.clone()), [" Delete 3 merged worktrees and 1", " remote branch?"]);
+        assert_eq!(
+            asked(plan.clone()),
+            [" Delete 3 merged worktrees and 1", " remote branch?"]
+        );
         plan.goes[1].pushed = on_origin("two");
-        assert_eq!(asked(plan), [" Delete 3 merged worktrees and 2", " remote branches?"]);
+        assert_eq!(
+            asked(plan),
+            [" Delete 3 merged worktrees and 2", " remote branches?"]
+        );
     }
 
     #[test]
@@ -3870,11 +5049,17 @@ mod tests {
         let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
         let wrong = closed(menu.swept(Err("luned does not answer".to_owned())));
-        assert_eq!(wrong, Done::Wrong("menu: nothing deleted: luned does not answer".to_owned()));
+        assert_eq!(
+            wrong,
+            Done::Wrong("menu: nothing deleted: luned does not answer".to_owned())
+        );
 
         let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, _) = stays(menu.key(&char('m')));
-        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+        assert_eq!(
+            closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
+            Done::Nothing
+        );
     }
 
     #[test]
@@ -3888,7 +5073,10 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        assert_eq!(closed(menu.key(&char('d'))), Done::Forget("me@vps".parse().unwrap()));
+        assert_eq!(
+            closed(menu.key(&char('d'))),
+            Done::Forget("me@vps".parse().unwrap())
+        );
 
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         for (header, machine) in [(local_header(), Machine::Local), (remote_header(), vps())] {
@@ -3908,57 +5096,75 @@ mod tests {
             let (menu, _) = stays(opened(target, group));
             text(&menu.lines(40, 14, 0).0)[1..].to_vec()
         };
-        assert_eq!(at(session_row(), None), [
-            " a  Ask",
-            " n  New ▸",
-            " r  Rename the project…",
-            " d  Close ▸",
-            " b  Brief ▸",
-            " q  Quit lune",
-            " <ESC> - Close",
-        ]);
-        assert_eq!(at(project_on(Machine::Local), Some('d')), [
-            " d  close the project",
-            " <BS> - Back, <ESC> - Close",
-        ]);
-        assert_eq!(at(session_row(), Some('n')), [
-            " w  new worktree…",
-            " m  new machine…",
-            " <BS> - Back, <ESC> - Close",
-        ]);
-        assert_eq!(at(worktree_on(Machine::Local), None), [
-            " a  Ask",
-            " i  File issue",
-            " n  New ▸",
-            " r  Rename the worktree…",
-            " d  Close ▸",
-            " g  Git ▸",
-            " b  Brief ▸",
-            " q  Quit lune",
-            " <ESC> - Close",
-        ]);
-        assert_eq!(at(worktree_on(Machine::Local), Some('d')), [
-            " d  close the worktree",
-            " m  delete merged worktrees",
-            " <BS> - Back, <ESC> - Close",
-        ]);
-        assert_eq!(at(own_view(), Some('d')), [
-            " d  close the view",
-            " m  delete merged worktrees",
-            " <BS> - Back, <ESC> - Close",
-        ]);
-        assert_eq!(at(remote_header(), None), [
-            " a  Ask",
-            " n  New ▸",
-            " d  Close ▸",
-            " b  Brief ▸",
-            " q  Quit lune",
-            " <ESC> - Close",
-        ]);
-        assert_eq!(at(local_header(), Some('n')), [
-            " m  new machine…",
-            " <BS> - Back, <ESC> - Close",
-        ]);
+        assert_eq!(
+            at(session_row(), None),
+            [
+                " a  Ask",
+                " n  New ▸",
+                " r  Rename the project…",
+                " d  Close ▸",
+                " b  Brief ▸",
+                " q  Quit lune",
+                " <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            at(project_on(Machine::Local), Some('d')),
+            [" d  close the project", " <BS> - Back, <ESC> - Close",]
+        );
+        assert_eq!(
+            at(session_row(), Some('n')),
+            [
+                " w  new worktree…",
+                " m  new machine…",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            at(worktree_on(Machine::Local), None),
+            [
+                " a  Ask",
+                " i  File issue",
+                " n  New ▸",
+                " r  Rename the worktree…",
+                " d  Close ▸",
+                " g  Git ▸",
+                " b  Brief ▸",
+                " q  Quit lune",
+                " <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            at(worktree_on(Machine::Local), Some('d')),
+            [
+                " d  close the worktree",
+                " m  delete merged worktrees",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            at(own_view(), Some('d')),
+            [
+                " d  close the view",
+                " m  delete merged worktrees",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            at(remote_header(), None),
+            [
+                " a  Ask",
+                " n  New ▸",
+                " d  Close ▸",
+                " b  Brief ▸",
+                " q  Quit lune",
+                " <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            at(local_header(), Some('n')),
+            [" m  new machine…", " <BS> - Back, <ESC> - Close",]
+        );
         assert!(Menu::open(1, local_header(), Some('d'), PICKED).is_none());
 
         let press = |target: &Target, group: Option<char>, key: char| {
@@ -3981,7 +5187,13 @@ mod tests {
 
     #[test]
     fn a_menu_that_cannot_open_beside_its_row_says_why() {
-        let unsaid = Target::View(Machine::Local, ViewRow { cwd: Cwd::Unsaid, ..row() });
+        let unsaid = Target::View(
+            Machine::Local,
+            ViewRow {
+                cwd: Cwd::Unsaid,
+                ..row()
+            },
+        );
         let (menu, _) = stays(opened(unsaid, None));
         let done = closed(menu.key(&char('/')));
         assert!(matches!(done, Done::Wrong(why) if why.contains("where view 4 works")));
@@ -4000,24 +5212,42 @@ mod tests {
     fn slash_searches_the_skills_and_enter_starts_an_agent_on_the_one_picked() {
         let (menu, _) = stays(opened(view_row(), None));
         let (mut menu, wants) = stays(menu.key(&char('/')));
-        assert_eq!(wants, Wants::Skills { dir: main_dir(), agent: CLAUDE });
+        assert_eq!(
+            wants,
+            Wants::Skills {
+                dir: main_dir(),
+                agent: CLAUDE
+            }
+        );
         assert_eq!(
             text(&menu.lines(31, 6, 0).0)[..3],
             ["─ Skills ────────── lune/main ─", " _", " finding skills…"]
         );
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
-        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
+        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4]
+            .iter()
+            .map(|line| line.style.bg)
+            .collect();
         assert_eq!(lit, [Some(LIT), None]);
-        assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{ec82} claude  <TAB> another agent");
+        assert_eq!(
+            text(&menu.lines(31, 6, 0).0)[4],
+            " \u{ec82} claude  <TAB> another agent"
+        );
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
-        assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
-            "─ Skills ────────── lune/main ─".to_owned(),
-            " ti_".to_owned(),
-            " /tigerstyle  tigerstyle it".to_owned(),
-        ]);
+        assert_eq!(
+            text(&menu.lines(31, 6, 0).0)[..3],
+            [
+                "─ Skills ────────── lune/main ─".to_owned(),
+                " ti_".to_owned(),
+                " /tigerstyle  tigerstyle it".to_owned(),
+            ]
+        );
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = agents::on_skill(CLAUDE, "tigerstyle", None).unwrap().words().to_vec();
+        let command = agents::on_skill(CLAUDE, "tigerstyle", None)
+            .unwrap()
+            .words()
+            .to_vec();
         assert_eq!(wants, beside_row(command));
     }
 
@@ -4027,19 +5257,30 @@ mod tests {
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let (menu, _) = stays(menu.key(&char('t')));
         let (mut menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
-        assert_eq!(wants, Wants::Refind { dir: main_dir(), agent: Harness::Pi });
-        assert_eq!(text(&menu.lines(31, 6, 0).0)[..3], [
-            "─ Skills ────────── lune/main ─",
-            " t_",
-            " finding skills…",
-        ]);
+        assert_eq!(
+            wants,
+            Wants::Refind {
+                dir: main_dir(),
+                agent: Harness::Pi
+            }
+        );
+        assert_eq!(
+            text(&menu.lines(31, 6, 0).0)[..3],
+            ["─ Skills ────────── lune/main ─", " t_", " finding skills…",]
+        );
         menu.found(CLAUDE, Ok(skills(&["tigerstyle"])));
         assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " finding skills…");
         menu.found(Harness::Pi, Ok(skills(&["tdd", "code-review"])));
         assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " /tdd  tdd it");
-        assert_eq!(text(&menu.lines(31, 6, 0).0)[4], " \u{f03ff} pi  <TAB> another agent");
+        assert_eq!(
+            text(&menu.lines(31, 6, 0).0)[4],
+            " \u{f03ff} pi  <TAB> another agent"
+        );
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
-        let command = agents::on_skill(Harness::Pi, "tdd", None).unwrap().words().to_vec();
+        let command = agents::on_skill(Harness::Pi, "tdd", None)
+            .unwrap()
+            .words()
+            .to_vec();
         assert_eq!(wants, beside_row(command));
     }
 
@@ -4050,17 +5291,29 @@ mod tests {
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
         let (_, spots, _) = menu.lines(31, 6, 0);
         assert_eq!(spots.at(Position::new(4, 1)), None);
-        assert_eq!(spots.at(Position::new(4, 2)), Some(&Choice::Skill(skill("code-review"))));
-        assert_eq!(spots.at(Position::new(30, 3)), Some(&Choice::Skill(skill("tigerstyle"))));
+        assert_eq!(
+            spots.at(Position::new(4, 2)),
+            Some(&Choice::Skill(skill("code-review")))
+        );
+        assert_eq!(
+            spots.at(Position::new(30, 3)),
+            Some(&Choice::Skill(skill("tigerstyle")))
+        );
         menu.scroll(1);
-        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4].iter().map(|line| line.style.bg).collect();
+        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4]
+            .iter()
+            .map(|line| line.style.bg)
+            .collect();
         assert_eq!(lit, [None, Some(LIT)]);
         let (menu, _) = stays(menu.key(&char('g')));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
-        let command = agents::on_skill(CLAUDE, "code-review", None).unwrap().words().to_vec();
+        let command = agents::on_skill(CLAUDE, "code-review", None)
+            .unwrap()
+            .words()
+            .to_vec();
         assert_eq!(wants, beside_row(command));
         assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
@@ -4069,9 +5322,16 @@ mod tests {
 
     #[test]
     fn a_click_on_a_key_a_line_of_keys_names_presses_it() {
-        let keys = [(Hint::Moves, "Move"), (Hint::Enter, "Start"), (Hint::Ctrl('r'), "Rename")];
+        let keys = [
+            (Hint::Moves, "Move"),
+            (Hint::Enter, "Start"),
+            (Hint::Ctrl('r'), "Rename"),
+        ];
         let (line, spots) = keyed(50, &keys);
-        assert_eq!(line.to_string(), " <↓↑> - Move, <ENTER> - Start, <Ctrl r> - Rename");
+        assert_eq!(
+            line.to_string(),
+            " <↓↑> - Move, <ENTER> - Start, <Ctrl r> - Rename"
+        );
         let at = |x| spots.at(Position::new(x, 0)).copied();
         assert_eq!(at(1), None);
         assert_eq!([at(14), at(28)], [Some(KeyEvent::from(KeyCode::Enter)); 2]);
@@ -4088,12 +5348,18 @@ mod tests {
         assert_eq!([at(3), at(4), at(5)], [yes, None, delete]);
         assert_eq!(keyed(9, &yes_or_delete).0.to_string(), " <y><Del>");
         let any = [(Hint::AnyKey, "Close"), (Hint::AnyOtherKey, "No")];
-        assert_eq!(keyed(40, &any).0.to_string(), " <any key> - Close, <any other key> - No");
+        assert_eq!(
+            keyed(40, &any).0.to_string(),
+            " <any key> - Close, <any other key> - No"
+        );
         assert_eq!(keyed(40, &any).1, Spots::default());
     }
 
     fn planned(act: Act, agents: Vec<(u32, Doing)>) -> Plan {
-        let agents: Vec<_> = agents.into_iter().map(|(id, doing)| (at(id), doing)).collect();
+        let agents: Vec<_> = agents
+            .into_iter()
+            .map(|(id, doing)| (at(id), doing))
+            .collect();
         Plan::of(act, Ok(&agents))
     }
 
@@ -4110,9 +5376,18 @@ mod tests {
         let (menu, _) = stays(opened(view_row(), Some('d')));
         let (menu, wants) = stays(menu.key(&char('d')));
         let scope = Scope::View(ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Plan { session: listed(), scope });
+        assert_eq!(
+            wants,
+            Wants::Plan {
+                session: listed(),
+                scope
+            }
+        );
         let done = closed(menu.planned(Ok(plan(vec![(4, Doing::Idle)]))));
-        assert_eq!(done, Done::Act(Machine::Local, Act::View(ViewKey::terminal(4))));
+        assert_eq!(
+            done,
+            Done::Act(Machine::Local, Act::View(ViewKey::terminal(4)))
+        );
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('d')));
         let (_, wants) = stays(menu.key(&char('d')));
         let (session, scope) = (project().listed().clone(), Scope::Worktree(worktree()));
@@ -4140,7 +5415,13 @@ mod tests {
         let (menu, _) = stays(menu.planned(Ok(plan(busy()))));
         let (menu, wants) = stays(menu.key(&char('d')));
         let scope = Scope::View(ViewKey::terminal(4));
-        assert_eq!(wants, Wants::Plan { session: listed(), scope });
+        assert_eq!(
+            wants,
+            Wants::Plan {
+                session: listed(),
+                scope
+            }
+        );
         let waiting = || vec![(4, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(Ok(plan(waiting()))));
         assert_eq!(wants, Wants::Nothing);
@@ -4148,7 +5429,10 @@ mod tests {
         assert_eq!(asking[1..3], [" Close the view? 1 agent, 1", " waiting"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let act = Act::View(ViewKey::terminal(4));
-        assert_eq!(closed(menu.planned(Ok(plan(waiting())))), Done::Act(Machine::Local, act));
+        assert_eq!(
+            closed(menu.planned(Ok(plan(waiting())))),
+            Done::Act(Machine::Local, act)
+        );
     }
 
     fn worktree_plan(agents: Vec<(u32, Doing)>) -> Plan {
@@ -4157,7 +5441,11 @@ mod tests {
 
     fn worktree_act() -> Act {
         let (views, seen) = (vec![at(4), at(5)], worktree_seen());
-        Act::Worktree { worktree: worktree(), views, seen }
+        Act::Worktree {
+            worktree: worktree(),
+            views,
+            seen,
+        }
     }
 
     fn worktree_seen() -> Vec<ViewId> {
@@ -4170,11 +5458,14 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, wants) = stays(menu.planned(Ok(worktree_plan(vec![(5, Doing::Unknown)]))));
         assert_eq!(wants, Wants::Nothing);
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1..4], [
-            " Close the worktree? 1 agent,",
-            " 1 unknown",
-            " <y> Yes <BS> Back <ESC> Close",
-        ]);
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[1..4],
+            [
+                " Close the worktree? 1 agent,",
+                " 1 unknown",
+                " <y> Yes <BS> Back <ESC> Close",
+            ]
+        );
         let (menu, wants) = stays(menu.key(&char('d')));
         let (session, scope) = (project().listed().clone(), Scope::Worktree(worktree()));
         assert_eq!(wants, Wants::Plan { session, scope });
@@ -4202,10 +5493,10 @@ mod tests {
             let (session, scope) = (project().listed().clone(), Scope::Project);
             assert_eq!(wants, Wants::Plan { session, scope });
             let (menu, _) = stays(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
-            assert_eq!(text(&menu.lines(31, 9, 0).0)[1..3], [
-                " Close project lune? 1 agent,",
-                " 1 busy",
-            ]);
+            assert_eq!(
+                text(&menu.lines(31, 9, 0).0)[1..3],
+                [" Close project lune? 1 agent,", " 1 busy",]
+            );
             let (menu, _) = stays(menu.key(&char('d')));
             let done = closed(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
             assert_eq!(done, Done::Act(on.clone(), act.clone()));
@@ -4213,9 +5504,18 @@ mod tests {
             let (menu, _) = stays(menu.key(&char('d')));
             let (menu, _) = stays(menu.planned(Ok(planned(Vec::new()))));
             let asks = text(&menu.lines(31, 9, 0).0)[1..3].to_vec();
-            assert_eq!(asks, [" Close project lune? no agent", " <y> Yes <BS> Back <ESC> Close"]);
+            assert_eq!(
+                asks,
+                [
+                    " Close project lune? no agent",
+                    " <y> Yes <BS> Back <ESC> Close"
+                ]
+            );
             let (menu, _) = stays(menu.key(&char('d')));
-            assert_eq!(closed(menu.planned(Ok(planned(Vec::new())))), Done::Act(on, act.clone()));
+            assert_eq!(
+                closed(menu.planned(Ok(planned(Vec::new())))),
+                Done::Act(on, act.clone())
+            );
         }
     }
 
@@ -4233,9 +5533,18 @@ mod tests {
         draw(&mut buffer, over);
         let content = buffer.content().iter();
         for cell in content.filter(|cell| !matches!(cell.symbol(), "z" | " ")) {
-            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(
+                moonlight::ALL.contains(&cell.fg),
+                "{:?} in {:?}",
+                cell.symbol(),
+                cell.fg
+            );
         }
-        let row = |y| (RIGHT_X..RIGHT_X + width).map(|x| buffer[(x, y)].symbol()).collect();
+        let row = |y| {
+            (RIGHT_X..RIGHT_X + width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
         (0..height).map(row).collect()
     }
 
@@ -4247,38 +5556,47 @@ mod tests {
     fn the_menu_floats_at_the_bottom_right_of_the_view_s_side() {
         let menu = Menu::new(1, view_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
-        assert_eq!(floated(drawing(&menu), 50, 14), [
-            "z".repeat(50),
-            format!("{}┌─ lune ───── lune/main ─┐", "z".repeat(24)),
-            boxed(" /  Search skills"),
-            boxed(" a  Ask"),
-            boxed(" i  File issue"),
-            boxed(" c  Skills ▸"),
-            boxed(" n  New ▸"),
-            boxed(" s  Show as panes"),
-            boxed(" d  Close ▸"),
-            boxed(" g  Git ▸"),
-            boxed(" b  Brief ▸"),
-            boxed(" q  Quit lune"),
-            boxed(" <ESC> - Close"),
-            format!("{}└{}┘", "z".repeat(24), "─".repeat(24)),
-        ]);
+        assert_eq!(
+            floated(drawing(&menu), 50, 14),
+            [
+                "z".repeat(50),
+                format!("{}┌─ lune ───── lune/main ─┐", "z".repeat(24)),
+                boxed(" /  Search skills"),
+                boxed(" a  Ask"),
+                boxed(" i  File issue"),
+                boxed(" c  Skills ▸"),
+                boxed(" n  New ▸"),
+                boxed(" s  Show as panes"),
+                boxed(" d  Close ▸"),
+                boxed(" g  Git ▸"),
+                boxed(" b  Brief ▸"),
+                boxed(" q  Quit lune"),
+                boxed(" <ESC> - Close"),
+                format!("{}└{}┘", "z".repeat(24), "─".repeat(24)),
+            ]
+        );
 
         let (menu, _) = stays(menu.key(&char('c')));
         let right = "z".repeat(7);
         let rule = format!("─ Skills {} lune/main ─", "─".repeat(20));
-        assert_eq!(floated(drawing(&menu), 50, 11)[1..], [
-            format!("{right}┌{rule}┐"),
-            format!("{right}│{:<41}│", " t  /thermo-nuclear-review"),
-            format!("{right}│{:<41}│", " m  /make-illegal-states-unrepresentable"),
-            format!("{right}│{:<41}│", " s  /tigerstyle"),
-            format!("{right}│{:<41}│", " f  fix the last command"),
-            format!("{right}│{:<41}│", " e  explain the last command"),
-            format!("{right}│{:<41}│", " c  fix the failing checks"),
-            format!("{right}│{:<41}│", " \u{ec82} claude  <TAB> another agent"),
-            format!("{right}│{:<41}│", " <BS> - Back, <ESC> - Close"),
-            format!("{right}└{}┘", "─".repeat(41)),
-        ]);
+        assert_eq!(
+            floated(drawing(&menu), 50, 11)[1..],
+            [
+                format!("{right}┌{rule}┐"),
+                format!("{right}│{:<41}│", " t  /thermo-nuclear-review"),
+                format!(
+                    "{right}│{:<41}│",
+                    " m  /make-illegal-states-unrepresentable"
+                ),
+                format!("{right}│{:<41}│", " s  /tigerstyle"),
+                format!("{right}│{:<41}│", " f  fix the last command"),
+                format!("{right}│{:<41}│", " e  explain the last command"),
+                format!("{right}│{:<41}│", " c  fix the failing checks"),
+                format!("{right}│{:<41}│", " \u{ec82} claude  <TAB> another agent"),
+                format!("{right}│{:<41}│", " <BS> - Back, <ESC> - Close"),
+                format!("{right}└{}┘", "─".repeat(41)),
+            ]
+        );
         let narrow = floated(drawing(&menu), 30, 11);
         assert_eq!(narrow[2], format!("│{:<28}│", " t  /thermo-nuclear-review"));
     }
@@ -4298,7 +5616,10 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
         let (drawn, _) = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10), UNIX_EPOCH);
         let at = drawn_at(&buffer, text).expect("drawn");
-        assert!(drawn.boxed().is_some_and(|area| area.contains(at)), "{text:?} is in the box");
+        assert!(
+            drawn.boxed().is_some_and(|area| area.contains(at)),
+            "{text:?} is in the box"
+        );
         drawn.at(at).map(|hit| match hit {
             Hit::Menu(number, choice) if number == menu.number() => choice,
             hit => panic!("{hit:?} is not the menu's"),
@@ -4312,22 +5633,37 @@ mod tests {
     #[test]
     fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
         let menu = Menu::new(1, view_row(), PICKED);
-        assert_eq!(clicked(&menu, "Skills ▸"), Some(pressed(KeyCode::Char('c'))));
-        assert_eq!(clicked(&menu, " /  Search"), Some(pressed(KeyCode::Char('/'))));
+        assert_eq!(
+            clicked(&menu, "Skills ▸"),
+            Some(pressed(KeyCode::Char('c')))
+        );
+        assert_eq!(
+            clicked(&menu, " /  Search"),
+            Some(pressed(KeyCode::Char('/')))
+        );
         assert_eq!(clicked(&menu, "<ESC>"), Some(pressed(KeyCode::Esc)));
         assert_eq!(clicked(&menu, "- Close"), Some(pressed(KeyCode::Esc)));
         assert_eq!(clicked(&menu, "Close ▸"), Some(pressed(KeyCode::Char('d'))));
         assert_eq!(clicked(&menu, "─ lune"), None);
 
         let (menu, _) = stays(menu.key(&char('c')));
-        assert_eq!(clicked(&menu, "/tigerstyle"), Some(pressed(KeyCode::Char('s'))));
-        assert_eq!(clicked(&menu, "<BS> - Back"), Some(pressed(KeyCode::Backspace)));
+        assert_eq!(
+            clicked(&menu, "/tigerstyle"),
+            Some(pressed(KeyCode::Char('s')))
+        );
+        assert_eq!(
+            clicked(&menu, "<BS> - Back"),
+            Some(pressed(KeyCode::Backspace))
+        );
     }
 
     #[test]
     fn a_click_on_a_close_asks_first_as_its_key_does() {
         let (menu, _) = stays(opened(view_row(), Some('d')));
-        assert_eq!(clicked(&menu, "close the view"), Some(pressed(KeyCode::Char('d'))));
+        assert_eq!(
+            clicked(&menu, "close the view"),
+            Some(pressed(KeyCode::Char('d')))
+        );
         let (menu, _) = stays(menu.key(&char('d')));
         assert_eq!(clicked(&menu, "close the view"), None);
         let busy = vec![(4, Doing::Busy)];
@@ -4341,15 +5677,18 @@ mod tests {
         let note = "menu: lune does not know yet which view lune is on; try again in a moment";
         let right = "z".repeat(2);
         let boxed = |inner: &str| format!("{right}│{inner:<46}│");
-        assert_eq!(floated(|buffer, over| draw_note(buffer, over, note), 50, 7), [
-            "z".repeat(50),
-            "z".repeat(50),
-            format!("{right}┌─ lune {}┐", "─".repeat(39)),
-            boxed(" menu: lune does not know yet which view lune"),
-            boxed(" is on; try again in a moment"),
-            boxed(" <any key> - Close"),
-            format!("{right}└{}┘", "─".repeat(46)),
-        ]);
+        assert_eq!(
+            floated(|buffer, over| draw_note(buffer, over, note), 50, 7),
+            [
+                "z".repeat(50),
+                "z".repeat(50),
+                format!("{right}┌─ lune {}┐", "─".repeat(39)),
+                boxed(" menu: lune does not know yet which view lune"),
+                boxed(" is on; try again in a moment"),
+                boxed(" <any key> - Close"),
+                format!("{right}└{}┘", "─".repeat(46)),
+            ]
+        );
     }
 
     fn pull_request() -> Link {
@@ -4362,7 +5701,11 @@ mod tests {
 
     fn pulling_on(row: Target, key: char) -> Menu {
         let (menu, wants) = stays(Menu::pull(1, row, link(), CLAUDE).key(&char(key)));
-        let wanted = if key == 'r' { Wanted::AtHead } else { Wanted::AsItIs };
+        let wanted = if key == 'r' {
+            Wanted::AtHead
+        } else {
+            Wanted::AsItIs
+        };
         assert_eq!(wants, Wants::Pull(link(), wanted));
         assert!(menu.pulling());
         menu
@@ -4373,7 +5716,10 @@ mod tests {
     }
 
     fn here(ready: Ready) -> Found {
-        Found { on: Machine::Local, ready }
+        Found {
+            on: Machine::Local,
+            ready,
+        }
     }
 
     fn argv(words: Vec<String>) -> Argv {
@@ -4408,14 +5754,24 @@ mod tests {
         assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
         assert_eq!(
             text(&menu.lines(31, 9, 0).0),
-            ["─ #2736 ──────── cashubtc/cdk ─", " ⠋ Making a worktree of #2736…", " <ESC> - Close"]
+            [
+                "─ #2736 ──────── cashubtc/cdk ─",
+                " ⠋ Making a worktree of #2736…",
+                " <ESC> - Close"
+            ]
         );
-        assert_eq!(text(&menu.lines(31, 9, 3).0)[1], " ⠸ Making a worktree of #2736…");
+        assert_eq!(
+            text(&menu.lines(31, 9, 3).0)[1],
+            " ⠸ Making a worktree of #2736…"
+        );
         assert!(menu.turning());
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
         assert!(menu.pulling());
-        assert_eq!(closed(menu.key(&KeyEvent::from(KeyCode::Esc))), Done::Nothing);
+        assert_eq!(
+            closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
+            Done::Nothing
+        );
     }
 
     #[test]
@@ -4426,7 +5782,13 @@ mod tests {
         let ready = |at| {
             let (folder, branch) = (directory(&folder), branch.clone());
             let work = Readied::Link(pull_request());
-            Ok(here(Ready { at, folder, branch, moved_off: false, work }))
+            Ok(here(Ready {
+                at,
+                folder,
+                branch,
+                moved_off: false,
+                work,
+            }))
         };
         let review = [
             "claude",
@@ -4438,20 +5800,39 @@ mod tests {
             let (menu, wants) = stays(pulling(key).pulled(ready(At::Unopened)));
             let (cwd, name) = (directory(&folder), "#2736".to_owned());
             assert_eq!(wants, Wants::Make { cwd, name, agent });
-            assert_eq!(menu.target(), &Target::Machine(Machine::Local), "no view is in it");
+            assert_eq!(
+                menu.target(),
+                &Target::Machine(Machine::Local),
+                "no view is in it"
+            );
             assert!(menu.opens_pulled());
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
         let there = || At::There(ViewPlace::new_in("cdk", 2, 1, 9));
         let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
-        assert_eq!(closed(pulling('w').pulled(ready(there()))), Done::Go(Machine::Local, place));
+        assert_eq!(
+            closed(pulling('w').pulled(ready(there()))),
+            Done::Go(Machine::Local, place)
+        );
         let (menu, wants) = stays(pulling('r').pulled(ready(there())));
-        assert!(!menu.opens_pulled(), "a view beside another opens at once, with no pull");
+        assert!(
+            !menu.opens_pulled(),
+            "a view beside another opens at once, with no pull"
+        );
         let opens = agent(review);
         let view = ViewKey::terminal(9);
-        assert_eq!(wants, Wants::Open { session: other.clone(), view, opens });
-        let Target::View(_, row) = menu.target() else { panic!("not a view's row") };
+        assert_eq!(
+            wants,
+            Wants::Open {
+                session: other.clone(),
+                view,
+                opens
+            }
+        );
+        let Target::View(_, row) = menu.target() else {
+            panic!("not a view's row")
+        };
         assert_eq!(row.place, ViewPlace::new_in("cdk", 2, 1, 9));
     }
 
@@ -4459,10 +5840,16 @@ mod tests {
     fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
         let menu = Menu::pull(1, view_row(), link(), CLAUDE);
         let tab = KeyEvent::from(KeyCode::Tab);
-        assert_eq!(menu.lines(31, 9, 0).1.at(Position::new(5, 3)), Some(&Choice::Key(tab)));
+        assert_eq!(
+            menu.lines(31, 9, 0).1.at(Position::new(5, 3)),
+            Some(&Choice::Key(tab))
+        );
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[3], " \u{f03ff} pi  <TAB> another agent");
+        assert_eq!(
+            text(&menu.lines(31, 9, 0).0)[3],
+            " \u{f03ff} pi  <TAB> another agent"
+        );
         let (menu, _) = stays(menu.key(&char('r')));
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Nothing);
@@ -4470,7 +5857,13 @@ mod tests {
         let work = Readied::Link(pull_request());
         let branch = Said::new("feat/x".to_owned());
         let at = At::Unopened;
-        let ready = Ready { at, folder: directory(&folder), branch, moved_off: false, work };
+        let ready = Ready {
+            at,
+            folder: directory(&folder),
+            branch,
+            moved_off: false,
+            work,
+        };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
         let review = [
             "pi",
@@ -4509,7 +5902,11 @@ mod tests {
             work: Readied::Link(link),
         };
         let (_, wants) = stays(menu.pulled(Ok(here(ready))));
-        let tackle = ["claude", "--", "Tackle https://github.com/cashubtc/cdk/issues/2736"];
+        let tackle = [
+            "claude",
+            "--",
+            "Tackle https://github.com/cashubtc/cdk/issues/2736",
+        ];
         let agent = Some(argv(tackle.map(str::to_owned).to_vec()));
         let (cwd, name) = (directory(&folder), "#2736".to_owned());
         assert_eq!(wants, Wants::Make { cwd, name, agent });
@@ -4543,7 +5940,10 @@ mod tests {
         ];
         let (lines, spots, _) = menu.lines(31, 9, 0);
         assert_eq!(text(&lines), refused);
-        assert_eq!(spots.at(Position::new(4, 2)), Some(&pressed(KeyCode::Char('w'))));
+        assert_eq!(
+            spots.at(Position::new(4, 2)),
+            Some(&pressed(KeyCode::Char('w')))
+        );
 
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
@@ -4587,7 +5987,14 @@ mod tests {
         assert_eq!(menu.off_branch(&found).as_deref(), Some(note));
         let (_, wants) = stays(menu.pulled(found));
         let (cwd, name) = (directory("/w/cdk/feat"), "#2736".to_owned());
-        assert_eq!(wants, Wants::Make { cwd, name, agent: None });
+        assert_eq!(
+            wants,
+            Wants::Make {
+                cwd,
+                name,
+                agent: None
+            }
+        );
     }
 
     #[test]
@@ -4611,14 +6018,22 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
-        assert_eq!(text(&menu.lines(38, 9, 0).0)[1], " ⠋ Making a worktree of sync-rework…");
-        let (folder, real) = ("/w/cdk/md-sync-rework", "/w/cdk/main/docs/plans/sync-rework.md");
+        assert_eq!(
+            text(&menu.lines(38, 9, 0).0)[1],
+            " ⠋ Making a worktree of sync-rework…"
+        );
+        let (folder, real) = (
+            "/w/cdk/md-sync-rework",
+            "/w/cdk/main/docs/plans/sync-rework.md",
+        );
         let ready = || Ready {
             at: At::Unopened,
             folder: directory(folder),
             branch: Said::new("md-sync-rework".to_owned()),
             moved_off: false,
-            work: Readied::File { real: real.to_owned() },
+            work: Readied::File {
+                real: real.to_owned(),
+            },
         };
         let (_, wants) = stays(menu.pulled(Ok(here(ready()))));
         let command = [
@@ -4636,9 +6051,8 @@ mod tests {
         };
         assert_eq!(wants, made(Some(argv(command))));
 
-        let pressed = |key: char| {
-            stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0
-        };
+        let pressed =
+            |key: char| stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0;
         let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
         assert_eq!(wants, made(None));
 
@@ -4647,8 +6061,13 @@ mod tests {
             Done::Wrong("menu: docs/plans/sync-rework.md: no such file".to_owned())
         );
 
-        let bell = Readied::File { real: "/w/cdk/main/\u{7}.md".to_owned() };
-        let bell = Ready { work: bell, ..ready() };
+        let bell = Readied::File {
+            real: "/w/cdk/main/\u{7}.md".to_owned(),
+        };
+        let bell = Ready {
+            work: bell,
+            ..ready()
+        };
         assert_eq!(
             closed(pressed('t').pulled(Ok(here(bell)))),
             Done::Wrong(
@@ -4664,17 +6083,30 @@ mod tests {
         let ready = |at| {
             let work = Readied::Link(pull_request());
             let folder = directory("/w/cdk/feat-x");
-            let ready = Ready { at, folder, branch: None, moved_off: false, work };
+            let ready = Ready {
+                at,
+                folder,
+                branch: None,
+                moved_off: false,
+                work,
+            };
             Ok(Found { on: vps(), ready })
         };
         let row = || Target::View(vps(), row());
         let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
         let there = ready(At::There(ViewPlace::new_in("cdk", 2, 1, 9)));
-        assert_eq!(closed(pulling_on(row(), 'w').pulled(there)), Done::Go(vps(), place));
+        assert_eq!(
+            closed(pulling_on(row(), 'w').pulled(there)),
+            Done::Go(vps(), place)
+        );
         for asked in [row(), Target::Machine(vps())] {
             let (menu, wants) = stays(pulling_on(asked, 'w').pulled(ready(At::Unopened)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
-            assert_eq!(menu.target(), &Target::Machine(vps()), "the machine that found it");
+            assert_eq!(
+                menu.target(),
+                &Target::Machine(vps()),
+                "the machine that found it"
+            );
         }
     }
 
@@ -4684,7 +6116,13 @@ mod tests {
         let found = |at| {
             let work = Readied::Link(pull_request());
             let folder = directory("/w/cdk/feat-x");
-            let ready = Ready { at, folder, branch: None, moved_off: false, work };
+            let ready = Ready {
+                at,
+                folder,
+                branch: None,
+                moved_off: false,
+                work,
+            };
             Ok(Found { on: vps(), ready })
         };
         let rows = [session_row(), view_row(), Target::Machine(Machine::Local)];
@@ -4692,8 +6130,13 @@ mod tests {
             let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
             let (menu, wants) = stays(pulling_on(row.clone(), 'r').pulled(found(at)));
             assert!(matches!(&wants, Wants::Open { view, .. } if *view == ViewKey::terminal(9)));
-            let Target::View(machine, opening) = menu.target() else { panic!("not a view's row") };
-            assert_eq!((machine, opening.place.view()), (&vps(), ViewKey::terminal(9)));
+            let Target::View(machine, opening) = menu.target() else {
+                panic!("not a view's row")
+            };
+            assert_eq!(
+                (machine, opening.place.view()),
+                (&vps(), ViewKey::terminal(9))
+            );
 
             let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
             let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));

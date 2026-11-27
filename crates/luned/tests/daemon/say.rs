@@ -4,7 +4,7 @@ use std::process::{Output, Stdio};
 use luned::api::say::Does;
 use luned::api::{self, Saying};
 
-use crate::host::{answered, folder_in, start, Host, LUNE};
+use crate::host::{Host, LUNE, answered, folder_in, start};
 
 fn lune(host: &Host, args: &[&str]) -> Output {
     answered(host.vars().command(&LUNE).args(args))
@@ -13,7 +13,11 @@ fn lune(host: &Host, args: &[&str]) -> Output {
 type Read<'a> = (&'static str, &'a str);
 
 fn read(saying: &Saying) -> Read<'_> {
-    let does = saying.say.as_ref().and_then(|say| say.does.as_ref()).unwrap();
+    let does = saying
+        .say
+        .as_ref()
+        .and_then(|say| say.does.as_ref())
+        .unwrap();
     match does {
         Does::InTurn(utterance) => ("in turn", &utterance.text),
         Does::Now(utterance) => ("now", &utterance.text),
@@ -26,7 +30,11 @@ fn said(host: &api::Host) -> Vec<Read<'_>> {
 }
 
 fn succeeds(output: &Output) {
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -41,12 +49,24 @@ fn lune_say_queues_what_it_is_given_and_returns() {
     succeeds(&lune(&host, &["say", "--stop"]));
 
     let after = host.host();
-    assert_ne!(after.version, before.version, "a window waiting hears of it at once");
-    let want = [("in turn", "the tests pass"), ("now", "look here"), ("stop", "")];
+    assert_ne!(
+        after.version, before.version,
+        "a window waiting hears of it at once"
+    );
+    let want = [
+        ("in turn", "the tests pass"),
+        ("now", "look here"),
+        ("stop", ""),
+    ];
     assert_eq!(said(&after), want);
     let numbers: Vec<u64> = after.sayings.iter().map(|saying| saying.number).collect();
     assert!(numbers.is_sorted(), "{numbers:?}");
-    assert!(after.sayings.iter().all(|saying| saying.pid == after.version.unwrap().pid));
+    assert!(
+        after
+            .sayings
+            .iter()
+            .all(|saying| saying.pid == after.version.unwrap().pid)
+    );
 }
 
 #[test]
@@ -54,9 +74,18 @@ fn lune_say_takes_what_comes_on_stdin() {
     let host = Host::new();
     let _daemon = start(host.vars()).unwrap();
     let mut command = host.vars().command(&LUNE);
-    command.arg("say").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .arg("say")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command.spawn().unwrap();
-    child.stdin.take().unwrap().write_all(b"from a pipe\n").unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from a pipe\n")
+        .unwrap();
     succeeds(&child.wait_with_output().unwrap());
     let host = host.host();
     assert_eq!(said(&host)[0].1, "from a pipe\n");
@@ -83,5 +112,8 @@ fn with_no_luned_it_fails_at_once_and_starts_none() {
     assert!(!failed.status.success());
     let why = String::from_utf8_lossy(&failed.stderr);
     assert!(why.contains("luned"), "{why}");
-    assert!(folder_in(host.runtime.path()).is_none(), "it started a daemon");
+    assert!(
+        folder_in(host.runtime.path()).is_none(),
+        "it started a daemon"
+    );
 }

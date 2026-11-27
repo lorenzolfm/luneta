@@ -55,7 +55,10 @@ mod tests {
     #[test]
     fn a_directory_is_absolute_bounded_and_has_no_nul() {
         assert_eq!(Directory::parse("/".to_owned()).unwrap().as_str(), "/");
-        assert_eq!(Directory::parse("/w/lune".to_owned()).unwrap().as_str(), "/w/lune");
+        assert_eq!(
+            Directory::parse("/w/lune".to_owned()).unwrap().as_str(),
+            "/w/lune"
+        );
         assert!(Directory::parse(String::new()).is_err());
         assert!(Directory::parse("w/lune".to_owned()).is_err());
         assert!(Directory::parse("/w/\0lune".to_owned()).is_err());

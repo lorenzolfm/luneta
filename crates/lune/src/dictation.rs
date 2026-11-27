@@ -10,9 +10,9 @@ use crate::brief;
 use crate::cadence::Cadence;
 use crate::clock::Moment;
 use crate::menu::{self, Hint};
+use crate::models::Fetched;
 use crate::named::{self, Written};
 use crate::sidebar::{self, ACCENT};
-use crate::models::Fetched;
 use crate::skills::{Name, Skill, Skills};
 use crate::speech::{self, Listening, Spoken};
 
@@ -43,7 +43,11 @@ impl Dictated {
     fn of(said: String, skills: &Skills, ending: &Ending) -> Self {
         let written = written(&said, skills);
         let sends = ending.sends(&written);
-        Dictated { said, written, sends }
+        Dictated {
+            said,
+            written,
+            sends,
+        }
     }
 
     pub fn moved(self) -> Self {
@@ -51,7 +55,11 @@ impl Dictated {
             return self;
         }
         let written = Written::said(&self.said);
-        Dictated { said: self.said, written, sends: false }
+        Dictated {
+            said: self.said,
+            written,
+            sends: false,
+        }
     }
 }
 
@@ -70,10 +78,15 @@ impl Repeats {
         if (key.code, key.modifiers) != self.key || key.kind == KeyEventKind::Release {
             return key;
         }
-        let soon = self.last.is_some_and(|last| now.saturating_duration_since(last) < REPEATS);
+        let soon = self
+            .last
+            .is_some_and(|last| now.saturating_duration_since(last) < REPEATS);
         self.last = Some(now);
         match key.kind {
-            KeyEventKind::Press if soon => KeyEvent { kind: KeyEventKind::Repeat, ..key },
+            KeyEventKind::Press if soon => KeyEvent {
+                kind: KeyEventKind::Repeat,
+                ..key
+            },
             _ => key,
         }
     }
@@ -146,7 +159,11 @@ impl Dictation {
         releases: bool,
         now: Instant,
     ) -> Self {
-        let key = if releases { Key::Down(now) } else { Key::Tapped };
+        let key = if releases {
+            Key::Down(now)
+        } else {
+            Key::Tapped
+        };
         let hearing = Hearing {
             key,
             model: Model::Opening,
@@ -155,11 +172,17 @@ impl Dictation {
             skills,
             listening,
         };
-        Dictation { number, stage: Stage::Hearing(hearing) }
+        Dictation {
+            number,
+            stage: Stage::Hearing(hearing),
+        }
     }
 
     pub fn fetching(number: u64, got: u64) -> Self {
-        Dictation { number, stage: Stage::Fetching(got) }
+        Dictation {
+            number,
+            stage: Stage::Fetching(got),
+        }
     }
 
     pub fn number(&self) -> u64 {
@@ -174,15 +197,19 @@ impl Dictation {
         let hearing = match &mut self.stage {
             Stage::Hearing(hearing) => hearing,
             Stage::Naming { .. } => {
-                return if pressed && closes { Keyed::Close } else { Keyed::Nothing };
-            },
+                return if pressed && closes {
+                    Keyed::Close
+                } else {
+                    Keyed::Nothing
+                };
+            }
             Stage::Fetching(_) | Stage::Fetched | Stage::Wrong(_) => {
                 return match (pressed, chord == KEY) {
                     (true, true) => Keyed::Dictate,
                     (true, false) => Keyed::Close,
                     (false, _) => Keyed::Nothing,
                 };
-            },
+            }
         };
         if pressed && closes {
             return Keyed::Close;
@@ -195,18 +222,18 @@ impl Dictation {
                     hearing.finish(Ending::Writes);
                 }
                 Keyed::Changed
-            },
+            }
             (Key::Down(_) | Key::Tapped, KeyEventKind::Press) if chord == KEY => {
                 hearing.finish(Ending::Writes);
                 Keyed::Changed
-            },
+            }
             (Key::Down(_) | Key::Tapped, KeyEventKind::Press)
                 if chord == (KeyCode::Enter, KeyModifiers::NONE) =>
             {
                 let showed = written(hearing.words.trim(), &hearing.skills).command;
                 hearing.finish(Ending::Sends { showed });
                 Keyed::Changed
-            },
+            }
             _ => Keyed::Nothing,
         }
     }
@@ -234,7 +261,7 @@ impl Dictation {
                     hearing.levels.remove(0);
                 }
                 hearing.levels.push(level);
-            },
+            }
             Spoken::Words(words) => hearing.words = words,
             Spoken::Ended(Ok(text)) => {
                 let ending = match &hearing.key {
@@ -246,7 +273,7 @@ impl Dictation {
                     return None;
                 }
                 return Some(Dictated::of(text, &hearing.skills, &ending));
-            },
+            }
             Spoken::Ended(Err(why)) => self.stage = Stage::Wrong(why),
         }
         None
@@ -261,7 +288,7 @@ impl Dictation {
             Stage::Hearing(hearing) => {
                 hearing.skills = skills;
                 None
-            },
+            }
             Stage::Naming { said, ending } => Some(Dictated::of(said.clone(), &skills, ending)),
             Stage::Fetching(_) | Stage::Fetched | Stage::Wrong(_) => None,
         }
@@ -273,8 +300,8 @@ impl Dictation {
             (Stage::Fetching(_), Fetched::Ended(Ok(()))) => self.stage = Stage::Fetched,
             (Stage::Fetching(_), Fetched::Ended(Err(why))) => {
                 self.stage = Stage::Wrong(format!("The speech model did not come: {why}"));
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -306,7 +333,7 @@ impl Dictation {
                 let lines = menu::wrap(said, inner, Style::new());
                 let keys = vec![(Hint::Alt('r'), "Dictate"), (Hint::AnyOtherKey, "Close")];
                 ((lines, keys, String::new()), None)
-            },
+            }
             Stage::Wrong(why) => (wrong(why, inner), None),
             Stage::Hearing(hearing) => hearing.lines(inner, now),
             Stage::Naming { said, .. } => {
@@ -314,10 +341,15 @@ impl Dictation {
                 lines.push(Line::default());
                 let dim = Style::new().add_modifier(Modifier::DIM);
                 let start = lines.len();
-                lines.extend(menu::waiting(WRITING, inner, dim, sidebar::frame(now.system)));
+                lines.extend(menu::waiting(
+                    WRITING,
+                    inner,
+                    dim,
+                    sidebar::frame(now.system),
+                ));
                 let spinner = (lines.len() > start).then_some(start);
                 ((lines, vec![(Hint::Esc, "Cancel")], String::new()), spinner)
-            },
+            }
         };
         let footer = [Line::default(), menu::keys_line(inner, &keys)];
         let lines_room = room.saturating_sub(footer.len());
@@ -326,8 +358,12 @@ impl Dictation {
             lines.drain(..drained);
         }
         lines.extend(footer);
-        let width = u16::try_from(inner + 2).unwrap_or(over.width).min(over.width);
-        let height = u16::try_from(lines.len() + 2).unwrap_or(over.height).min(over.height);
+        let width = u16::try_from(inner + 2)
+            .unwrap_or(over.width)
+            .min(over.width);
+        let height = u16::try_from(lines.len() + 2)
+            .unwrap_or(over.height)
+            .min(over.height);
         let x = over.x + (over.width - width) / 2;
         let y = (over.bottom().saturating_sub(height + 1)).max(over.y);
         let area = Rect::new(x, y, width, height);
@@ -372,7 +408,7 @@ impl Hearing {
             Model::Listening(_) if lines.is_empty() => {
                 lines.push(Line::styled(" Listening…", dim));
                 None
-            },
+            }
             Model::Listening(_) => None,
         };
         let mut spinner = None;
@@ -401,7 +437,14 @@ impl Hearing {
         };
         let seconds = heard.as_secs();
         let bars: String = self.levels.iter().map(|level| bar(*level)).collect();
-        ((lines, keys, format!("● {}:{:02} {bars}", seconds / 60, seconds % 60)), spinner)
+        (
+            (
+                lines,
+                keys,
+                format!("● {}:{:02} {bars}", seconds / 60, seconds % 60),
+            ),
+            spinner,
+        )
     }
 }
 
@@ -430,7 +473,11 @@ fn fetching(got: u64, inner: usize) -> Shown {
 
 fn wrong(why: &str, inner: usize) -> Shown {
     let lines = brief::paragraphs(why, inner, Style::new().fg(sidebar::ERROR));
-    (lines, vec![(Hint::Alt('r'), "Try again"), (Hint::AnyOtherKey, "Close")], String::new())
+    (
+        lines,
+        vec![(Hint::Alt('r'), "Try again"), (Hint::AnyOtherKey, "Close")],
+        String::new(),
+    )
 }
 
 fn progress(got: u64, of: u64, inner: usize) -> Line<'static> {
@@ -439,7 +486,10 @@ fn progress(got: u64, of: u64, inner: usize) -> Line<'static> {
     Line::from(vec![
         Span::raw(" "),
         Span::styled("━".repeat(full), Style::new().fg(ACCENT)),
-        Span::styled("━".repeat(room - full), Style::new().add_modifier(Modifier::DIM)),
+        Span::styled(
+            "━".repeat(room - full),
+            Style::new().add_modifier(Modifier::DIM),
+        ),
     ])
 }
 
@@ -488,13 +538,25 @@ mod tests {
     }
 
     fn written(text: &str, sends: bool) -> Dictated {
-        Dictated { said: text.to_owned(), written: Written::said(text), sends }
+        Dictated {
+            said: text.to_owned(),
+            written: Written::said(text),
+            sends,
+        }
     }
 
     fn runs(said: &str, name: &str, text: &str, sends: bool) -> Dictated {
         let command = Name::new(name.to_owned());
-        let written = Written { command, text: text.to_owned(), only_first: Vec::new() };
-        Dictated { said: said.to_owned(), written, sends }
+        let written = Written {
+            command,
+            text: text.to_owned(),
+            only_first: Vec::new(),
+        };
+        Dictated {
+            said: said.to_owned(),
+            written,
+            sends,
+        }
     }
 
     #[test]
@@ -502,13 +564,25 @@ mod tests {
         let at = Instant::now();
         let (mut dictation, stop) = hearing(true, at);
         let held = at + Duration::from_millis(100);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Repeat), held), Keyed::Nothing);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Repeat), held),
+            Keyed::Nothing
+        );
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
-        let let_go =
-            KeyEvent::new_with_kind(KeyCode::Char('r'), KeyModifiers::NONE, KeyEventKind::Release);
-        assert_eq!(dictation.key(&let_go, at + Duration::from_secs(2)), Keyed::Changed);
+        let let_go = KeyEvent::new_with_kind(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        assert_eq!(
+            dictation.key(&let_go, at + Duration::from_secs(2)),
+            Keyed::Changed
+        );
         assert_eq!(stop.try_recv(), Ok(()));
-        assert_eq!(ended(&mut dictation, "Open a tab."), Some(written("Open a tab.", false)));
+        assert_eq!(
+            ended(&mut dictation, "Open a tab."),
+            Some(written("Open a tab.", false))
+        );
     }
 
     #[test]
@@ -516,12 +590,21 @@ mod tests {
         let at = Instant::now();
         let (mut dictation, stop) = hearing(true, at);
         let tapped = at + Duration::from_millis(150);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Release), tapped), Keyed::Changed);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Release), tapped),
+            Keyed::Changed
+        );
         let typed = pressed(KeyCode::Char('x'), KeyModifiers::NONE);
-        assert_eq!(dictation.key(&typed, at + Duration::from_secs(1)), Keyed::Nothing);
+        assert_eq!(
+            dictation.key(&typed, at + Duration::from_secs(1)),
+            Keyed::Nothing
+        );
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
         let again = at + Duration::from_secs(9);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), again), Keyed::Changed);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Press), again),
+            Keyed::Changed
+        );
         assert_eq!(stop.try_recv(), Ok(()));
     }
 
@@ -531,7 +614,10 @@ mod tests {
         let (mut dictation, stop) = hearing(false, at);
         assert!(!dictation.unfocused());
         assert_eq!(stop.try_recv(), Err(TryRecvError::Empty));
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Changed);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Press), at),
+            Keyed::Changed
+        );
         assert_eq!(stop.try_recv(), Ok(()));
     }
 
@@ -539,16 +625,18 @@ mod tests {
     fn the_key_pressed_as_soon_after_as_a_key_repeats_is_held() {
         let at = Instant::now();
         let mut repeats = Repeats::of(KEY);
-        let mut read = |key: KeyEvent, after: u64| {
-            repeats.read(key, at + Duration::from_millis(after)).kind
-        };
+        let mut read =
+            |key: KeyEvent, after: u64| repeats.read(key, at + Duration::from_millis(after)).kind;
         let press = alt_r(KeyEventKind::Press);
         assert_eq!(read(press, 0), KeyEventKind::Press);
         assert_eq!(read(press, 500), KeyEventKind::Press);
         assert_eq!(read(press, 530), KeyEventKind::Repeat);
         assert_eq!(read(alt_r(KeyEventKind::Repeat), 560), KeyEventKind::Repeat);
         assert_eq!(read(press, 590), KeyEventKind::Repeat);
-        assert_eq!(read(alt_r(KeyEventKind::Release), 600), KeyEventKind::Release);
+        assert_eq!(
+            read(alt_r(KeyEventKind::Release), 600),
+            KeyEventKind::Release
+        );
         assert_eq!(read(press, 2_000), KeyEventKind::Press);
         let typed = pressed(KeyCode::Char('x'), KeyModifiers::NONE);
         assert_eq!(read(typed, 2_010), KeyEventKind::Press);
@@ -561,7 +649,10 @@ mod tests {
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(dictation.key(&enter, at), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
-        assert_eq!(ended(&mut dictation, "Run the tests."), Some(written("Run the tests.", true)));
+        assert_eq!(
+            ended(&mut dictation, "Run the tests."),
+            Some(written("Run the tests.", true))
+        );
     }
 
     #[test]
@@ -569,8 +660,11 @@ mod tests {
         let at = Instant::now();
         for key in [KeyCode::Esc, KeyCode::Char('c')] {
             let (mut dictation, stop) = hearing(true, at);
-            let modifiers =
-                if key == KeyCode::Esc { KeyModifiers::NONE } else { KeyModifiers::CONTROL };
+            let modifiers = if key == KeyCode::Esc {
+                KeyModifiers::NONE
+            } else {
+                KeyModifiers::CONTROL
+            };
             assert_eq!(dictation.key(&pressed(key, modifiers), at), Keyed::Close);
             drop(dictation);
             assert_eq!(stop.try_recv(), Err(TryRecvError::Disconnected));
@@ -589,9 +683,15 @@ mod tests {
     fn what_went_wrong_shows_until_a_key_goes_down() {
         let at = Instant::now();
         let (mut dictation, _stop) = hearing(true, at);
-        assert_eq!(dictation.spoken(Spoken::Ended(Err(speech::UNHEARD.to_owned())), at), None);
+        assert_eq!(
+            dictation.spoken(Spoken::Ended(Err(speech::UNHEARD.to_owned())), at),
+            None
+        );
         assert!(!dictation.turning());
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Release), at), Keyed::Nothing);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Release), at),
+            Keyed::Nothing
+        );
         let typed = pressed(KeyCode::Char('x'), KeyModifiers::NONE);
         assert_eq!(dictation.key(&typed, at), Keyed::Close);
     }
@@ -601,8 +701,14 @@ mod tests {
         let at = Instant::now();
         let mut dictation = Dictation::fetching(1, 0);
         dictation.fetched(&Fetched::Ended(Ok(())));
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Release), at), Keyed::Nothing);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Dictate);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Release), at),
+            Keyed::Nothing
+        );
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Press), at),
+            Keyed::Dictate
+        );
     }
 
     const Z: &str = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
@@ -613,12 +719,28 @@ mod tests {
         for row in area.rows() {
             buffer.set_string(row.x, row.y, "z".repeat(usize::from(width)), Style::new());
         }
-        dictation.draw(&mut buffer, area, Moment { system: SystemTime::UNIX_EPOCH, steady: now });
+        dictation.draw(
+            &mut buffer,
+            area,
+            Moment {
+                system: SystemTime::UNIX_EPOCH,
+                steady: now,
+            },
+        );
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(
+                moonlight::ALL.contains(&cell.fg),
+                "{:?} in {:?}",
+                cell.symbol(),
+                cell.fg
+            );
         }
         (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -657,7 +779,10 @@ mod tests {
         let said = "review this with the thermonuclear review skill";
         dictation.spoken(Spoken::Words(said.to_owned()), at);
         let lines = shown(&dictation, 60, 7, at);
-        assert_eq!(lines[2], "│ /thermo-nuclear-review review this                       │");
+        assert_eq!(
+            lines[2],
+            "│ /thermo-nuclear-review review this                       │"
+        );
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(dictation.key(&enter, at), Keyed::Changed);
         assert_eq!(stop.try_recv(), Ok(()));
@@ -674,10 +799,18 @@ mod tests {
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
         for (shown, sent) in [
             ("Run the tests", written("Run all the tests.", true)),
-            ("slash tiger style", runs("Slash tiger style, now.", "tigerstyle", "now.", true)),
+            (
+                "slash tiger style",
+                runs("Slash tiger style, now.", "tigerstyle", "now.", true),
+            ),
             (
                 "Review the tiger style",
-                runs("Review the tiger style skill.", "tigerstyle", "Review", false),
+                runs(
+                    "Review the tiger style skill.",
+                    "tigerstyle",
+                    "Review",
+                    false,
+                ),
             ),
             ("slash tiger style", written("Slash tie your style.", false)),
         ] {
@@ -693,8 +826,14 @@ mod tests {
     #[test]
     fn a_command_goes_back_to_words_where_the_agent_has_gone() {
         let said = "Slash tiger style, now.";
-        assert_eq!(runs(said, "tigerstyle", "now.", true).moved(), written(said, false));
-        assert_eq!(written("Run the tests.", true).moved(), written("Run the tests.", true));
+        assert_eq!(
+            runs(said, "tigerstyle", "now.", true).moved(),
+            written(said, false)
+        );
+        assert_eq!(
+            written("Run the tests.", true).moved(),
+            written("Run the tests.", true)
+        );
     }
 
     #[test]
@@ -707,8 +846,14 @@ mod tests {
         let said = "slash tiger style and then the handoff skill";
         dictation.spoken(Spoken::Words(said.to_owned()), at);
         let lines = shown(&dictation, 60, 9, at);
-        assert_eq!(lines[2], "│ /tigerstyle and then the handoff skill                   │");
-        assert_eq!(lines[4], "│ Runs only if named first: /handoff                       │");
+        assert_eq!(
+            lines[2],
+            "│ /tigerstyle and then the handoff skill                   │"
+        );
+        assert_eq!(
+            lines[4],
+            "│ Runs only if named first: /handoff                       │"
+        );
     }
 
     #[test]
@@ -720,10 +865,16 @@ mod tests {
         assert_eq!(ended(&mut dictation, "Slash hand off."), None);
         assert!(dictation.turning());
         let lines = shown(&dictation, 60, 9, at);
-        assert_eq!(lines[2], "│ Slash hand off.                                          │");
+        assert_eq!(
+            lines[2],
+            "│ Slash hand off.                                          │"
+        );
         assert!(lines[4].contains("Writing what you said…"), "{lines:?}");
         assert_eq!(dictation.key(&enter, at), Keyed::Nothing);
-        assert_eq!(dictation.key(&alt_r(KeyEventKind::Press), at), Keyed::Nothing);
+        assert_eq!(
+            dictation.key(&alt_r(KeyEventKind::Press), at),
+            Keyed::Nothing
+        );
         let found = dictation.found(Ok(skills(&["handoff"])));
         assert_eq!(found, Some(runs("Slash hand off.", "handoff", "", false)));
 
@@ -739,15 +890,24 @@ mod tests {
         let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
         assert_eq!(ended(&mut dictation, "Slash hand off."), None);
         let failed = Err("skills: no answer".to_owned());
-        assert_eq!(dictation.found(failed), Some(written("Slash hand off.", false)));
+        assert_eq!(
+            dictation.found(failed),
+            Some(written("Slash hand off.", false))
+        );
 
         let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
-        assert_eq!(ended(&mut dictation, "Run the tests."), Some(written("Run the tests.", false)));
+        assert_eq!(
+            ended(&mut dictation, "Run the tests."),
+            Some(written("Run the tests.", false))
+        );
 
         let (mut dictation, _stop) = hearing_of(Skills::Finding, true, at);
         assert_eq!(dictation.found(Ok(skills(&["handoff"]))), None);
         let said = "Slash hand off.";
-        assert_eq!(ended(&mut dictation, said), Some(runs(said, "handoff", "", false)));
+        assert_eq!(
+            ended(&mut dictation, said),
+            Some(runs(said, "handoff", "", false))
+        );
     }
 
     #[test]

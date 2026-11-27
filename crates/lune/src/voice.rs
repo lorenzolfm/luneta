@@ -1,13 +1,13 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use ptts::checkpoint::read_config;
 use ptts::preprocess::Lang;
 use ptts::synth::{DeviceKind, Quant, Synth};
-use xn::threadpool::{start_pool_with, PoolConfig};
+use xn::threadpool::{PoolConfig, start_pool_with};
 
 use crate::brief::Asking;
 use crate::due::Due;
@@ -110,8 +110,16 @@ pub struct Reading {
 
 impl Reading {
     pub fn new(held: Arc<AtomicBool>) -> (Reading, Quiet) {
-        let quiet = Quiet { cut: Arc::new(AtomicBool::new(false)), held };
-        (Reading { cut: Arc::clone(&quiet.cut) }, quiet)
+        let quiet = Quiet {
+            cut: Arc::new(AtomicBool::new(false)),
+            held,
+        };
+        (
+            Reading {
+                cut: Arc::clone(&quiet.cut),
+            },
+            quiet,
+        )
     }
 }
 
@@ -144,9 +152,15 @@ fn read(synth: &mut Option<Synth>, text: &str, quiet: &Quiet) -> Result<(), Stri
 }
 
 fn load() -> Result<Synth, String> {
-    start_pool_with(PoolConfig { workers: THREADS - 1, spin_budget: None }, |worker| {
-        thread::spawn(worker);
-    });
+    start_pool_with(
+        PoolConfig {
+            workers: THREADS - 1,
+            spin_budget: None,
+        },
+        |worker| {
+            thread::spawn(worker);
+        },
+    );
     let unread = |error: ptts::Error| format!("the voice cannot be read in: {error}");
     let config = read_config(CONFIG.path()?).map_err(unread)?;
     let synth = Synth::builder(config, WEIGHTS.path()?, Lang::En)

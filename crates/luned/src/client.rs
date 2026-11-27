@@ -14,16 +14,18 @@ use hyper_util::rt::TokioIo;
 use lune_protocol::socket::SocketId;
 use lune_protocol::watch::{HostVersion, VersionedHost, WatchedAfter};
 use rustix::process::Pid;
-use tokio::io::{AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf};
+use tokio::io::{
+    AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, ReadBuf,
+};
 use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout_at, Instant};
+use tokio::time::{Instant, timeout_at};
 use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Error, Uri};
 use tonic::{IntoStreamingRequest, Response, Status, Streaming};
-use tower::{service_fn, BoxError, Service};
+use tower::{BoxError, Service, service_fn};
 
 use crate::api;
 use crate::api::daemon_client::DaemonClient;
@@ -65,11 +67,17 @@ const CONNECTION_WINDOW_BYTES: u32 = QUESTIONS_MAX * STREAM_WINDOW_BYTES;
 const REACH_ATTEMPTS_MAX: usize = 2;
 
 const _: () = assert!(KEPT_MAX > 0, "lune keeps at least one channel to luned");
-const _: () = assert!(CONNECTING_MAX > 0, "lune connects to at least one luned at once");
+const _: () = assert!(
+    CONNECTING_MAX > 0,
+    "lune connects to at least one luned at once"
+);
 const _: () = assert!(REACH_ATTEMPTS_MAX > 0, "reach tries at least once");
 const _: () = assert!(HELD_MAX > 0, "lune holds at least one stream to luned");
 const _: () = assert!(ASKED_MAX > 0, "lune keeps room for questions to luned");
-const _: () = assert!(ASKED_WAITING_MAX > 0, "short bursts of questions wait their turn");
+const _: () = assert!(
+    ASKED_WAITING_MAX > 0,
+    "short bursts of questions wait their turn"
+);
 const _: () = assert!(
     HELD_MAX + ASKED_MAX <= QUESTIONS_MAX as usize,
     "the one connection to luned holds every stream and question lune puts on it"
@@ -93,12 +101,18 @@ impl<const MAX: usize> Slots<MAX> {
 
     fn try_acquire(&self) -> Option<SemaphorePermit<'_>> {
         assert!(!self.0.is_closed(), "slots are never closed");
-        assert!(self.0.available_permits() <= MAX, "slots hold at most {MAX} places");
+        assert!(
+            self.0.available_permits() <= MAX,
+            "slots hold at most {MAX} places"
+        );
         match self.0.try_acquire() {
             Ok(permit) => {
-                assert!(self.0.available_permits() < MAX, "an active slot occupies a place");
+                assert!(
+                    self.0.available_permits() < MAX,
+                    "an active slot occupies a place"
+                );
                 Some(permit)
-            },
+            }
             Err(TryAcquireError::NoPermits) => None,
             Err(TryAcquireError::Closed) => unreachable!("slots are never closed"),
         }
@@ -117,12 +131,18 @@ impl<const MAX: usize> OwnedSlots<MAX> {
 
     fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
         assert!(!self.0.is_closed(), "slots are never closed");
-        assert!(self.0.available_permits() <= MAX, "slots hold at most {MAX} places");
+        assert!(
+            self.0.available_permits() <= MAX,
+            "slots hold at most {MAX} places"
+        );
         match Arc::clone(&self.0).try_acquire_owned() {
             Ok(permit) => {
-                assert!(self.0.available_permits() < MAX, "an active slot occupies a place");
+                assert!(
+                    self.0.available_permits() < MAX,
+                    "an active slot occupies a place"
+                );
                 Some(permit)
-            },
+            }
             Err(TryAcquireError::NoPermits) => None,
             Err(TryAcquireError::Closed) => unreachable!("slots are never closed"),
         }
@@ -130,10 +150,18 @@ impl<const MAX: usize> OwnedSlots<MAX> {
 
     async fn acquire_until(&self, deadline: Instant) -> Option<OwnedSemaphorePermit> {
         assert!(!self.0.is_closed(), "slots are never closed");
-        assert!(self.0.available_permits() <= MAX, "slots hold at most {MAX} places");
-        let acquired = timeout_at(deadline, Arc::clone(&self.0).acquire_owned()).await.ok()?;
+        assert!(
+            self.0.available_permits() <= MAX,
+            "slots hold at most {MAX} places"
+        );
+        let acquired = timeout_at(deadline, Arc::clone(&self.0).acquire_owned())
+            .await
+            .ok()?;
         let permit = acquired.expect("slots are never closed");
-        assert!(self.0.available_permits() < MAX, "an active slot occupies a place");
+        assert!(
+            self.0.available_permits() < MAX,
+            "an active slot occupies a place"
+        );
         Some(permit)
     }
 }
@@ -171,10 +199,16 @@ pub struct RoundTrip {
 impl RoundTrip {
     #[must_use]
     pub const fn of(round_trip: Duration) -> RoundTrip {
-        assert!(!round_trip.is_zero(), "a keepalive waits some time for its pong");
+        assert!(
+            !round_trip.is_zero(),
+            "a keepalive waits some time for its pong"
+        );
         let answer = ANSWER.0.checked_add(round_trip);
         let answer = answer.expect("an answer through a bridge waits a finite time");
-        RoundTrip { pong: round_trip, answer: Answer::of(answer) }
+        RoundTrip {
+            pong: round_trip,
+            answer: Answer::of(answer),
+        }
     }
 }
 
@@ -268,7 +302,9 @@ pub enum Unsent {
 impl fmt::Display for Unsent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unsent::HoldsFull => write!(f, "lune holds at most {HELD_MAX} streams to luned at once"),
+            Unsent::HoldsFull => {
+                write!(f, "lune holds at most {HELD_MAX} streams to luned at once")
+            }
             Unsent::QueueFull => write!(
                 f,
                 "lune has at most {ASKED_WAITING_MAX} questions waiting on luned at once"
@@ -408,7 +444,10 @@ impl Budget {
             return Ok(permit);
         }
         let _waiting = self.waiting.try_acquire().ok_or(Unsent::QueueFull)?;
-        self.asked.acquire_until(deadline).await.ok_or(Unsent::TimedOut(wait))
+        self.asked
+            .acquire_until(deadline)
+            .await
+            .ok_or(Unsent::TimedOut(wait))
     }
 }
 
@@ -448,7 +487,10 @@ impl Watching {
                 after: self.after.map(HostVersion::to_api),
                 waiter: self.kind.waiter().into(),
             };
-            let response = self.call_changes(request).await.map_err(WatchError::Unasked)?;
+            let response = self
+                .call_changes(request)
+                .await
+                .map_err(WatchError::Unasked)?;
             let next = match self.after {
                 None => response.read_host().map(Some),
                 Some(seen) => response.read_after(seen).map(|watched| match watched {
@@ -462,7 +504,7 @@ impl Watching {
                     let (version, host) = host.into_parts();
                     self.after = Some(version);
                     return Ok(WatchedHost { version, host });
-                },
+                }
                 None => tokio::time::sleep_until(asked_at + WATCH_PACE).await,
             }
         }
@@ -474,7 +516,10 @@ impl Watching {
             kept: None,
             shown: self.kind.shown(),
         };
-        let host = self.call_legacy(request).await.map_err(WatchError::Unasked)?;
+        let host = self
+            .call_legacy(request)
+            .await
+            .map_err(WatchError::Unasked)?;
         VersionedHost::of_api(Box::new(host)).map_err(WatchError::Unread)
     }
 
@@ -483,7 +528,10 @@ impl Watching {
             after: Some(after.to_api()),
             waiter: self.kind.waiter().into(),
         };
-        let response = self.call_changes(request).await.map_err(WatchError::Unasked)?;
+        let response = self
+            .call_changes(request)
+            .await
+            .map_err(WatchError::Unasked)?;
         response.read_after(after).map_err(WatchError::Unread)
     }
 
@@ -524,7 +572,11 @@ pub struct Shared {
 
 impl Shared {
     fn new(channel: Channel, gone: Gone) -> Shared {
-        Shared { channel, gone, budget: Arc::new(Budget::new()) }
+        Shared {
+            channel,
+            gone,
+            budget: Arc::new(Budget::new()),
+        }
     }
 
     fn daemon(&self, answer: Answer) -> Daemon {
@@ -560,7 +612,11 @@ impl Shared {
         if self.gone.is() {
             return Err(Unasked::Unsent(Unsent::ChannelGone));
         }
-        let _permit = self.budget.ask(deadline, answer).await.map_err(Unasked::Unsent)?;
+        let _permit = self
+            .budget
+            .ask(deadline, answer)
+            .await
+            .map_err(Unasked::Unsent)?;
         if self.gone.is() {
             return Err(Unasked::Unsent(Unsent::ChannelGone));
         }
@@ -583,7 +639,10 @@ impl Shared {
         F: Future<Output = Result<Response<Streaming<T>>, Status>>,
     {
         let wait = answer.waits();
-        assert!(!wait.is_zero(), "a held stream waits some time for its answer");
+        assert!(
+            !wait.is_zero(),
+            "a held stream waits some time for its answer"
+        );
         if self.gone.is() {
             return Err(Unasked::Unsent(Unsent::ChannelGone));
         }
@@ -593,7 +652,10 @@ impl Shared {
             Ok(heard) => heard.map_err(Unasked::Asked)?.into_inner(),
             Err(_) => return Err(Unasked::Asked(Status::deadline_exceeded(unanswered(wait)))),
         };
-        Ok(Held { heard, _permit: permit })
+        Ok(Held {
+            heard,
+            _permit: permit,
+        })
     }
 
     pub fn watching(&self, answer: Answer, kind: LocalWatch) -> Result<Watching, Unsent> {
@@ -616,9 +678,14 @@ impl Shared {
         answer: Answer,
         kind: LocalWatch,
     ) -> Result<VersionedHost, WatchError> {
-        let request = api::WatchChangesRequest { after: None, waiter: kind.waiter().into() };
+        let request = api::WatchChangesRequest {
+            after: None,
+            waiter: kind.waiter().into(),
+        };
         let response = self
-            .ask_unary(answer, |mut daemon| async move { daemon.watch_changes(request).await })
+            .ask_unary(answer, |mut daemon| async move {
+                daemon.watch_changes(request).await
+            })
             .await
             .map_err(WatchError::Unasked)?;
         response.read_host().map_err(WatchError::Unread)
@@ -629,20 +696,35 @@ impl Shared {
         answer: Answer,
         kind: LocalWatch,
     ) -> Result<VersionedHost, WatchError> {
-        let request = api::WatchRequest { after: None, kept: None, shown: kind.shown() };
+        let request = api::WatchRequest {
+            after: None,
+            kept: None,
+            shown: kind.shown(),
+        };
         let host = self
-            .ask_unary(answer, |mut daemon| async move { daemon.watch(request).await })
+            .ask_unary(
+                answer,
+                |mut daemon| async move { daemon.watch(request).await },
+            )
             .await
             .map_err(WatchError::Unasked)?;
         VersionedHost::of_api(Box::new(host)).map_err(WatchError::Unread)
     }
 
     pub async fn list_agents(&self, answer: Answer) -> Result<api::ListAgentsResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.list_agents(()).await }).await
+        self.ask_unary(
+            answer,
+            |mut daemon| async move { daemon.list_agents(()).await },
+        )
+        .await
     }
 
     pub async fn say(&self, answer: Answer, request: api::SayRequest) -> Result<(), Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.say(request).await }).await
+        self.ask_unary(
+            answer,
+            |mut daemon| async move { daemon.say(request).await },
+        )
+        .await
     }
 
     pub async fn change_projects(
@@ -650,8 +732,10 @@ impl Shared {
         answer: Answer,
         request: api::ChangeProjectsRequest,
     ) -> Result<api::ChangeProjectsResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.change_projects(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.change_projects(request).await
+        })
+        .await
     }
 
     pub async fn list_repositories(
@@ -659,8 +743,10 @@ impl Shared {
         answer: Answer,
         request: api::ListRepositoriesRequest,
     ) -> Result<api::ListRepositoriesResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.list_repositories(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.list_repositories(request).await
+        })
+        .await
     }
 
     pub async fn list_contents(
@@ -668,8 +754,10 @@ impl Shared {
         answer: Answer,
         request: api::ListContentsRequest,
     ) -> Result<api::ListContentsResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.list_contents(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.list_contents(request).await
+        })
+        .await
     }
 
     pub async fn list_skills(
@@ -677,7 +765,10 @@ impl Shared {
         answer: Answer,
         request: api::ListSkillsRequest,
     ) -> Result<api::ListSkillsResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.list_skills(request).await }).await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.list_skills(request).await
+        })
+        .await
     }
 
     pub async fn transcript_ends(
@@ -685,8 +776,10 @@ impl Shared {
         answer: Answer,
         request: api::TranscriptEndsRequest,
     ) -> Result<api::TranscriptEndsResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.transcript_ends(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.transcript_ends(request).await
+        })
+        .await
     }
 
     pub async fn keep_printed(
@@ -694,8 +787,10 @@ impl Shared {
         answer: Answer,
         request: api::KeepPrintedRequest,
     ) -> Result<api::KeepPrintedResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.keep_printed(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.keep_printed(request).await
+        })
+        .await
     }
 
     pub async fn issue_repositories(
@@ -703,8 +798,10 @@ impl Shared {
         answer: Answer,
         request: api::IssueRepositoriesRequest,
     ) -> Result<api::IssueRepositoriesResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.issue_repositories(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.issue_repositories(request).await
+        })
+        .await
     }
 
     pub async fn keep_checks(
@@ -712,8 +809,10 @@ impl Shared {
         answer: Answer,
         request: api::KeepChecksRequest,
     ) -> Result<Held<Streaming<api::KeepChecksResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.keep_checks(request).await })
-            .await
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.keep_checks(request).await
+        })
+        .await
     }
 
     pub async fn ask(
@@ -721,7 +820,11 @@ impl Shared {
         answer: Answer,
         request: api::AskRequest,
     ) -> Result<Held<Streaming<api::AskResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.ask(request).await }).await
+        self.hold_stream(
+            answer,
+            |mut daemon| async move { daemon.ask(request).await },
+        )
+        .await
     }
 
     pub async fn paste(
@@ -729,7 +832,11 @@ impl Shared {
         answer: Answer,
         request: api::PasteRequest,
     ) -> Result<Held<Streaming<api::PasteResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.paste(request).await }).await
+        self.hold_stream(
+            answer,
+            |mut daemon| async move { daemon.paste(request).await },
+        )
+        .await
     }
 
     pub async fn file_issue(
@@ -737,7 +844,10 @@ impl Shared {
         answer: Answer,
         request: api::FileIssueRequest,
     ) -> Result<Held<Streaming<api::FileIssueResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.file_issue(request).await }).await
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.file_issue(request).await
+        })
+        .await
     }
 
     pub async fn prunes(
@@ -745,7 +855,11 @@ impl Shared {
         answer: Answer,
         request: api::PrunesRequest,
     ) -> Result<Held<Streaming<api::PrunesResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.prunes(request).await }).await
+        self.hold_stream(
+            answer,
+            |mut daemon| async move { daemon.prunes(request).await },
+        )
+        .await
     }
 
     pub async fn prune(
@@ -753,7 +867,11 @@ impl Shared {
         answer: Answer,
         request: api::PruneRequest,
     ) -> Result<Held<Streaming<api::PruneResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.prune(request).await }).await
+        self.hold_stream(
+            answer,
+            |mut daemon| async move { daemon.prune(request).await },
+        )
+        .await
     }
 
     pub async fn rebase(
@@ -761,7 +879,11 @@ impl Shared {
         answer: Answer,
         request: api::RebaseRequest,
     ) -> Result<Held<Streaming<api::RebaseResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.rebase(request).await }).await
+        self.hold_stream(
+            answer,
+            |mut daemon| async move { daemon.rebase(request).await },
+        )
+        .await
     }
 
     pub async fn make_worktree(
@@ -769,8 +891,10 @@ impl Shared {
         answer: Answer,
         request: api::MakeWorktreeRequest,
     ) -> Result<Held<Streaming<api::MakeWorktreeResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.make_worktree(request).await })
-            .await
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.make_worktree(request).await
+        })
+        .await
     }
 
     pub async fn list_work(
@@ -778,7 +902,10 @@ impl Shared {
         answer: Answer,
         request: api::ListWorkRequest,
     ) -> Result<Held<Streaming<api::ListWorkResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.list_work(request).await }).await
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.list_work(request).await
+        })
+        .await
     }
 
     pub async fn reload_resume(
@@ -786,8 +913,10 @@ impl Shared {
         answer: Answer,
         request: api::ReloadResumeRequest,
     ) -> Result<api::ReloadResumeResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.reload_resume(request).await })
-            .await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.reload_resume(request).await
+        })
+        .await
     }
 
     pub async fn list_resume(
@@ -795,7 +924,10 @@ impl Shared {
         answer: Answer,
         request: api::ListResumeRequest,
     ) -> Result<api::ListResumeResponse, Unasked> {
-        self.ask_unary(answer, |mut daemon| async move { daemon.list_resume(request).await }).await
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.list_resume(request).await
+        })
+        .await
     }
 
     pub async fn read_diff(
@@ -803,7 +935,10 @@ impl Shared {
         answer: Answer,
         request: api::ReadDiffRequest,
     ) -> Result<Held<Streaming<api::ReadDiffResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.read_diff(request).await }).await
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.read_diff(request).await
+        })
+        .await
     }
 
     pub async fn keep_image(
@@ -811,7 +946,10 @@ impl Shared {
         answer: Answer,
         request: impl IntoStreamingRequest<Message = api::KeepImageRequest>,
     ) -> Result<Held<Streaming<api::KeepImageResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.keep_image(request).await }).await
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.keep_image(request).await
+        })
+        .await
     }
 
     pub async fn show(
@@ -819,7 +957,8 @@ impl Shared {
         answer: Answer,
         words: impl IntoStreamingRequest<Message = api::ShowRequest>,
     ) -> Result<Held<Streaming<api::ShowResponse>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.show(words).await }).await
+        self.hold_stream(answer, |mut daemon| async move { daemon.show(words).await })
+            .await
     }
 
     pub async fn frames(
@@ -827,7 +966,11 @@ impl Shared {
         answer: Answer,
         words: impl IntoStreamingRequest<Message = api::FramesRequest>,
     ) -> Result<Held<Streaming<crate::mux::own::api::ToViewer>>, Unasked> {
-        self.hold_stream(answer, |mut daemon| async move { daemon.frames(words).await }).await
+        self.hold_stream(
+            answer,
+            |mut daemon| async move { daemon.frames(words).await },
+        )
+        .await
     }
 }
 
@@ -896,7 +1039,10 @@ impl fmt::Display for Unmatched {
         let pid = self.pid.map_or_default(|pid| format!(" (pid {pid})"));
         let (daemon, own) = (format!("luned {}{pid}", self.other), release::SAID.as_str());
         if self.other.is_newer() {
-            write!(f, "{daemon} is newer than this lune, {own}: run a lune of its build")
+            write!(
+                f,
+                "{daemon} is newer than this lune, {own}: run a lune of its build"
+            )
         } else {
             write!(
                 f,
@@ -922,7 +1068,10 @@ pub enum Unreached {
 impl fmt::Display for Unreached {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unreached::Busy => write!(f, "lune connects to at most {CONNECTING_MAX} luneds at once"),
+            Unreached::Busy => write!(
+                f,
+                "lune connects to at most {CONNECTING_MAX} luneds at once"
+            ),
             Unreached::Changed => f.write_str("luned's socket changed while lune reached it"),
             Unreached::Connect(error) => write!(f, "{error}"),
             Unreached::Asked(status) => match status.message() {
@@ -949,7 +1098,8 @@ struct Kept {
 }
 
 fn lock_kept() -> MutexGuard<'static, BTreeMap<PathBuf, Kept>> {
-    KEPT.lock().expect("lune's kept channel map is never poisoned")
+    KEPT.lock()
+        .expect("lune's kept channel map is never poisoned")
 }
 
 #[must_use]
@@ -959,7 +1109,10 @@ pub fn kept(folder: &Folder) -> Option<Shared> {
 
 fn kept_at(socket: &Path) -> Option<Shared> {
     let mut kept = lock_kept();
-    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    assert!(
+        kept.len() <= KEPT_MAX,
+        "lune keeps at most {KEPT_MAX} channels to luned"
+    );
     kept.retain(|_, entry| !entry.shared.gone.is());
     let found = if let Some(entry) = kept.get(socket) {
         if SocketId::at(socket) == Some(entry.socket_id) && !entry.shared.gone.is() {
@@ -968,19 +1121,28 @@ fn kept_at(socket: &Path) -> Option<Shared> {
             entry.shared.gone.mark();
             let removed = kept.remove(socket);
             assert!(removed.is_some(), "the evicted channel was in the cache");
-            assert!(!kept.contains_key(socket), "an evicted channel is no longer kept");
+            assert!(
+                !kept.contains_key(socket),
+                "an evicted channel is no longer kept"
+            );
             None
         }
     } else {
         None
     };
-    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    assert!(
+        kept.len() <= KEPT_MAX,
+        "lune keeps at most {KEPT_MAX} channels to luned"
+    );
     found
 }
 
 fn keep(socket: &Path, fresh: Kept) -> Option<Shared> {
     let mut kept = lock_kept();
-    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    assert!(
+        kept.len() <= KEPT_MAX,
+        "lune keeps at most {KEPT_MAX} channels to luned"
+    );
     kept.retain(|_, entry| !entry.shared.gone.is());
     let current = SocketId::at(socket);
     if fresh.shared.gone.is() || current != Some(fresh.socket_id) {
@@ -1005,12 +1167,21 @@ fn keep(socket: &Path, fresh: Kept) -> Option<Shared> {
         existing.shared.gone.mark();
     } else if kept.len() == KEPT_MAX {
         let evicted = kept.pop_first();
-        assert!(evicted.is_some(), "a full channel cache drops one entry to make room");
+        assert!(
+            evicted.is_some(),
+            "a full channel cache drops one entry to make room"
+        );
     }
     let shared = fresh.shared.clone();
     kept.insert(socket.to_owned(), fresh);
-    assert!(kept.contains_key(socket), "a newly kept channel is in the cache");
-    assert!(kept.len() <= KEPT_MAX, "lune keeps at most {KEPT_MAX} channels to luned");
+    assert!(
+        kept.contains_key(socket),
+        "a newly kept channel is in the cache"
+    );
+    assert!(
+        kept.len() <= KEPT_MAX,
+        "lune keeps at most {KEPT_MAX} channels to luned"
+    );
     Some(shared)
 }
 
@@ -1023,12 +1194,20 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 enum Opened {
-    Connected { channel: Channel, gone: Gone, id: SocketId },
+    Connected {
+        channel: Channel,
+        gone: Gone,
+        id: SocketId,
+    },
     Changed,
 }
 
 enum Connected {
-    Matched { channel: Channel, gone: Gone, id: SocketId },
+    Matched {
+        channel: Channel,
+        gone: Gone,
+        id: SocketId,
+    },
     Unmatched(Unmatched),
     Changed,
 }
@@ -1050,19 +1229,25 @@ pub async fn reach(folder: &Folder) -> Result<Reached, Unreached> {
             (held, answered)
         }));
         let (returned, answered) = (&mut connected.0).await.unwrap_or_else(|ended| {
-            assert!(ended.is_panic(), "a connect task spawned by reach is never cancelled");
+            assert!(
+                ended.is_panic(),
+                "a connect task spawned by reach is never cancelled"
+            );
             std::panic::resume_unwind(ended.into_panic())
         });
         connecting = returned;
         match answered? {
             Connected::Matched { channel, gone, id } => {
-                let kept = Kept { shared: Shared::new(channel, gone), socket_id: id };
+                let kept = Kept {
+                    shared: Shared::new(channel, gone),
+                    socket_id: id,
+                };
                 if let Some(shared) = keep(&socket, kept) {
                     return Ok(Reached::Matched(shared));
                 }
-            },
+            }
             Connected::Unmatched(unmatched) => return Ok(Reached::Unmatched(unmatched)),
-            Connected::Changed => {},
+            Connected::Changed => {}
         }
     }
     Err(Unreached::Changed)
@@ -1075,20 +1260,26 @@ async fn connect_matched(socket: PathBuf, verify: Answer) -> Result<Connected, U
     };
     let mut guard = MarkOnDrop::arm(gone.clone());
     let wait = verify.waits();
-    assert!(!wait.is_zero(), "build verification waits some time for its answer");
+    assert!(
+        !wait.is_zero(),
+        "build verification waits some time for its answer"
+    );
     let mut verified = daemon(channel.clone(), Some(gone.clone()), verify);
     let Ok(answered) = tokio::time::timeout(wait, verified.info(())).await else {
-        return Err(Unreached::Asked(Status::deadline_exceeded(unanswered(wait))));
+        return Err(Unreached::Asked(Status::deadline_exceeded(unanswered(
+            wait,
+        ))));
     };
     let info = answered.map_err(Unreached::Asked)?.into_inner();
     match release::of(&info.version, info.built) {
         release::Of::Own => {
             guard.disarm();
             Ok(Connected::Matched { channel, gone, id })
-        },
-        release::Of::Other(other) => {
-            Ok(Connected::Unmatched(Unmatched { other, pid: PeerPid::new(info.pid) }))
-        },
+        }
+        release::Of::Other(other) => Ok(Connected::Unmatched(Unmatched {
+            other,
+            pid: PeerPid::new(info.pid),
+        })),
     }
 }
 
@@ -1131,10 +1322,12 @@ async fn open(socket: PathBuf) -> Result<Opened, Error> {
         .await;
     match connected {
         Ok(channel) => {
-            let id = *verified.get().expect("connect_with_connector ran the connector once");
+            let id = *verified
+                .get()
+                .expect("connect_with_connector ran the connector once");
             guard.disarm();
             Ok(Opened::Connected { channel, gone, id })
-        },
+        }
         Err(_) if changed.load(Ordering::Relaxed) => Ok(Opened::Changed),
         Err(error) => Err(error),
     }
@@ -1151,8 +1344,8 @@ impl Tracked {
             Poll::Ready(Err(_)) => self.gone.mark(),
             Poll::Pending if !self.gone.register(context.waker()) => {
                 return Poll::Ready(Err(went()));
-            },
-            Poll::Ready(Ok(_)) | Poll::Pending => {},
+            }
+            Poll::Ready(Ok(_)) | Poll::Pending => {}
         }
         polled
     }
@@ -1178,12 +1371,12 @@ impl AsyncRead for Tracked {
                 if room > 0 && buffer.filled().len() == before {
                     self.gone.mark();
                 }
-            },
+            }
             Poll::Ready(Err(_)) => self.gone.mark(),
             Poll::Pending if !self.gone.register(context.waker()) => {
                 return Poll::Ready(Err(went()));
-            },
-            Poll::Pending => {},
+            }
+            Poll::Pending => {}
         }
         polled
     }
@@ -1249,17 +1442,22 @@ pub struct Within<S> {
 impl<S> Within<S> {
     pub(crate) fn new(inner: S, answer: Duration, unanswered: fn(Duration) -> String) -> Self {
         assert!(!answer.is_zero(), "a call waits some time for its answer");
-        Within { inner, answer, unanswered, gone: None }
+        Within {
+            inner,
+            answer,
+            unanswered,
+            gone: None,
+        }
     }
 
-    fn watched(
-        inner: S,
-        answer: Duration,
-        unanswered: fn(Duration) -> String,
-        gone: Gone,
-    ) -> Self {
+    fn watched(inner: S, answer: Duration, unanswered: fn(Duration) -> String, gone: Gone) -> Self {
         assert!(!answer.is_zero(), "a call waits some time for its answer");
-        Within { inner, answer, unanswered, gone: Some(gone) }
+        Within {
+            inner,
+            answer,
+            unanswered,
+            gone: Some(gone),
+        }
     }
 }
 
@@ -1293,7 +1491,7 @@ where
                         gone.mark();
                     }
                     Err(error.into())
-                },
+                }
                 Err(_) => Err(Status::deadline_exceeded(unanswered(answer)).into()),
             }
         })
@@ -1310,10 +1508,15 @@ pub async fn info_of_any_build(
     answer: Answer,
 ) -> Result<api::InfoResponse, Unreached> {
     let wait = answer.waits();
-    assert!(!wait.is_zero(), "an info call waits some time for its answer");
+    assert!(
+        !wait.is_zero(),
+        "an info call waits some time for its answer"
+    );
     let mut daemon = connect(folder, answer).await.map_err(Unreached::Connect)?;
     let Ok(answered) = tokio::time::timeout(wait, daemon.info(())).await else {
-        return Err(Unreached::Asked(Status::deadline_exceeded(unanswered(wait))));
+        return Err(Unreached::Asked(Status::deadline_exceeded(unanswered(
+            wait,
+        ))));
     };
     answered.map(Response::into_inner).map_err(Unreached::Asked)
 }
@@ -1371,8 +1574,12 @@ impl fmt::Display for Unbridged {
             Unbridged::Ended(ended) => write!(f, "it ended before it reached luned ({ended})"),
             Unbridged::Said(said) => write!(f, "it said {said:?} before it reached luned"),
             Unbridged::Silent => {
-                write!(f, "it neither reached luned nor ended in {}s", REACH.as_secs())
-            },
+                write!(
+                    f,
+                    "it neither reached luned nor ended in {}s",
+                    REACH.as_secs()
+                )
+            }
         }
     }
 }
@@ -1412,7 +1619,11 @@ impl Piped {
             heard?;
         }
         match said.as_slice() {
-            BRIDGED => Ok(Piped { stdout, stdin, _child: child }),
+            BRIDGED => Ok(Piped {
+                stdout,
+                stdin,
+                _child: child,
+            }),
             [] => match timeout_at(deadline, child.wait()).await {
                 Ok(ended) => Err(Unbridged::Ended(ended?)),
                 Err(_) => Err(Unbridged::Silent),
@@ -1475,10 +1686,10 @@ mod tests {
     use std::time::Duration;
 
     use lune_protocol::socket::SocketId;
-    use lune_waits::{eventually_async, Began, Patience};
+    use lune_waits::{Began, Patience, eventually_async};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{UnixListener, UnixStream};
-    use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio::sync::{Notify, mpsc, oneshot};
     use tokio::time::Instant;
     use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
     use tokio_stream::{Stream, StreamExt as _};
@@ -1486,41 +1697,44 @@ mod tests {
     use tonic::codegen::http::{Request, Response};
     use tonic::transport::{Channel, Server};
     use tonic::{Code, Request as GrpcRequest, Response as GrpcResponse, Status, Streaming};
-    use tower::{service_fn, BoxError, ServiceExt as _};
+    use tower::{BoxError, ServiceExt as _, service_fn};
 
     use super::{
-        connect_matched, keep, kept, kept_at, lock_kept, reach, through, unanswered, Answer, Gone,
-        Kept, LocalWatch, PeerPid, Reached, RoundTrip, Shared, Tracked, Unasked, Unbridged,
-        Unmatched, Unreached, Unsent, WatchError, Within, ANSWER, ASKED_MAX, ASKED_WAITING_MAX,
-        CONNECTING, CONNECTING_MAX, HELD_MAX, KEPT_MAX, QUESTIONS_MAX, STREAM_WINDOW_BYTES,
+        ANSWER, ASKED_MAX, ASKED_WAITING_MAX, Answer, CONNECTING, CONNECTING_MAX, Gone, HELD_MAX,
+        KEPT_MAX, Kept, LocalWatch, PeerPid, QUESTIONS_MAX, Reached, RoundTrip,
+        STREAM_WINDOW_BYTES, Shared, Tracked, Unasked, Unbridged, Unmatched, Unreached, Unsent,
+        WatchError, Within, connect_matched, keep, kept, kept_at, lock_kept, reach, through,
+        unanswered,
     };
-    use crate::changes::Unchanged;
-    use crate::remote::Destination;
     use crate::api::daemon_client::DaemonClient;
     use crate::api::daemon_server::{Daemon as DaemonService, DaemonServer};
     use crate::api::{
         self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest,
         ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
-        IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest,
-        KeepChecksResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest,
-        KeepPrintedResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
-        ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse,
-        ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse,
-        PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
-        ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse, SayRequest, ShowRequest,
-        ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest,
-        WaitingResponse, WatchChangesRequest, WatchLocalChangesRequest, WatchLocalResponse,
-        WatchRequest,
+        IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
+        KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+        ListAgentsResponse, ListContentsRequest, ListContentsResponse, ListRepositoriesRequest,
+        ListRepositoriesResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
+        ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse,
+        PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, ReadDiffRequest,
+        ReadDiffResponse, RebaseRequest, RebaseResponse, SayRequest, ShowRequest, ShowResponse,
+        TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest, WaitingResponse,
+        WatchChangesRequest, WatchLocalChangesRequest, WatchLocalResponse, WatchRequest,
     };
+    use crate::changes::Unchanged;
     use crate::folder::{self, Folder};
     use crate::mux::own::api::ToViewer;
+    use crate::remote::Destination;
     use crate::{release, tasks};
 
     #[derive(Clone)]
     enum AgentsAnswer {
         Ok,
         Unavailable(String),
-        Park { arrived: Arc<AtomicUsize>, release: Arc<Notify> },
+        Park {
+            arrived: Arc<AtomicUsize>,
+            release: Arc<Notify>,
+        },
     }
 
     #[derive(Clone)]
@@ -1582,7 +1796,11 @@ mod tests {
                     .serve_with_incoming_shutdown(incoming, shutdown)
                     .await;
             });
-            Served { accepted, stop: Some(stop), handle }
+            Served {
+                accepted,
+                stop: Some(stop),
+                handle,
+            }
         }
     }
 
@@ -1621,11 +1839,13 @@ mod tests {
     #[tonic::async_trait]
     impl DaemonService for Stub {
         type AskStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
-        type FileIssueStream = Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
+        type FileIssueStream =
+            Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
         type FramesStream = Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>>;
         type KeepChecksStream =
             Pin<Box<dyn Stream<Item = Result<KeepChecksResponse, Status>> + Send>>;
-        type KeepImageStream = Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
+        type KeepImageStream =
+            Pin<Box<dyn Stream<Item = Result<KeepImageResponse, Status>> + Send>>;
         type ListWorkStream = Pin<Box<dyn Stream<Item = Result<ListWorkResponse, Status>> + Send>>;
         type MakeWorktreeStream =
             Pin<Box<dyn Stream<Item = Result<MakeWorktreeResponse, Status>> + Send>>;
@@ -1652,7 +1872,11 @@ mod tests {
             &self,
             _: GrpcRequest<()>,
         ) -> Result<GrpcResponse<ListAgentsResponse>, Status> {
-            let answer = self.agents.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let answer = self
+                .agents
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
             match answer {
                 AgentsAnswer::Ok => Ok(GrpcResponse::new(ListAgentsResponse::default())),
                 AgentsAnswer::Unavailable(why) => Err(Status::unavailable(why)),
@@ -1661,7 +1885,7 @@ mod tests {
                     arrived.fetch_add(1, Ordering::Relaxed);
                     notified.await;
                     Ok(GrpcResponse::new(ListAgentsResponse::default()))
-                },
+                }
             }
         }
 
@@ -1677,7 +1901,10 @@ mod tests {
                 let seq = self.watch_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 api::Version { pid: self.pid, seq }
             });
-            Ok(GrpcResponse::new(api::Host { version, ..api::Host::default() }))
+            Ok(GrpcResponse::new(api::Host {
+                version,
+                ..api::Host::default()
+            }))
         }
 
         async fn watch_changes(
@@ -1685,11 +1912,16 @@ mod tests {
             request: GrpcRequest<WatchChangesRequest>,
         ) -> Result<GrpcResponse<api::WatchResponse>, Status> {
             let after = request.into_inner().after;
-            self.watch_afters.lock().unwrap_or_else(PoisonError::into_inner).push(after);
+            self.watch_afters
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(after);
             if let Some(after) = after
                 && self
                     .watch_unchanged
-                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1))
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                        left.checked_sub(1)
+                    })
                     .is_ok()
             {
                 let response = api::WatchResponse {
@@ -1701,7 +1933,10 @@ mod tests {
                 let seq = self.watch_seq.fetch_add(1, Ordering::Relaxed) + 1;
                 api::Version { pid: self.pid, seq }
             });
-            let host = api::Host { version, ..api::Host::default() };
+            let host = api::Host {
+                version,
+                ..api::Host::default()
+            };
             let response = api::WatchResponse {
                 answer: Some(api::watch_response::Answer::Host(Box::new(host))),
             };
@@ -1719,7 +1954,9 @@ mod tests {
             &self,
             _: GrpcRequest<ListContentsRequest>,
         ) -> Result<GrpcResponse<ListContentsResponse>, Status> {
-            Ok(GrpcResponse::new(ListContentsResponse { listed: self.contents.clone() }))
+            Ok(GrpcResponse::new(ListContentsResponse {
+                listed: self.contents.clone(),
+            }))
         }
 
         async fn ask(
@@ -1918,7 +2155,10 @@ mod tests {
         let stub = Stub::own();
         let served = stub.serve(&folder);
 
-        let transient = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let transient = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let Reached::Matched(first) = transient.block_on(reach(&folder)).unwrap() else {
             panic!("the own build did not match");
         };
@@ -1930,8 +2170,16 @@ mod tests {
                 panic!("the cached channel did not match");
             };
             second.list_agents(ANSWER).await.unwrap();
-            assert_eq!(served.accepted(), 1, "a kept channel opens no second connection");
-            assert_eq!(stub.infos.load(Ordering::Relaxed), 1, "build is checked once per channel");
+            assert_eq!(
+                served.accepted(),
+                1,
+                "a kept channel opens no second connection"
+            );
+            assert_eq!(
+                stub.infos.load(Ordering::Relaxed),
+                1,
+                "build is checked once per channel"
+            );
 
             *stub.agents.lock().unwrap() =
                 AgentsAnswer::Unavailable("luned does not reach far now".to_owned());
@@ -1949,7 +2197,11 @@ mod tests {
                 panic!("the kept channel vanished after a server-returned Unavailable");
             };
             third.list_agents(ANSWER).await.unwrap();
-            assert_eq!(served.accepted(), 1, "the same connection serves calls after Unavailable");
+            assert_eq!(
+                served.accepted(),
+                1,
+                "the same connection serves calls after Unavailable"
+            );
             assert_eq!(stub.infos.load(Ordering::Relaxed), 1);
         });
 
@@ -1959,7 +2211,10 @@ mod tests {
                 first.gone.is().then_some(())
             })
             .await;
-            assert!(kept(&folder).is_none(), "a closed connection evicts its kept channel");
+            assert!(
+                kept(&folder).is_none(),
+                "a closed connection evicts its kept channel"
+            );
             let gone = first.list_agents(ANSWER).await.unwrap_err();
             assert!(
                 matches!(gone, Unasked::Unsent(Unsent::ChannelGone)),
@@ -2005,9 +2260,15 @@ mod tests {
             };
             let returned = keep(&folder.socket(), stale)
                 .expect("a stale keep returns the already-kept live channel for the new socket");
-            assert!(stale_gone.is(), "a stale channel arriving after restart is marked gone");
+            assert!(
+                stale_gone.is(),
+                "a stale channel arriving after restart is marked gone"
+            );
             assert!(!returned.gone.is(), "keep never returns a gone channel");
-            assert!(!second.gone.is(), "a stale keep leaves the live channel untouched");
+            assert!(
+                !second.gone.is(),
+                "a stale keep leaves the live channel untouched"
+            );
             let Reached::Matched(still) = reach(&folder).await.unwrap() else {
                 panic!("the live channel did not stay kept after a stale keep");
             };
@@ -2025,8 +2286,14 @@ mod tests {
             };
             assert!(unmatched.other().is_newer());
             assert_eq!(unmatched.pid(), PeerPid::new(4242));
-            assert!(second.gone.is(), "replacing the socket marks the old channel gone");
-            assert!(kept(&folder).is_none(), "another build is never kept in the cache");
+            assert!(
+                second.gone.is(),
+                "replacing the socket marks the old channel gone"
+            );
+            assert!(
+                kept(&folder).is_none(),
+                "another build is never kept in the cache"
+            );
             let stale_no_live = Kept {
                 shared: super::Shared::new(first.channel.clone(), Gone::default()),
                 socket_id: old_id,
@@ -2039,7 +2306,11 @@ mod tests {
             let Reached::Unmatched(_) = reach(&folder).await.unwrap() else {
                 panic!("a second reach to another build was not refused");
             };
-            assert_eq!(replaced.accepted(), 2, "unmatched builds connect afresh each time");
+            assert_eq!(
+                replaced.accepted(),
+                2,
+                "unmatched builds connect afresh each time"
+            );
             assert_eq!(newer.infos.load(Ordering::Relaxed), 2);
         });
     }
@@ -2052,7 +2323,10 @@ mod tests {
         ours.set_nonblocking(true).unwrap();
         let gone = Gone::default();
         let stream = UnixStream::from_std(ours).unwrap();
-        let tracked = Tracked { stream, gone: gone.clone() };
+        let tracked = Tracked {
+            stream,
+            gone: gone.clone(),
+        };
         assert!(!gone.is(), "a connection held is not gone");
         drop(tracked);
         assert!(gone.is(), "a connection let go of without a word is gone");
@@ -2064,12 +2338,18 @@ mod tests {
             let mut watched = Within::watched(ok, ANSWER.waits(), unanswered, gone.clone());
             watched.ready().await.unwrap();
             watched.oneshot(()).await.unwrap();
-            assert!(!gone.is(), "an Ok transport response leaves the channel alive");
+            assert!(
+                !gone.is(),
+                "an Ok transport response leaves the channel alive"
+            );
 
             let silent = service_fn(|()| pending::<Result<(), &'static str>>());
             let watched = Within::watched(silent, IMPATIENT.waits(), unanswered, gone.clone());
             let late = watched.oneshot(()).await.unwrap_err();
-            assert_eq!(late.downcast_ref::<Status>().unwrap().code(), Code::DeadlineExceeded);
+            assert_eq!(
+                late.downcast_ref::<Status>().unwrap().code(),
+                Code::DeadlineExceeded
+            );
             assert!(!gone.is(), "a call deadline leaves the channel alive");
 
             let broken = service_fn(|()| async { Err::<(), _>("goaway") });
@@ -2096,7 +2376,11 @@ mod tests {
             let second = watching.next().await.unwrap();
             assert_eq!(
                 *stub.watch_afters.lock().unwrap(),
-                vec![None, Some(first.version.to_api()), Some(first.version.to_api())],
+                vec![
+                    None,
+                    Some(first.version.to_api()),
+                    Some(first.version.to_api())
+                ],
                 "Watching::next skips Unchanged and keeps asking past the last seen version"
             );
             assert!(second.version.seq() > first.version.seq());
@@ -2115,21 +2399,36 @@ mod tests {
                 .await
                 .err()
                 .expect("a stream past HELD_MAX is refused");
-            assert!(matches!(refused, Unasked::Unsent(Unsent::HoldsFull)), "{refused:?}");
-            assert!(matches!(Unchanged::of_asked(&refused), Unchanged::Refused(_)));
+            assert!(
+                matches!(refused, Unasked::Unsent(Unsent::HoldsFull)),
+                "{refused:?}"
+            );
+            assert!(matches!(
+                Unchanged::of_asked(&refused),
+                Unchanged::Refused(_)
+            ));
             let nixos: Destination = "nixos".parse().unwrap();
             assert_eq!(
                 refused.said(Some(&nixos)),
                 format!("lune holds at most {HELD_MAX} streams to luned at once"),
                 "a local budget refusal is never attributed to a remote machine"
             );
-            let refused_watch =
-                shared.watching(ANSWER, LocalWatch::Client).err().expect("watch shares HELD_MAX");
+            let refused_watch = shared
+                .watching(ANSWER, LocalWatch::Client)
+                .err()
+                .expect("watch shares HELD_MAX");
             assert_eq!(refused_watch, Unsent::HoldsFull);
-            assert!(!shared.gone.is(), "refusing past HELD_MAX leaves the channel kept");
+            assert!(
+                !shared.gone.is(),
+                "refusing past HELD_MAX leaves the channel kept"
+            );
 
             shared.list_agents(ANSWER).await.unwrap();
-            assert_eq!(served.accepted(), 1, "questions share the same connection while HELD is full");
+            assert_eq!(
+                served.accepted(),
+                1,
+                "questions share the same connection while HELD is full"
+            );
 
             drop(held.pop());
             let mut freed = shared
@@ -2157,8 +2456,10 @@ mod tests {
         let stub = Stub::own();
         let arrived = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(Notify::new());
-        *stub.agents.lock().unwrap() =
-            AgentsAnswer::Park { arrived: Arc::clone(&arrived), release: Arc::clone(&release) };
+        *stub.agents.lock().unwrap() = AgentsAnswer::Park {
+            arrived: Arc::clone(&arrived),
+            release: Arc::clone(&release),
+        };
         let served = stub.serve(&folder);
 
         let tasks = tasks::shared();
@@ -2254,7 +2555,10 @@ mod tests {
             };
             let mut flooders = Vec::new();
             for _ in 0..FLOODERS {
-                let request = AskRequest { words: "flood".to_owned(), ..AskRequest::default() };
+                let request = AskRequest {
+                    words: "flood".to_owned(),
+                    ..AskRequest::default()
+                };
                 let stream = shared.ask(ANSWER, request).await.unwrap();
                 flooders.push(stream);
             }
@@ -2288,7 +2592,10 @@ mod tests {
                 })
                 .await
                 .expect_err("an expired deadline refuses before sending");
-            assert!(!sent.load(Ordering::Relaxed), "an expired ask never sends its RPC");
+            assert!(
+                !sent.load(Ordering::Relaxed),
+                "an expired ask never sends its RPC"
+            );
             assert!(
                 matches!(late, Unasked::Unsent(Unsent::TimedOut(wait)) if wait == ANSWER.waits()),
                 "{late:?}"
@@ -2319,7 +2626,9 @@ mod tests {
             let Err(Unreached::Asked(late)) = result else {
                 panic!("a peer with zero concurrent streams did not time out in poll_ready");
             };
-            began.lasted().at_least(IMPATIENT.waits(), "build verification wait");
+            began
+                .lasted()
+                .at_least(IMPATIENT.waits(), "build verification wait");
             assert_eq!(late.code(), Code::DeadlineExceeded, "{late:?}");
             assert_eq!(late.message(), "luned did not answer in 0.05s");
             Patience::begun()
@@ -2343,12 +2652,25 @@ mod tests {
             let id = SocketId::at(&path).unwrap();
             let channel = Channel::from_static("http://[::1]:1").connect_lazy();
             let shared = Shared::new(channel, Gone::default());
-            let stored = keep(&path, Kept { shared, socket_id: id }).unwrap();
+            let stored = keep(
+                &path,
+                Kept {
+                    shared,
+                    socket_id: id,
+                },
+            )
+            .unwrap();
             created.push(stored);
             paths.push(path);
         }
-        assert!(kept_at(&paths[0]).is_none(), "the first entry is evicted past KEPT_MAX");
-        assert!(kept_at(&paths[KEPT_MAX]).is_some(), "the newest entry stays kept");
+        assert!(
+            kept_at(&paths[0]).is_none(),
+            "the first entry is evicted past KEPT_MAX"
+        );
+        assert!(
+            kept_at(&paths[KEPT_MAX]).is_some(),
+            "the newest entry stays kept"
+        );
         assert!(lock_kept().len() <= KEPT_MAX);
         for shared in &created {
             shared.gone.mark();
@@ -2366,20 +2688,32 @@ mod tests {
             matches!(refused, Err(Unreached::Busy)),
             "a connect past CONNECTING_MAX is refused as Unreached::Busy"
         );
-        assert!(Unreached::Busy.to_string().contains(&format!("at most {CONNECTING_MAX}")));
+        assert!(
+            Unreached::Busy
+                .to_string()
+                .contains(&format!("at most {CONNECTING_MAX}"))
+        );
         drop(held);
     }
 
     #[test]
-    fn a_symlink_alias_to_the_same_folder_reuses_one_kept_channel_and_peer_pid_rejects_invalid_ids() {
+    fn a_symlink_alias_to_the_same_folder_reuses_one_kept_channel_and_peer_pid_rejects_invalid_ids()
+    {
         let (dir, folder) = temp_folder();
         let alias = dir.path().join("alias");
         std::os::unix::fs::symlink(folder.path(), &alias).unwrap();
         let via_parent = dir.path().join("parent");
         std::os::unix::fs::symlink(dir.path(), &via_parent).unwrap();
         let aliased = folder::open(&via_parent.join("lune")).unwrap().unwrap();
-        assert_eq!(folder.path(), aliased.path(), "Folder canonicalizes parent path aliases");
-        assert!(folder::open(&alias).is_err(), "a leaf symlink is still refused as NotYours");
+        assert_eq!(
+            folder.path(),
+            aliased.path(),
+            "Folder canonicalizes parent path aliases"
+        );
+        assert!(
+            folder::open(&alias).is_err(),
+            "a leaf symlink is still refused as NotYours"
+        );
 
         let stub = Stub::own();
         let served = stub.serve(&folder);
@@ -2393,7 +2727,11 @@ mod tests {
             };
             first.list_agents(ANSWER).await.unwrap();
             second.list_agents(ANSWER).await.unwrap();
-            assert_eq!(served.accepted(), 1, "aliased folder paths share one kept channel");
+            assert_eq!(
+                served.accepted(),
+                1,
+                "aliased folder paths share one kept channel"
+            );
             assert_eq!(stub.infos.load(Ordering::Relaxed), 1);
         });
 
@@ -2410,12 +2748,18 @@ mod tests {
             panic!("99.0.0 is another build");
         };
         let without_pid = Unmatched::of(newer, None).to_string();
-        assert!(!without_pid.contains("pid"), "an absent peer pid is omitted: {without_pid}");
+        assert!(
+            !without_pid.contains("pid"),
+            "an absent peer pid is omitted: {without_pid}"
+        );
     }
 
     #[test]
     fn a_call_past_its_answer_says_luned_did_not_answer_in_time() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
         let silent = service_fn(|_: Request<Body>| pending::<Result<Response<Body>, BoxError>>());
         let mut daemon = DaemonClient::new(Within::new(silent, Duration::from_secs(1), unanswered));
         let late = runtime.block_on(daemon.info(())).unwrap_err();
@@ -2426,7 +2770,10 @@ mod tests {
     #[test]
     fn a_command_that_stalls_ends_its_call_on_the_keepalive_past_its_round_trip_and_runs_once() {
         const STALLS: RoundTrip = RoundTrip::of(Duration::from_secs(1));
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let mut stalls = Command::new("sh");
         stalls.args(["-c", "echo luned; exec sleep 60"]);
         runtime.block_on(async {
@@ -2480,34 +2827,61 @@ mod tests {
             let spins = (round % 128) * 16;
             match round % 3 {
                 0 => {
-                    let _ = keep(&path, Kept { shared, socket_id: id });
+                    let _ = keep(
+                        &path,
+                        Kept {
+                            shared,
+                            socket_id: id,
+                        },
+                    );
                     to_marker.send((gone, spins)).unwrap();
                     barrier.wait();
                     let _ = kept_at(&path);
                     barrier.wait();
-                },
+                }
                 1 => {
                     to_marker.send((gone, spins)).unwrap();
                     barrier.wait();
-                    let _ = keep(&path, Kept { shared, socket_id: id });
+                    let _ = keep(
+                        &path,
+                        Kept {
+                            shared,
+                            socket_id: id,
+                        },
+                    );
                     barrier.wait();
-                },
+                }
                 _ => {
-                    let _ = keep(&path, Kept { shared, socket_id: id });
+                    let _ = keep(
+                        &path,
+                        Kept {
+                            shared,
+                            socket_id: id,
+                        },
+                    );
                     let second = Channel::from_static("http://[::1]:1").connect_lazy();
                     let fresh_gone = Gone::default();
                     let fresh = Shared::new(second, fresh_gone.clone());
                     to_marker.send((gone, spins)).unwrap();
                     barrier.wait();
-                    let _ = keep(&path, Kept { shared: fresh, socket_id: id });
+                    let _ = keep(
+                        &path,
+                        Kept {
+                            shared: fresh,
+                            socket_id: id,
+                        },
+                    );
                     barrier.wait();
                     fresh_gone.mark();
-                },
+                }
             }
         }
         drop(to_marker);
         marker.join().unwrap();
-        assert!(kept_at(&path).is_none(), "every marked channel is evicted without poisoning KEPT");
+        assert!(
+            kept_at(&path).is_none(),
+            "every marked channel is evicted without poisoning KEPT"
+        );
     }
 
     #[test]
@@ -2596,7 +2970,13 @@ mod tests {
 
     #[test]
     fn a_bound_in_part_of_a_second_is_said_exactly() {
-        assert_eq!(unanswered(Duration::from_millis(1500)), "luned did not answer in 1.5s");
-        assert_eq!(unanswered(Duration::from_millis(250)), "luned did not answer in 0.25s");
+        assert_eq!(
+            unanswered(Duration::from_millis(1500)),
+            "luned did not answer in 1.5s"
+        );
+        assert_eq!(
+            unanswered(Duration::from_millis(250)),
+            "luned did not answer in 0.25s"
+        );
     }
 }

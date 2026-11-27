@@ -21,9 +21,9 @@ use crate::folder::Claim;
 use crate::id::ClientId;
 use crate::leader::GRACE;
 use crate::mux::{Listed, Mux};
+use crate::pty;
 use crate::screen::Looked;
 use crate::terminal::{CLIENT_MESSAGES, ToTerminal, ViewerOut};
-use crate::pty;
 use crate::unread::TYPED_BYTES_MAX;
 
 pub const FIRST_TERMINAL: Duration = Duration::from_secs(30);
@@ -34,7 +34,10 @@ const REAPED_WAIT: Duration = GRACE.saturating_add(Duration::from_secs(1));
 
 const SOCKET_LOOK: Duration = Duration::from_secs(1);
 
-const _: () = assert!(!SOCKET_LOOK.is_zero(), "a look at the socket waits between looks");
+const _: () = assert!(
+    !SOCKET_LOOK.is_zero(),
+    "a look at the socket waits between looks"
+);
 
 const HELLO_WAIT: Duration = Duration::from_secs(5);
 
@@ -69,7 +72,11 @@ impl mux_server::Mux for Service {
     }
 
     async fn press(&self, request: Request<api::PressRequest>) -> Answer<api::PressResponse> {
-        let Press { terminal, shown, inputs } = Press::parse(request.into_inner())?;
+        let Press {
+            terminal,
+            shown,
+            inputs,
+        } = Press::parse(request.into_inner())?;
         let handle = self.mux.terminal(terminal)?;
         let (answer, answered) = oneshot::channel();
         handle.send(ToTerminal::Press(shown, inputs, answer)).await;
@@ -93,7 +100,9 @@ impl mux_server::Mux for Service {
             Listed::Holds(_) => None,
             Listed::Ended(ending) => Some(api::watched::Is::Ended(ending.said())),
         });
-        let watched = holds.chain(ended.take(1)).map(|is| Ok(api::Watched { is: Some(is) }));
+        let watched = holds
+            .chain(ended.take(1))
+            .map(|is| Ok(api::Watched { is: Some(is) }));
         Ok(Response::new(Box::pin(watched)))
     }
 
@@ -110,7 +119,9 @@ impl mux_server::Mux for Service {
         let key = started.await.map_err(|error| {
             Status::internal(format!("the terminal's start was not waited for: {error}"))
         })??;
-        Ok(Response::new(api::NewTerminalResponse { terminal: Some(key.said()) }))
+        Ok(Response::new(api::NewTerminalResponse {
+            terminal: Some(key.said()),
+        }))
     }
 
     async fn close_terminal(
@@ -128,7 +139,8 @@ impl mux_server::Mux for Service {
     ) -> Answer<api::SizeTerminalResponse> {
         let request = request.into_inner();
         let key = TerminalKey::parse("terminal", request.terminal)?;
-        self.mux.size_terminal(key, Size::parse("size", request.size)?)?;
+        self.mux
+            .size_terminal(key, Size::parse("size", request.size)?)?;
         Ok(Response::new(api::SizeTerminalResponse {}))
     }
 
@@ -138,7 +150,8 @@ impl mux_server::Mux for Service {
     ) -> Answer<api::TagTerminalResponse> {
         let request = request.into_inner();
         let key = TerminalKey::parse("terminal", request.terminal)?;
-        self.mux.tag_terminal(key, Tag::parse("tag", request.tag)?)?;
+        self.mux
+            .tag_terminal(key, Tag::parse("tag", request.tag)?)?;
         Ok(Response::new(api::TagTerminalResponse {}))
     }
 
@@ -154,14 +167,17 @@ impl mux_server::Mux for Service {
         let (gone, let_go) = oneshot::channel();
         let client = self.mux.view(greeting, out.clone(), gone)?;
         tokio::spawn(listen_to_viewer(Arc::clone(&self.mux), client, heard, out));
-        Ok(Response::new(Viewed { going: ReceiverStream::new(going), let_go, ended: false }))
+        Ok(Response::new(Viewed {
+            going: ReceiverStream::new(going),
+            let_go,
+            ended: false,
+        }))
     }
 
     async fn info(&self, _: Request<api::InfoRequest>) -> Answer<api::InfoResponse> {
         let (version, built) = (release::VERSION.to_owned(), release::BUILT);
         Ok(Response::new(api::InfoResponse { version, built }))
     }
-
 }
 
 fn ended(key: TerminalKey) -> Status {
@@ -190,14 +206,20 @@ async fn listen_to_viewer(
                 Ok(handle) => {
                     handle.send(ToTerminal::Input(client, input)).await;
                     Vec::new()
-                },
+                }
                 Err(refusal) => vec![refusal],
             },
         };
         for refusal in refusals {
             let reason = refusal.message().to_owned();
             let refused = api::to_viewer::Event::Refused(api::Refused { reason });
-            if out.send(Ok(api::ToViewer { event: Some(refused) })).await.is_err() {
+            if out
+                .send(Ok(api::ToViewer {
+                    event: Some(refused),
+                }))
+                .await
+                .is_err()
+            {
                 eprintln!("lune-mux: viewer {client} went before it heard it was refused");
             }
         }
@@ -227,7 +249,7 @@ impl Stream for Viewed {
             Poll::Ready(Some(said)) => {
                 self.ended = said.is_err();
                 Poll::Ready(Some(said))
-            },
+            }
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => {
                 if Pin::new(&mut self.let_go).poll(context).is_ready() {
@@ -235,7 +257,7 @@ impl Stream for Viewed {
                     return Poll::Ready(None);
                 }
                 Poll::Pending
-            },
+            }
         }
     }
 }
@@ -252,7 +274,7 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
             Ok(Found::Ours) => {
                 error_said = false;
                 continue;
-            },
+            }
             Ok(Found::Lost(unreached)) => unreached,
             Err(error) => {
                 if !error_said {
@@ -261,7 +283,7 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
                 }
                 error_said = true;
                 continue;
-            },
+            }
         };
         if let Some(closed) = mux.end_unreached(unreached.clone()) {
             let closed = match closed {
@@ -271,7 +293,10 @@ async fn end_once_unreached(mux: Arc<Mux>, bound: Bound) {
             };
             eprintln!("lune-mux: {unreached}: {closed} and ends");
         }
-        assert!(matches!(*watched.borrow(), Listed::Ended(_)), "the listing ends with the server");
+        assert!(
+            matches!(*watched.borrow(), Listed::Ended(_)),
+            "the listing ends with the server"
+        );
         return;
     }
 }
@@ -283,11 +308,17 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
     listener.set_nonblocking(true)?;
     let listener = UnixListener::from_std(listener)?;
-    let browser_socket =
-        bound.socket().parent().map(|dir| dir.join(lune_protocol::TERMINAL_BROWSER_SOCKET));
+    let browser_socket = bound
+        .socket()
+        .parent()
+        .map(|dir| dir.join(lune_protocol::TERMINAL_BROWSER_SOCKET));
     let mux = Mux::serving(Some(claim.folder().to_owned()), browser_socket);
     let mut watched = mux.watched();
-    let listening = format!("{}{}\n", lune_protocol::MUX_LISTENING, bound.socket().display());
+    let listening = format!(
+        "{}{}\n",
+        lune_protocol::MUX_LISTENING,
+        bound.socket().display()
+    );
     let _ = io::stderr().write_all(listening.as_bytes());
     let (begun, mut beginning) = watch::channel(false);
     let unused = Arc::clone(&mux);
@@ -311,15 +342,19 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         Server::builder()
             .max_concurrent_streams(lune_protocol::MUX_STREAMS_MAX)
             .add_service(
-                mux_server::MuxServer::new(Service { mux: Arc::clone(&mux) })
-                    .max_decoding_message_size(MESSAGE_BYTES_MAX),
+                mux_server::MuxServer::new(Service {
+                    mux: Arc::clone(&mux),
+                })
+                .max_decoding_message_size(MESSAGE_BYTES_MAX),
             )
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), ended),
     );
     if !io::stdout().is_terminal() {
         {
             let mut out = io::stdout().lock();
-            if let Err(error) = out.write_all(listening.as_bytes()).and_then(|()| out.flush())
+            if let Err(error) = out
+                .write_all(listening.as_bytes())
+                .and_then(|()| out.flush())
                 && error.kind() != io::ErrorKind::BrokenPipe
             {
                 eprintln!("lune-mux: stdout did not take its listening line: {error}");
@@ -330,7 +365,7 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
                 if let Err(error) = rustix::stdio::dup2_stdout(&null) {
                     eprintln!("lune-mux: stdout did not turn to /dev/null: {error}");
                 }
-            },
+            }
             Err(error) => eprintln!("lune-mux: /dev/null did not open for stdout: {error}"),
         }
     }
@@ -340,11 +375,17 @@ pub async fn serve(claim: Claim) -> io::Result<()> {
         Ok(Ok(served)) => served.map_err(io::Error::other),
         Ok(Err(error)) => Err(io::Error::other(error)),
         Err(_) => {
-            eprintln!("lune-mux: clients still connected after {}s are left", DRAIN.as_secs());
+            eprintln!(
+                "lune-mux: clients still connected after {}s are left",
+                DRAIN.as_secs()
+            );
             Ok(())
-        },
+        }
     };
-    if tokio::time::timeout(REAPED_WAIT, mux.leaders().all_reaped()).await.is_err() {
+    if tokio::time::timeout(REAPED_WAIT, mux.leaders().all_reaped())
+        .await
+        .is_err()
+    {
         let waited = REAPED_WAIT.as_secs();
         eprintln!("lune-mux: programs of closed terminals still run after {waited}s, and are left");
     }

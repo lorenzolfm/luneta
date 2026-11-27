@@ -147,9 +147,13 @@ fn visible_ribbon(
 pub fn clamped_cell_px(cell_px: (NonZeroU16, NonZeroU16)) -> (NonZeroU16, NonZeroU16) {
     let cell_width = NonZeroU16::new(cell_px.0.get().clamp(CELL_WIDTH_PX_MIN, CELL_WIDTH_PX_MAX))
         .expect("CELL_WIDTH_PX_MIN is non-zero");
-    let cell_height =
-        NonZeroU16::new(cell_px.1.get().clamp(CELL_HEIGHT_PX_MIN, CELL_HEIGHT_PX_MAX))
-            .expect("CELL_HEIGHT_PX_MIN is non-zero");
+    let cell_height = NonZeroU16::new(
+        cell_px
+            .1
+            .get()
+            .clamp(CELL_HEIGHT_PX_MIN, CELL_HEIGHT_PX_MAX),
+    )
+    .expect("CELL_HEIGHT_PX_MIN is non-zero");
     (cell_width, cell_height)
 }
 
@@ -181,7 +185,13 @@ pub fn rasterize_rgba(
         .filter_map(|ribbon| {
             let (left_start, left_end, right_start, right_end) =
                 visible_ribbon(ribbon, scroll, visible_rows)?;
-            Some((left_start, left_end, right_start, right_end, ribbon.shape.kind()))
+            Some((
+                left_start,
+                left_end,
+                right_start,
+                right_end,
+                ribbon.shape.kind(),
+            ))
         })
         .collect();
     if active.is_empty() {
@@ -311,7 +321,13 @@ pub fn rasterize_cells(
         .filter_map(|ribbon| {
             let (left_start, left_end, right_start, right_end) =
                 visible_ribbon(ribbon, scroll, visible_rows)?;
-            Some((left_start, left_end, right_start, right_end, ribbon.shape.kind()))
+            Some((
+                left_start,
+                left_end,
+                right_start,
+                right_end,
+                ribbon.shape.kind(),
+            ))
         })
         .collect();
     if active.is_empty() {
