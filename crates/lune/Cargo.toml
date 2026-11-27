@@ -10,6 +10,7 @@ description = "lune: the terminals of a worktree beside a sidebar of the host, a
 [[bin]]
 name = "lune"
 path = "src/main.rs"
+test = false
 
 [dependencies]
 alacritty_terminal = "0.26.0"

@@ -225,23 +225,22 @@
             ];
           };
 
-          daemonDeps = craneLib.buildDepsOnly daemon;
+          checked = daemon // {
+            CARGO_PROFILE = "checks";
+          };
 
-          lunedWith =
-            built:
+          daemonDeps = craneLib.buildDepsOnly checked;
+
+          luned =
+            let
+              released = daemon // {
+                doCheck = false;
+              };
+            in
             craneLib.buildPackage (
-              daemon
+              released
               // {
-                src = testSrc;
-                cargoArtifacts = daemonDeps;
-
-                NEXTEST_SHOW_PROGRESS = "counter";
-                checkPhaseCargoCommand = ''
-                  export PATH="${localToolchain}/bin:$PATH"
-                  ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
-                    --test-threads "$NIX_BUILD_CORES"
-                  cargoWithProfile test --doc --locked ${testRun}
-                '';
+                cargoArtifacts = craneLib.buildDepsOnly released;
 
                 meta = {
                   description = "The lune daemon, its CLI, and lune's own multiplexer";
@@ -251,22 +250,42 @@
                   platforms = systems;
                 };
               }
-              // built
+              // pkgs.lib.optionalAttrs (self ? rev) {
+                LUNE_BUILT = toString self.lastModified;
+              }
             );
 
-          luned = lunedWith (
-            {
-              doCheck = false;
-            }
-            // pkgs.lib.optionalAttrs (self ? rev) {
-              LUNE_BUILT = toString self.lastModified;
+          tested = craneLib.mkCargoDerivation (
+            builtins.removeAttrs checked [ "cargoExtraArgs" ]
+            // {
+              pnameSuffix = "-tested";
+              src = testSrc;
+              cargoArtifacts = daemonDeps;
+              doCheck = true;
+              doInstallCargoArtifacts = false;
+
+              LUNE_BUILT = "1";
+              NEXTEST_SHOW_PROGRESS = "counter";
+              NEXTEST_DOUBLE_SPAWN = "0";
+
+              preBuild = ''
+                export PATH="${localToolchain}/bin:$PATH"
+              '';
+              buildPhaseCargoCommand = ''
+                ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --no-run
+              '';
+              checkPhaseCargoCommand = ''
+                ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
+                  --test-threads "$NIX_BUILD_CORES"
+                cargoWithProfile test --doc --locked ${testRun}
+              '';
             }
           );
 
           clippyRun = "--all-targets --workspace";
 
           clippy = craneLib.cargoClippy (
-            daemon
+            checked
             // {
               src = lintSrc;
               cargoArtifacts = daemonDeps;
@@ -322,7 +341,7 @@
 
           checks = {
             inherit clippy deny;
-            luned = lunedWith { LUNE_BUILT = "1"; };
+            luned = tested;
             statix = nixLint pkgs.statix "check .";
             swift =
               let

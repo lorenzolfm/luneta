@@ -7,6 +7,11 @@ license.workspace = true
 publish = false
 description = "lune's own multiplexer: a server that holds the pseudoterminals of its sessions and reads each terminal's program as Ghostty does"
 
+[[bin]]
+name = "lune-mux"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 lune-protocol = { path = "../protocol" }
 percent-encoding = "2.3.2"

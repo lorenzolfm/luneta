@@ -65,8 +65,9 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             connect-timeout = 5
+            stalled-download-timeout = 30
+            download-attempts = 3
             fallback = true
-            ${{ runner.os == 'macOS' && 'keep-outputs = true' || '' }}
             ${{ !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
             ${{ !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
 

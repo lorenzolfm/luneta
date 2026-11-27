@@ -10,6 +10,7 @@ description = "The lune daemon: the projects and views of this machine, the term
 [[bin]]
 name = "luned"
 path = "src/bin/luned.rs"
+test = false
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }

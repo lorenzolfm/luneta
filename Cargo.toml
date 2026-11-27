@@ -12,6 +12,10 @@ opt-level = "z"
 lto = true
 strip = true
 
+[profile.checks]
+inherits = "dev"
+debug = "line-tables-only"
+
 [profile.dev.package.ptts]
 opt-level = 3
 [profile.dev.package.xn]
