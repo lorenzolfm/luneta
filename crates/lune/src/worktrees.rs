@@ -27,7 +27,7 @@ use luned::links::{self, Branch, Unready};
 use luned::projects::Opened;
 use luned::repositories::OWNED_FOLDER;
 use luned::work::{self, Listed};
-use luned::{Answer, Asked, Beside, Heard, Shared, Unasked};
+use luned::{Answer, Beside, FocusAsked, Heard, Shared, Unasked};
 use tonic::{Code, Status};
 
 use luned::Directory;
@@ -160,7 +160,11 @@ pub fn holders(path: &Path) -> Result<Holders, String> {
 
 fn kept_as_said(path: &Path) -> Result<Vec<api::Project>, String> {
     on_current(path, async |daemon| {
-        let host = daemon.snapshot(ASKING, false).await.map_err(|unasked| unasked.said(None))?;
+        let host = daemon
+            .snapshot(ASKING, luned::LocalWatch::Client)
+            .await
+            .map_err(|error| error.said(None))?
+            .into_host();
         match host.projects.and_then(|projects| projects.held) {
             Some(Held::Kept(kept)) => Ok(kept.projects),
             Some(Held::Unkept(why)) => Err(format!("luned keeps no projects: {why}")),
@@ -687,7 +691,7 @@ pub enum Opening {
 }
 
 enum Asking {
-    Unsent(Asked),
+    Unsent(FocusAsked),
     Sent { before: BTreeSet<ViewId> },
 }
 
@@ -703,29 +707,29 @@ pub fn opened(
     let (heard, hearing) = mpsc::channel();
     let at = luned::Where::Here { runs_in: None };
     let unvisited = true;
-    let show = luned::show(folder, at, worktree, size, unvisited, move |it| {
+    let mut show = luned::show(folder, at, worktree, size, unvisited, move |it| {
         drop(heard.send(it));
     });
     let beside = match opening {
         Opening::IfEmpty => Beside::Alone,
         Opening::Beside => Beside::Focused,
     };
-    let mut asking = Asking::Unsent(Asked::Open { beside, opens });
+    let mut asking = Asking::Unsent(FocusAsked::Open { beside, opens });
     let until = Instant::now() + OPENING;
     loop {
         let left = until.saturating_duration_since(Instant::now());
         let late = |_| format!("luned opened no terminal in {}s", OPENING.as_secs());
         match hearing.recv_timeout(left).map_err(late)? {
-            Heard::Laid(laid) if laid.worktree() != worktree => {
+            Heard::Laid { laid, .. } if laid.worktree() != worktree => {
                 let other = laid.worktree();
                 return Err(format!("luned laid out worktree {other}, not {worktree}"));
             },
-            Heard::Laid(laid) => {
+            Heard::Laid { laid, .. } => {
                 let views: BTreeSet<ViewId> = laid.views().map(|view| view.id).collect();
                 asking = match (asking, opening) {
                     (Asking::Unsent(_), Opening::IfEmpty) if !laid.is_empty() => return Ok(()),
                     (Asking::Unsent(open), Opening::IfEmpty | Opening::Beside) => {
-                        show.ask(open);
+                        let _ = show.ask_focus(open);
                         Asking::Sent { before: views }
                     },
                     (Asking::Sent { before }, _) if views.is_subset(&before) => {
@@ -736,7 +740,7 @@ pub fn opened(
             },
             Heard::Edged { .. } | Heard::Sent(_) => {},
             Heard::Left(gone) => return Err(format!("worktree {gone} is gone")),
-            Heard::Refused(why) => return Err(format!("luned refused: {why}")),
+            Heard::Refused { why, .. } => return Err(format!("luned refused: {why}")),
             Heard::Forgotten(why) | Heard::Lost(why) => return Err(why),
         }
     }

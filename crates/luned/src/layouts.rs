@@ -40,7 +40,7 @@ use crate::resume::store::{RecordSource, ResumeAttempt, ResumeStore, StoredResum
 use crate::resume::synthesize::{LiveTerminal, Synthesizer};
 use crate::resume::{self, trust};
 use crate::shells::Shell;
-use crate::shows::direction_said;
+use crate::shows::{direction_said, AskNumber};
 use crate::terminal_socket::{self, PaneInfo, PaneRef, SocketCommand, SplitAction};
 use crate::watch::Troubles;
 use crate::{log, shells, Directory};
@@ -99,10 +99,11 @@ pub enum Command {
         size: Size,
         runs_in: Option<TerminalKey>,
         again: bool,
+        asked_number: Option<AskNumber>,
         out: Out,
         answer: oneshot::Sender<Result<ClientId, Status>>,
     },
-    Asked { client: ClientId, asked: Result<Asked, String> },
+    Asked { client: ClientId, asked_number: Option<AskNumber>, asked: Result<Asked, String> },
     Left(ClientId),
     Listed(TerminalsListed),
     Emptied { since: Instant },
@@ -367,7 +368,6 @@ pub fn start(
         errands,
         homes,
         clients: BTreeMap::new(),
-        stranded: BTreeMap::new(),
         arrivals: 0,
         known: BTreeMap::new(),
         listed: BTreeMap::new(),
@@ -395,7 +395,6 @@ struct Layouts {
     errands: Errands,
     homes: Homes,
     clients: BTreeMap<ClientId, Client>,
-    stranded: BTreeMap<ClientId, Stranded>,
     arrivals: u64,
     known: BTreeMap<TerminalViewId, Known>,
     listed: BTreeMap<TerminalKey, server::Terminal>,
@@ -411,21 +410,82 @@ struct Layouts {
     resume_synth: Synthesizer,
 }
 
-struct Client {
-    worktree: WorktreeId,
-    size: Size,
-    runs_in: Option<TerminalKey>,
-    focus: Option<ViewId>,
-    browser_ttys: BTreeMap<ViewId, String>,
-    out: Out,
-    said: Option<api::ShowResponse>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientAsks {
+    Unnumbered,
+    Numbered(AskNumber),
 }
 
-struct Stranded {
-    left: WorktreeId,
+impl ClientAsks {
+    fn start(asked_number: Option<AskNumber>) -> ClientAsks {
+        asked_number.map_or(ClientAsks::Unnumbered, ClientAsks::Numbered)
+    }
+
+    fn last(self) -> Option<AskNumber> {
+        match self {
+            ClientAsks::Unnumbered => None,
+            ClientAsks::Numbered(last) => Some(last),
+        }
+    }
+
+    fn hear(&mut self, asked_number: Option<AskNumber>) -> Result<(), String> {
+        match (*self, asked_number) {
+            (ClientAsks::Unnumbered | ClientAsks::Numbered(_), None) => Ok(()),
+            (ClientAsks::Unnumbered, Some(number)) => {
+                Err(format!("asked {} after unnumbered hello", number.get()))
+            },
+            (ClientAsks::Numbered(last), Some(number)) if number > last => {
+                *self = ClientAsks::Numbered(number);
+                Ok(())
+            },
+            (ClientAsks::Numbered(last), Some(number)) => {
+                Err(format!("asked {} did not advance past {}", number.get(), last.get()))
+            },
+        }
+    }
+}
+
+enum ClientPlace {
+    Showing {
+        worktree: WorktreeId,
+        focus: Option<ViewId>,
+        browser_ttys: BTreeMap<ViewId, String>,
+        laid_said: Option<show_response::Laid>,
+    },
+    Stranded {
+        left: WorktreeId,
+    },
+}
+
+struct Client {
     size: Size,
     runs_in: Option<TerminalKey>,
     out: Out,
+    heard: ClientAsks,
+    echoed: Option<AskNumber>,
+    place: ClientPlace,
+}
+
+impl Client {
+    fn showing(&self) -> Option<(WorktreeId, Option<ViewId>)> {
+        match self.place {
+            ClientPlace::Showing { worktree, focus, .. } => Some((worktree, focus)),
+            ClientPlace::Stranded { .. } => None,
+        }
+    }
+
+    fn showing_worktree(&self, worktree: WorktreeId) -> bool {
+        matches!(self.place, ClientPlace::Showing { worktree: shown, .. } if shown == worktree)
+    }
+
+    fn browser_ttys(&self, worktree: WorktreeId) -> Option<&BTreeMap<ViewId, String>> {
+        match &self.place {
+            ClientPlace::Showing { worktree: shown, browser_ttys, .. } if *shown == worktree => {
+                Some(browser_ttys)
+            },
+            ClientPlace::Showing { .. } | ClientPlace::Stranded { .. } => None,
+        }
+    }
 }
 
 struct Known {
@@ -562,36 +622,47 @@ impl Layouts {
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|(made, opened)| Changed { made, opened, kept }));
             },
-            Command::Came { worktree, size, runs_in, again, out, answer } => {
-                let _ = answer.send(self.came(worktree, size, runs_in, again, out));
+            Command::Came { worktree, size, runs_in, again, asked_number, out, answer } => {
+                let _ = answer.send(self.came(worktree, size, runs_in, again, asked_number, out));
             },
-            Command::Asked { client, asked } if self.stranded.contains_key(&client) => {
-                self.asked_stranded(client, asked);
-            },
-            Command::Asked { client, asked } => {
-                if !self.clients.contains_key(&client) {
+            Command::Asked { client, asked_number, asked } => {
+                let Some(held) = self.clients.get_mut(&client) else {
+                    return;
+                };
+                let stranded = matches!(held.place, ClientPlace::Stranded { .. });
+                let heard_ok = held.heard.hear(asked_number);
+                if stranded {
+                    self.asked_stranded(client, asked_number, heard_ok.and(asked));
                     return;
                 }
-                let event = match asked.and_then(|asked| self.asked(client, asked)) {
+                let event = match heard_ok
+                    .and(asked)
+                    .and_then(|asked| self.asked(client, asked))
+                {
                     Ok(Done::Quiet) => return,
                     Ok(Done::Edged { direction, step }) => {
-                        let worktree = self.clients[&client].worktree.get();
+                        let (worktree, _) = self.clients[&client]
+                            .showing()
+                            .expect("a showing client edged");
                         let direction = direction_said(direction).into();
                         let step = step.get();
-                        let edged = show_response::Edged { worktree, direction, step };
+                        let edged =
+                            show_response::Edged { worktree: worktree.get(), direction, step };
                         show_response::Event::Edged(edged)
                     },
                     Err(why) => show_response::Event::Refused(why),
                 };
-                let word = api::ShowResponse { event: Some(event) };
-                let held = self.clients.get(&client).expect("a client that asked is held");
-                if !told(&held.out, word) {
+                let held = self.client(client);
+                let heard = held.heard.last();
+                let word = api::ShowResponse { event: Some(event), heard: AskNumber::wire(heard) };
+                if told(&held.out, word) {
+                    held.echoed = heard;
+                } else {
                     self.clients.remove(&client);
                 }
             },
             Command::Left(client) => {
                 self.clients.remove(&client);
-                self.stranded.remove(&client);
             },
             Command::Listed(listed) => self.heard_listed(listed),
             Command::Emptied { since } => {
@@ -772,25 +843,22 @@ impl Layouts {
         let valid = |registered: &str| {
             terminal_socket::view_from_browser_tty(runtime, registered) == Some(view)
         };
-        let matching_client = caller_tty.and_then(|caller| {
+        let matching_ttys = caller_tty.and_then(|caller| {
             self.clients
                 .values()
-                .filter(|client| client.worktree == worktree)
-                .find(|client| client.browser_ttys.values().any(|it| it == caller))
+                .filter_map(|client| client.browser_ttys(worktree))
+                .find(|ttys| ttys.values().any(|it| it == caller))
         });
-        if let Some(client) = matching_client
-            && let Some(registered) = client.browser_ttys.get(&view)
+        if let Some(ttys) = matching_ttys
+            && let Some(registered) = ttys.get(&view)
             && valid(registered)
         {
             return Some(registered.clone());
         }
-        self.clients
-            .values()
-            .filter(|client| client.worktree == worktree)
-            .find_map(|client| {
-                let registered = client.browser_ttys.get(&view)?;
-                valid(registered).then(|| registered.clone())
-            })
+        self.clients.values().filter_map(|client| client.browser_ttys(worktree)).find_map(|ttys| {
+            let registered = ttys.get(&view)?;
+            valid(registered).then(|| registered.clone())
+        })
     }
 
     fn socket_neighbor(
@@ -802,7 +870,7 @@ impl Layouts {
         let Some((worktree, _)) = projects.holding_view(from) else {
             return Ok(None);
         };
-        let shown = self.clients.values().filter(|it| it.worktree == worktree.id());
+        let shown = self.clients.values().filter(|it| it.showing_worktree(worktree.id()));
         let size = fit(shown, worktree.layout(), &self.known)
             .map_or(UNSHOWN_SIZE, |fit| fit.size);
         let Some(neighbor) = worktree.layout().beside(from, direction, size) else {
@@ -824,7 +892,7 @@ impl Layouts {
             return Err(format!("no layout holds view {from}"));
         };
         let worktree = worktree_ref.id();
-        let shown = self.clients.values().filter(|it| it.worktree == worktree);
+        let shown = self.clients.values().filter(|it| it.showing_worktree(worktree));
         let size = fit(shown, worktree_ref.layout(), &self.known)
             .map_or(UNSHOWN_SIZE, |fit| fit.size);
         let preferred = match direction {
@@ -844,8 +912,12 @@ impl Layouts {
                         size,
                     )
                     .map_err(Failed::said)?;
-                for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
-                    client.focus = Some(view);
+                for client in self.clients.values_mut() {
+                    if let ClientPlace::Showing { worktree: shown, focus, .. } = &mut client.place
+                        && *shown == worktree
+                    {
+                        *focus = Some(view);
+                    }
                 }
                 return Ok(());
             },
@@ -864,8 +936,12 @@ impl Layouts {
         let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         self.spawned(terminal, &cwd, &opens, inner)?;
-        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
-            client.focus = Some(terminal.view());
+        for client in self.clients.values_mut() {
+            if let ClientPlace::Showing { worktree: shown, focus, .. } = &mut client.place
+                && *shown == worktree
+            {
+                *focus = Some(terminal.view());
+            }
         }
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(terminal.view())), "split terminal opens focused");
@@ -891,8 +967,12 @@ impl Layouts {
         };
         let worktree = worktree_ref.id();
         self.relaid(Relaid::Focus { view: pane })?;
-        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
-            client.focus = Some(pane);
+        for client in self.clients.values_mut() {
+            if let ClientPlace::Showing { worktree: shown, focus, .. } = &mut client.place
+                && *shown == worktree
+            {
+                *focus = Some(pane);
+            }
         }
         assert_eq!(
             self.layout(worktree).map(Layout::last_focus),
@@ -908,9 +988,10 @@ impl Layouts {
         size: Size,
         runs_in: Option<TerminalKey>,
         again: bool,
+        asked_number: Option<AskNumber>,
         out: Out,
     ) -> Result<ClientId, Status> {
-        if self.clients.len() + self.stranded.len() >= CLIENTS_MAX {
+        if self.clients.len() >= CLIENTS_MAX {
             let many = format!("{CLIENTS_MAX} clients show layouts, as many as may");
             return Err(Status::resource_exhausted(many));
         }
@@ -921,14 +1002,19 @@ impl Layouts {
         let focus = arrival(shown);
         self.arrivals += 1;
         let id = ClientId(self.arrivals);
-        let client = Client {
+        let place = ClientPlace::Showing {
             worktree,
-            size,
-            runs_in,
             focus,
             browser_ttys: BTreeMap::new(),
+            laid_said: None,
+        };
+        let client = Client {
+            size,
+            runs_in,
             out,
-            said: None,
+            heard: ClientAsks::start(asked_number),
+            echoed: None,
+            place,
         };
         assert!(self.clients.insert(id, client).is_none(), "a client comes once");
         if !again {
@@ -937,31 +1023,33 @@ impl Layouts {
         Ok(id)
     }
 
-    fn asked_stranded(&mut self, client: ClientId, asked: Result<Asked, String>) {
-        let left = self.stranded[&client].left;
+    fn asked_stranded(
+        &mut self,
+        client: ClientId,
+        asked_number: Option<AskNumber>,
+        asked: Result<Asked, String>,
+    ) {
+        let ClientPlace::Stranded { left } = self.clients[&client].place else {
+            unreachable!("a stranded client asked");
+        };
         let refused = match asked {
-            Ok(Asked::Size(size)) => {
-                self.stranded.get_mut(&client).expect("a stranded client asked").size = size;
+            Ok(Asked::Size(size)) if asked_number.is_none() => {
+                self.client(client).size = size;
                 return;
             },
+            Ok(Asked::Size(_)) => "size cannot be awaited while stranded".to_owned(),
             Ok(Asked::Go(to)) => {
                 let shown = self.store.projects().and_then(|it| it.find(to));
                 let Some((_, shown)) = shown else {
                     return self.refuse_stranded(client, format!("no worktree {to}"));
                 };
                 let focus = arrival(shown);
-                let stranded = self.stranded.remove(&client).expect("a stranded client asked");
-                let Stranded { size, runs_in, out, .. } = stranded;
-                let arrived = Client {
+                self.client(client).place = ClientPlace::Showing {
                     worktree: to,
-                    size,
-                    runs_in,
                     focus,
                     browser_ttys: BTreeMap::new(),
-                    out,
-                    said: None,
+                    laid_said: None,
                 };
-                assert!(self.clients.insert(client, arrived).is_none(), "a client is held once");
                 self.went(to);
                 return;
             },
@@ -972,9 +1060,16 @@ impl Layouts {
     }
 
     fn refuse_stranded(&mut self, client: ClientId, refused: String) {
-        let word = api::ShowResponse { event: Some(show_response::Event::Refused(refused)) };
-        if !told(&self.stranded[&client].out, word) {
-            self.stranded.remove(&client);
+        let held = self.client(client);
+        let heard = held.heard.last();
+        let word = api::ShowResponse {
+            event: Some(show_response::Event::Refused(refused)),
+            heard: AskNumber::wire(heard),
+        };
+        if told(&held.out, word) {
+            held.echoed = heard;
+        } else {
+            self.clients.remove(&client);
         }
     }
 
@@ -1013,7 +1108,7 @@ impl Layouts {
         let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
         let projects = self.kept()?;
         let (project, found) = projects.find(worktree).expect("a worktree just found is held");
-        let shown = self.clients.values().filter(|it| it.worktree == worktree);
+        let shown = self.clients.values().filter(|it| it.showing_worktree(worktree));
         let size = fit(shown, found.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let view = terminal.view();
         let (placed, inner) = placement(found.layout(), None, Beside::Largest, view, size)?;
@@ -1162,8 +1257,12 @@ impl Layouts {
         if let Some(why) = kept? {
             self.unwritten(&why);
         }
-        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
-            client.browser_ttys.clear();
+        for client in self.clients.values_mut() {
+            if let ClientPlace::Showing { worktree: shown, browser_ttys, .. } = &mut client.place
+                && *shown == worktree
+            {
+                browser_ttys.clear();
+            }
         }
         self.forget_closed(&terminals);
         Ok(None)
@@ -1239,14 +1338,20 @@ impl Layouts {
         let Some((&held, _)) = held else {
             return Ok(Made::Untaken);
         };
-        let sent = api::ShowResponse { event: Some(show_response::Event::Sent(worktree.get())) };
-        let on = self.clients.iter().filter(|(_, it)| it.focus == Some(held.view()));
+        let on = self.clients.iter().filter(|(_, it)| {
+            matches!(it.place, ClientPlace::Showing { focus, .. } if focus == Some(held.view()))
+        });
         let on = on.map(|(id, _)| *id);
         let on: Vec<ClientId> = on.collect();
         let mut taken = false;
         for client in on {
             let it = &self.clients[&client];
-            if it.worktree == worktree || told(&it.out, sent.clone()) {
+            let (shown, _) = it.showing().expect("a client focusing a view is showing");
+            let sent = api::ShowResponse {
+                event: Some(show_response::Event::Sent(worktree.get())),
+                heard: AskNumber::wire(it.heard.last()),
+            };
+            if shown == worktree || told(&it.out, sent) {
                 taken = true;
             } else {
                 self.clients.remove(&client);
@@ -1304,9 +1409,8 @@ impl Layouts {
     }
 
     fn asked(&mut self, client: ClientId, asked: Asked) -> Result<Done, String> {
-        let worktree = self.clients[&client].worktree;
+        let (worktree, focus) = self.clients[&client].showing().expect("a showing client asked");
         let size = self.size_of(client);
-        let focus = self.clients[&client].focus;
         let focused = || focus.ok_or_else(|| "the layout holds no view".to_owned());
         match asked {
             Asked::Size(size) => self.client(client).size = size,
@@ -1314,10 +1418,14 @@ impl Layouts {
                 let projects = self.kept()?;
                 let (_, shown) = projects.find(to).ok_or_else(|| format!("no worktree {to}"))?;
                 let focus = arrival(shown);
-                let moved = self.client(client);
-                moved.worktree = to;
-                moved.focus = focus;
-                moved.browser_ttys.clear();
+                let ClientPlace::Showing { worktree, focus: focused, browser_ttys, .. } =
+                    &mut self.client(client).place
+                else {
+                    unreachable!("a showing client goes to another worktree");
+                };
+                *worktree = to;
+                *focused = focus;
+                browser_ttys.clear();
                 self.went(to);
             },
             Asked::Open { beside, opens } => self.open(client, beside, &opens)?,
@@ -1339,7 +1447,10 @@ impl Layouts {
                 if self.kept()?.holding_browser(view).is_none() {
                     return Err(format!("view {view} runs no browser"));
                 }
-                let client_state = self.client(client);
+                let ClientPlace::Showing { browser_ttys, .. } = &mut self.client(client).place
+                else {
+                    unreachable!("a showing client updates browser tty");
+                };
                 match tty {
                     Some(tty) => {
                         if !terminal_socket::is_browser_client_tty(&tty, view) {
@@ -1347,10 +1458,10 @@ impl Layouts {
                                 "browser_tty: {tty:?} is no browser tty for view {view}"
                             ));
                         }
-                        client_state.browser_ttys.insert(view, tty);
+                        browser_ttys.insert(view, tty);
                     },
                     None => {
-                        client_state.browser_ttys.remove(&view);
+                        browser_ttys.remove(&view);
                     },
                 }
             },
@@ -1441,9 +1552,12 @@ impl Layouts {
     }
 
     fn focus(&mut self, client: ClientId, view: ViewId) -> Result<(), String> {
-        let worktree = self.clients[&client].worktree;
+        let (worktree, _) = self.clients[&client].showing().expect("a showing client focuses");
         self.relaid(Relaid::Focus { view })?;
-        self.client(client).focus = Some(view);
+        let ClientPlace::Showing { focus, .. } = &mut self.client(client).place else {
+            unreachable!("a showing client focuses");
+        };
+        *focus = Some(view);
         let layout = self.layout(worktree)?;
         assert_eq!(layout.last_focus(), Some(view), "view {view} is its worktree's last focus");
         let full = layout.full();
@@ -1452,16 +1566,18 @@ impl Layouts {
     }
 
     fn size_of(&self, client: ClientId) -> Size {
-        let Client { worktree, size, .. } = self.clients[&client];
+        let client = &self.clients[&client];
+        let (worktree, _) = client.showing().expect("a showing client has a size");
+        let size = client.size;
         let Some((_, found)) = self.store.projects().and_then(|it| it.find(worktree)) else {
             return size;
         };
-        let shown = self.clients.values().filter(|it| it.worktree == worktree);
+        let shown = self.clients.values().filter(|it| it.showing_worktree(worktree));
         fit(shown, found.layout(), &self.known).map_or(size, |fit| fit.size)
     }
 
     fn open(&mut self, client: ClientId, beside: Beside, opens: &Opens) -> Result<(), String> {
-        let Client { worktree, focus, .. } = self.clients[&client];
+        let (worktree, focus) = self.clients[&client].showing().expect("a showing client opens");
         let size = self.size_of(client);
         let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
         let projects = self.kept()?;
@@ -1483,14 +1599,17 @@ impl Layouts {
         let made = Terminal::new(terminal, folder, opens.runs());
         self.changed(Change::Open { worktree, view: View::Terminal(made), placed, size })?;
         self.spawned(terminal, &cwd, opens, inner)?;
-        self.client(client).focus = Some(terminal.view());
+        if let ClientPlace::Showing { focus, .. } = &mut self.client(client).place {
+            *focus = Some(terminal.view());
+        }
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(terminal.view())), "terminal {terminal} opens focused");
         Ok(())
     }
 
     fn welcome(&mut self, client: ClientId) -> Result<(), String> {
-        let Client { worktree, focus, .. } = self.clients[&client];
+        let (worktree, focus) =
+            self.clients[&client].showing().expect("a showing client welcomes");
         let size = self.size_of(client);
         let view = self.store.fresh().map_err(Failed::said)?;
         let projects = self.kept()?;
@@ -1502,7 +1621,9 @@ impl Layouts {
         let held_in = projects.holding_view(view).map(|(it, _)| it.id());
         assert_eq!(held_in, Some(worktree), "welcome view {view} opened in its worktree");
         assert!(projects.holding_terminal(view).is_none(), "welcome view {view} runs no terminal");
-        self.client(client).focus = Some(view);
+        if let ClientPlace::Showing { focus, .. } = &mut self.client(client).place {
+            *focus = Some(view);
+        }
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(view)), "welcome view {view} opens focused");
         Ok(())
@@ -1544,14 +1665,21 @@ impl Layouts {
     }
 
     fn browser(&mut self, client: ClientId, url: Option<BrowserUrl>) -> Result<(), String> {
-        let Client { worktree, focus, .. } = self.clients[&client];
+        let (worktree, focus) =
+            self.clients[&client].showing().expect("a showing client browses");
         let size = self.size_of(client);
         let beside = if focus.is_some() { Beside::Focused } else { Beside::Largest };
         let view = self
             .place_browser(worktree, focus, beside, None, url, size)
             .map_err(Failed::said)?;
-        self.client(client).focus = Some(view);
-        assert_eq!(self.clients[&client].focus, Some(view), "client focuses opened browser");
+        if let ClientPlace::Showing { focus, .. } = &mut self.client(client).place {
+            *focus = Some(view);
+        }
+        assert_eq!(
+            self.clients[&client].showing(),
+            Some((worktree, Some(view))),
+            "client focuses opened browser"
+        );
         Ok(())
     }
 
@@ -1622,8 +1750,12 @@ impl Layouts {
             None if created => Made::Worktree(worktree),
             None => Made::Found(worktree),
         };
-        for client in self.clients.values_mut().filter(|it| it.worktree == worktree) {
-            client.focus = Some(view);
+        for client in self.clients.values_mut() {
+            if let ClientPlace::Showing { worktree: shown, focus, .. } = &mut client.place
+                && *shown == worktree
+            {
+                *focus = Some(view);
+            }
         }
         Ok((Some(made), Some(projects::Opened::View(view))))
     }
@@ -1638,7 +1770,7 @@ impl Layouts {
         let (_, shown) = projects
             .find(worktree)
             .ok_or_else(|| Failed::Refused(format!("no worktree has the id {worktree}")))?;
-        let shown_clients = self.clients.values().filter(|it| it.worktree == worktree);
+        let shown_clients = self.clients.values().filter(|it| it.showing_worktree(worktree));
         let size = fit(shown_clients, shown.layout(), &self.known)
             .map_or(UNSHOWN_SIZE, |fit| fit.size);
         let focus = beside_view.or_else(|| shown.layout().last_focus());
@@ -1647,7 +1779,8 @@ impl Layouts {
     }
 
     fn review(&mut self, client: ClientId) -> Result<(), String> {
-        let Client { worktree, focus, .. } = self.clients[&client];
+        let (worktree, focus) =
+            self.clients[&client].showing().expect("a showing client reviews");
         let size = self.size_of(client);
         let view = self.store.fresh().map_err(Failed::said)?;
         let projects = self.kept()?;
@@ -1659,7 +1792,9 @@ impl Layouts {
         let held_in = projects.holding_view(view).map(|(it, _)| it.id());
         assert_eq!(held_in, Some(worktree), "review view {view} opened in its worktree");
         assert!(projects.holding_terminal(view).is_none(), "review view {view} runs no terminal");
-        self.client(client).focus = Some(view);
+        if let ClientPlace::Showing { focus, .. } = &mut self.client(client).place {
+            *focus = Some(view);
+        }
         let last_focus = self.layout(worktree).map(Layout::last_focus);
         assert_eq!(last_focus, Ok(Some(view)), "review view {view} opens focused");
         Ok(())
@@ -1797,7 +1932,7 @@ impl Layouts {
         let kept_folder = held.folder().clone();
         let runs = held.runs().clone();
         let layout = worktree.layout();
-        let shown = self.clients.values().filter(|it| it.worktree == held_in.id());
+        let shown = self.clients.values().filter(|it| it.showing_worktree(held_in.id()));
         let size = fit(shown, layout, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let inner = placed(layout, terminal.view(), size);
         let inner = inner.expect("a layout lays out the terminals it holds");
@@ -2076,9 +2211,11 @@ impl Layouts {
             }
         }
         for client in self.clients.values_mut() {
-            client.browser_ttys.remove(&view);
-            if client.focus == Some(view) {
-                client.focus = heir;
+            if let ClientPlace::Showing { focus, browser_ttys, .. } = &mut client.place {
+                browser_ttys.remove(&view);
+                if *focus == Some(view) {
+                    *focus = heir;
+                }
             }
         }
         let projects = self.kept().map_err(Failed::NotKept)?;
@@ -2086,7 +2223,9 @@ impl Layouts {
         if let Some(heir) = heir {
             assert!(projects.holding_view(heir).is_some(), "view {heir} took the room it left");
         }
-        let focused = self.clients.values().any(|client| client.focus == Some(view));
+        let focused = self.clients.values().any(|client| {
+            matches!(client.place, ClientPlace::Showing { focus, .. } if focus == Some(view))
+        });
         assert!(!focused, "no client focuses view {view}, which closed");
         Ok(())
     }
@@ -2497,7 +2636,13 @@ impl Layouts {
         let view = terminal.view();
         let (held_in, _) = projects.holding_terminal(view).ok_or("no layout holds it")?;
         let from = held_in.id();
-        let follows = |client: &Client| client.worktree == from && client.focus == Some(view);
+        let follows = |client: &Client| {
+            matches!(
+                client.place,
+                ClientPlace::Showing { worktree, focus, .. }
+                    if worktree == from && focus == Some(view)
+            )
+        };
         let unmade = Layout::default();
         let (target, bound) = match &to {
             MoveTo::Worktree(to) => {
@@ -2506,13 +2651,17 @@ impl Layouts {
             },
             MoveTo::Made { .. } => (&unmade, None),
         };
-        let shown = self.clients.values().filter(|it| Some(it.worktree) == bound || follows(it));
+        let shown = self.clients.values().filter(|it| {
+            bound.is_some_and(|bound| it.showing_worktree(bound)) || follows(it)
+        });
         let size = fit(shown, target, &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
         let followed = self.clients.values().any(follows);
         let to = self.store.moved(terminal, to, size, followed).map_err(Failed::said)?;
         for client in self.clients.values_mut().filter(|client| follows(client)) {
-            client.worktree = to;
-            client.browser_ttys.clear();
+            if let ClientPlace::Showing { worktree, browser_ttys, .. } = &mut client.place {
+                *worktree = to;
+                browser_ttys.clear();
+            }
         }
         if followed {
             self.went(to);
@@ -2544,42 +2693,51 @@ impl Layouts {
     }
 
     fn settle(&mut self) {
-        let Layouts { store, clients, stranded, known, looked, errands, troubles, .. } = self;
+        let Layouts { store, clients, known, looked, errands, troubles, .. } = self;
         let Some(projects) = store.projects() else {
             let why = store.unkept().unwrap_or("no projects are kept").to_owned();
-            let outs = std::mem::take(clients).into_values().map(|it| it.out);
-            for out in outs.chain(std::mem::take(stranded).into_values().map(|it| it.out)) {
-                let _ = out.try_send(Err(Status::failed_precondition(why.clone())));
+            for client in std::mem::take(clients).into_values() {
+                let _ = client.out.try_send(Err(Status::failed_precondition(why.clone())));
             }
             return;
         };
+        let version = store.revision().to_api();
         let mut gone = Vec::new();
         for (id, client) in clients.iter_mut() {
-            let Some((_, shown)) = projects.find(client.worktree) else {
-                gone.push(*id);
+            let ClientPlace::Showing { worktree, focus, .. } = &mut client.place else {
+                continue;
+            };
+            let Some((_, shown)) = projects.find(*worktree) else {
+                gone.push((*id, *worktree));
                 continue;
             };
             let layout = shown.layout();
             if let Some(full) = layout.full() {
-                client.focus = Some(full);
-            } else if !client.focus.is_some_and(|focus| layout.holds(focus)) {
-                client.focus = arrival(shown);
+                *focus = Some(full);
+            } else if !focus.is_some_and(|focus| layout.holds(focus)) {
+                *focus = arrival(shown);
             }
         }
-        for id in gone {
-            let Client { worktree: left, size, runs_in, out, .. } =
-                clients.remove(&id).expect("a client whose worktree went is held");
-            let word = api::ShowResponse { event: Some(show_response::Event::Left(left.get())) };
-            if told(&out, word) {
-                let strands = Stranded { left, size, runs_in, out };
-                assert!(stranded.insert(id, strands).is_none(), "a client is stranded once");
+        for (id, left) in gone {
+            let client = clients.get_mut(&id).expect("a client whose worktree went is held");
+            let heard = client.heard.last();
+            let word = api::ShowResponse {
+                event: Some(show_response::Event::Left(left.get())),
+                heard: AskNumber::wire(heard),
+            };
+            if told(&client.out, word) {
+                client.echoed = heard;
+                client.place = ClientPlace::Stranded { left };
+            } else {
+                clients.remove(&id);
             }
         }
-        let worktrees: BTreeSet<_> = clients.values().map(|it| it.worktree).collect();
+        let worktrees: BTreeSet<WorktreeId> =
+            clients.values().filter_map(Client::showing).map(|(worktree, _)| worktree).collect();
         let mut fits: BTreeMap<WorktreeId, Fit> = BTreeMap::new();
         for worktree in worktrees {
             let (_, found) = projects.find(worktree).expect("a client's worktree is held");
-            let shown = clients.values().filter(|it| it.worktree == worktree);
+            let shown = clients.values().filter(|it| it.showing_worktree(worktree));
             let fitted = fit(shown, found.layout(), known);
             let fitted = fitted.expect("a worktree shown has a client");
             fits.insert(worktree, fitted);
@@ -2596,9 +2754,8 @@ impl Layouts {
                 let Some(known) = known.get_mut(&terminal) else {
                     continue;
                 };
-                let runs_in = |it: &Client| {
-                    it.worktree == worktree && it.runs_in == Some(known.key)
-                };
+                let runs_in =
+                    |it: &Client| it.showing_worktree(worktree) && it.runs_in == Some(known.key);
                 let pinned = !outside && clients.values().any(runs_in);
                 if known.settled == Some(wanted) || pinned {
                     continue;
@@ -2615,26 +2772,34 @@ impl Layouts {
         assert!(sizes_asked <= VIEWS_MAX, "a settle asks at most one size of each view");
         let mut slow = Vec::new();
         for (id, client) in clients.iter_mut() {
-            let found = projects.find(client.worktree);
+            let ClientPlace::Showing { worktree, focus, laid_said, .. } = &mut client.place else {
+                continue;
+            };
+            let found = projects.find(*worktree);
             let (_, found) = found.expect("a client's worktree is held");
-            let size = fits[&client.worktree].size;
-            let laid = laid(found, size, client.focus, known, *looked);
-            if client.said.as_ref() == Some(&laid) {
+            let size = fits[worktree].size;
+            let laid_body = laid(found, size, *focus, known, *looked);
+            let heard = client.heard.last();
+            if laid_said.as_ref() == Some(&laid_body) && client.echoed >= heard {
                 continue;
             }
-            if !told(&client.out, laid.clone()) {
+            let mut wire_laid = laid_body.clone();
+            wire_laid.version = Some(version);
+            let word = api::ShowResponse {
+                event: Some(show_response::Event::Laid(wire_laid)),
+                heard: AskNumber::wire(heard),
+            };
+            if !told(&client.out, word) {
                 slow.push(*id);
                 continue;
             }
-            client.said = Some(laid);
+            *laid_said = Some(laid_body);
+            client.echoed = heard;
         }
         for id in slow {
             clients.remove(&id);
         }
-        let held = clients.len() + stranded.len();
-        assert!(held <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show layouts");
-        let both = clients.keys().any(|it| stranded.contains_key(it));
-        assert!(!both, "a client shows or is stranded");
+        assert!(clients.len() <= CLIENTS_MAX, "no more than {CLIENTS_MAX} clients show layouts");
     }
 }
 
@@ -2980,7 +3145,7 @@ fn laid(
     focus: Option<ViewId>,
     known: &BTreeMap<TerminalViewId, Known>,
     looked: bool,
-) -> api::ShowResponse {
+) -> show_response::Laid {
     let layout = worktree.layout();
     if let Some(focus) = focus {
         assert!(layout.holds(focus), "a client focuses view {focus} of the layout it shows");
@@ -3018,7 +3183,7 @@ fn laid(
     let views: Vec<show_response::View> = views.collect();
     assert_eq!(views.len(), layout.len(), "a layout lays out each of its terminals");
     let (columns, rows) = fitted.get();
-    let laid = show_response::Laid {
+    show_response::Laid {
         worktree: worktree.id().get(),
         size: Some(show_request::Size { columns: columns.into(), rows: rows.into() }),
         views,
@@ -3033,8 +3198,8 @@ fn laid(
             (None, Some(focus)) => Some(show_response::laid::Shown::Tiled(focus.get())),
             (None, None) => None,
         },
-    };
-    api::ShowResponse { event: Some(show_response::Event::Laid(laid)) }
+        version: None,
+    }
 }
 
 fn runs_of(listed: &server::Terminal, before: &Runs, shell: &Shell) -> Runs {

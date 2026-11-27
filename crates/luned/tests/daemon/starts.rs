@@ -384,7 +384,17 @@ fn a_new_worktree_on_a_view_in_a_folder_of_a_project_shows_that_folder_in_the_pr
     git(&dir.path.parent().unwrap().join(".bare"), &["worktree", "add", "-q", "../feat", "feat"]);
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || window.shows(" work ").then_some(()));
+    eventually("the sidebar seats its view", || {
+        window
+            .screen()
+            .iter()
+            .any(|line| {
+                let sidebar: String =
+                    line.chars().skip_while(|it| *it == '│').take_while(|it| *it != '│').collect();
+                sidebar.starts_with('▌') && sidebar.contains(" work/main")
+            })
+            .then_some(())
+    });
     window.send(SPLIT);
     eventually("a second view opens in work", || {
         (shown(&owned, &dir.path)?.terminals.len() == 2).then_some(())
