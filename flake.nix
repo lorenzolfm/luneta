@@ -282,6 +282,7 @@
               pkgs
               toolchain
               buildTools
+              macBuildEnv
               clippyRun
               testRun
               nextest

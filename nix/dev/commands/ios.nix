@@ -1,8 +1,7 @@
 {
   pkgs,
   toolchain,
-  buildTools,
-  compileEnv,
+  macBuildEnv,
   ...
 }:
 let
@@ -10,12 +9,7 @@ let
   onMac = pkgs.stdenv.hostPlatform.isDarwin;
   phone = "aarch64-apple-ios";
   simulator = "aarch64-apple-ios-sim";
-  iosToolchain = toolchain.override {
-    targets = [
-      phone
-      simulator
-    ];
-  };
+  toolchainFor = targets: toolchain.override { inherit targets; };
   xcode = import ../../ios.nix { inherit pkgs; };
   swift = import ../../swift.nix { inherit pkgs; };
   noXcode = ''
@@ -42,19 +36,23 @@ let
       configuration=Release
       sdk=iphoneos
       destination="generic/platform=iOS"
-      signing=(-allowProvisioningUpdates "DEVELOPMENT_TEAM=$LUNE_TEAM")
+      settings=(-allowProvisioningUpdates "DEVELOPMENT_TEAM=$LUNE_TEAM")
     else
       target=${simulator}
       profile=dev
       folder=debug
       configuration=Debug
       sdk=iphonesimulator
-      udid="$(checkout-simulator ensure)"
-      destination="id=$udid"
-      signing=()
+      if [ "$how" = run ]; then
+        udid="$(checkout-simulator ensure)"
+        destination="id=$udid"
+      else
+        destination="generic/platform=iOS Simulator"
+      fi
+      settings=(ARCHS=arm64)
     fi
 
-    ${compileEnv}
+    ${macBuildEnv}
     cargo build --locked -p lune-phone --target "$target" --profile "$profile"
     cargo build --locked -p lune-phone-bindgen
     built="$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)"
@@ -74,7 +72,7 @@ let
 
     xcodebuild-logged "$how" build -project ios/Lune.xcodeproj -scheme Lune \
       -configuration "$configuration" -sdk "$sdk" -destination "$destination" \
-      -derivedDataPath "$out/derived" "''${signing[@]}"
+      -derivedDataPath "$out/derived" "''${settings[@]}"
     app="$out/derived/Build/Products/$configuration-$sdk/Lune.app"
     bundle="$(plutil -extract CFBundleIdentifier raw -o - "$app/Info.plist")"
 
@@ -114,21 +112,33 @@ let
         ;;
     esac
   '';
+  buildKit = [
+    pkgs.coreutils
+    pkgs.jq
+    pkgs.protobuf
+    pkgs.stdenv.cc
+  ]
+  ++ lib.optionals onMac (
+    [
+      pkgs.stdenv.cc.bintools.bintools
+    ]
+    ++ xcode.tools
+  );
 in
 {
   name = "ios";
   usage = "[build|run|phone|clean|fmt]";
-  help = "the iPhone app, on a Mac with Xcode ${xcode.xcodeVersion}: build for this checkout's simulator (the default), run it there, phone to install it on the paired iPhone (LUNE_TEAM names the signing team, LUNE_PHONE the device when more than one is paired), clean to drop ios/build and the simulator, fmt to format the Swift (on Linux too)";
+  help = "the iPhone app, on a Mac with Xcode ${xcode.xcodeVersion}: build for the simulator (the default), run it on this checkout's simulator, phone to install it on the paired iPhone (LUNE_TEAM names the signing team, LUNE_PHONE the device when more than one is paired), clean to drop ios/build and the simulator, fmt to format the Swift (on Linux too)";
   tools = [
-    iosToolchain
-    pkgs.coreutils
-    pkgs.jq
+    (toolchainFor [
+      phone
+      simulator
+    ])
     pkgs.git
     pkgs.findutils
     swift.format
   ]
-  ++ buildTools
-  ++ lib.optionals onMac xcode.tools;
+  ++ buildKit;
   text = ''
     case "$#:$*" in
       0: | 1:build) how=build ;;
@@ -149,4 +159,12 @@ in
 
     ${if onMac then onXcode else noXcode}
   '';
+  build = {
+    name = "ios-build";
+    tools = [ (toolchainFor [ simulator ]) ] ++ buildKit;
+    text = ''
+      how=build
+      ${if onMac then onXcode else noXcode}
+    '';
+  };
 }

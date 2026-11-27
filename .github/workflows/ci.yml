@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
+      ios: ${{ steps.diff.outputs.ios }}
 
     steps:
       - name: actions/checkout v7
@@ -24,7 +25,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Whether anything but Markdown the build doesn't read changed
+      - name: Whether anything but Markdown the build doesn't read changed, and anything the iPhone app is built from
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
@@ -40,8 +41,15 @@ jobs:
           if [[ -n $files && $docs == "$files" ]]; then
             changed=false
           fi
+          app='ios/.*|crates/(phone|phone-bindgen|protocol)/.*|proto/.*'
+          build='Cargo\.(toml|lock)|rust-toolchain\.toml|flake\.(nix|lock)|nix/ios\.nix|nix/dev/default\.nix|nix/dev/commands/ios\.nix|\.github/workflows/ci\.yml'
+          ios=true
+          if [[ -n $files ]] && ! grep -qxE "$app|$build" <<<"$files"; then
+            ios=false
+          fi
           echo "$files"
           echo "changed=$changed" | tee -a "$GITHUB_OUTPUT"
+          echo "ios=$ios" | tee -a "$GITHUB_OUTPUT"
 
   clippy:
     needs: code
@@ -67,8 +75,8 @@ jobs:
             connect-timeout = 5
             fallback = true
             ${{ runner.os == 'macOS' && 'keep-outputs = true' || '' }}
-            ${{ !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
-            ${{ !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
+            ${{ github.job != 'ios' && !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
+            ${{ github.job != 'ios' && !github.event.pull_request.head.repo.fork && 'extra-trusted-public-keys = main:4Zt9CH+9bGa5vSsFCdxOmqGjhItSREekmxJaB9wmgYY=' || '' }}
 
       - &tailscale
         name: tailscale/github-action v4.4.0, to reach the attic cache
@@ -254,7 +262,9 @@ jobs:
 
   ios:
     needs: code
-    if: ${{ !cancelled() && needs.code.outputs.changed != 'false' }}
+    if: >-
+      ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && needs.code.outputs.ios != 'false' }}
     runs-on: xcode-27
     timeout-minutes: 40
 
@@ -274,8 +284,18 @@ jobs:
           fi
           echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
 
+      - name: actions/cache v6.1.0, what cargo fetched and built
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+
       - name: Build the app for the simulator
-        run: nix run .#dev -- ios build
+        run: nix run .#dev.commands.ios-build
 
       - name: actions/upload-artifact v7, xcodebuild's whole output
         if: failure()

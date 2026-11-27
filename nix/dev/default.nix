@@ -3,6 +3,7 @@
   toolchain,
   buildTools,
   compileEnv,
+  macBuildEnv,
   clippyRun,
   testRun,
   nextest,
@@ -26,6 +27,7 @@ let
       toolchain
       buildTools
       compileEnv
+      macBuildEnv
       clippyRun
       testRun
       nextest
@@ -70,6 +72,7 @@ pkgs.writeShellApplication {
   passthru.commands = {
     lint = command (import ./commands/lint.nix args);
     clippy-cross = command (import ./commands/clippy.nix args).cross;
+    ios-build = command (import ./commands/ios.nix args).build;
   };
   text = ''
     paint() {
