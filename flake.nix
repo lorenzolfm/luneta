@@ -55,8 +55,7 @@
         else
           ciRetriesRaw.count or (throw ".config/nextest.toml [profile.ci].retries has no count");
       ciJunitPath =
-        (ciProfile.junit or { }).path
-          or (throw ".config/nextest.toml has no [profile.ci.junit].path");
+        (ciProfile.junit or { }).path or (throw ".config/nextest.toml has no [profile.ci.junit].path");
       inherit (cargoToml.workspace.package) version;
       rustVersion =
         cargoToml.workspace.package.rust-version
@@ -336,23 +335,41 @@
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
           };
 
-          scrubCargoDeps = label: depsToolchains: ''
-            targetDir="''${CARGO_TARGET_DIR:-target}"
-            rm -f "$targetDir/.rustc_info.json"
-            find "$targetDir" -path '*/build/transcribe-cpp-sys-*/out/build' -type d -prune -exec rm -rf -- {} +
-            for depToolchain in ${pkgs.lib.escapeShellArgs depsToolchains}; do
-              toolchainHash="$(basename "$depToolchain")"
-              toolchainHash="''${toolchainHash%%-*}"
-              found=0
-              grep -rlF -- "$toolchainHash" "$targetDir" >&2 || found=$?
-              if (( found == 0 )); then
-                echo "${label}: $targetDir still references $depToolchain before compression" >&2
-                exit 1
-              elif (( found != 1 )); then
-                exit "$found"
-              fi
-            done
-          '';
+          scrubCargoDeps =
+            label: depsToolchains:
+            ''
+              targetDir="''${CARGO_TARGET_DIR:-target}"
+              rm -f "$targetDir/.rustc_info.json"
+              find "$targetDir" -path '*/build/transcribe-cpp-sys-*/out/build' -type d -prune -exec rm -rf -- {} +
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              source ${pkgs.darwin.signingUtils}
+              for depToolchain in ${pkgs.lib.escapeShellArgs depsToolchains}; do
+                toolchainHash="$(basename "$depToolchain")"
+                toolchainHash="''${toolchainHash%%-*}"
+                while IFS= read -r -d "" file; do
+                  if [[ -f $file && ! -L $file ]] && checkRequiresSignature "$file"; then
+                    chmod u+w "$file"
+                    "$STRIP" -S "$file"
+                    sign "$file"
+                  fi
+                done < <(grep -rlFZ -- "$toolchainHash" "$targetDir" || true)
+              done
+            ''
+            + ''
+              for depToolchain in ${pkgs.lib.escapeShellArgs depsToolchains}; do
+                toolchainHash="$(basename "$depToolchain")"
+                toolchainHash="''${toolchainHash%%-*}"
+                found=0
+                grep -rlF -- "$toolchainHash" "$targetDir" >&2 || found=$?
+                if (( found == 0 )); then
+                  echo "${label}: $targetDir still references $depToolchain before compression" >&2
+                  exit 1
+                elif (( found != 1 )); then
+                  exit "$found"
+                fi
+              done
+            '';
           checksArgs = daemon // {
             CARGO_PROFILE = checksProfile;
           };
