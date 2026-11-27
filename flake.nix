@@ -213,6 +213,16 @@
 
           nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
 
+          daemonPackages = "-p lune -p luned -p lune-mux";
+
+          testTools = [
+            pkgs.cargo-nextest
+            pkgs.git
+            pkgs.nodejs
+            pkgs.openssh
+            pkgs.procps
+          ];
+
           cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
 
           daemon = {
@@ -220,68 +230,89 @@
             inherit version src cargoVendorDir;
             strictDeps = true;
 
-            cargoExtraArgs = "--locked -p lune -p luned -p lune-mux";
-
             nativeBuildInputs = [ pkgs.protobuf ] ++ speechBuild;
             buildInputs = speechLibs ++ [ libghosttyVt.dev ];
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
-
-            nativeCheckInputs = [
-              pkgs.cargo-nextest
-              pkgs.git
-              pkgs.nodejs
-              pkgs.openssh
-              pkgs.procps
-            ];
           };
 
-          daemonDeps = craneLib.buildDepsOnly daemon;
+          checksProfile = "checks";
 
-          lunedWith =
-            built:
-            craneLib.buildPackage (
-              daemon
-              // {
-                src = testSrc;
-                cargoArtifacts = daemonDeps;
+          checksArgs = daemon // {
+            CARGO_PROFILE = checksProfile;
+          };
 
-                NEXTEST_SHOW_PROGRESS = "counter";
-                checkPhaseCargoCommand = ''
-                  export PATH="${localToolchain}/bin:$PATH"
-                  case "''${NIX_BUILD_CORES:-}" in
-                    "" | 0* | *[!0-9]*)
-                      printf 'checkPhase: NIX_BUILD_CORES must be a positive integer, got %s\n' "''${NIX_BUILD_CORES:-unset}" >&2
-                      exit 1
-                      ;;
-                    [1-7])
-                      test_threads=$((NIX_BUILD_CORES * 3))
-                      ;;
-                    *)
-                      test_threads=24
-                      ;;
-                  esac
-                  ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
-                    --test-threads "$test_threads"
-                  cargoWithProfile test --doc --locked ${testRun}
-                '';
+          checksDeps = craneLib.buildDepsOnly (
+            checksArgs
+            // {
+              pname = "luned-checks";
+              cargoExtraArgs = "--locked ${daemonPackages}";
+              doCheck = true;
+            }
+          );
 
-                meta = {
-                  description = "The lune daemon, its CLI, and lune's own multiplexer";
-                  homepage = "https://github.com/lorenzolfm/lune";
-                  license = pkgs.lib.licenses.mit;
-                  mainProgram = "luned";
-                  platforms = systems;
-                };
-              }
-              // built
-            );
+          releaseArgs = daemon // {
+            CARGO_PROFILE = "release";
+            cargoExtraArgs = "--locked ${daemonPackages}";
+            doCheck = false;
+          };
 
-          luned = lunedWith (
-            {
-              doCheck = false;
+          releaseDeps = craneLib.buildDepsOnly releaseArgs;
+
+          luned = craneLib.buildPackage (
+            releaseArgs
+            // {
+              cargoArtifacts = releaseDeps;
+
+              meta = {
+                description = "The lune daemon, its CLI, and lune's own multiplexer";
+                homepage = "https://github.com/lorenzolfm/lune";
+                license = pkgs.lib.licenses.mit;
+                mainProgram = "luned";
+                platforms = systems;
+              };
             }
             // pkgs.lib.optionalAttrs (self ? rev) {
               LUNE_BUILT = toString self.lastModified;
+            }
+          );
+
+          tested = craneLib.mkCargoDerivation (
+            checksArgs
+            // {
+              pnameSuffix = "-tested";
+              src = testSrc;
+              cargoArtifacts = checksDeps;
+              nativeCheckInputs = testTools;
+              doCheck = true;
+              doInstallCargoArtifacts = false;
+
+              LUNE_BUILT = "1";
+              NEXTEST_SHOW_PROGRESS = "counter";
+              NEXTEST_DOUBLE_SPAWN = "0";
+
+              preBuild = ''
+                export PATH="${localToolchain}/bin:$PATH"
+              '';
+              buildPhaseCargoCommand = ''
+                ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --no-run
+              '';
+              checkPhaseCargoCommand = ''
+                case "''${NIX_BUILD_CORES:-}" in
+                  "" | 0* | *[!0-9]*)
+                    printf 'checkPhase: NIX_BUILD_CORES must be a positive integer, got %s\n' "''${NIX_BUILD_CORES:-unset}" >&2
+                    exit 1
+                    ;;
+                  [1-7])
+                    test_threads=$((NIX_BUILD_CORES * 3))
+                    ;;
+                  *)
+                    test_threads=24
+                    ;;
+                esac
+                ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
+                  --test-threads "$test_threads"
+                cargoWithProfile test --doc --locked ${testRun}
+              '';
             }
           );
 
@@ -289,35 +320,46 @@
           vendoredClippyRun = "${clippyRun} --exclude lune-phone-bindgen";
 
           clippy = craneLib.cargoClippy (
-            daemon
+            checksArgs
             // {
               src = lintSrc;
-              cargoArtifacts = daemonDeps;
+              cargoArtifacts = checksDeps;
               cargoExtraArgs = "--locked";
               cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
+              postBuild = ''
+                cargoWithProfile clippy --locked ${daemonPackages} -- -D warnings
+              '';
               doCheck = false;
               doInstallCargoArtifacts = false;
             }
           );
 
+          hostTarget = pkgs.stdenv.hostPlatform.rust.rustcTarget;
+
+          skipNative =
+            triple:
+            ''
+              [target.${triple}.transcribe]
+              rustc-link-lib = ["transcribe"]
+              [target.${triple}.alsa]
+              rustc-link-lib = ["asound"]
+              [target.${triple}.ghostty-vt]
+              rustc-link-lib = ["ghostty-vt"]
+            '';
+
+          hostBuildScriptsSkipped = pkgs.writeText "clippy-host.toml" (skipNative hostTarget);
+
           cross =
             let
               target =
-                pkgs.lib.throwIfNot (cfg.crossTarget != pkgs.stdenv.hostPlatform.rust.rustcTarget)
-                  "clippy-cross target ${cfg.crossTarget} matches host ${pkgs.stdenv.hostPlatform.rust.rustcTarget}"
+                pkgs.lib.throwIfNot (cfg.crossTarget != hostTarget)
+                  "clippy-cross target ${cfg.crossTarget} matches host ${hostTarget}"
                   cfg.crossTarget;
             in
             {
               inherit target;
               toolchain = toolchain.override { targets = [ target ]; };
-              buildScriptsSkipped = pkgs.writeText "clippy-cross.toml" ''
-                [target.${target}.transcribe]
-                rustc-link-lib = ["transcribe"]
-                [target.${target}.alsa]
-                rustc-link-lib = ["asound"]
-                [target.${target}.ghostty-vt]
-                rustc-link-lib = ["ghostty-vt"]
-              '';
+              buildScriptsSkipped = pkgs.writeText "clippy-cross.toml" (skipNative target);
             };
 
           craneCross = craneLib.overrideToolchain cross.toolchain;
@@ -347,6 +389,67 @@
             // {
               cargoArtifacts = clippyCrossDeps;
               cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
+              postBuild = ''
+                cargoWithProfile clippy ${clippyCrossArgs.cargoExtraArgs} ${daemonPackages} -- -D warnings
+              '';
+              doInstallCargoArtifacts = false;
+            }
+          );
+
+          clippyReleaseArgs = {
+            pname = "luned-release-clippy";
+            inherit version cargoVendorDir;
+            src = lintSrc;
+            strictDeps = true;
+
+            CARGO_PROFILE = "release";
+            cargoExtraArgs = "--locked --config ${hostBuildScriptsSkipped} ${daemonPackages}";
+
+            nativeBuildInputs = [ pkgs.protobuf ];
+            doCheck = false;
+          };
+
+          clippyReleaseDeps = craneLib.buildDepsOnly (
+            clippyReleaseArgs
+            // {
+              buildPhaseCargoCommand = "cargoWithProfile check ${clippyReleaseArgs.cargoExtraArgs}";
+            }
+          );
+
+          clippyRelease = craneLib.cargoClippy (
+            clippyReleaseArgs
+            // {
+              cargoArtifacts = clippyReleaseDeps;
+              cargoClippyExtraArgs = "-- -D warnings";
+              doInstallCargoArtifacts = false;
+            }
+          );
+
+          clippyCrossReleaseArgs = {
+            pname = "luned-cross-release-clippy";
+            inherit version cargoVendorDir;
+            src = lintSrc;
+            strictDeps = true;
+
+            CARGO_PROFILE = "release";
+            cargoExtraArgs = "--locked --config ${cross.buildScriptsSkipped} --target ${cross.target} ${daemonPackages}";
+
+            nativeBuildInputs = [ pkgs.protobuf ];
+            doCheck = false;
+          };
+
+          clippyCrossReleaseDeps = craneCross.buildDepsOnly (
+            clippyCrossReleaseArgs
+            // {
+              buildPhaseCargoCommand = "cargoWithProfile check ${clippyCrossReleaseArgs.cargoExtraArgs}";
+            }
+          );
+
+          clippyCrossRelease = craneCross.cargoClippy (
+            clippyCrossReleaseArgs
+            // {
+              cargoArtifacts = clippyCrossReleaseDeps;
+              cargoClippyExtraArgs = "-- -D warnings";
               doInstallCargoArtifacts = false;
             }
           );
@@ -357,12 +460,14 @@
               toolchain
               buildTools
               macBuildEnv
+              hostBuildScriptsSkipped
               cross
               clippyRun
+              daemonPackages
               testRun
               nextest
+              testTools
               ;
-            testTools = daemon.nativeCheckInputs;
             compileEnv = ''
               export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
               export PKG_CONFIG_PATH="${
@@ -396,7 +501,9 @@
 
           lintChecks = {
             inherit clippy deny;
+            clippy-release = clippyRelease;
             clippy-cross = clippyCross;
+            clippy-cross-release = clippyCrossRelease;
             statix = nixLint pkgs.statix "check .";
             swift =
               let
@@ -420,7 +527,19 @@
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
             profiles =
               let
-                failures = import ./nix/profiles.nix { root = ./.; };
+                failures = import ./nix/profiles.nix {
+                  root = ./.;
+                  inherit checksProfile;
+                  derivationProfiles = {
+                    checksDeps = checksDeps.CARGO_PROFILE or null;
+                    tested = tested.CARGO_PROFILE or null;
+                    clippy = clippy.CARGO_PROFILE or null;
+                    clippyRelease = clippyRelease.CARGO_PROFILE or null;
+                    clippyCrossRelease = clippyCrossRelease.CARGO_PROFILE or null;
+                    releaseDeps = releaseDeps.CARGO_PROFILE or null;
+                    luned = luned.CARGO_PROFILE or null;
+                  };
+                };
               in
               pkgs.runCommand "lune-profiles" { } (
                 if failures == [ ] then
@@ -480,7 +599,7 @@
 
           checks = lintChecks // {
             inherit lints;
-            luned = lunedWith { LUNE_BUILT = "1"; };
+            luned = tested;
           };
 
           shell = pkgs.mkShell {

@@ -10,6 +10,7 @@ in
   help = "statix, deadnix, no comments, matching dev and release crate profiles, iOS CI input filter parity, swift-format and swiftlint over the app, typescript over extensions, no clock waits in tests, no call past its wrapper, no shell script files and buf breaking; --breaking runs that one alone";
   tools = [
     pkgs.buf
+    pkgs.coreutils
     pkgs.deadnix
     pkgs.findutils
     pkgs.git
@@ -20,6 +21,21 @@ in
     typescript
   ];
   text = ''
+    comments() {
+      local bin_rules status=0
+      bin_rules="$(mktemp -d)"
+      if nix eval --impure --raw --expr \
+        'import ${../../bin-test-rules.nix} { root = /. + builtins.getEnv "PWD"; }' \
+        >"$bin_rules/bin-tests.yml"; then
+        git ls-files -z --cached --others --exclude-standard |
+          lune-comments --bin-rules "$bin_rules" || status=1
+      else
+        status=1
+      fi
+      rm -rf "$bin_rules"
+      return "$status"
+    }
+
     profiles() {
       local failures
       failures="$(
@@ -64,7 +80,7 @@ in
         statix check . || status=1
         git ls-files -z --cached --others --exclude-standard '*.nix' |
           xargs -0 deadnix --fail || status=1
-        git ls-files -z --cached --others --exclude-standard | lune-comments || status=1
+        comments || status=1
         profiles || status=1
         ios_inputs || status=1
         git ls-files -z --cached --others --exclude-standard '*.swift' |

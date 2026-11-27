@@ -2,6 +2,7 @@ name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -28,11 +29,15 @@ jobs:
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
+          MERGE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           base=HEAD^
           if [[ $GITHUB_EVENT_NAME == push ]]; then
             git fetch --depth=1 origin "$BEFORE"
             base="$BEFORE"
+          elif [[ $GITHUB_EVENT_NAME == merge_group ]]; then
+            git fetch --depth=1 origin "$MERGE_BASE"
+            base="$MERGE_BASE"
           fi
           files="$(git -c core.quotepath=false diff --no-renames --name-only "$base" HEAD)"
           ios_dirs=(
@@ -150,10 +155,10 @@ jobs:
 
     steps:
       - &checkout-head
-        name: actions/checkout v7, at the PR's head
+        name: actions/checkout v7, at the head to test
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - &install-nix
         name: cachix/install-nix-action v31
@@ -162,6 +167,8 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             connect-timeout = 5
+            stalled-download-timeout = 30
+            download-attempts = 3
             fallback = true
             ${{ runner.os == 'macOS' && 'keep-outputs = true' || '' }}
             ${{ !github.event.pull_request.head.repo.fork && 'extra-substituters = https://attic.tail174781.ts.net/main' || '' }}
@@ -187,6 +194,12 @@ jobs:
       - name: Lints, bans, licenses, sources, and clippy for Linux and the Mac
         if: ${{ !cancelled() && (success() || steps.dev.outcome == 'failure') }}
         run: nix build -L --keep-going --out-link checks .#checks.x86_64-linux.lints
+
+      - name: Evaluate release derivations
+        run: >-
+          nix eval --json .#packages
+          --apply 'builtins.mapAttrs (_: packages: packages.luned.drvPath)'
+          >/dev/null
 
       - name: Advisories
         run: nix run .#dev.commands.deny -- advisories
@@ -293,7 +306,8 @@ jobs:
 
       - *tailscale
 
-      - name: Give macOS its own DNS back, and only the tailnet's names to MagicDNS
+      - &macos-dns
+        name: Give macOS its own DNS back, and only the tailnet's names to MagicDNS
         if: runner.os == 'macOS' && steps.tailscale.outcome != 'skipped'
         env:
           TAILSCALE: ${{ steps.tailscale.outcome }}
@@ -335,6 +349,40 @@ jobs:
 
       - name: Build and test the daemon
         run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
+
+      - *attic-push
+
+  release:
+    needs: code
+    if: >-
+      fromJSON(needs.code.outputs.plan).kind == 'code'
+      && (github.event_name == 'push' || github.event_name == 'merge_group')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            system: x86_64-linux
+          - runner: ubuntu-24.04-arm
+            system: aarch64-linux
+          - runner: macos-latest
+            system: aarch64-darwin
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - *checkout-head
+
+      - *install-nix
+
+      - *tailscale
+
+      - *macos-dns
+
+      - name: Build the release package
+        run: nix build -L ".#packages.${{ matrix.system }}.luned"
 
       - *attic-push
 
