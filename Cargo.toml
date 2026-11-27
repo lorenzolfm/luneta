@@ -12,6 +12,10 @@ opt-level = "z"
 lto = true
 strip = true
 
+[profile.checks]
+inherits = "dev"
+debug = "line-tables-only"
+
 [profile.dev.package.ptts]
 opt-level = 3
 [profile.dev.package.xn]
@@ -19,6 +23,8 @@ opt-level = 3
 [profile.dev.package.xn-gemm]
 opt-level = 3
 [profile.dev.package.xn-gemm-common]
+opt-level = 3
+[profile.dev.package.xn-gemm-f16]
 opt-level = 3
 [profile.dev.package.xn-gemm-f32]
 opt-level = 3
@@ -30,6 +36,8 @@ opt-level = 3
 [profile.release.package.xn-gemm]
 opt-level = 3
 [profile.release.package.xn-gemm-common]
+opt-level = 3
+[profile.release.package.xn-gemm-f16]
 opt-level = 3
 [profile.release.package.xn-gemm-f32]
 opt-level = 3

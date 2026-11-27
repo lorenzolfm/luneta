@@ -4,8 +4,10 @@
   buildTools,
   compileEnv,
   macBuildEnv,
+  hostBuildScriptsSkipped,
   cross,
   clippyRun,
+  daemonPackages,
   testRun,
   nextest,
   testTools,
@@ -29,8 +31,10 @@ let
       buildTools
       compileEnv
       macBuildEnv
+      hostBuildScriptsSkipped
       cross
       clippyRun
+      daemonPackages
       testRun
       nextest
       testKit
