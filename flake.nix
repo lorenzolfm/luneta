@@ -24,11 +24,22 @@
       ...
     }:
     let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "aarch64-darwin"
-      ];
+      systemConfigs = {
+        x86_64-linux = {
+          crossTarget = "aarch64-apple-darwin";
+          ggmlCpu = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON";
+        };
+        aarch64-linux = {
+          crossTarget = "aarch64-apple-darwin";
+          ggmlCpu = "-DGGML_NATIVE=OFF";
+        };
+        aarch64-darwin = {
+          crossTarget = "x86_64-unknown-linux-gnu";
+          ggmlCpu = "-DGGML_NATIVE=OFF";
+        };
+      };
+
+      systems = builtins.attrNames systemConfigs;
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       toolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
@@ -44,6 +55,7 @@
       build =
         system:
         let
+          cfg = systemConfigs.${system};
           pkgs = import nixpkgs {
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
@@ -177,11 +189,7 @@
                   }
               );
 
-          ggmlCpu =
-            {
-              x86_64-linux = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON";
-            }
-            .${system} or "-DGGML_NATIVE=OFF";
+          inherit (cfg) ggmlCpu;
 
           buildTools = [
             localToolchain
@@ -282,16 +290,10 @@
 
           cross =
             let
-              targets = {
-                x86_64-linux = "aarch64-apple-darwin";
-                aarch64-linux = "aarch64-apple-darwin";
-                aarch64-darwin = "x86_64-unknown-linux-gnu";
-              };
-              selected = targets.${system} or (throw "clippy-cross has no target for ${system}");
               target =
-                pkgs.lib.throwIfNot (selected != pkgs.stdenv.hostPlatform.rust.rustcTarget)
-                  "clippy-cross target ${selected} matches host ${pkgs.stdenv.hostPlatform.rust.rustcTarget}"
-                  selected;
+                pkgs.lib.throwIfNot (cfg.crossTarget != pkgs.stdenv.hostPlatform.rust.rustcTarget)
+                  "clippy-cross target ${cfg.crossTarget} matches host ${pkgs.stdenv.hostPlatform.rust.rustcTarget}"
+                  cfg.crossTarget;
             in
             {
               inherit target;
@@ -378,14 +380,10 @@
             '';
 
           terminal-browser = import ./nix/terminal-browser.nix { inherit pkgs; };
-        in
-        {
-          inherit dev luned terminal-browser;
 
-          checks = {
+          lintChecks = {
             inherit clippy deny;
             clippy-cross = clippyCross;
-            luned = lunedWith { LUNE_BUILT = "1"; };
             statix = nixLint pkgs.statix "check .";
             swift =
               let
@@ -445,6 +443,18 @@
                   find . -name '*.ts' -print0 | ${pkgs.findutils}/bin/xargs -0 -r ${pkgs.lib.getExe typescript}
                   touch "$out"
                 '';
+          };
+
+          lints = pkgs.linkFarm "lune-lints" (
+            pkgs.lib.mapAttrsToList (name: path: { inherit name path; }) lintChecks
+          );
+        in
+        {
+          inherit dev luned terminal-browser;
+
+          checks = lintChecks // {
+            inherit lints;
+            luned = lunedWith { LUNE_BUILT = "1"; };
           };
 
           shell = pkgs.mkShell {

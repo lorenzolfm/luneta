@@ -56,6 +56,7 @@ let
 
     ${compileEnv}
     cargo build --locked -p lune-phone --target "$target" --profile "$profile"
+    cargo clippy --locked -p lune-phone-bindgen --all-targets -- -D warnings
     cargo build --locked -p lune-phone-bindgen
     built="$(cargo metadata --locked --no-deps --format-version 1 | jq -r .target_directory)"
     library="$built/$target/$folder/liblune_phone.a"
