@@ -6,7 +6,7 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 
 use lune_domain::projects::{Opens, Size, WorktreeId};
-use lune_waits::{eventually, shell, Patience, Span, QUIET};
+use lune_waits::{eventually, eventually_showing, shell, Patience, Span, QUIET};
 use luned::api::show_request::{self, focus, open, r#move, resize, Event, Hello};
 use luned::api::show_response::{self, view::Found, Laid, View};
 use luned::api::change_projects_request::{
@@ -29,7 +29,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Status, Streaming};
 
 use crate::agents::file_of_pid;
-use crate::host::{folder_in, script, start, Host, PATIENT};
+use crate::host::{folder_in, script, side_by_side, start, Host, PATIENT};
 use crate::own::{self, Owned};
 use crate::projects::{self, asked, command, kept, project, running, worktree};
 use crate::remote::{hosts, reached, skills_on, FakeSsh};
@@ -1009,7 +1009,11 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     assert!(said.ends_with(" may close still"), "{said}");
     assert_eq!(watched(&owned, closing).len(), 2, "a stalled mux has closed none yet");
     drop(stalled);
-    assert_eq!(asked(&owned.host, close()).unwrap(), None);
+    let made = eventually_showing("the worktree closes, whichever of its terminals are left", || {
+        let left: Vec<u64> = watched(&owned, closing).iter().map(|it| it.id).collect();
+        asked(&owned.host, closed(&left))
+    });
+    assert_eq!(made, None);
     eventually("the worktree's terminals leave the mux", || {
         let listing = owned.listing();
         terminals.iter().all(|terminal| tagged(&listing, *terminal).is_none()).then_some(())
@@ -1299,6 +1303,23 @@ fn a_layout_restores_its_terminals_when_the_mux_s_socket_goes() {
 }
 
 #[test]
+fn the_restores_that_wait_out_their_pause_hold_side_by_side() {
+    side_by_side([
+        (
+            "a closed terminal stays closed at a second crash",
+            a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash,
+        ),
+        (
+            "a terminal whose mux keeps ending is given up",
+            a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost,
+        ),
+        (
+            "a restored line outlives a restart",
+            a_line_typed_by_a_restore_outlives_a_restart_of_luned,
+        ),
+    ]);
+}
+
 fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_second_crash() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
@@ -1334,7 +1355,6 @@ fn a_restored_terminal_that_ran_nothing_closes_and_comes_back_the_same_after_a_s
     }
 }
 
-#[test]
 fn a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost() {
     let owned = Owned::new();
     let worktree = worktree_in_home(&owned);
@@ -1355,7 +1375,6 @@ fn a_terminal_that_lune_mux_keeps_ending_after_is_given_up_and_left_lost() {
     assert!(lost(&shown.until("the terminal still lost", |_| true).views[0]));
 }
 
-#[test]
 fn a_line_typed_by_a_restore_outlives_a_restart_of_luned() {
     let mut owned = Owned::new();
     let worktree = worktree_in_home(&owned);

@@ -239,7 +239,7 @@
                 checkPhaseCargoCommand = ''
                   export PATH="${localToolchain}/bin:$PATH"
                   ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
-                    --test-threads "$NIX_BUILD_CORES"
+                    --test-threads "$((NIX_BUILD_CORES * 3))"
                   cargoWithProfile test --doc --locked ${testRun}
                 '';
 

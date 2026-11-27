@@ -691,3 +691,15 @@ pub fn info(vars: Vars) -> String {
     assert!(output.status.success(), "lune info failed: {why}");
     said
 }
+
+pub fn side_by_side<const N: usize>(waits: [(&str, fn()); N]) {
+    let failed: Vec<&str> = thread::scope(|scope| {
+        let running = waits.map(|(name, wait)| {
+            let named = thread::Builder::new().name(name.to_owned());
+            (name, named.spawn_scoped(scope, wait).unwrap())
+        });
+        let ended = running.map(|(name, it)| (name, it.join()));
+        ended.into_iter().filter(|(_, ended)| ended.is_err()).map(|(name, _)| name).collect()
+    });
+    assert_eq!(failed, [] as [&str; 0]);
+}
