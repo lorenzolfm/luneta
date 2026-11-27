@@ -147,7 +147,9 @@ jobs:
 
   clippy:
     needs: code
-    if: fromJSON(needs.code.outputs.plan).kind == 'code'
+    if: >-
+      ${{ !cancelled() && needs.code.result == 'success'
+      && fromJSON(needs.code.outputs.plan).kind == 'code' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -206,25 +208,19 @@ jobs:
         run: nix run .#dev.commands.deny -- advisories
 
       - &attic-push
-        name: Push the store to the attic cache
+        name: Push what this job built to the attic cache
         if: ${{ !cancelled() && steps.tailscale.outcome == 'success' }}
         env:
           ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-        run: |
-          if [[ -z $ATTIC_TOKEN ]]; then
-            echo "No ATTIC_TOKEN secret, so nothing is pushed."
-            exit 0
-          fi
-          attic="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#attic-client)/bin/attic"
-          "$attic" login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
-          nix path-info --all | awk -v skip="${ATTIC_SKIP_PATH:-}" '!/\.drv$/ && (skip == "" || $0 != skip)' | "$attic" push homelab:main --stdin
+        run: nix run .#dev.commands.attic-push
 
   breaking:
     needs: code
     if: >-
-      github.event_name == 'pull_request'
+      ${{ !cancelled() && needs.code.result == 'success'
+      && github.event_name == 'pull_request'
       && fromJSON(needs.code.outputs.plan).kind == 'code'
-      && fromJSON(needs.code.outputs.plan).breaking != false
+      && fromJSON(needs.code.outputs.plan).breaking != false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -246,10 +242,7 @@ jobs:
           nix run .#dev.commands.lint -- --breaking
 
   tested:
-    needs: code
-    if: >-
-      fromJSON(needs.code.outputs.plan).kind == 'code'
-      && !github.event.pull_request.head.repo.fork
+    if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -266,34 +259,42 @@ jobs:
 
       - name: The runners whose tested luned attic doesn't hold
         id: tested
-        if: steps.tailscale.outcome == 'success'
+        env:
+          TAILSCALE: ${{ steps.tailscale.outcome }}
         run: |
-          checks="$(nix eval --json .#checks --apply 'builtins.mapAttrs (_: checks: checks.luned.outPath)')"
+          set -u
+          if [[ $TAILSCALE != success ]]; then
+            untested="$(nix eval --json .#ciRunners | jq -ce 'if type == "object" and length > 0 then [.[]] else error("ciRunners must be a non-empty object") end')"
+            echo "untested=$untested" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          targets="$(nix eval --json .#testedTargets)"
+          rows="$(jq -er 'to_entries | if length > 0 then .[] | [.key, .value.runner, .value.path] | @tsv else error("testedTargets must be non-empty") end' <<<"$targets")"
           untested=()
-          for pair in x86_64-linux=ubuntu-latest aarch64-linux=ubuntu-24.04-arm aarch64-darwin=macos-latest; do
-            system="${pair%%=*}"
-            check="$(jq -er --arg system "$system" '.[$system]' <<<"$checks")"
+          while IFS=$'\t' read -r system runner check; do
             if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
               echo "attic holds $system's tested $check"
             else
-              untested+=("${pair#*=}")
+              untested+=("$runner")
             fi
-          done
+          done <<<"$rows"
           echo "untested=$(jq -cn '$ARGS.positional' --args "${untested[@]}")" | tee -a "$GITHUB_OUTPUT"
 
   daemon:
     needs: [code, tested]
     if: >-
-      ${{ !cancelled() && needs.code.result == 'success'
-      && needs.tested.result != 'failure'
+      ${{ !cancelled()
+      && needs.code.result == 'success'
       && fromJSON(needs.code.outputs.plan).kind == 'code'
-      && needs.tested.outputs.untested != '[]' }}
+      && (needs.tested.result == 'skipped'
+      || (needs.tested.result == 'success' && needs.tested.outputs.untested != '[]')) }}
     strategy:
       fail-fast: false
       matrix:
         runner: >-
-          ${{ fromJSON(needs.tested.outputs.untested
-          || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]') }}
+          ${{ fromJSON(needs.tested.result == 'skipped'
+          && '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]'
+          || needs.tested.outputs.untested) }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -437,8 +438,9 @@ jobs:
   ios:
     needs: code
     if: >-
-      fromJSON(needs.code.outputs.plan).kind == 'code'
-      && fromJSON(needs.code.outputs.plan).ios != false
+      ${{ !cancelled() && needs.code.result == 'success'
+      && fromJSON(needs.code.outputs.plan).kind == 'code'
+      && fromJSON(needs.code.outputs.plan).ios != false }}
     runs-on: xcode-27
     timeout-minutes: 40
 

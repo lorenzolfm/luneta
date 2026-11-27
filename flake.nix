@@ -10,7 +10,6 @@
       url = "github:ghostty-org/ghostty/108cacb17ed8990840cd14abfce43d8ed8503ca1";
       flake = false;
     };
-    nixpkgs-zig.url = "github:nixos/nixpkgs/d4f25a3e562008648d45bcf2d70bcc7422cad84e";
   };
 
   outputs =
@@ -20,28 +19,32 @@
       rust-overlay,
       crane,
       ghostty,
-      nixpkgs-zig,
       ...
     }:
     let
       systemConfigs = {
         x86_64-linux = {
+          runner = "ubuntu-latest";
           crossTarget = "aarch64-apple-darwin";
           ggmlCpu = "-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON -DGGML_BMI2=ON";
         };
         aarch64-linux = {
+          runner = "ubuntu-24.04-arm";
           crossTarget = "aarch64-apple-darwin";
           ggmlCpu = "-DGGML_NATIVE=OFF";
         };
         aarch64-darwin = {
+          runner = "macos-latest";
           crossTarget = "x86_64-unknown-linux-gnu";
           ggmlCpu = "-DGGML_NATIVE=OFF";
         };
       };
 
+      ciRunners = nixpkgs.lib.mapAttrs (_: cfg: cfg.runner) systemConfigs;
       systems = builtins.attrNames systemConfigs;
 
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+      cargoLock = builtins.fromTOML (builtins.readFile ./Cargo.lock);
       toolchainToml = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
       nextestToml = builtins.fromTOML (builtins.readFile ./.config/nextest.toml);
       ciProfile = nextestToml.profile.ci or (throw ".config/nextest.toml has no [profile.ci]");
@@ -52,8 +55,7 @@
         else
           ciRetriesRaw.count or (throw ".config/nextest.toml [profile.ci].retries has no count");
       ciJunitPath =
-        (ciProfile.junit or { }).path
-          or (throw ".config/nextest.toml has no [profile.ci.junit].path");
+        (ciProfile.junit or { }).path or (throw ".config/nextest.toml has no [profile.ci.junit].path");
       inherit (cargoToml.workspace.package) version;
       rustVersion =
         cargoToml.workspace.package.rust-version
@@ -62,6 +64,60 @@
         toolchainToml.toolchain.channel or (throw "rust-toolchain.toml has no [toolchain].channel");
       workspaceMembers = cargoToml.workspace.members or [ ];
       workspaceExclude = cargoToml.workspace.exclude or [ ];
+
+      validSriHash =
+        hash: builtins.isString hash && builtins.match "sha256-[A-Za-z0-9+/]{43}=" hash != null;
+
+      libghosttyRsSource = "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf";
+      gitDeps = {
+        ${libghosttyRsSource} = {
+          hash = "sha256-VkLyG0Y3V8ugEl2emA7Zpe0StQnwqu8Ay2xMQWr8Kn8=";
+          ghosttyRev = "108cacb17ed8990840cd14abfce43d8ed8503ca1";
+        };
+        "git+https://github.com/lorenzolfm/wt?rev=b73f7d36d8f6f6c9301da9568de82ec8bd917cce#b73f7d36d8f6f6c9301da9568de82ec8bd917cce" =
+          {
+            hash = "sha256-KYTyp97dAhus2mzuvsvX4JbRilIbucNIBe7xR2xf+BE=";
+          };
+      };
+      gitHashes = builtins.mapAttrs (_: dep: dep.hash) gitDeps;
+      gitSources = nixpkgs.lib.unique (
+        builtins.filter (nixpkgs.lib.hasPrefix "git") (map (crate: crate.source or "") cargoLock.package)
+      );
+      encodedGitSources = builtins.filter (
+        source: builtins.match ".*%[0-9A-Fa-f]{2}.*" source != null
+      ) gitSources;
+      unhashed = builtins.filter (
+        source: !(gitDeps ? ${source}) || !(validSriHash (gitDeps.${source}.hash or null))
+      ) gitSources;
+      staleGitHashes = builtins.filter (source: !(builtins.elem source gitSources)) (
+        builtins.attrNames gitDeps
+      );
+      gitHashChecks = [
+        {
+          ok = encodedGitSources == [ ];
+          message = "Cargo.lock has percent-encoded git sources not handled by gitDeps: ${nixpkgs.lib.concatStringsSep ", " encodedGitSources}";
+        }
+        {
+          ok = unhashed == [ ];
+          message = "gitDeps has no valid SRI hash for ${nixpkgs.lib.concatStringsSep ", " unhashed}, so every evaluation would clone it";
+        }
+        {
+          ok = staleGitHashes == [ ];
+          message = "gitDeps has unused entries not in Cargo.lock: ${nixpkgs.lib.concatStringsSep ", " staleGitHashes}";
+        }
+      ];
+
+      ghosttySysMatches = builtins.filter (crate: crate.name == "libghostty-vt-sys") cargoLock.package;
+      ghosttySys =
+        if builtins.length ghosttySysMatches == 1 then
+          builtins.head ghosttySysMatches
+        else
+          throw "Cargo.lock must have exactly one libghostty-vt-sys, found ${toString (builtins.length ghosttySysMatches)}";
+      ghosttySysRev =
+        gitDeps.${ghosttySys.source}.ghosttyRev
+          or (throw "gitDeps has no ghosttyRev for libghostty-vt-sys from ${ghosttySys.source}");
+
+      cachedPathsMax = 32;
 
       build =
         system:
@@ -136,8 +192,15 @@
             else
               toolchain;
 
-          craneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
-            _: prev: { writeTOML = prev.writeTOMLViaRemarshal; }
+          baseCraneLib = ((crane.mkLib pkgs).overrideToolchain toolchain).overrideScope (
+            _: prev: {
+              writeTOML = prev.writeTOMLViaRemarshal;
+              downloadCargoPackageFromGit =
+                args:
+                pkgs.lib.throwIfNot (args ? hash && validSriHash args.hash)
+                  "downloadCargoPackageFromGit requires an SRI hash for ${args.git or "<unknown>"}"
+                  (prev.downloadCargoPackageFromGit args);
+            }
           );
 
           cargoFiles = pkgs.lib.fileset.unions [
@@ -178,35 +241,55 @@
             '';
           };
 
+          linkedVendor = nixpkgs.lib.foldr (check: next: nixpkgs.lib.throwIfNot check.ok check.message next) (
+            baseCraneLib.vendorCargoDeps
+              {
+                cargoLockParsed = cargoLock;
+                outputHashes = gitHashes;
+              }
+          ) gitHashChecks;
+          cargoVendorDir = pkgs.runCommand "lune-cargo-vendor" { allowedReferences = [ "out" ]; } ''
+            cp -rL "${linkedVendor}" "$out"
+            chmod u+w "$out" "$out/config.toml"
+            substituteInPlace "$out/config.toml" --replace-fail "${linkedVendor}" "$out"
+            chmod a-w "$out" "$out/config.toml"
+          '';
+
+          craneLib = baseCraneLib.overrideScope (
+            _: _: {
+              vendorCargoDeps = _: throw "pass cargoVendorDir directly; unbundled vendorCargoDeps is forbidden";
+            }
+          );
+
           speechBuild = [
             pkgs.cmake
             pkgs.pkg-config
           ];
           speechLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.alsa-lib ];
 
-          ghosttyRevs = {
-            "git+https://github.com/uzaaft/libghostty-rs?rev=cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf#cd4d497e8c698b27054a677ce19d1bd1a1a4d8bf" =
-              "108cacb17ed8990840cd14abfce43d8ed8503ca1";
-          };
-          ghosttySys =
-            pkgs.lib.findFirst (crate: crate.name == "libghostty-vt-sys")
-              (throw "Cargo.lock has no libghostty-vt-sys")
-              (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package;
-          ghosttySysRev =
-            ghosttyRevs.${ghosttySys.source}
-              or (throw "ghosttyRevs has no commit for libghostty-vt-sys from ${ghosttySys.source}");
           libghosttyVt =
             pkgs.lib.throwIfNot (ghostty.rev == ghosttySysRev)
               "the ghostty input is not ${ghosttySysRev}, which libghostty-vt-sys binds"
               (
-                (pkgs.lib.makeScope pkgs.newScope (_: {
-                  inherit (nixpkgs-zig.legacyPackages.${system}) zig_0_17;
-                })).callPackage
-                  "${ghostty}/nix/libghostty-vt.nix"
-                  {
-                    optimize = "ReleaseSafe";
-                    revision = ghostty.shortRev;
-                  }
+                (pkgs.callPackage "${ghostty}/nix/libghostty-vt.nix" {
+                  optimize = "ReleaseSafe";
+                  revision = ghostty.shortRev;
+                }).overrideAttrs
+                  (
+                    finalAttrs: prev: {
+                      zigBuildFlags = prev.zigBuildFlags ++ [ "-Dstrip=true" ];
+                      disallowedRequisites = [
+                        finalAttrs.deps
+                        finalAttrs.src
+                        pkgs.zig_0_17
+                        pkgs.git
+                      ];
+                      postFixup = (prev.postFixup or "") + ''
+                        "$STRIP" -S "$dev/lib/libghostty-vt.a"
+                        "$RANLIB" "$dev/lib/libghostty-vt.a"
+                      '';
+                    }
+                  )
               );
 
           inherit (cfg) ggmlCpu;
@@ -242,9 +325,6 @@
             pkgs.openssh
             pkgs.procps
           ];
-
-          cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
-
           daemon = {
             pname = "luned";
             inherit version src cargoVendorDir;
@@ -255,6 +335,41 @@
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
           };
 
+          scrubCargoDeps =
+            label: depsToolchains:
+            ''
+              targetDir="''${CARGO_TARGET_DIR:-target}"
+              rm -f "$targetDir/.rustc_info.json"
+              find "$targetDir" -path '*/build/transcribe-cpp-sys-*/out/build' -type d -prune -exec rm -rf -- {} +
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              source ${pkgs.darwin.signingUtils}
+              for depToolchain in ${pkgs.lib.escapeShellArgs depsToolchains}; do
+                toolchainHash="$(basename "$depToolchain")"
+                toolchainHash="''${toolchainHash%%-*}"
+                while IFS= read -r -d "" file; do
+                  if [[ -f $file && ! -L $file ]] && checkRequiresSignature "$file"; then
+                    chmod u+w "$file"
+                    "$STRIP" -S "$file"
+                    sign "$file"
+                  fi
+                done < <(grep -rlFZ -- "$toolchainHash" "$targetDir" || true)
+              done
+            ''
+            + ''
+              for depToolchain in ${pkgs.lib.escapeShellArgs depsToolchains}; do
+                toolchainHash="$(basename "$depToolchain")"
+                toolchainHash="''${toolchainHash%%-*}"
+                found=0
+                grep -rlF -- "$toolchainHash" "$targetDir" >&2 || found=$?
+                if (( found == 0 )); then
+                  echo "${label}: $targetDir still references $depToolchain before compression" >&2
+                  exit 1
+                elif (( found != 1 )); then
+                  exit "$found"
+                fi
+              done
+            '';
           checksArgs = daemon // {
             CARGO_PROFILE = checksProfile;
           };
@@ -265,6 +380,10 @@
               pname = "luned-checks";
               cargoExtraArgs = "--locked ${daemonPackages}";
               doCheck = true;
+              disallowedRequisites = [
+                toolchain
+              ];
+              preInstall = scrubCargoDeps "checksDeps" [ toolchain ];
             }
           );
 
@@ -274,12 +393,30 @@
             doCheck = false;
           };
 
-          releaseDeps = craneLib.buildDepsOnly releaseArgs;
+          releaseDeps = craneLib.buildDepsOnly (
+            releaseArgs
+            // {
+              disallowedRequisites = [
+                toolchain
+              ];
+              preInstall = scrubCargoDeps "releaseDeps" [ toolchain ];
+            }
+          );
+
+          lunedDisallowedRequisites = [
+            toolchain
+            cargoVendorDir
+            src
+            pkgs.protobuf
+            pkgs.cmake
+          ]
+          ++ testTools;
 
           luned = craneLib.buildPackage (
             releaseArgs
             // {
               cargoArtifacts = releaseDeps;
+              disallowedRequisites = lunedDisallowedRequisites;
 
               meta = {
                 description = "The lune daemon, its CLI, and lune's own multiplexer";
@@ -302,6 +439,14 @@
               cargoArtifacts = checksDeps;
               doCheck = false;
               doInstallCargoArtifacts = false;
+              disallowedRequisites = [
+                toolchain
+                cargoVendorDir
+                src
+                testSrc
+                pkgs.protobuf
+                pkgs.cmake
+              ];
 
               LUNE_BUILT = "1";
               NEXTEST_SHOW_PROGRESS = "counter";
@@ -355,30 +500,28 @@
               '';
               doCheck = false;
               doInstallCargoArtifacts = false;
+              allowedReferences = [ ];
             }
           );
 
           hostTarget = pkgs.stdenv.hostPlatform.rust.rustcTarget;
 
-          skipNative =
-            triple:
-            ''
-              [target.${triple}.transcribe]
-              rustc-link-lib = ["transcribe"]
-              [target.${triple}.alsa]
-              rustc-link-lib = ["asound"]
-              [target.${triple}.ghostty-vt]
-              rustc-link-lib = ["ghostty-vt"]
-            '';
+          skipNative = triple: ''
+            [target.${triple}.transcribe]
+            rustc-link-lib = ["transcribe"]
+            [target.${triple}.alsa]
+            rustc-link-lib = ["asound"]
+            [target.${triple}.ghostty-vt]
+            rustc-link-lib = ["ghostty-vt"]
+          '';
 
           hostBuildScriptsSkipped = pkgs.writeText "clippy-host.toml" (skipNative hostTarget);
 
           cross =
             let
-              target =
-                pkgs.lib.throwIfNot (cfg.crossTarget != hostTarget)
-                  "clippy-cross target ${cfg.crossTarget} matches host ${hostTarget}"
-                  cfg.crossTarget;
+              target = pkgs.lib.throwIfNot (
+                cfg.crossTarget != hostTarget
+              ) "clippy-cross target ${cfg.crossTarget} matches host ${hostTarget}" cfg.crossTarget;
             in
             {
               inherit target;
@@ -405,6 +548,14 @@
             clippyCrossArgs
             // {
               buildPhaseCargoCommand = "cargoWithProfile check ${clippyCrossArgs.cargoExtraArgs} ${vendoredClippyRun}";
+              disallowedRequisites = [
+                toolchain
+                cross.toolchain
+              ];
+              preInstall = scrubCargoDeps "clippyCrossDeps" [
+                toolchain
+                cross.toolchain
+              ];
             }
           );
 
@@ -417,6 +568,7 @@
                 cargoWithProfile clippy ${clippyCrossArgs.cargoExtraArgs} ${daemonPackages} -- -D warnings
               '';
               doInstallCargoArtifacts = false;
+              allowedReferences = [ ];
             }
           );
 
@@ -437,6 +589,10 @@
             clippyReleaseArgs
             // {
               buildPhaseCargoCommand = "cargoWithProfile check ${clippyReleaseArgs.cargoExtraArgs}";
+              disallowedRequisites = [
+                toolchain
+              ];
+              preInstall = scrubCargoDeps "clippyReleaseDeps" [ toolchain ];
             }
           );
 
@@ -446,6 +602,7 @@
               cargoArtifacts = clippyReleaseDeps;
               cargoClippyExtraArgs = "-- -D warnings";
               doInstallCargoArtifacts = false;
+              allowedReferences = [ ];
             }
           );
 
@@ -466,6 +623,14 @@
             clippyCrossReleaseArgs
             // {
               buildPhaseCargoCommand = "cargoWithProfile check ${clippyCrossReleaseArgs.cargoExtraArgs}";
+              disallowedRequisites = [
+                toolchain
+                cross.toolchain
+              ];
+              preInstall = scrubCargoDeps "clippyCrossReleaseDeps" [
+                toolchain
+                cross.toolchain
+              ];
             }
           );
 
@@ -475,38 +640,19 @@
               cargoArtifacts = clippyCrossReleaseDeps;
               cargoClippyExtraArgs = "-- -D warnings";
               doInstallCargoArtifacts = false;
+              allowedReferences = [ ];
             }
           );
-
-          dev = import ./nix/dev {
-            inherit
-              pkgs
-              toolchain
-              buildTools
-              macBuildEnv
-              hostBuildScriptsSkipped
-              cross
-              clippyRun
-              daemonPackages
-              testRun
-              nextest
-              testTools
-              ;
-            compileEnv = ''
-              export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
-              export PKG_CONFIG_PATH="${
-                pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
-              }:${libghosttyVt.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-              ${macBuildEnv}
-            '';
-          };
-
           deny = craneLib.cargoDeny {
-            inherit (daemon) pname version;
+            inherit (daemon) pname version cargoVendorDir;
             src = denySrc;
-            inherit cargoVendorDir;
             cargoDenyExtraArgs = "--offline --locked";
+            allowedReferences = [ ];
           };
+
+          markerCheck =
+            name: attrs: command:
+            pkgs.runCommand name ({ allowedReferences = [ ]; } // attrs) command;
 
           nixFiles = pkgs.lib.fileset.toSource {
             root = ./.;
@@ -515,19 +661,17 @@
 
           nixLint =
             tool: args:
-            pkgs.runCommand "lune-${tool.pname}" { } ''
+            markerCheck "lune-${tool.pname}" { } ''
               cd ${nixFiles}
               ${pkgs.lib.getExe tool} ${args}
               touch "$out"
             '';
 
-          terminal-browser = import ./nix/terminal-browser.nix { inherit pkgs; };
           flakyReport = import ./nix/flaky-report.nix {
             inherit pkgs;
             maxAttempts = ciRetries + 1;
             derivationName = tested.pname;
           };
-
           lintChecks = {
             inherit clippy deny;
             clippy-release = clippyRelease;
@@ -539,7 +683,7 @@
               let
                 swift = import ./nix/swift.nix { inherit pkgs; };
               in
-              pkgs.runCommand "lune-swift"
+              markerCheck "lune-swift"
                 {
                   src = pkgs.lib.fileset.toSource {
                     root = ./.;
@@ -571,7 +715,7 @@
                   };
                 };
               in
-              pkgs.runCommand "lune-profiles" { } (
+              markerCheck "lune-profiles" { } (
                 if failures == [ ] then
                   ''touch "$out"''
                 else
@@ -584,7 +728,7 @@
               let
                 failures = import ./nix/ios-inputs.nix { root = ./.; };
               in
-              pkgs.runCommand "lune-ios-inputs" { } (
+              markerCheck "lune-ios-inputs" { } (
                 if failures == [ ] then
                   ''touch "$out"''
                 else
@@ -597,7 +741,7 @@
               let
                 comments = import ./nix/comments.nix { inherit pkgs; };
               in
-              pkgs.runCommand "lune-comments" { } ''
+              markerCheck "lune-comments" { } ''
                 cd ${./.}
                 find . -type f -print0 | ${pkgs.lib.getExe comments}
                 touch "$out"
@@ -606,7 +750,7 @@
               let
                 typescript = import ./nix/typescript.nix { inherit pkgs; };
               in
-              pkgs.runCommand "lune-typescript"
+              markerCheck "lune-typescript"
                 {
                   src = pkgs.lib.fileset.toSource {
                     root = ./.;
@@ -620,19 +764,134 @@
                 '';
           };
 
-          lints = pkgs.linkFarm "lune-lints" (
-            pkgs.lib.mapAttrsToList (name: path: { inherit name path; }) lintChecks
-          );
-        in
-        {
-          inherit dev luned terminal-browser;
-          flaky-report = flakyReport.bin;
+          cachedArtifacts = [
+            cargoVendorDir
+            checksDeps
+            releaseDeps
+            luned
+            clippyCrossDeps
+            clippyReleaseDeps
+            clippyCrossReleaseDeps
+            libghosttyVt
+          ];
 
-          checks = lintChecks // {
-            inherit lints;
+          cachedChecks = lintChecks // {
             luned = tested;
           };
 
+          cachedDerivations = cachedArtifacts ++ builtins.attrValues cachedChecks;
+          rawCachedPaths = nixpkgs.lib.concatMap (
+            artifact: map (output: artifact.${output}.outPath) artifact.outputs
+          ) cachedDerivations;
+          cachedChecksList = [
+            {
+              ok = builtins.all nixpkgs.lib.isDerivation cachedDerivations;
+              message = "cached.${system} contains a non-derivation";
+            }
+            {
+              ok = rawCachedPaths != [ ];
+              message = "cached.${system} is empty";
+            }
+            {
+              ok = builtins.length rawCachedPaths <= cachedPathsMax;
+              message = "cached.${system} has ${toString (builtins.length rawCachedPaths)} paths, exceeding ${toString cachedPathsMax}";
+            }
+            {
+              ok = builtins.length rawCachedPaths == builtins.length (nixpkgs.lib.unique rawCachedPaths);
+              message = "cached.${system} contains duplicate store paths";
+            }
+            {
+              ok = builtins.all (
+                path: nixpkgs.lib.hasPrefix "/nix/store/" path && !(nixpkgs.lib.hasSuffix ".drv" path)
+              ) rawCachedPaths;
+              message = "cached.${system} contains a non-output store path";
+            }
+          ];
+          cachedPaths = nixpkgs.lib.foldr (
+            check: next: nixpkgs.lib.throwIfNot check.ok check.message next
+          ) rawCachedPaths cachedChecksList;
+
+          cachedCheck = markerCheck "lune-cached" { } (
+            builtins.seq (builtins.deepSeq cachedPaths null) ''
+              touch "$out"
+            ''
+          );
+
+          lints = pkgs.linkFarm "lune-lints" (
+            pkgs.lib.mapAttrsToList (name: path: { inherit name path; }) (
+              lintChecks // { cached = cachedCheck; }
+            )
+          );
+
+          checks = cachedChecks // {
+            cached = cachedCheck;
+            inherit lints;
+          };
+
+          atticPush = pkgs.writeShellApplication {
+            name = "attic-push";
+            runtimeInputs = [ pkgs.attic-client ];
+            text = ''
+              if [[ -z "''${ATTIC_TOKEN:-}" ]]; then
+                echo "No ATTIC_TOKEN secret, so nothing is pushed."
+                exit 0
+              fi
+              attic login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
+              paths=(${pkgs.lib.escapeShellArgs (map builtins.unsafeDiscardStringContext cachedPaths)})
+              skip="''${ATTIC_SKIP_PATH:-}"
+              built=()
+              for path in "''${paths[@]}"; do
+                if [[ -n "$skip" && "$path" == "$skip" ]]; then
+                  continue
+                fi
+                if [[ -e "$path" ]]; then
+                  built+=("$path")
+                fi
+              done
+              if (( ''${#built[@]} == 0 )); then
+                echo "This job built nothing the cache keeps."
+                exit 0
+              fi
+              printf '%s\n' "''${built[@]}"
+              attic push homelab:main "''${built[@]}"
+            '';
+          };
+
+          dev = import ./nix/dev {
+            inherit
+              pkgs
+              toolchain
+              buildTools
+              macBuildEnv
+              hostBuildScriptsSkipped
+              cross
+              clippyRun
+              daemonPackages
+              testRun
+              nextest
+              testTools
+              atticPush
+              ;
+            compileEnv = ''
+              export TRANSCRIBE_CMAKE_ARGS="${ggmlCpu}"
+              export PKG_CONFIG_PATH="${
+                pkgs.lib.makeSearchPathOutput "dev" "lib/pkgconfig" speechLibs
+              }:${libghosttyVt.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+              ${macBuildEnv}
+            '';
+          };
+
+          terminal-browser = import ./nix/terminal-browser.nix { inherit pkgs; };
+        in
+        {
+          inherit
+            dev
+            luned
+            terminal-browser
+            checks
+            cachedPaths
+            ;
+          flaky-report = flakyReport.bin;
           shell = pkgs.mkShell {
             packages = buildTools ++ [
               dev
@@ -653,6 +912,8 @@
       bySystem = nixpkgs.lib.genAttrs systems build;
     in
     {
+      inherit ciRunners;
+
       devShells = nixpkgs.lib.mapAttrs (_: built: { default = built.shell; }) bySystem;
 
       packages = nixpkgs.lib.mapAttrs (_: built: {
@@ -666,5 +927,12 @@
       }) bySystem;
 
       checks = nixpkgs.lib.mapAttrs (_: built: built.checks) bySystem;
+
+      testedTargets = nixpkgs.lib.mapAttrs (system: runner: {
+        inherit runner;
+        path = bySystem.${system}.checks.luned.outPath;
+      }) ciRunners;
+
+      cached = nixpkgs.lib.mapAttrs (_: built: built.cachedPaths) bySystem;
     };
 }

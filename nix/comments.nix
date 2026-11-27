@@ -124,10 +124,10 @@ pkgs.writeShellApplication {
       echo "lune-comments: no file to scan was listed on stdin" >&2
       exit 1
     fi
-    ast-grep test --config "$config" || status=1
+    ast-grep test --custom-languages allow --config "$config" || status=1
     inspect="$(mktemp)"
     printf '%s\0' "''${found[@]}" |
-      xargs -0 ast-grep scan --error --inspect entity --config "$config" 2>"$inspect" || status=1
+      xargs -0 ast-grep scan --custom-languages allow --error --inspect entity --config "$config" 2>"$inspect" || status=1
     ruled_file='^sg: entity[|]file[|](.*): language=[^,]*,appliedRuleCount=[1-9][0-9]*$'
     declare -A ruled=()
     while IFS= read -r line; do

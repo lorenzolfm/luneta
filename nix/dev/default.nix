@@ -11,6 +11,7 @@
   testRun,
   nextest,
   testTools,
+  atticPush,
 }:
 let
   inherit (pkgs) lib;
@@ -136,6 +137,7 @@ pkgs.writeShellApplication {
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
     inherit (commands) lint deny;
+    attic-push = atticPush;
     ios-build = command (import ./commands/ios.nix args).build;
   };
   text = ''
