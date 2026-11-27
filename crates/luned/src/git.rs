@@ -3418,6 +3418,25 @@ mod tests {
         });
     }
 
+    fn wait_nested_write_heard_tree(
+        what: &str,
+        watches: &Watches,
+        woken: &mpsc::Receiver<()>,
+        tree: &TreeWatch,
+        file: &AbsPath,
+    ) {
+        let mut attempt = 0u64;
+        lune_waits::eventually(what, || {
+            if attempt > 0 && watches.take_heard().contains_tree(tree) {
+                return Some(());
+            }
+            attempt += 1;
+            fs::write(file.as_path(), format!("{attempt}\n")).unwrap();
+            None
+        });
+        while woken.try_recv().is_ok() {}
+    }
+
     #[test]
     fn a_default_branch_is_a_named_branch_of_a_known_remote_or_of_its_own() {
         let remote = |branch: &str| {
@@ -4398,12 +4417,12 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        fs::write(feat.join("branch").as_path(), "abc\n").unwrap();
-        wait_heard_tree(
+        wait_nested_write_heard_tree(
             "recursive parent watches newly created nested dir",
             &watches,
             &woken,
             &tree,
+            &feat.join("branch"),
         );
 
         watches.remove_outside(outside).synced.unwrap();
@@ -4430,12 +4449,12 @@ mod tests {
         );
         clear_heard(&watches, &woken);
 
-        fs::write(other.join("tip").as_path(), "123\n").unwrap();
-        wait_heard_tree(
+        wait_nested_write_heard_tree(
             "recursive parent hears write inside new nested dir",
             &watches,
             &woken,
             &tree,
+            &other.join("tip"),
         );
 
         watches.remove_tree(tree).unwrap();
