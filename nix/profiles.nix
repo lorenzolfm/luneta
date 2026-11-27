@@ -69,6 +69,43 @@ let
     ++ checkDrv "clippyCrossRelease" "release"
     ++ checkDrv "releaseDeps" "release"
     ++ checkDrv "luned" "release";
+  devFailures =
+    if devProfile ? opt-level then
+      [
+        "Cargo.toml: [profile.dev] must not override opt-level so checks inherit unoptimized dev builds"
+      ]
+    else
+      [ ];
+  releaseFailures =
+    if !(profile ? release) then
+      [
+        "Cargo.toml: [profile.release] is missing; flake.nix builds packages.<system>.luned with CARGO_PROFILE = \"release\""
+      ]
+    else
+      (
+        if (releaseProfile.lto or null) == true then
+          [ ]
+        else
+          [
+            "Cargo.toml: [profile.release] must explicitly set lto = true for shipped release binaries"
+          ]
+      )
+      ++ (
+        if (releaseProfile.strip or null) == true then
+          [ ]
+        else
+          [
+            "Cargo.toml: [profile.release] must explicitly set strip = true for shipped release binaries"
+          ]
+      )
+      ++ (
+        if (releaseProfile.debug-assertions or false) == false then
+          [ ]
+        else
+          [
+            "Cargo.toml: [profile.release] must not enable debug-assertions"
+          ]
+      );
   checksFailures =
     if
       !(builtins.isString checksProfile)
@@ -92,6 +129,14 @@ let
           [
             "Cargo.toml: [profile.${checksProfile}] must set inherits = \"dev\" so CI runs with debug_assert!, overflow-checks and dev's opt-level 3 crate overrides"
           ]
+      )
+      ++ (
+        if checks ? opt-level then
+          [
+            "Cargo.toml: [profile.${checksProfile}] must not override opt-level so CI tests unoptimized dev builds"
+          ]
+        else
+          [ ]
       )
       ++ (
         if (checks.package or { }) == { } && (checks.build-override or { }) == { } then
@@ -147,7 +192,9 @@ in
       "Cargo.toml: [profile.dev.package.*] and [profile.release.package.*] set different opt-levels; the speech crates run at opt-level 3 in both profiles, so change them together"
     ]
 )
+++ devFailures
 ++ checksFailures
+++ releaseFailures
 ++ derivationFailures
 ++ map (
   name:

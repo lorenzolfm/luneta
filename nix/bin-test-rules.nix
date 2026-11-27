@@ -1,5 +1,8 @@
 { root }:
 let
+  cargoToml = builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"));
+  members = cargoToml.workspace.members or [ ];
+  exclude = cargoToml.workspace.exclude or [ ];
   cratesEntries = builtins.readDir (root + "/crates");
   crateDirs = builtins.filter (name: cratesEntries.${name} == "directory") (
     builtins.attrNames cratesEntries
@@ -54,7 +57,7 @@ let
   rule = {
     id = "untested-bins-hold-no-tests";
     language = "rust";
-    message = "This [[bin]] sets test = false in Cargo.toml, so Cargo neither compiles nor runs tests in it. Put unit tests and submodules in the crate's library, or remove test = false.";
+    message = "This [[bin]] sets test = false in Cargo.toml, so Cargo neither compiles nor runs tests in it. Put unit tests, submodules, and included files in the crate's library, or remove test = false.";
     rule.any = [
       {
         kind = "attribute";
@@ -70,8 +73,18 @@ let
           kind = "declaration_list";
         };
       }
+      {
+        kind = "macro_invocation";
+        has = {
+          field = "macro";
+          regex = "^(::)?(core::|std::)?include$";
+        };
+      }
     ];
   }
   // (if untestedBins == [ ] then { ignores = [ "**" ]; } else { files = untestedBins; });
 in
-builtins.toJSON rule
+if members == [ "crates/*" ] && exclude == [ ] then
+  builtins.toJSON rule
+else
+  throw "nix/bin-test-rules.nix: Cargo.toml workspace members changed; update nix/bin-test-rules.nix"

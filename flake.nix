@@ -77,6 +77,11 @@
           ) crateDirs;
           noRepoCargoConfig =
             !(builtins.pathExists ./.cargo/config.toml) && !(builtins.pathExists ./.cargo/config);
+          checksProfile = "checks";
+          profileFailures = import ./nix/profiles.nix {
+            root = ./.;
+            inherit checksProfile;
+          };
           toolchainChecks = [
             {
               ok = stableChannel;
@@ -97,6 +102,10 @@
             {
               ok = noRepoCargoConfig;
               message = "a tracked .cargo/config(.toml) is ignored by flake.nix's cargoFiles while dev and plain cargo read it; remove it or wire it into cargoFiles and ci.yml";
+            }
+            {
+              ok = profileFailures == [ ];
+              message = pkgs.lib.concatStringsSep "\n" profileFailures;
             }
           ];
           toolchain = pkgs.lib.foldr (
@@ -235,8 +244,6 @@
             TRANSCRIBE_CMAKE_ARGS = ggmlCpu;
           };
 
-          checksProfile = "checks";
-
           checksArgs = daemon // {
             CARGO_PROFILE = checksProfile;
           };
@@ -282,24 +289,21 @@
               pnameSuffix = "-tested";
               src = testSrc;
               cargoArtifacts = checksDeps;
-              nativeCheckInputs = testTools;
-              doCheck = true;
+              doCheck = false;
               doInstallCargoArtifacts = false;
 
               LUNE_BUILT = "1";
               NEXTEST_SHOW_PROGRESS = "counter";
               NEXTEST_DOUBLE_SPAWN = "0";
 
-              preBuild = ''
-                export PATH="${localToolchain}/bin:$PATH"
-              '';
               buildPhaseCargoCommand = ''
-                ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --no-run
-              '';
-              checkPhaseCargoCommand = ''
+                if [ "''${CARGO_PROFILE:-}" != "${checksProfile}" ]; then
+                  echo "luned-tested: expected CARGO_PROFILE=${checksProfile}, got ''${CARGO_PROFILE:-<unset>}" >&2
+                  exit 1
+                fi
                 case "''${NIX_BUILD_CORES:-}" in
-                  "" | 0* | *[!0-9]*)
-                    printf 'checkPhase: NIX_BUILD_CORES must be a positive integer, got %s\n' "''${NIX_BUILD_CORES:-unset}" >&2
+                  "" | *[!0-9]* | 0*)
+                    echo "luned-tested: NIX_BUILD_CORES must be a positive integer, got ''${NIX_BUILD_CORES:-<unset>}" >&2
                     exit 1
                     ;;
                   [1-7])
@@ -309,7 +313,8 @@
                     test_threads=24
                     ;;
                 esac
-                ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
+                export PATH="${localToolchain}/bin:${pkgs.lib.makeBinPath testTools}:$PATH"
+                ${pkgs.lib.getExe nextest} --cargo-profile "${checksProfile}" --profile ci \
                   --test-threads "$test_threads"
                 cargoWithProfile test --doc --locked ${testRun}
               '';
