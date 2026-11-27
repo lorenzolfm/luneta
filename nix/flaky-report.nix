@@ -19,16 +19,19 @@ let
     FLAKY_ANNOTATIONS_MAX = 10
 
     ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    RULE_RE = re.compile(r"^[-─]{12}$")
     NEXTEST_START_RE = re.compile(
-        r"^\s*(?:Starting [0-9]+ tests? across |(?:[-─]+\s*)?Nextest run ID )"
+        r"^(?: Nextest run ID | {4}Starting [0-9]+ tests? across )"
     )
-    SUMMARY_RE = re.compile(r"^\s*Summary \[[^]]*\] +[0-9]+ tests? run:")
+    SUMMARY_RE = re.compile(
+        r"^ {0,5}Summary \[[^]]*\] +[0-9]+(?:/[0-9]+)? tests? run:"
+    )
     SUMMARY_FLAKY_RE = re.compile(r"\b([1-9][0-9]*) flaky\b")
     FLAKY_LINE_RE = re.compile(
-        r"^\s*FLAKY ([0-9]+)/([0-9]+) \[[^]]*\] +(?:\([^)]*\) +)?(.+?)\s*$"
+        r"^ {0,3}FLAKY ([0-9]+)/([0-9]+) \[[^]]*\] +(?:\([^)]*\) +)?(.+?)\s*$"
     )
     MID_RUN_PASS_RE = re.compile(
-        r"^\s*TRY ([0-9]+) PASS \[[^]]*\] +(?:\([^)]*\) +)?(.+?)\s*$"
+        r"^ {0,3}TRY ([0-9]+) PASS \[[^]]*\] +(?:\([^)]*\) +)?(.+?)\s*$"
     )
     FINAL_STATUS_LINE_RE = re.compile(
         r"^\s*(?:FAIL|LEAK|LEAK-FAIL|PASS|SKIP|TIMEOUT|ABORT|EXECFAIL|SLOW|SIG[A-Z0-9]+)\b"
@@ -53,8 +56,10 @@ let
         total_num: int
 
         def __post_init__(self) -> None:
-            if not self.name:
-                raise ValueError("flaky test name must be non-empty")
+            if not self.name or "\n" in self.name or "\r" in self.name:
+                raise ValueError(
+                    f"flaky test name must be a non-empty single line: {self.name!r}"
+                )
             if self.try_num < 2 or self.try_num > self.total_num:
                 raise ValueError(
                     f"invalid attempt count {self.try_num}/{self.total_num} for {self.name}"
@@ -78,8 +83,6 @@ let
 
     @dataclass(frozen=True)
     class NoSummaryOutcome:
-        daemon_outcome: DaemonOutcome
-        saw_derivation: bool
         saw_nextest: bool
         mid_run_records: tuple[FlakyTest, ...]
         mid_run_total: int
@@ -182,12 +185,9 @@ let
         log_path: Path,
         derivation: str,
         max_attempts: int,
-        daemon_outcome: DaemonOutcome,
     ) -> LogSummaryOutcome | NoSummaryOutcome:
         if not log_path.is_file():
             return NoSummaryOutcome(
-                daemon_outcome=daemon_outcome,
-                saw_derivation=False,
                 saw_nextest=False,
                 mid_run_records=(),
                 mid_run_total=0,
@@ -195,8 +195,8 @@ let
             )
         prefix = f"{derivation}> "
         phase = ParserPhase.BEFORE_SUMMARY
-        saw_derivation = False
         saw_nextest = False
+        prev_was_rule = False
         summary_flaky = 0
         seen: dict[str, FlakyTest] = {}
         mid_run: dict[str, FlakyTest] = {}
@@ -205,15 +205,20 @@ let
                 cleaned = ANSI_RE.sub("", raw_line).rstrip("\r\n")
                 if not cleaned.startswith(prefix):
                     continue
-                saw_derivation = True
                 body = cleaned[len(prefix):]
                 if phase is ParserPhase.BEFORE_SUMMARY:
+                    if RULE_RE.match(body):
+                        prev_was_rule = True
+                        continue
+                    was_rule = prev_was_rule
+                    prev_was_rule = False
                     if NEXTEST_START_RE.match(body):
                         saw_nextest = True
                         continue
+                    if not saw_nextest:
+                        continue
                     mid_match = MID_RUN_PASS_RE.match(body)
                     if mid_match:
-                        saw_nextest = True
                         try_num = int(mid_match.group(1))
                         test_name = mid_match.group(2)
                         if try_num >= 2 and test_name and test_name not in mid_run:
@@ -223,7 +228,7 @@ let
                                 total_num=max(max_attempts, try_num),
                             )
                         continue
-                    if SUMMARY_RE.match(body):
+                    if was_rule and SUMMARY_RE.match(body):
                         phase = ParserPhase.IN_SUMMARY
                         flaky_match = SUMMARY_FLAKY_RE.search(body)
                         summary_flaky = int(flaky_match.group(1)) if flaky_match else 0
@@ -248,8 +253,6 @@ let
         if phase is ParserPhase.BEFORE_SUMMARY:
             mid_records, mid_total, mid_truncated = bound_sorted(mid_run)
             return NoSummaryOutcome(
-                daemon_outcome=daemon_outcome,
-                saw_derivation=saw_derivation,
                 saw_nextest=saw_nextest,
                 mid_run_records=mid_records,
                 mid_run_total=mid_total,
@@ -329,8 +332,18 @@ let
         )
 
 
-    def record_attic_skip(github_env: Path | None, out_link: Path | None) -> None:
-        if github_env is None or out_link is None or not out_link.exists():
+    def write_attic_skip(
+        github_env: Path | None,
+        out_link: Path | None,
+        skip: bool,
+    ) -> None:
+        if github_env is None:
+            return
+        if not skip:
+            with github_env.open("a", encoding="utf-8") as handle:
+                handle.write("ATTIC_SKIP_PATH=\n")
+            return
+        if out_link is None or not out_link.exists():
             return
         resolved = os.path.realpath(out_link)
         if not resolved.startswith("/nix/store/") or "\n" in resolved or "\r" in resolved:
@@ -348,7 +361,6 @@ let
     ) -> None:
         annotations_left = FLAKY_ANNOTATIONS_MAX
         notes: list[str] = []
-        skip_attic = False
         records: tuple[FlakyTest, ...] = ()
         total_records = 0
 
@@ -361,7 +373,7 @@ let
                     warning(f"Flaky test list truncated on {runner_label}", msg)
                     notes.append(msg)
                     annotations_left -= 1
-                skip_attic = total > 0
+                write_attic_skip(github_env, out_link, skip=total > 0)
             case LogSummaryOutcome(
                 summary_flaky=summary_flaky,
                 records=recs,
@@ -383,10 +395,7 @@ let
                     warning(f"Flaky test count mismatch on {runner_label}", msg)
                     notes.append(msg)
                     annotations_left -= 1
-                skip_attic = total_parsed > 0 or summary_flaky > 0 or truncated
             case NoSummaryOutcome(
-                daemon_outcome=daemon_outcome,
-                saw_derivation=saw_derivation,
                 saw_nextest=saw_nextest,
                 mid_run_records=mid_records,
                 mid_run_total=mid_total,
@@ -399,13 +408,7 @@ let
                     warning(f"Flaky test list truncated on {runner_label}", msg)
                     notes.append(msg)
                     annotations_left -= 1
-                if daemon_outcome is DaemonOutcome.SUCCESS and saw_derivation:
-                    msg = "luned built and succeeded, but no nextest Summary line was matched; check the log"
-                    warning(f"Nextest summary missing on {runner_label}", msg)
-                    notes.append(msg)
-                    annotations_left -= 1
-                    skip_attic = True
-                elif daemon_outcome is DaemonOutcome.FAILURE and saw_nextest:
+                if saw_nextest:
                     msg = "nextest started and ended without printing a final Summary line; check the log"
                     warning(f"Nextest summary missing on {runner_label}", msg)
                     notes.append(msg)
@@ -413,8 +416,6 @@ let
 
         append_summary(step_summary, runner_label, records, total_records, notes)
         emit_flaky_annotations(runner_label, records, total_records, annotations_left)
-        if skip_attic:
-            record_attic_skip(github_env, out_link)
 
 
     def main(argv: list[str]) -> int:
@@ -461,7 +462,6 @@ let
                     args.log,
                     args.derivation,
                     args.max_attempts,
-                    daemon_outcome,
                 )
             emit_report(
                 report,
@@ -521,6 +521,7 @@ let
         )
         summary = root / "clean-summary.md"
         gh_env = root / "clean.env"
+        gh_env.write_text("ATTIC_SKIP_PATH=/nix/store/preexisting-luned\n", encoding="utf-8")
         res = run_cli(
             "--outcome", "success",
             "--log", str(root / "missing.log"),
@@ -534,7 +535,7 @@ let
         assert res.returncode == 0, res
         assert res.stdout == "", res.stdout
         assert not summary.exists()
-        assert not gh_env.exists()
+        assert gh_env.read_text(encoding="utf-8").splitlines()[-1] == "ATTIC_SKIP_PATH="
 
         flaky_junit = root / "flaky.xml"
         flaky_junit.write_text(
@@ -575,6 +576,31 @@ let
         env_text = gh_env.read_text(encoding="utf-8")
         assert env_text.startswith("ATTIC_SKIP_PATH=/nix/store/"), env_text
 
+        nl = f"&{chr(35)}10;"
+        newline_junit = root / "newline.xml"
+        newline_junit.write_text(
+            '<testsuites name="nextest-run" tests="1" failures="0" errors="0">'
+            '<testsuite name="luned::daemon" tests="1" failures="0" errors="0">'
+            f'<testcase name="bad{nl}{nl}inject" classname="luned::daemon" time="0.1">'
+            '<flakyFailure type="test failure">boom</flakyFailure>'
+            "</testcase></testsuite></testsuites>",
+            encoding="utf-8",
+        )
+        gh_env = root / "newline.env"
+        gh_env.write_text("ATTIC_SKIP_PATH=/nix/store/keep-me\n", encoding="utf-8")
+        res = run_cli(
+            "--outcome", "success",
+            "--log", str(root / "missing.log"),
+            "--junit", str(newline_junit),
+            "--out-link", "${bin}",
+            "--runner-os", "Linux",
+            "--runner-arch", "X64",
+            "--github-env", str(gh_env),
+        )
+        assert res.returncode != 0, res
+        assert "::error::flaky test name must be a non-empty single line" in res.stdout, res.stdout
+        assert gh_env.read_text(encoding="utf-8") == "ATTIC_SKIP_PATH=/nix/store/keep-me\n"
+
         res = run_cli(
             "--outcome", "success",
             "--log", str(root / "missing.log"),
@@ -588,15 +614,28 @@ let
         scoped_log = root / "scoped.log"
         scoped_log.write_text(
             "\n".join([
+                "other-drv> ────────────",
                 "other-drv>      Summary [   1.000s] 1 test run: 1 passed (1 flaky)",
                 "other-drv>    FLAKY 2/3 [   0.010s] other::bin foreign_test",
+                "${derivationName}> ------------",
+                "${derivationName}>      Summary [   0.001s] 1 test run: 1 passed, 0 failed",
+                "${derivationName}> ------------",
+                "${derivationName}>  Nextest run ID 1234 with nextest profile: ci",
                 "${derivationName}>     Starting 3 tests across 1 binary",
-                "${derivationName}>   TRY 1 FAIL [   0.010s] luned::daemon layouts::one",
-                "${derivationName}>   TRY 2 PASS [   0.010s] luned::daemon layouts::one",
+                "${derivationName}>   TRY 1 FAIL [   0.010s] (---) luned::daemon layouts::hard_fail",
+                "${derivationName}>   stdout ---",
+                "${derivationName}>     ------------",
+                "${derivationName}>          Summary [   0.001s] 1 test run: 1 passed, 0 failed",
+                "${derivationName}>        FLAKY 1/1 [   0.001s] fake::bin spoofed_in_stdout",
+                "${derivationName}>       TRY 2 PASS [   0.001s] fake::bin spoofed_mid_run",
+                "${derivationName}>   TRY 1 FAIL [   0.010s] (---) luned::daemon layouts::one",
+                "${derivationName}>   TRY 2 PASS [   0.010s] (1/3) luned::daemon layouts::one",
+                "${derivationName}> ------------",
                 "${derivationName}>      Summary [   2.000s] 3 tests run: 2 passed (1 flaky), 1 failed",
-                "${derivationName}>    FLAKY 2/3 [   0.010s] (2/3) luned::daemon layouts::one",
-                "${derivationName}>         FAIL [   0.020s] luned::daemon layouts::hard_fail",
+                "${derivationName}>    FLAKY 2/3 [   0.010s] (1/3) luned::daemon layouts::one",
+                "${derivationName}>   TRY 3 FAIL [   0.020s] (2/3) luned::daemon layouts::hard_fail",
                 "${derivationName}> error: test run failed",
+                "${derivationName}> ------------",
                 "${derivationName}>      Summary [   0.001s] 1 test run: 1 passed, 0 failed",
                 "${derivationName}>    FLAKY 1/1 [   0.001s] luned::doctest spoofed_after_summary",
             ]) + "\n",
@@ -613,11 +652,62 @@ let
         assert res.returncode == 0, res
         assert "luned::daemon layouts::one, which passed on try 2 of 3" in res.stdout, res.stdout
         assert "foreign_test" not in res.stdout, res.stdout
+        assert "spoofed_in_stdout" not in res.stdout, res.stdout
+        assert "spoofed_mid_run" not in res.stdout, res.stdout
         assert "spoofed_after_summary" not in res.stdout, res.stdout
         assert "mismatch" not in res.stdout.lower(), res.stdout
 
+        partial_log = root / "partial.log"
+        partial_log.write_text(
+            "\n".join([
+                "${derivationName}> ────────────",
+                "${derivationName}>  Nextest run ID 5678 with nextest profile: ci",
+                "${derivationName}>     Starting 3 tests across 1 binary",
+                "${derivationName}>   TRY 2 PASS [   0.010s] (1/3) luned::daemon partial::flaky",
+                "${derivationName}> ────────────",
+                "${derivationName}>      Summary [   0.026s] 2/3 tests run: 1 passed (1 flaky), 1 failed, 1 skipped",
+                "${derivationName}>    FLAKY 2/3 [   0.010s] (1/3) luned::daemon partial::flaky",
+                "${derivationName}>   TRY 3 FAIL [   0.010s] (2/3) luned::daemon partial::hard_fail",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        summary = root / "partial-summary.md"
+        res = run_cli(
+            "--outcome", "failure",
+            "--log", str(partial_log),
+            "--runner-os", "Linux",
+            "--runner-arch", "X64",
+            "--step-summary", str(summary),
+        )
+        assert res.returncode == 0, res
+        assert "luned::daemon partial::flaky, which passed on try 2 of 3" in res.stdout, res.stdout
+        assert "summary missing" not in res.stdout.lower(), res.stdout
+
+        partial_clean_log = root / "partial-clean.log"
+        partial_clean_log.write_text(
+            "\n".join([
+                "${derivationName}> ------------",
+                "${derivationName}>     Starting 3 tests across 1 binary",
+                "${derivationName}> ------------",
+                "${derivationName}>      Summary [   0.026s] 2/3 tests run: 1 passed, 1 failed, 1 skipped",
+            ]) + "\n",
+            encoding="utf-8",
+        )
+        summary = root / "partial-clean-summary.md"
+        res = run_cli(
+            "--outcome", "failure",
+            "--log", str(partial_clean_log),
+            "--runner-os", "Linux",
+            "--runner-arch", "X64",
+            "--step-summary", str(summary),
+        )
+        assert res.returncode == 0, res
+        assert res.stdout == "", res.stdout
+        assert not summary.exists()
+
         trunc_lines = [
             "${derivationName}>     Starting 1005 tests across 1 binary",
+            "${derivationName}> ────────────",
             "${derivationName}>      Summary [   9.000s] 1005 tests run: 1004 passed (1005 flaky), 1 failed",
         ]
         for idx in range(1005):
@@ -643,7 +733,11 @@ let
 
         mismatch_log = root / "mismatch.log"
         mismatch_log.write_text(
-            "${derivationName}>      Summary [   1.000s] 2 tests run: 1 passed (1 flaky), 1 failed\n",
+            "\n".join([
+                "${derivationName}>     Starting 2 tests across 1 binary",
+                "${derivationName}> ------------",
+                "${derivationName}>      Summary [   1.000s] 2 tests run: 1 passed (1 flaky), 1 failed",
+            ]) + "\n",
             encoding="utf-8",
         )
         summary = root / "mismatch-summary.md"

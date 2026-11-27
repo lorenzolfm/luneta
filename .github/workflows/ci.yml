@@ -363,6 +363,12 @@ jobs:
           rm -f "$out"
           : > "$log"
           nix build -L --out-link "$out" ".#checks.$system.luned" 2>&1 | tee "$log"
+          built="$(nix path-info "$out")"
+          if [[ $built != /nix/store/* || $built == *$'\n'* || $built == *$'\r'* ]]; then
+            echo "::error::luned out-link did not resolve to a nix store path: $built"
+            exit 1
+          fi
+          echo "ATTIC_SKIP_PATH=$built" >> "$GITHUB_ENV"
 
       - name: Name the tests that passed only on a retry
         if: ${{ !cancelled() && steps.daemon.outcome != 'skipped' }}
@@ -378,6 +384,16 @@ jobs:
             --out-link "$RUNNER_TEMP/luned-check"
 
       - *attic-push
+
+      - name: Drop flaky or unverified daemon check from the local store
+        if: ${{ !cancelled() && env.ATTIC_SKIP_PATH != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/luned-check"
+          if [[ -e $ATTIC_SKIP_PATH ]]; then
+            nix store delete "$ATTIC_SKIP_PATH"
+          fi
 
   release:
     needs: [code, clippy, tested, daemon]

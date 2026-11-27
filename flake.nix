@@ -324,7 +324,7 @@
                 cargoWithProfile test --doc --locked ${testRun}
               '';
               postBuild = ''
-                junit="''${CARGO_TARGET_DIR:-target}/nextest/ci/${ciJunitPath}"
+                junit="''${CARGO_TARGET_DIR:-target}/nextest/ci/"${pkgs.lib.escapeShellArg ciJunitPath}
                 test -f "$junit"
                 cp "$junit" "$TMPDIR/luned-junit.xml"
               '';
