@@ -10,11 +10,12 @@ use clap::Subcommand;
 use lune_domain::mux::TerminalKey;
 use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::unread::Unread;
+use lune_protocol::watch::HostVersion;
 use luned::api::projects::Held;
 use luned::api::remote::Reached;
 use luned::api::say::Does;
 use luned::api::{
-    Agent, InfoResponse, ListAgentsResponse, Say, SayRequest, Utterance, Version,
+    Agent, InfoResponse, ListAgentsResponse, Say, SayRequest, Utterance,
 };
 use luned::folder::SOCKET;
 pub use luned::log::causes;
@@ -57,7 +58,13 @@ pub enum Command {
             help = "The host as last seen, `<pid>:<seq>` from its version, to wait for the next. \
                     Without it, the host is written out at once"
         )]
-        after: Option<Version>,
+        after: Option<HostVersion>,
+        #[arg(
+            long,
+            help = "Write a WatchResponse instead of a Host, so an unchanged timeout carries \
+                    only its version"
+        )]
+        changes: bool,
     },
     #[command(
         hide = true,
@@ -224,23 +231,21 @@ pub enum Command {
     },
 }
 
-fn version(spelled: &str) -> Result<Version, String> {
-    let (pid, seq) = spelled.split_once(':').ok_or("not <pid>:<seq>")?;
-    let pid = pid.parse().map_err(|error| format!("the pid: {error}"))?;
-    let seq = seq.parse().map_err(|error| format!("the seq: {error}"))?;
-    Ok(Version { pid, seq })
+fn version(spelled: &str) -> Result<HostVersion, String> {
+    spelled.parse()
 }
 
 pub fn run(command: &Command, folder: &Path) -> ExitCode {
     match command {
         Command::Info => ask(folder, daemon::info(folder), info),
         Command::Agents => ask(folder, daemon::running(folder), agents),
-        Command::Watch { after } => {
+        Command::Watch { after, changes } => {
             let current = async {
                 let current = daemon::current(folder).await.map_err(Unreached::Failed)?;
                 Ok(current.daemon)
             };
-            ask(folder, current, |daemon| watch(daemon, *after))
+            let output = if *changes { WatchOutput::Changes } else { WatchOutput::Host };
+            ask(folder, current, |daemon| watch(daemon, *after, output))
         },
         Command::Bridge => bridge::run(folder),
         Command::Ssh { destination } => ssh(destination, folder),
@@ -363,14 +368,19 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
     }
 }
 
+const FIRST_REACH_WATCHES_MAX: usize = 128;
+
+const _: () = assert!(FIRST_REACH_WATCHES_MAX > 0);
+
 async fn first_reach(
     daemon: Shared,
     destination: &Destination,
 ) -> Result<Option<Reached>, Box<dyn Error>> {
     let deadline = tokio::time::Instant::now() + luned::REACH + Duration::from_secs(5);
     let spelled = destination.to_string();
+    assert!(!spelled.is_empty(), "a destination is not blank");
     let mut watching = daemon.watching(luned::ANSWER, LocalWatch::Client)?;
-    loop {
+    for _ in 0..FIRST_REACH_WATCHES_MAX {
         let Ok(watched) = tokio::time::timeout_at(deadline, watching.next()).await else {
             return Ok(None);
         };
@@ -381,6 +391,7 @@ async fn first_reach(
             reached => return Ok(reached),
         }
     }
+    Ok(None)
 }
 
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
@@ -460,16 +471,40 @@ pub fn unread(unread: Unread) -> String {
     format!("{unread}, and its log says which")
 }
 
+#[derive(Clone, Copy)]
+enum WatchOutput {
+    Host,
+    Changes,
+}
+
 async fn watch(
     daemon: Shared,
-    after: Option<Version>,
+    after: Option<HostVersion>,
+    output: WatchOutput,
 ) -> Result<(), Box<dyn Error>> {
-    let host = match after {
-        None => daemon.snapshot(luned::ANSWER, false).await?,
-        Some(version) => daemon.watching(luned::ANSWER, LocalWatch::Client)?.once(version).await?,
+    let encoded = match output {
+        WatchOutput::Host => {
+            let host = match after {
+                None => daemon.snapshot_legacy(luned::ANSWER, LocalWatch::Client).await?,
+                Some(seen) => daemon.watching(luned::ANSWER, LocalWatch::Client)?.once(seen).await?,
+            };
+            host.into_host().encode_to_vec()
+        },
+        WatchOutput::Changes => {
+            let response = match after {
+                None => daemon.snapshot(luned::ANSWER, LocalWatch::Client).await?.into_response(),
+                Some(seen) => daemon
+                    .watching(luned::ANSWER, LocalWatch::Client)?
+                    .once_changes(seen)
+                    .await?
+                    .into_response(seen),
+            };
+            response.encode_to_vec()
+        },
     };
+    assert!(!encoded.is_empty(), "a validated watch response encodes non-empty");
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(&host.encode_to_vec())?;
+    stdout.write_all(&encoded)?;
     stdout.flush()?;
     Ok(())
 }

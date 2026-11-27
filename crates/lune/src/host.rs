@@ -78,8 +78,8 @@ use crate::printed::{self, Printed};
 use crate::pull::{self, Found};
 use crate::review::{self, LoadedDiff, ReviewAction, RibbonCacheKey, RibbonOverlay};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, Sidebar,
-    SidebarView, Sitting, ViewKey,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, SeatedLayout,
+    Sidebar, SidebarView, Sitting, ViewKey,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
@@ -1256,7 +1256,7 @@ impl App {
     ) -> io::Result<()> {
         let relists = matches!(
             event,
-            Event::Daemon(_) | Event::Shown(_, luned::Heard::Laid(_))
+            Event::Daemon(_) | Event::Shown(_, luned::Heard::Laid { .. })
         );
         let mut dirty = match event {
             Event::Input(input) => self.input(input, now),
@@ -1957,7 +1957,9 @@ impl App {
         }
         if let Some(change) = resized(chord) {
             self.leave();
-            self.ask_right(luned::Asked::Resize(change));
+            if let Some(right) = self.viewed_mut() {
+                right.grow(change);
+            }
             return true;
         }
         false
@@ -2021,12 +2023,6 @@ impl App {
     fn tell_focus(&mut self, has: bool) {
         if let Some(right) = self.viewed_mut() {
             right.focus(has);
-        }
-    }
-
-    fn ask_right(&mut self, asked: luned::Asked) {
-        if let Some(right) = self.viewed_mut() {
-            right.ask(asked);
         }
     }
 
@@ -3120,6 +3116,9 @@ impl App {
     #[must_use]
     fn cross(&mut self, across: Across) -> bool {
         if !matches!(self.holder(), Holder::Terminal) {
+            if let Some(right) = self.viewed_mut() {
+                right.crossed_edge();
+            }
             return false;
         }
         let Some(right) = self.viewed() else {
@@ -3136,7 +3135,12 @@ impl App {
                 self.step_to_sidebar();
                 true
             },
-            (Across::After, _, None) => false,
+            (Across::After, _, None) => {
+                if let Some(right) = self.viewed_mut() {
+                    right.stayed_at_edge();
+                }
+                false
+            },
         }
     }
 
@@ -3222,7 +3226,7 @@ impl App {
         let right = self.shown();
         let _ = right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
-            right.ask(luned::Asked::Focus(terminal));
+            right.focus_view(terminal);
         }
         self.seat();
     }
@@ -3282,7 +3286,17 @@ impl App {
             return;
         };
         let terminal = right.focused().and_then(|focused| project.terminal_key(focused));
-        let at = Sitting::Worktree { worktree, terminal };
+        let layout = match (right.arranged(), terminal) {
+            (Some((arranged, version)), terminal) => {
+                SeatedLayout::Live { arranged, version, terminal }
+            },
+            (None, Some(terminal)) => {
+                assert!(!right.live(), "a live worktree with a focused terminal has an arrangement");
+                SeatedLayout::Disconnected(terminal)
+            },
+            (None, None) => SeatedLayout::Unlaid,
+        };
+        let at = Sitting::Worktree { worktree, layout };
         self.sidebar.sit(Seat { on, project: project.id, at });
     }
 

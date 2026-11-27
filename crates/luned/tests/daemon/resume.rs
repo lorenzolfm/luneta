@@ -41,7 +41,7 @@ impl<'a> Shown<'a> {
             again: false,
             on: None,
         };
-        asks.try_send(ShowRequest { event: Some(Event::Hello(hello)) }).unwrap();
+        asks.try_send(ShowRequest { event: Some(Event::Hello(hello)), asked: 0 }).unwrap();
         let heard = owned.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             daemon.show(ReceiverStream::new(asked)).await.unwrap().into_inner()
@@ -56,7 +56,7 @@ impl<'a> Shown<'a> {
             beside: Some(open::Beside::Largest(())),
             opens: Some(Opens::Shell.to_api()),
         };
-        self.asks.try_send(ShowRequest { event: Some(Event::Open(open)) }).unwrap();
+        self.asks.try_send(ShowRequest { event: Some(Event::Open(open)), asked: 0 }).unwrap();
         let laid = self.until("shell terminal ready", |l| {
             l.views.len() == 1 && view_key(&l.views[0]).is_some()
         });

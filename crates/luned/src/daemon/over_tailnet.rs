@@ -178,7 +178,24 @@ impl Daemon for OverTailnet {
         &self,
         request: Request<api::WatchRequest>,
     ) -> Result<Response<api::Host>, Status> {
+        if request.get_ref().kept.is_some() {
+            return Err(unserved("Watch as a daemon"));
+        }
         Daemon::watch(&*self.0, request).await
+    }
+
+    async fn watch_changes(
+        &self,
+        request: Request<api::WatchChangesRequest>,
+    ) -> Result<Response<api::WatchResponse>, Status> {
+        Daemon::watch_changes(&*self.0, request).await
+    }
+
+    async fn watch_local_changes(
+        &self,
+        _: Request<api::WatchLocalChangesRequest>,
+    ) -> Result<Response<api::WatchLocalResponse>, Status> {
+        Err(unserved("WatchLocalChanges"))
     }
 
     async fn info(&self, _: Request<()>) -> Result<Response<InfoResponse>, Status> {
@@ -433,6 +450,17 @@ mod tests {
                     "ReloadResume",
                     device.reload_resume(api::ReloadResumeRequest::default()).await.map(drop),
                 ),
+                (
+                    "WatchLocalChanges",
+                    device.watch_local_changes(api::WatchLocalChangesRequest::default()).await.map(drop),
+                ),
+                (
+                    "Watch as a daemon",
+                    device
+                        .watch(api::WatchRequest { after: None, kept: Some(true), shown: false })
+                        .await
+                        .map(drop),
+                ),
             ];
             let changed = |change| api::ChangeProjectsRequest { on: None, change: Some(change) };
             let opening = |runs: Option<Runs>| api::MakeWorktreeRequest { opens: runs.map(|runs| api::Opens { runs: Some(runs) }), ..Default::default() };
@@ -463,6 +491,14 @@ mod tests {
             let stopped = (Code::Unavailable, "the daemon's core has stopped");
             let watched = device.watch(api::WatchRequest::default()).await.unwrap_err();
             assert_eq!((watched.code(), watched.message()), stopped);
+            let watched_changes = device
+                .watch_changes(api::WatchChangesRequest {
+                    after: None,
+                    waiter: api::ClientWaiter::Window.into(),
+                })
+                .await
+                .unwrap_err();
+            assert_eq!((watched_changes.code(), watched_changes.message()), stopped);
             let renamed = change::RenameProject { project: 1, to: "lune".to_owned() };
             let renamed = device.change_projects(changed(Change::RenameProject(renamed))).await.unwrap_err();
             assert_eq!(renamed.code(), Code::Unavailable, "{renamed:?}");
