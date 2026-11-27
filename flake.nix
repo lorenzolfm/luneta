@@ -238,8 +238,24 @@
                 NEXTEST_SHOW_PROGRESS = "counter";
                 checkPhaseCargoCommand = ''
                   export PATH="${localToolchain}/bin:$PATH"
+                  case "''${NIX_BUILD_CORES:-}" in
+                    "" | *[!0-9]*)
+                      printf 'checkPhase: NIX_BUILD_CORES must be a positive integer, got %s\n' "''${NIX_BUILD_CORES:-unset}" >&2
+                      exit 1
+                      ;;
+                  esac
+                  if [ "$NIX_BUILD_CORES" -ge 1 ]; then
+                    test_threads=$((10#$NIX_BUILD_CORES * 3))
+                  else
+                    printf 'checkPhase: NIX_BUILD_CORES must be at least 1, got %s\n' "$NIX_BUILD_CORES" >&2
+                    exit 1
+                  fi
+                  test_threads_max=24
+                  if [ "$test_threads" -gt "$test_threads_max" ]; then
+                    test_threads="$test_threads_max"
+                  fi
                   ${pkgs.lib.getExe nextest} --cargo-profile "$CARGO_PROFILE" --profile ci \
-                    --test-threads "$((NIX_BUILD_CORES * 3))"
+                    --test-threads "$test_threads"
                   cargoWithProfile test --doc --locked ${testRun}
                 '';
 

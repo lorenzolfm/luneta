@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
@@ -692,14 +693,153 @@ pub fn info(vars: Vars) -> String {
     said
 }
 
+const SIDE_BY_SIDE_MAX: usize = 8;
+
+const NEXTEST_PROFILES_MAX: usize = 16;
+
+const NEXTEST_OVERRIDES_MAX: usize = 64;
+
+const NEXTEST_EXACT_FILTERS_MAX: usize = 64;
+
+const DAEMON_TESTS_MAX: usize = 2048;
+
 pub fn side_by_side<const N: usize>(waits: [(&str, fn()); N]) {
+    const { assert!(N >= 2, "side_by_side overlaps at least two waits") };
+    const { assert!(N <= SIDE_BY_SIDE_MAX, "side_by_side runs too many waits in one test slot") };
+    for (index, (name, wait)) in waits.iter().enumerate() {
+        assert!(!name.is_empty(), "a side_by_side wait has a name");
+        assert!(!name.contains('\0'), "wait name {name:?} has a NUL byte");
+        for (prior_name, prior_wait) in &waits[..index] {
+            assert_ne!(name, prior_name, "duplicate side_by_side wait name {name:?}");
+            assert!(
+                !std::ptr::fn_addr_eq(*wait, *prior_wait),
+                "duplicate side_by_side wait function under {name:?} and {prior_name:?}"
+            );
+        }
+    }
     let failed: Vec<&str> = thread::scope(|scope| {
         let running = waits.map(|(name, wait)| {
             let named = thread::Builder::new().name(name.to_owned());
-            (name, named.spawn_scoped(scope, wait).unwrap())
+            let handle = named
+                .spawn_scoped(scope, wait)
+                .unwrap_or_else(|error| panic!("could not spawn wait {name:?}: {error}"));
+            (name, handle)
         });
-        let ended = running.map(|(name, it)| (name, it.join()));
-        ended.into_iter().filter(|(_, ended)| ended.is_err()).map(|(name, _)| name).collect()
+        running
+            .into_iter()
+            .filter_map(|(name, handle)| handle.join().is_err().then_some(name))
+            .collect()
     });
     assert_eq!(failed, [] as [&str; 0]);
+}
+
+fn exact_test_filters(expression: &str) -> Vec<&str> {
+    assert!(!expression.is_empty(), "nextest filter expression is non-empty");
+    let mut remaining = expression;
+    let mut found = Vec::new();
+    for _ in 0..NEXTEST_EXACT_FILTERS_MAX {
+        let Some((_, after_prefix)) = remaining.split_once("test(=") else {
+            break;
+        };
+        let Some((name, after_close)) = after_prefix.split_once(')') else {
+            panic!("unclosed test(=...) filter in nextest.toml: {expression}");
+        };
+        assert!(!name.is_empty(), "empty test(=) filter in nextest.toml");
+        assert!(!name.chars().any(char::is_whitespace), "whitespace in test(={name}) filter");
+        assert!(!found.contains(&name), "duplicate test(={name}) in one nextest filter");
+        found.push(name);
+        remaining = after_close;
+    }
+    assert!(
+        !remaining.contains("test(="),
+        "nextest filter exceeds NEXTEST_EXACT_FILTERS_MAX ({NEXTEST_EXACT_FILTERS_MAX})"
+    );
+    found
+}
+
+fn listed_daemon_tests() -> BTreeSet<String> {
+    let exe = std::env::current_exe().expect("test binary knows its own path");
+    let output = Command::new(&exe)
+        .args(["--list", "--format=terse"])
+        .output()
+        .expect("test binary lists its tests");
+    assert!(output.status.success(), "test binary --list failed: {}", output.status);
+    let stdout = String::from_utf8(output.stdout).expect("test names are UTF-8");
+    let mut tests = BTreeSet::new();
+    for (line_index, line) in stdout.lines().enumerate() {
+        assert!(
+            line_index < DAEMON_TESTS_MAX,
+            "daemon test listing exceeds DAEMON_TESTS_MAX ({DAEMON_TESTS_MAX})"
+        );
+        if let Some(name) = line.strip_suffix(": test") {
+            assert!(tests.insert(name.to_owned()), "duplicate test name {name}");
+        }
+    }
+    assert!(!tests.is_empty(), "daemon test binary lists at least one test");
+    tests
+}
+
+#[test]
+fn nextest_toml_names_only_existing_daemon_tests() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.config/nextest.toml");
+    let text = fs::read_to_string(&path).expect("nextest.toml is in the source tree");
+    let config: toml::Table = toml::from_str(&text).expect("nextest.toml parses as TOML");
+    let profiles =
+        config.get("profile").and_then(toml::Value::as_table).expect("nextest.toml defines [profile]");
+    assert!(!profiles.is_empty(), "nextest.toml defines at least one profile");
+    assert!(
+        profiles.len() <= NEXTEST_PROFILES_MAX,
+        "nextest.toml profile count exceeds NEXTEST_PROFILES_MAX ({NEXTEST_PROFILES_MAX})"
+    );
+
+    let listed = listed_daemon_tests();
+    let mut prioritized = BTreeSet::new();
+    let mut quick_excluded = BTreeSet::new();
+
+    for (profile_name, profile_value) in profiles {
+        let profile = profile_value.as_table().expect("each profile is a table");
+        if let Some(default_filter) = profile.get("default-filter") {
+            let expression = default_filter.as_str().expect("default-filter is a string");
+            for name in exact_test_filters(expression) {
+                assert!(
+                    listed.contains(name),
+                    "nextest.toml [profile.{profile_name}].default-filter names {name}, which is no daemon test"
+                );
+                if profile_name == "quick" {
+                    quick_excluded.insert(name.to_owned());
+                }
+            }
+        }
+        if let Some(overrides) = profile.get("overrides") {
+            let overrides = overrides.as_array().expect("overrides is an array");
+            assert!(
+                overrides.len() <= NEXTEST_OVERRIDES_MAX,
+                "profile {profile_name} override count exceeds NEXTEST_OVERRIDES_MAX ({NEXTEST_OVERRIDES_MAX})"
+            );
+            for entry in overrides {
+                let entry = entry.as_table().expect("each override is a table");
+                if let Some(filter) = entry.get("filter") {
+                    let expression = filter.as_str().expect("override filter is a string");
+                    for name in exact_test_filters(expression) {
+                        assert!(
+                            listed.contains(name),
+                            "nextest.toml [profile.{profile_name}.overrides] names {name}, which is no daemon test"
+                        );
+                        if profile_name == "default" {
+                            prioritized.insert(name.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(!prioritized.is_empty(), "nextest.toml prioritizes at least one long daemon test");
+    assert!(!quick_excluded.is_empty(), "nextest.toml [profile.quick] excludes at least one test");
+    for name in &quick_excluded {
+        assert!(
+            prioritized.contains(name),
+            "nextest.toml [profile.quick] excludes {name}, which is not prioritized in [profile.default.overrides]"
+        );
+    }
 }

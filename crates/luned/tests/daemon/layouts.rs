@@ -1011,7 +1011,17 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
     drop(stalled);
     let made = eventually_showing("the worktree closes, whichever of its terminals are left", || {
         let left: Vec<u64> = watched(&owned, closing).iter().map(|it| it.id).collect();
-        asked(&owned.host, closed(&left))
+        assert!(!left.is_empty(), "only the timed-out terminal may have closed late");
+        assert!(left.len() <= terminals.len(), "{left:?}");
+        assert!(left.iter().all(|id| terminals.contains(id)), "{left:?} not in {terminals:?}");
+        match asked(&owned.host, closed(&left)) {
+            Ok(made) => Ok(made),
+            Err(stale) if stale.code() == Code::Aborted => {
+                assert!(stale.message().contains("changed since"), "{}", stale.message());
+                Err(stale)
+            },
+            Err(other) => panic!("a worktree close failed once the mux answered: {other:?}"),
+        }
     });
     assert_eq!(made, None);
     eventually("the worktree's terminals leave the mux", || {
