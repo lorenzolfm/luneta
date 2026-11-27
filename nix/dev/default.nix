@@ -51,6 +51,14 @@ let
       '';
     };
 
+  commands =
+    let
+      built = builtins.listToAttrs (map (record: lib.nameValuePair record.name (command record)) records);
+    in
+    lib.throwIfNot (
+      builtins.length records == builtins.length (builtins.attrNames built)
+    ) "nix/dev/commands has duplicate command names" built;
+
   signature = record: "dev ${record.name} ${record.usage}";
   width = lib.foldl' lib.max 0 (map (record: lib.stringLength (signature record)) records);
 
@@ -62,7 +70,7 @@ let
   dispatch = lib.concatMapStringsSep "\n" (record: ''
     ${record.name})
       enter_checkout
-      exec ${lib.getExe (command record)} "$@"
+      exec ${lib.getExe commands.${record.name}} "$@"
       ;;
   '') records;
 in
@@ -70,8 +78,7 @@ pkgs.writeShellApplication {
   name = "dev";
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
-    lint = command (import ./commands/lint.nix args);
-    deny = command (import ./commands/deny.nix args);
+    inherit (commands) lint deny;
   };
   text = ''
     paint() {

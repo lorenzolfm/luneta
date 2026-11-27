@@ -22,7 +22,7 @@
       esac
     fi
     echo "dev clippy: linting for ${cross.target}" >&2
-    cargo clippy --config ${cross.config} --locked ${clippyRun} --target ${cross.target} "$@" -- -D warnings || status=$?
+    cargo clippy --config ${cross.buildScriptsSkipped} --locked ${clippyRun} --target ${cross.target} "$@" -- -D warnings || status=$?
     exit "$status"
   '';
 }

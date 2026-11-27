@@ -205,9 +205,11 @@
 
           nextest = import ./nix/nextest.nix { inherit pkgs testRun; };
 
+          cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+
           daemon = {
             pname = "luned";
-            inherit version src;
+            inherit version src cargoVendorDir;
             strictDeps = true;
 
             cargoExtraArgs = "--locked -p lune -p luned -p lune-mux";
@@ -280,13 +282,21 @@
 
           cross =
             let
+              targets = {
+                x86_64-linux = "aarch64-apple-darwin";
+                aarch64-linux = "aarch64-apple-darwin";
+                aarch64-darwin = "x86_64-unknown-linux-gnu";
+              };
+              selected = targets.${system} or (throw "clippy-cross has no target for ${system}");
               target =
-                if pkgs.stdenv.hostPlatform.isDarwin then "x86_64-unknown-linux-gnu" else "aarch64-apple-darwin";
+                pkgs.lib.throwIfNot (selected != pkgs.stdenv.hostPlatform.rust.rustcTarget)
+                  "clippy-cross target ${selected} matches host ${pkgs.stdenv.hostPlatform.rust.rustcTarget}"
+                  selected;
             in
             {
               inherit target;
               toolchain = toolchain.override { targets = [ target ]; };
-              config = pkgs.writeText "clippy-cross.toml" ''
+              buildScriptsSkipped = pkgs.writeText "clippy-cross.toml" ''
                 [target.${target}.transcribe]
                 rustc-link-lib = ["transcribe"]
                 [target.${target}.alsa]
@@ -298,28 +308,30 @@
 
           craneCross = craneLib.overrideToolchain cross.toolchain;
 
-          crossLint = {
+          clippyCrossArgs = {
             pname = "luned-cross";
-            inherit version;
+            inherit version cargoVendorDir;
             src = lintSrc;
             strictDeps = true;
 
             CARGO_PROFILE = "dev";
-            cargoExtraArgs = "--locked --config ${cross.config} --target ${cross.target}";
+            cargoExtraArgs = "--locked --config ${cross.buildScriptsSkipped} --target ${cross.target}";
 
             nativeBuildInputs = [ pkgs.protobuf ];
             doCheck = false;
           };
 
-          clippyCross = craneCross.cargoClippy (
-            crossLint
+          clippyCrossDeps = craneCross.buildDepsOnly (
+            clippyCrossArgs
             // {
-              cargoArtifacts = craneCross.buildDepsOnly (
-                crossLint
-                // {
-                  buildPhaseCargoCommand = "cargoWithProfile check ${crossLint.cargoExtraArgs} ${vendoredClippyRun}";
-                }
-              );
+              buildPhaseCargoCommand = "cargoWithProfile check ${clippyCrossArgs.cargoExtraArgs} ${vendoredClippyRun}";
+            }
+          );
+
+          clippyCross = craneCross.cargoClippy (
+            clippyCrossArgs
+            // {
+              cargoArtifacts = clippyCrossDeps;
               cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
               doInstallCargoArtifacts = false;
             }
@@ -348,7 +360,7 @@
           deny = craneLib.cargoDeny {
             inherit (daemon) pname version;
             src = denySrc;
-            cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+            inherit cargoVendorDir;
             cargoDenyExtraArgs = "--offline --locked";
           };
 

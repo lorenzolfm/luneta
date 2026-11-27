@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
-      proto: ${{ steps.diff.outputs.proto }}
+      breaking: ${{ steps.diff.outputs.breaking }}
       dev: ${{ steps.diff.outputs.dev }}
 
     steps:
@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Whether anything but Markdown the build doesn't read changed, and the protocol or the dev CLI
+      - name: Whether anything but Markdown the build doesn't read changed, and whether breaking or the dev CLI need to run
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
@@ -42,14 +42,34 @@ jobs:
           if [[ -n $files && $docs == "$files" ]]; then
             changed=false
           fi
-          proto=true
+          any_matches() {
+            local pattern="${1:-}"
+            if [[ -z $pattern ]]; then
+              echo "diff: any_matches requires a non-empty pattern" >&2
+              exit 2
+            fi
+            local status=0
+            grep --quiet --extended-regexp -- "$pattern" <<<"$files" || status=$?
+            case "$status" in
+              0) return 0 ;;
+              1) return 1 ;;
+              *) exit "$status" ;;
+            esac
+          }
+          breaking=true
           dev=true
           if [[ -n $files ]]; then
-            grep -q '^proto/' <<<"$files" || proto=false
-            grep -qE '^(nix/|flake\.(nix|lock)$)' <<<"$files" || dev=false
+            any_matches '^(proto/|nix/dev/(default|commands/lint)\.nix$)' || breaking=false
+            any_matches '^(nix/|flake\.(nix|lock)$)' || dev=false
           fi
+          for flag in "$changed" "$breaking" "$dev"; do
+            if [[ $flag != true && $flag != false ]]; then
+              echo "diff: unexpected flag value '$flag'" >&2
+              exit 2
+            fi
+          done
           echo "$files"
-          printf '%s\n' "changed=$changed" "proto=$proto" "dev=$dev" | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "changed=$changed" "breaking=$breaking" "dev=$dev" | tee -a "$GITHUB_OUTPUT"
 
   clippy:
     needs: code
@@ -91,11 +111,12 @@ jobs:
           ping: attic.tail174781.ts.net
 
       - name: Build the dev CLI, when what it is built from changed
+        id: dev
         if: needs.code.outputs.dev != 'false'
         run: nix build --no-link .#dev
 
       - name: Lints, bans, licenses, sources, and clippy for Linux and the Mac
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && (success() || steps.dev.outcome == 'failure') }}
         run: >-
           nix build -L --keep-going --out-link checks
           .#checks.x86_64-linux.statix
@@ -129,7 +150,7 @@ jobs:
     needs: code
     if: >-
       ${{ !cancelled() && needs.code.outputs.changed != 'false'
-      && needs.code.outputs.proto != 'false'
+      && needs.code.outputs.breaking != 'false'
       && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
