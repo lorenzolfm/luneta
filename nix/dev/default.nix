@@ -3,6 +3,7 @@
   toolchain,
   buildTools,
   compileEnv,
+  cross,
   clippyRun,
   testRun,
   nextest,
@@ -26,6 +27,7 @@ let
       toolchain
       buildTools
       compileEnv
+      cross
       clippyRun
       testRun
       nextest
@@ -69,7 +71,7 @@ pkgs.writeShellApplication {
   meta.description = "lune build recipes on the flake-pinned toolchain";
   passthru.commands = {
     lint = command (import ./commands/lint.nix args);
-    clippy-cross = command (import ./commands/clippy.nix args).cross;
+    deny = command (import ./commands/deny.nix args);
   };
   text = ''
     paint() {

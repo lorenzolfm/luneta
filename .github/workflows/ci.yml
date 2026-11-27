@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
+      proto: ${{ steps.diff.outputs.proto }}
+      dev: ${{ steps.diff.outputs.dev }}
 
     steps:
       - name: actions/checkout v7
@@ -24,7 +26,7 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Whether anything but Markdown the build doesn't read changed
+      - name: Whether anything but Markdown the build doesn't read changed, and the protocol or the dev CLI
         id: diff
         env:
           BEFORE: ${{ github.event.before }}
@@ -40,8 +42,14 @@ jobs:
           if [[ -n $files && $docs == "$files" ]]; then
             changed=false
           fi
+          proto=true
+          dev=true
+          if [[ -n $files ]]; then
+            grep -q '^proto/' <<<"$files" || proto=false
+            grep -qE '^(nix/|flake\.(nix|lock)$)' <<<"$files" || dev=false
+          fi
           echo "$files"
-          echo "changed=$changed" | tee -a "$GITHUB_OUTPUT"
+          printf '%s\n' "changed=$changed" "proto=$proto" "dev=$dev" | tee -a "$GITHUB_OUTPUT"
 
   clippy:
     needs: code
@@ -82,31 +90,26 @@ jobs:
           tags: tag:ci
           ping: attic.tail174781.ts.net
 
-      - name: Build the dev CLI
+      - name: Build the dev CLI, when what it is built from changed
+        if: needs.code.outputs.dev != 'false'
         run: nix build --no-link .#dev
 
-      - name: Lints
+      - name: Lints, bans, licenses, sources, and clippy for Linux and the Mac
+        if: ${{ !cancelled() }}
         run: >-
-          nix build -L --keep-going --out-link lint
+          nix build -L --keep-going --out-link checks
           .#checks.x86_64-linux.statix
           .#checks.x86_64-linux.deadnix
           .#checks.x86_64-linux.comments
           .#checks.x86_64-linux.profiles
           .#checks.x86_64-linux.swift
           .#checks.x86_64-linux.typescript
-
-      - name: Bans, licenses and sources
-        run: nix build -L --out-link deny .#checks.x86_64-linux.deny
-
-      - name: Clippy
-        run: nix build -L --out-link clippy .#checks.x86_64-linux.clippy
-
-      - name: Clippy for the Mac
-        if: ${{ !cancelled() }}
-        run: nix run .#dev.commands.clippy-cross
+          .#checks.x86_64-linux.deny
+          .#checks.x86_64-linux.clippy
+          .#checks.x86_64-linux.clippy-cross
 
       - name: Advisories
-        run: nix run .#dev -- deny advisories
+        run: nix run .#dev.commands.deny -- advisories
 
       - &attic-push
         name: Push the store to the attic cache
@@ -126,6 +129,7 @@ jobs:
     needs: code
     if: >-
       ${{ !cancelled() && needs.code.outputs.changed != 'false'
+      && needs.code.outputs.proto != 'false'
       && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:

@@ -138,12 +138,12 @@
             ];
           };
 
-          denySrc = pkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = pkgs.lib.fileset.unions [
-              cargoFiles
-              ./deny.toml
-            ];
+          denySrc = craneLib.mkDummySrc {
+            inherit src;
+            cleanCargoTomlFilter = _: true;
+            extraDummyScript = ''
+              cp ${./deny.toml} "$out/deny.toml"
+            '';
           };
 
           speechBuild = [
@@ -264,6 +264,7 @@
           );
 
           clippyRun = "--all-targets --workspace";
+          vendoredClippyRun = "${clippyRun} --exclude lune-phone-bindgen";
 
           clippy = craneLib.cargoClippy (
             daemon
@@ -271,8 +272,55 @@
               src = lintSrc;
               cargoArtifacts = daemonDeps;
               cargoExtraArgs = "--locked";
-              cargoClippyExtraArgs = "${clippyRun} --exclude lune-phone-bindgen -- -D warnings";
+              cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
               doCheck = false;
+              doInstallCargoArtifacts = false;
+            }
+          );
+
+          cross =
+            let
+              target =
+                if pkgs.stdenv.hostPlatform.isDarwin then "x86_64-unknown-linux-gnu" else "aarch64-apple-darwin";
+            in
+            {
+              inherit target;
+              toolchain = toolchain.override { targets = [ target ]; };
+              config = pkgs.writeText "clippy-cross.toml" ''
+                [target.${target}.transcribe]
+                rustc-link-lib = ["transcribe"]
+                [target.${target}.alsa]
+                rustc-link-lib = ["asound"]
+                [target.${target}.ghostty-vt]
+                rustc-link-lib = ["ghostty-vt"]
+              '';
+            };
+
+          craneCross = craneLib.overrideToolchain cross.toolchain;
+
+          crossLint = {
+            pname = "luned-cross";
+            inherit version;
+            src = lintSrc;
+            strictDeps = true;
+
+            CARGO_PROFILE = "dev";
+            cargoExtraArgs = "--locked --config ${cross.config} --target ${cross.target}";
+
+            nativeBuildInputs = [ pkgs.protobuf ];
+            doCheck = false;
+          };
+
+          clippyCross = craneCross.cargoClippy (
+            crossLint
+            // {
+              cargoArtifacts = craneCross.buildDepsOnly (
+                crossLint
+                // {
+                  buildPhaseCargoCommand = "cargoWithProfile check ${crossLint.cargoExtraArgs} ${vendoredClippyRun}";
+                }
+              );
+              cargoClippyExtraArgs = "${vendoredClippyRun} -- -D warnings";
               doInstallCargoArtifacts = false;
             }
           );
@@ -282,6 +330,7 @@
               pkgs
               toolchain
               buildTools
+              cross
               clippyRun
               testRun
               nextest
@@ -299,6 +348,7 @@
           deny = craneLib.cargoDeny {
             inherit (daemon) pname version;
             src = denySrc;
+            cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
             cargoDenyExtraArgs = "--offline --locked";
           };
 
@@ -322,6 +372,7 @@
 
           checks = {
             inherit clippy deny;
+            clippy-cross = clippyCross;
             luned = lunedWith { LUNE_BUILT = "1"; };
             statix = nixLint pkgs.statix "check .";
             swift =
