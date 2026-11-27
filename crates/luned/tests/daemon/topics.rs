@@ -8,7 +8,7 @@ use luned::SWEEP;
 use serde_json::json;
 
 use crate::agents::{file_for, process};
-use crate::host::{folder_in, script, side_by_side, start, Host, Running, PATIENT};
+use crate::host::{folder_in, script, side_by_side, start, Host, Running, Slot, Waits, PATIENT};
 use crate::remote::{hosts, FakeSsh};
 
 const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
@@ -73,16 +73,18 @@ fn topic(agents: &[api::Agent]) -> Option<&str> {
 
 #[test]
 fn the_topics_a_window_has_named_hold_side_by_side() {
-    side_by_side([
-        ("this daemon names the topic", a_window_has_the_daemon_name_the_topic_on_each_new_prompt),
-        (
-            "another machine names its agents' topics",
-            a_window_here_has_another_machine_name_its_agents_topics,
-        ),
-    ]);
+    side_by_side(const {
+        Waits::of([
+            ("this daemon names the topic", a_window_has_the_daemon_name_the_topic_on_each_new_prompt),
+            (
+                "another machine names its agents' topics",
+                a_window_here_has_another_machine_name_its_agents_topics,
+            ),
+        ])
+    });
 }
 
-fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
+fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt(_: Slot) {
     let host = Host::new();
     claude_that_names_topics(&host);
     let _daemon = start(host.vars()).unwrap();
@@ -133,7 +135,7 @@ fn a_window_has_the_daemon_name_the_topic_on_each_new_prompt() {
     assert_eq!(topic(&host.host().agents), Some("Tab order"));
 }
 
-fn a_window_here_has_another_machine_name_its_agents_topics() {
+fn a_window_here_has_another_machine_name_its_agents_topics(_: Slot) {
     let here = Host::new();
     let far = Host::new();
     claude_that_names_topics(&here);
