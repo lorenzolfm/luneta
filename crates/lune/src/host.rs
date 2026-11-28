@@ -84,7 +84,7 @@ use crate::sidebar::{
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
-use crate::spots::{Burst, Drawn, DrawnHover, Hit, Settling};
+use crate::spots::{Burst, Drawn, DrawnHover, Hit, Settling, Spots};
 use crate::state;
 use crate::viewed::{self, Across, Heeded, Viewed};
 use crate::width::Width;
@@ -760,13 +760,13 @@ pub struct App {
     burst: Option<Burst>,
     settling: Settling,
     drawn: Drawn,
+    drawn_aloud: Spots<aloud::Button>,
     pointer: Option<Position>,
     pointer_shape: Option<embedded::PointerShape>,
     pending_graphics: Vec<u8>,
     graphics: Graphics,
     exact_cell: Option<CellPixels>,
     cell: CellPixels,
-    window_pixels: Option<WindowPixels>,
     cursor: Option<(CursorShape, bool)>,
     title: Option<String>,
     pacing: Pacing,
@@ -1096,13 +1096,7 @@ impl App {
         let wall = SystemTime::now();
         let frame = Rect::new(0, 0, columns, rows);
         let initial_areas = areas(frame, width.columns());
-        let mut sidebar = Sidebar::new(
-            folds,
-            news,
-            agent,
-            machines::local_name(),
-            initial_areas.0,
-        );
+        let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name(), initial_areas.0);
         if let Some(why) = unkept {
             sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
         }
@@ -1207,13 +1201,13 @@ impl App {
             burst: None,
             settling: Settling::default(),
             drawn: Drawn::Nothing,
+            drawn_aloud: Spots::default(),
             pointer: None,
             pointer_shape: None,
             pending_graphics: Vec::new(),
             graphics,
             exact_cell,
             cell,
-            window_pixels,
             cursor: None,
             title: None,
             pacing: Pacing::default(),
@@ -1946,7 +1940,7 @@ impl App {
             link,
             pointer_shape,
             drawn: self.drawn.hovered(pointer),
-            aloud: self.sidebar.aloud_buttons().hovered(pointer),
+            aloud: self.drawn_aloud.hovered(pointer),
         }
     }
 
@@ -2541,7 +2535,7 @@ impl App {
                 return;
             }
         }
-        let button = || self.sidebar.aloud_buttons().at(at).copied().map(Hit::Aloud);
+        let button = || self.drawn_aloud.at(at).copied().map(Hit::Aloud);
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(hit) = self.drawn.at(at).or_else(button)
         {
@@ -3511,7 +3505,9 @@ impl App {
     }
 
     fn undictate(&mut self, dictated: Option<Dictated>, now: SystemTime) {
-        let open = self.over.take_if(|over| matches!(over, Over::Dictation(..)));
+        let open = self
+            .over
+            .take_if(|over| matches!(over, Over::Dictation(..)));
         let Some(Over::Dictation(_, under)) = open else {
             return;
         };
@@ -4070,18 +4066,6 @@ impl App {
             return;
         }
         self.frame = frame;
-        if let Some(window_pixels) = self.window_pixels {
-            let cell = embedded::cell_pixels(
-                self.exact_cell,
-                Some(window_pixels),
-                frame.width,
-                frame.height,
-            );
-            self.cell = cell;
-            if let Some(right) = self.viewed_mut() {
-                right.cell_resized(cell);
-            }
-        }
         self.sync_areas();
     }
 
@@ -4099,8 +4083,7 @@ impl App {
         if collapsed {
             self.sync_areas();
         }
-        self.sidebar
-            .focus(self.pane.keys(self.over.as_ref()), wall);
+        self.sidebar.focus(self.pane.keys(self.over.as_ref()), wall);
         assert!(
             self.sidebar.floating().is_none(),
             "a focus change closes what floats"
@@ -4176,13 +4159,14 @@ impl App {
                 }
             }
             Answer::WindowPixels(window_pixels) => {
-                self.window_pixels = Some(window_pixels);
                 let cols = self.frame.width;
                 let rows = self.frame.height;
                 let cell = embedded::cell_pixels(self.exact_cell, Some(window_pixels), cols, rows);
-                self.cell = cell;
-                if let Some(right) = self.viewed_mut() {
-                    right.cell_resized(cell);
+                if cell != self.cell {
+                    self.cell = cell;
+                    if let Some(right) = self.viewed_mut() {
+                        right.cell_resized(cell);
+                    }
                 }
             }
             Answer::Graphics => {
@@ -4264,13 +4248,13 @@ impl App {
         if !graphics.is_empty() {
             terminal.backend_mut().write_all(&graphics)?;
         }
-        let (painted, cursor_position) = {
+        let (painted, cursor_position, aloud_buttons) = {
             let mut frame = terminal.get_frame();
             self.paint_at(&mut frame, now)
         };
         terminal.apply_buffer_with_cursor(cursor_position)?;
-        self.settling
-            .drawn(self.sidebar.aloud_buttons(), now.steady);
+        self.drawn_aloud = aloud_buttons;
+        self.settling.drawn(&self.drawn_aloud, now.steady);
         self.paint_graphics(terminal.backend_mut())?;
         let cursor = self.viewed().map_or(UNSHOWN_CURSOR, Viewed::cursor_style);
         if self.cursor != Some(cursor) {
@@ -4361,16 +4345,20 @@ impl App {
         let now = Moment::now();
         let _ = self.sync_aloud();
         self.resize_frame(frame.area());
-        let (painted, _) = self.paint_at(frame, now);
-        self.settling
-            .drawn(self.sidebar.aloud_buttons(), now.steady);
+        let (painted, _, aloud_buttons) = self.paint_at(frame, now);
+        self.drawn_aloud = aloud_buttons;
+        self.settling.drawn(&self.drawn_aloud, now.steady);
         self.pacing = Pacing::Drawn {
             dirty: false,
             painted,
         };
     }
 
-    fn paint_at(&mut self, frame: &mut Frame<'_>, now: Moment) -> (Painted, Option<Position>) {
+    fn paint_at(
+        &mut self,
+        frame: &mut Frame<'_>,
+        now: Moment,
+    ) -> (Painted, Option<Position>, Spots<aloud::Button>) {
         let mut cadence = Cadence::default();
         let frame_area = frame.area();
         assert_eq!(
@@ -4459,9 +4447,10 @@ impl App {
                 None => beside,
             },
         };
+        let aloud_buttons = self.sidebar.aloud_buttons().clone();
         if let Some(pointer) = self.pointer {
             drawn.light(buffer, pointer);
-            self.sidebar.aloud_buttons().light(buffer, pointer);
+            aloud_buttons.light(buffer, pointer);
         }
         let cursor_position = matches!(self.holder(), Holder::Terminal)
             .then_some(cursor)
@@ -4475,7 +4464,7 @@ impl App {
             cadence,
             sidebar_view: self.sidebar.view(),
         };
-        (painted, cursor_position)
+        (painted, cursor_position, aloud_buttons)
     }
 }
 
@@ -5449,7 +5438,12 @@ mod tests {
 
         app.handle_at(Event::Daemon(Ok(busy_host(1, "work"))), &mut terminal, now)
             .unwrap();
-        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None, now.system);
+        app.go_worktree(
+            &Machine::Local,
+            WorktreeId::of(100).unwrap(),
+            None,
+            now.system,
+        );
         app.give(SplitSide::Collapsed, None, now.system);
         assert!(app.pane.collapsed());
         assert!(matches!(app.sidebar.view(), SidebarView::Collapsed { .. }));
@@ -5482,5 +5476,147 @@ mod tests {
 
         app.pacing.mark_dirty();
         app.draw_due(&mut terminal, now + FRAME_INTERVAL).unwrap();
+    }
+
+    #[test]
+    fn resize_preserves_cell_pixels_derived_from_window_pixels() {
+        let (mut terminal, _written) = test_terminal(120, 40);
+        let (mut app, _inbox, _state) = test_app(120, 40);
+        let nz = |value| NonZeroU16::new(value).unwrap();
+        let expected = CellPixels {
+            width: nz(10),
+            height: nz(20),
+        };
+        assert!(
+            !app.answered(
+                Answer::WindowPixels(WindowPixels {
+                    width: nz(1200),
+                    height: nz(800),
+                }),
+                &mut terminal,
+            )
+            .unwrap()
+        );
+        assert_eq!(app.cell, expected);
+
+        app.handle_at(
+            Event::Input(Input::Resize(60, 20)),
+            &mut terminal,
+            Moment::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            app.cell, expected,
+            "resizing the window must not recompute cell size from startup window_pixels"
+        );
+
+        terminal.resize(Rect::new(0, 0, 180, 60)).unwrap();
+        terminal.draw(|frame| app.paint(frame)).unwrap();
+        assert_eq!(
+            app.cell, expected,
+            "painting a resized frame must preserve cell size derived from startup window_pixels"
+        );
+    }
+
+    #[test]
+    fn aloud_buttons_match_painted_frame_and_settling_on_clicks() {
+        let (mut terminal, _written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+        let mouse = |kind, pos: Position| MouseEvent {
+            kind,
+            column: pos.x,
+            row: pos.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let down = |pos| mouse(MouseEventKind::Down(MouseButton::Left), pos);
+        let up = |pos| mouse(MouseEventKind::Up(MouseButton::Left), pos);
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            at(0),
+        )
+        .unwrap();
+        app.tick(at(0));
+        app.draw_due(&mut terminal, at(0)).unwrap();
+
+        assert!(app.sidebar.aloud(Some(aloud::Shown::Fetching {
+            got: 0,
+            paused: false,
+        })));
+        let button = (0..20)
+            .flat_map(|y| (0..80).map(move |x| Position::new(x, y)))
+            .find(|pos| app.sidebar.aloud_buttons().at(*pos).is_some())
+            .expect("fetching aloud lays out clickable buttons");
+
+        app.pointer = Some(button);
+        assert_eq!(
+            app.hover().aloud,
+            None,
+            "undrawn aloud buttons do not highlight on hover"
+        );
+        app.mouse(down(button), at(500));
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "undrawn aloud buttons must not intercept clicks before paint"
+        );
+        assert!(app.sidebar.pressed());
+        app.mouse(up(button), at(510));
+
+        app.frame_at(&mut terminal, at(1200)).unwrap();
+        app.pointer = Some(button);
+        assert!(
+            app.hover().aloud.is_some(),
+            "drawn aloud buttons highlight on hover"
+        );
+
+        app.mouse(down(button), at(1300));
+        assert_eq!(
+            app.held,
+            Held::Taken,
+            "newly drawn aloud buttons are absorbed during the settling window"
+        );
+        assert!(!app.sidebar.pressed());
+        app.mouse(up(button), at(1310));
+
+        assert!(app.sidebar.aloud(None));
+        assert_eq!(app.sidebar.aloud_buttons(), &Spots::default());
+        app.mouse(down(button), at(1900));
+        assert_eq!(
+            app.held,
+            Held::Taken,
+            "still-painted aloud buttons keep absorbing clicks until the frame redraws"
+        );
+        assert!(!app.sidebar.pressed());
+        app.mouse(up(button), at(1910));
+
+        app.frame_at(&mut terminal, at(2600)).unwrap();
+        app.pointer = Some(button);
+        assert_eq!(app.hover().aloud, None);
+
+        app.mouse(down(button), at(2700));
+        assert_eq!(
+            app.held,
+            Held::Taken,
+            "cleared aloud buttons remain protected during the settling window"
+        );
+        assert!(!app.sidebar.pressed());
+        app.mouse(up(button), at(2710));
+
+        app.mouse(down(button), at(3300));
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "after settling expires, clicks reach the sidebar"
+        );
+        assert!(app.sidebar.pressed());
+        app.mouse(up(button), at(3310));
     }
 }

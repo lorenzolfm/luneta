@@ -319,7 +319,10 @@ mod tests {
         let mut here = within(scratch.path());
         let vps = Machine::Remote("me@vps:22".parse().unwrap());
 
-        assert_eq!(here.set(Fold::Machine(&Machine::Local), true), FoldSet::Changed);
+        assert_eq!(
+            here.set(Fold::Machine(&Machine::Local), true),
+            FoldSet::Changed
+        );
         assert_eq!(here.set(Fold::Machine(&vps), true), FoldSet::Changed);
         assert_eq!(here.set(Fold::Machine(&vps), false), FoldSet::Changed);
         let next = within(scratch.path());

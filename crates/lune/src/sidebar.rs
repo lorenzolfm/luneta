@@ -1849,7 +1849,7 @@ mod sealed {
 
 pub use sealed::Sidebar;
 
-struct SidebarState {
+pub struct SidebarState {
     host: Option<Host>,
     this: String,
     away: Option<String>,
@@ -4005,9 +4005,6 @@ impl SidebarState {
         self.here_row = here_spot.and_then(|spot| self.row_for(&spot));
         let gone = |spot: Spot| self.row_of(&spot).is_none();
         let reordered_gone = matches!(&self.mode, Mode::Reorder(movable) if gone(movable.spot()));
-        if reordered_gone {
-            self.mode = Mode::Idle;
-        }
         let lifted_gone = matches!(
             self.viewport.moving(),
             Some(Moving::Lifted(Lift { lifted: movable, .. })) if gone(movable.spot())
@@ -4016,6 +4013,9 @@ impl SidebarState {
             self.viewport.moving(),
             Some(Moving::Down { on, .. }) if on.spot().is_some_and(gone)
         );
+        if reordered_gone {
+            self.mode = Mode::Idle;
+        }
         if let Some(moving) = self.viewport.moving_mut() {
             if lifted_gone {
                 *moving = Moving::Still;
@@ -5126,13 +5126,7 @@ impl SidebarState {
         None
     }
 
-    fn pull_in_menu(
-        &mut self,
-        target: Target,
-        work: Work,
-        pull: Pull,
-        origin: Origin,
-    ) -> Asked {
+    fn pull_in_menu(&mut self, target: Target, work: Work, pull: Pull, origin: Origin) -> Asked {
         if self.notice_on_its_way(&work) {
             return Asked::Nothing;
         }
@@ -5979,7 +5973,7 @@ impl SidebarState {
             return Asked::Nothing;
         };
         match std::mem::take(moving) {
-            Moving::Down { at, on } if over && mouse.row == at.y => self.click(at, on, area, wall),
+            Moving::Down { at, on } if over && mouse.row == at.y => self.click(at, &on, area, wall),
             Moving::Lifted(Lift {
                 lifted: movable, ..
             }) => {
@@ -6015,7 +6009,7 @@ impl SidebarState {
         }
     }
 
-    fn click(&mut self, at: Position, on: Pressed, area: Rect, wall: SystemTime) -> Asked {
+    fn click(&mut self, at: Position, on: &Pressed, area: Rect, wall: SystemTime) -> Asked {
         let Some(spot) = on.spot() else {
             return Asked::Take;
         };
@@ -13123,7 +13117,7 @@ mod tests {
                     ready,
                 }),
             );
-            (matches!(asked, Asked::Make { .. }), sidebar.notice)
+            (matches!(asked, Asked::Make { .. }), sidebar.notice.clone())
         };
         let on_dev_docs = "#5's worktree is on dev-docs, not issue-5";
         assert_eq!(
@@ -14973,7 +14967,7 @@ mod tests {
         assert_eq!(up, copied("a-p"));
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
         sidebar.mouse_rows(mouse(MouseEventKind::Moved, 20, 13), area, test_wall());
-        sidebar.hear(searched().host.unwrap());
+        sidebar.hear(searched().host.clone().unwrap());
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
         sidebar.hear(first_view_is(1, "a-p-i-y"));
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
@@ -14998,7 +14992,7 @@ mod tests {
             host(vec![session("bipa", 10, views)], Vec::new())
         };
         let branch_too = || {
-            let mut listed = searched().host.unwrap();
+            let mut listed = searched().host.clone().unwrap();
             let (statuses, pulls) = (&mut listed.git_statuses, &mut listed.pull_requests);
             checked_out(statuses, pulls, "/w/a", "main", None);
             listed
@@ -15655,6 +15649,8 @@ mod tests {
     #[test]
     fn another_machine_s_rows_go_there_and_open_there() {
         let mut sidebar = fresh();
+        let area = Rect::new(0, 0, 32, 26);
+        sidebar.place_rows(area);
         let mut host = machines();
         host.remotes[0] = remote(
             "nixos",
@@ -15705,7 +15701,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), asked);
         assert!(sidebar.open().is_none());
 
-        let area = Rect::new(0, 0, 32, 26);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[11], "  •✓ \u{ec82} fix                  1m");
         assert_eq!(click(&mut sidebar, 10, 11, area), there);
@@ -16692,12 +16687,15 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let main = ProjectId::of(20).unwrap();
-        sidebar
-            .folds
-            .set(Fold::Machine(&Machine::Remote(nixos())), true);
-        sidebar
-            .folds
-            .set(Fold::Project(&Machine::Remote(nixos()), main), true);
+        sidebar.edit(|state| {
+            let _ = state
+                .folds
+                .set(Fold::Machine(&Machine::Remote(nixos())), true);
+            let _ = state
+                .folds
+                .set(Fold::Project(&Machine::Remote(nixos()), main), true);
+            state.rebuild(test_wall());
+        });
         sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "/fix");
         let lines = screen(&mut sidebar, true, 32, 26);
@@ -16740,10 +16738,8 @@ mod tests {
 
     #[test]
     fn this_machine_cuts_its_long_name_to_say_no_projects_and_another_keeps_its_name() {
-        let mut sidebar = Sidebar {
-            this: "Mac-1763578123456".to_owned(),
-            ..fresh()
-        };
+        let mut sidebar = fresh();
+        sidebar.edit(|state| state.this = "Mac-1763578123456".to_owned());
         let remotes = ["lorenzo@nixos", "me@vps-frankfurt"].map(|it| remote(it, down(100)));
         sidebar.hear(Host {
             remotes: remotes.to_vec(),
@@ -17205,11 +17201,7 @@ mod tests {
             Copied::text(&Excerpt::of("copied".to_owned()).unwrap()),
             t0.steady,
         );
-        assert_ne!(
-            sidebar.view(),
-            before,
-            "SidebarView reflects copied toast"
-        );
+        assert_ne!(sidebar.view(), before, "SidebarView reflects copied toast");
         sidebar.edit(|state| state.copied = None);
         assert_eq!(sidebar.view(), before);
 
@@ -17647,7 +17639,7 @@ mod tests {
         assert!(matches!(sidebar.view(), SidebarView::Collapsed { .. }));
         let mut collapsed_buffer = Buffer::empty(narrow);
         let (drawn, cadence) = sidebar.draw(&mut collapsed_buffer, narrow, wall);
-        assert_eq!(drawn, Drawn::Nothing);
+        assert!(matches!(drawn, Drawn::Nothing));
         assert_eq!(cadence, Cadence::default());
 
         let taller = Rect::new(0, 0, COLLAPSED, 20);
@@ -17692,7 +17684,9 @@ mod tests {
     #[test]
     fn ticked_relayouts_when_news_loses_sharing_without_row_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let news = News::within(dir.path());
+        let runtime = dir.path().join("lune");
+        let news = News::within(&runtime);
+        assert_eq!(news.lost(), None);
         let framed = Rect::new(0, 0, 32, 16);
         let start = moment(160_000);
         let mut sidebar = Sidebar::new(
@@ -17709,7 +17703,7 @@ mod tests {
         sit(&mut sidebar, &own_view_of("s", 1, 1));
         assert!(!sidebar.ticked(start, true));
 
-        let stayed = dir.path().join("stayed");
+        let stayed = runtime.join("stayed");
         std::fs::remove_dir_all(&stayed).unwrap();
         std::fs::write(&stayed, "blocked").unwrap();
 
