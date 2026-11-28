@@ -4265,9 +4265,43 @@ mod tests {
         retyped(&mut cased_picker, "Api");
         assert_eq!(
             rows(&cased_picker),
-            ["Ops › Api", "Api › main", "Ops › Api-v2"]
+            ["Ops › Api", "Ops › Api-v2", "Api › main"]
         );
         assert!(Finder::of("", Typos::None).is_none());
+
+        let mut ranked = works();
+        let mut scratch = worktree(worktree_id(4, 1), "scratch", Some(10), &[6]);
+        branched(&mut scratch, "fix-old");
+        let mut renamed_api = worktree(worktree_id(4, 2), "Api", Some(20), &[7]);
+        renamed_api.folder = projects::Dir::parse("/home/you/ops/api").unwrap();
+        branched(&mut renamed_api, "api-v2");
+        let mut dot = worktree(worktree_id(4, 3), ".Github", Some(15), &[8]);
+        dot.folder = projects::Dir::parse("/home/you/ops/.github").unwrap();
+        branched(&mut dot, ".github-ci");
+        ranked.shelves[0].projects.push(housed(
+            "ops",
+            4,
+            vec![
+                worktree(worktree_id(4, 4), "fix-875", Some(50), &[9]),
+                scratch,
+                renamed_api,
+                dot,
+            ],
+        ));
+        let mut ranked_picker = opened(ranked);
+        typed(&mut ranked_picker, "fix-");
+        assert_eq!(rows(&ranked_picker), ["ops › fix-875", "ops › scratch"]);
+        assert_eq!(found(&ranked_picker)[0].1, "fix-");
+        assert_eq!(found(&ranked_picker)[1].1, "");
+        retyped(&mut ranked_picker, "api");
+        assert_eq!(rows(&ranked_picker), ["web › api", "ops › Api"]);
+        assert_eq!(found(&ranked_picker)[1].1, "Api");
+        retyped(&mut ranked_picker, "ap");
+        assert_eq!(rows(&ranked_picker), ["web › api", "ops › Api"]);
+        assert_eq!(found(&ranked_picker)[1].1, "Ap");
+        retyped(&mut ranked_picker, ".git");
+        assert_eq!(rows(&ranked_picker), ["ops › .Github"]);
+        assert_eq!(found(&ranked_picker)[0].1, ".Git");
 
         let mut picker = opened(works());
         typed(&mut picker, "api");

@@ -8172,6 +8172,11 @@ impl Finder {
         own: Option<&str>,
         also: &[Option<&str>],
     ) -> Option<(Fit, Vec<usize>)> {
+        assert!(
+            own.is_none_or(|own| shown.ends_with(own)),
+            "own name is a suffix of shown"
+        );
+        let own = own.filter(|own| *own != shown);
         let best = |fuzzy: &Fuzzy| {
             also.iter()
                 .flatten()
@@ -8190,13 +8195,22 @@ impl Finder {
         };
         let exact = shown.to_lowercase() == self.lower
             || own.is_some_and(|own| own.to_lowercase() == self.lower);
+        let shown_score = own
+            .and_then(|own| self.fuzzy.score(own))
+            .map_or(score, |own| score.max(own));
         let fits = |score: Score, other: Option<Score>| other.is_none_or(|other| score >= other);
-        let lit = fits(score, other)
-            || self
-                .anywhere
-                .score(shown)
-                .is_some_and(|anywhere| fits(anywhere, best(&self.anywhere)));
-        let score = other.map_or(score, |other| score.max(other));
+        let anywhere = || {
+            let shown = self.anywhere.score(shown);
+            let own = own.and_then(|own| self.anywhere.score(own));
+            match (shown, own) {
+                (Some(shown), Some(own)) => Some(shown.max(own)),
+                (shown, own) => shown.or(own),
+            }
+        };
+        let lit = exact
+            || fits(shown_score, other)
+            || anywhere().is_some_and(|anywhere| fits(anywhere, best(&self.anywhere)));
+        let score = other.map_or(shown_score, |other| shown_score.max(other));
         Some((Fit { exact, score }, if lit { hits } else { Vec::new() }))
     }
 }
