@@ -319,10 +319,42 @@ fn the_phone_renames_and_reorders_a_clone_s_worktrees_and_closes_a_view_and_a_wo
     phone.sees("the last view closed takes its worktree", |model| {
         order(model) == [main]
     });
-    let stale = refused(phone.block_on(phone.core.close_worktree(None, main, Vec::new())));
+    let mut shown = crate::layouts::Shown::new(&owned, main, 80, 24);
+    shown.ask(luned::api::show_request::Event::Browser(
+        luned::api::show_request::Browser {
+            url: Some("https://example.com".to_owned()),
+        },
+    ));
+    shown.until("the browser view opens", |laid| {
+        laid.views.iter().any(|v| {
+            matches!(
+                &v.found,
+                Some(luned::api::show_response::view::Found::Browser(_))
+            )
+        })
+    });
+    let model = phone.sees("the phone sees the worktree's browser view", |model| {
+        worktree_of(model, main)
+            .and_then(|it| it.browsers.as_deref())
+            .is_some_and(|ids| ids.len() == 1)
+    });
+    let browsers = worktree_of(&model, main).unwrap().browsers.clone();
+    let stale = refused(phone.block_on(phone.core.close_worktree(
+        None,
+        main,
+        Vec::new(),
+        browsers.clone(),
+    )));
     assert!(stale.contains("changed since"), "{stale}");
+    let unseen_browser =
+        refused(phone.block_on(phone.core.close_worktree(None, main, vec![view.id], None)));
+    assert!(unseen_browser.contains("did not see"), "{unseen_browser}");
     phone
-        .block_on(phone.core.close_worktree(None, main, vec![view.id]))
+        .block_on(
+            phone
+                .core
+                .close_worktree(None, main, vec![view.id], browsers),
+        )
         .unwrap();
     phone.sees("the worktree closed", |model| order(model).is_empty());
 }

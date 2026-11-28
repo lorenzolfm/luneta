@@ -227,6 +227,14 @@ fn commands_of(held: &mut Held) -> Vec<Vec<Option<String>>> {
         };
         for worktree in worktrees {
             let terminals = std::mem::take(&mut worktree.terminals);
+            let views = std::mem::take(&mut worktree.views)
+                .expect("luned populates views")
+                .items;
+            assert_eq!(
+                views.len(),
+                terminals.len(),
+                "each terminal is also listed as a view"
+            );
             commands.push(terminals.into_iter().map(|it| it.command).collect());
         }
     }
@@ -271,6 +279,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_luned_starts_again() {
                         folder: text(&clone.join("main")),
                         seen: Some(Seen::Stage(Stage::Working.into())),
                         terminals: Vec::new(),
+                        views: None,
                         used_at: None,
                         arranged: Some(api::Arrangement::Tabs.into()),
                     }],
@@ -291,6 +300,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_luned_starts_again() {
                     folder: text(&vault),
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
                     terminals: Vec::new(),
+                    views: None,
                     used_at: None,
                     arranged: None,
                 })),
@@ -483,6 +493,7 @@ fn a_clone_s_worktrees_made_or_removed_outside_lune_are_listed_unopened_on_the_s
     let closing = Change::CloseWorktree(CloseWorktree {
         worktree: made,
         seen,
+        seen_browsers: None,
     });
     assert_eq!(asked(&host, closing).unwrap(), None);
     eventually("closed, it is offered no more", || {
@@ -1032,6 +1043,7 @@ fn a_start_or_a_pull_on_another_machine_finds_its_project_through_a_link_there()
     let close = Change::CloseWorktree(CloseWorktree {
         worktree: 1,
         seen: Vec::new(),
+        seen_browsers: None,
     });
     let unsent = answered_on(&here, Some("nowhere"), close).unwrap_err();
     let unreached = Unchanged::Refused("luned does not reach nowhere now".to_owned());

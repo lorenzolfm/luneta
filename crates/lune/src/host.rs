@@ -2398,12 +2398,12 @@ impl App {
     }
 
     fn palette(&self) -> Palette {
-        let non_terminal = self
+        let aims_worktree = self
             .viewed()
-            .is_some_and(|right| right.welcomes() || right.browses() || right.reviews());
+            .is_some_and(|right| right.welcomes() || right.reviews());
         let (aim, origin) = match self.pane.side() {
             SplitSide::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
-            SplitSide::Session | SplitSide::Collapsed if non_terminal => {
+            SplitSide::Session | SplitSide::Collapsed if aims_worktree => {
                 (self.sidebar.aimed_worktree(), Origin::Views)
             }
             SplitSide::Session | SplitSide::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
@@ -3272,11 +3272,11 @@ impl App {
             Asked::Printed {
                 menu,
                 on,
-                view,
+                terminal,
                 ended,
                 ..
             } => {
-                let terminal = projected::route(&on, view);
+                let terminal = projected::route_terminal(&on, terminal);
                 printed::read(menu, on, terminal, ended, &self.events);
             }
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
@@ -3367,15 +3367,24 @@ impl App {
         self.keep_change(thread::spawn(move || {
             let asked = || match &act {
                 Act::View(ViewKey::Terminal(key)) => worktrees::closed_view(&luned, &on, *key),
-                Act::Worktree { worktree, seen, .. } => {
-                    worktrees::closed(&luned, &on, *worktree, seen)
+                Act::View(ViewKey::Browser(view)) => {
+                    worktrees::closed_browser_view(&luned, &on, *view)
                 }
+                Act::Worktree {
+                    worktree,
+                    seen,
+                    seen_browsers,
+                    ..
+                } => worktrees::closed(&luned, &on, *worktree, seen, seen_browsers),
                 Act::Project {
                     project,
                     worktrees,
                     seen,
+                    seen_browsers,
                     ..
-                } => worktrees::closed_project(&luned, &on, *project, worktrees, seen),
+                } => {
+                    worktrees::closed_project(&luned, &on, *project, worktrees, seen, seen_browsers)
+                }
             };
             if let Err(unchanged) = doubted(CLOSE_PANICKED, asked) {
                 let _ = events.send(Event::Unclosed {
@@ -3397,13 +3406,11 @@ impl App {
         now: SystemTime,
     ) {
         let project = self.projected.project(on, session.project());
-        let held = project.and_then(|project| project.view_of(view.key()));
-        let Some((worktree, terminal)) = held else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {view}"));
+        let held = project.and_then(|project| view_location(project, view));
+        let Some((worktree, target)) = held else {
+            return self.sidebar.notify(no_view(view));
         };
-        self.go_worktree(on, worktree, Some(terminal), now);
+        self.go_worktree(on, worktree, Some(target), now);
         self.shown().welcome();
         self.give_opened(Opener::of(asking), now);
     }
@@ -3419,13 +3426,11 @@ impl App {
         match place {
             menu::BrowserPlace::View { session, view } => {
                 let project = self.projected.project(on, session.project());
-                let held = project.and_then(|project| project.view_of(view.key()));
-                let Some((worktree, terminal)) = held else {
-                    return self
-                        .sidebar
-                        .notify(format!("menu: luned lists no view {view}"));
+                let held = project.and_then(|project| view_location(project, *view));
+                let Some((worktree, target)) = held else {
+                    return self.sidebar.notify(no_view(*view));
                 };
-                self.go_worktree(on, worktree, Some(terminal), now);
+                self.go_worktree(on, worktree, Some(target), now);
             }
             menu::BrowserPlace::Worktree(worktree) => {
                 self.go_worktree(on, *worktree, None, now);
@@ -3482,13 +3487,11 @@ impl App {
         now: SystemTime,
     ) {
         let project = self.projected.project(on, session.project());
-        let held = project.and_then(|project| project.view_of(view.key()));
-        let Some((worktree, terminal)) = held else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {view}"));
+        let held = project.and_then(|project| view_location(project, view));
+        let Some((worktree, target)) = held else {
+            return self.sidebar.notify(no_view(view));
         };
-        self.go_worktree(on, worktree, Some(terminal), now);
+        self.go_worktree(on, worktree, Some(target), now);
         self.shown().review();
         self.give_opened(Opener::of(asking), now);
     }
@@ -3606,13 +3609,11 @@ impl App {
         now: SystemTime,
     ) {
         let project = self.projected.project(on, session.project());
-        let held = project.and_then(|project| project.view_of(view.key()));
-        let Some((worktree, terminal)) = held else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {view}"));
+        let held = project.and_then(|project| view_location(project, view));
+        let Some((worktree, target)) = held else {
+            return self.sidebar.notify(no_view(view));
         };
-        self.go_worktree(on, worktree, Some(terminal), now);
+        self.go_worktree(on, worktree, Some(target), now);
         self.shown().arrange(arranged);
         self.give_opened(Opener::of(asking), now);
     }
@@ -3631,12 +3632,10 @@ impl App {
                 .sidebar
                 .notify("menu: luned keeps no such project".to_owned());
         };
-        let Some((worktree, terminal)) = project.view_of(beside.key()) else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {beside}"));
+        let Some((worktree, target)) = view_location(project, beside) else {
+            return self.sidebar.notify(no_view(beside));
         };
-        self.go_worktree(on, worktree, Some(terminal), now);
+        self.go_worktree(on, worktree, Some(target), now);
         self.shown().open_beside_focused(opens);
         self.give_opened(Opener::of(asking), now);
     }
@@ -4061,11 +4060,10 @@ impl App {
                 }
             }
             Place::View(place) => {
-                let terminal_key = place.view().key();
-                let (worktree, terminal) = project.view_of(terminal_key).ok_or_else(|| {
-                    format!("luned lists no view {} in {session}", terminal_key.id)
-                })?;
-                self.go_worktree(machine, worktree, Some(terminal), now);
+                let view_key = place.view();
+                let (worktree, view) = view_location(project, view_key)
+                    .ok_or_else(|| format!("luned lists no view {view_key} in {session}"))?;
+                self.go_worktree(machine, worktree, Some(view), now);
             }
         }
         Ok(())
@@ -4132,7 +4130,7 @@ impl App {
         let held = |machine: &Machine| {
             let projects = self.projected.projects(machine).iter();
             let worktrees = projects.flat_map(rows::Project::worktrees);
-            let open = worktrees.filter(|it| !it.terminals.is_empty());
+            let open = worktrees.filter(|it| !it.views.is_empty());
             let others = open.filter(|it| machine != on || Some(it.id) != left);
             projects::last_used(others.map(|it| (it.id, it.used)))
         };
@@ -4172,24 +4170,27 @@ impl App {
             Some(Right::Worktree(right)) => right,
         };
         let (on, worktree) = (right.machine().clone(), right.worktree());
-        let Some((project, _)) = self.projected.holding(&on, worktree) else {
+        let Some((project, shown_worktree)) = self.projected.holding(&on, worktree) else {
             return;
         };
-        let terminal = right
+        let view = right
             .focused()
-            .and_then(|focused| project.terminal_key(focused));
-        let layout = match (right.arranged(), terminal) {
-            (Some((arranged, version)), terminal) => SeatedLayout::Live {
+            .and_then(|focused| match shown_worktree.view(focused)? {
+                rows::View::Terminal(terminal) => terminal.key().map(ViewKey::Terminal),
+                rows::View::Browser(browser) => Some(ViewKey::Browser(browser.id)),
+            });
+        let layout = match (right.arranged(), view) {
+            (Some((arranged, version)), view) => SeatedLayout::Live {
                 arranged,
                 version,
-                terminal,
+                view,
             },
-            (None, Some(terminal)) => {
+            (None, Some(view)) => {
                 assert!(
                     !right.live(),
-                    "a live worktree with a focused terminal has an arrangement"
+                    "a live worktree with a focused view has an arrangement"
                 );
-                SeatedLayout::Disconnected(terminal)
+                SeatedLayout::Disconnected(view)
             }
             (None, None) => SeatedLayout::Unlaid,
         };
@@ -4839,6 +4840,20 @@ impl App {
             sidebar_view: self.sidebar.view(),
         };
         (painted, cursor_position, aloud_buttons)
+    }
+}
+
+fn view_location(project: &rows::Project, view: ViewKey) -> Option<(WorktreeId, ViewId)> {
+    match view {
+        ViewKey::Terminal(key) => project.view_of(key),
+        ViewKey::Browser(id) => project.browser_of(id),
+    }
+}
+
+fn no_view(view: ViewKey) -> String {
+    match view {
+        ViewKey::Terminal(key) => format!("menu: luned lists no view {}", key.id),
+        ViewKey::Browser(_) => "menu: luned lists no browser view".to_owned(),
     }
 }
 
@@ -6332,7 +6347,7 @@ mod tests {
                 project: ProjectId::of(1).unwrap(),
                 at: Sitting::Worktree {
                     worktree: WorktreeId::of(100).unwrap(),
-                    layout: SeatedLayout::Disconnected(ViewKey::terminal(1).key()),
+                    layout: SeatedLayout::Disconnected(ViewKey::terminal(1)),
                 },
             },
             now.system,
@@ -7508,6 +7523,76 @@ mod tests {
             "revived view regains terminal focus when collapsed"
         );
         assert_eq!(app.pane.side(), SplitSide::Collapsed);
+    }
+
+    #[test]
+    fn browser_views_resolve_in_project_and_keep_their_worktree_open() {
+        use luned::api::worktree::{View as ApiView, Views as ApiViews, view::Kind};
+        use luned::api::{self, projects};
+
+        let browser = api::Browser {
+            id: 30,
+            url: Some("https://example.com".to_owned()),
+        };
+        let worktree = api::Worktree {
+            id: 100,
+            name: "docs".to_owned(),
+            folder: "/w/lune/docs".to_owned(),
+            seen: Some(api::worktree::Seen::Unread(())),
+            terminals: Vec::new(),
+            views: Some(ApiViews {
+                items: vec![ApiView {
+                    kind: Some(Kind::Browser(browser)),
+                }],
+            }),
+            arranged: Some(api::Arrangement::Tabs.into()),
+            ..api::Worktree::default()
+        };
+        let project = api::Project {
+            id: 1,
+            name: "lune".to_owned(),
+            dir: "/w/lune".to_owned(),
+            missing: false,
+            holds: Some(api::project::Holds::Clone(api::project::Clone {
+                worktrees: vec![worktree],
+                listing: None,
+            })),
+        };
+        let kept = projects::Kept {
+            projects: vec![project],
+            version: None,
+        };
+        let host = Host {
+            projects: Some(api::Projects {
+                held: Some(projects::Held::Kept(kept)),
+            }),
+            ..Host::default()
+        };
+        let projected = Projected::adapted(&host).unwrap();
+        let project_id = ProjectId::of(1).unwrap();
+        let worktree_id = WorktreeId::of(100).unwrap();
+        let browser_id = ViewId::of(30).unwrap();
+        let parsed = projected.project(&Machine::Local, project_id).unwrap();
+        assert_eq!(
+            view_location(parsed, ViewKey::Browser(browser_id)),
+            Some((worktree_id, browser_id))
+        );
+        assert_eq!(
+            view_location(parsed, ViewKey::Browser(ViewId::of(99).unwrap())),
+            None
+        );
+        assert_eq!(
+            no_view(ViewKey::Browser(browser_id)),
+            "menu: luned lists no browser view"
+        );
+        assert_eq!(no_view(ViewKey::terminal(4)), "menu: luned lists no view 4");
+
+        let (mut terminal, _written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        app.handle_at(Event::Daemon(Ok(host)), &mut terminal, Moment::now())
+            .unwrap();
+        app.go_other_than(&Machine::Local, None, Moment::now().system);
+        assert_eq!(app.viewed().map(Viewed::worktree), Some(worktree_id));
     }
 
     #[test]

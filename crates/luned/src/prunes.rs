@@ -8,12 +8,9 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use lune_domain::mux::TerminalKey;
 #[cfg(test)]
 use lune_protocol::github::State;
 
-use crate::api::projects::Held;
-use crate::api::terminal::Found;
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
 use crate::core;
 use crate::directory::Directory;
@@ -210,7 +207,9 @@ impl Occupied {
     pub fn of(local: &core::Local, lunes: Lunes) -> Result<Occupied, String> {
         let unread = seats::unread(local.unread, &local.unread_files);
         let unread = unread.map_err(|unplaced| unplaced.to_string())?;
-        let terminals = terminals(&local.projects)?;
+        let held_views = local.held_views.as_ref().map_err(|why| {
+            format!("luned keeps no layouts, and may leave out a terminal: {why}")
+        })?;
         for seats::Unread { pid, terminal } in unread {
             match terminal {
                 None => {
@@ -219,7 +218,7 @@ impl Occupied {
                          terminal"
                     ));
                 }
-                Some(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
+                Some(key) if !held_views.iter().any(|it| it.terminal == Some(key)) => {
                     return Err(format!(
                         "luned cannot read the session file of agent {pid}, which runs in a \
                          terminal no layout holds"
@@ -228,7 +227,10 @@ impl Occupied {
                 Some(_) => {}
             }
         }
-        let views = terminals.into_iter().map(|(_, folder)| folder).collect();
+        let views = held_views
+            .iter()
+            .map(|view| PathBuf::from(view.folder.as_str()))
+            .collect();
         let agents = local
             .agents
             .iter()
@@ -254,42 +256,6 @@ impl Occupied {
         }
         self.lunes.iter().any(holds).then_some(A_LUNE)
     }
-}
-
-fn terminals(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
-    let kept = match projects {
-        Held::Unkept(why) => {
-            return Err(format!(
-                "luned keeps no layouts, and may leave out a terminal: {why}"
-            ));
-        }
-        Held::Kept(kept) => kept,
-    };
-    let mut worktrees = Vec::new();
-    for project in &kept.projects {
-        let unsaid = || format!("luned says not what project {} holds", project.name);
-        worktrees.extend(project.worktrees().ok_or_else(unsaid)?);
-    }
-    let terminal = |terminal: &api::Terminal| {
-        let key = match &terminal.state {
-            Some(
-                api::terminal::State::Running(api::terminal::Running { key: Some(key), .. })
-                | api::terminal::State::Ended(api::terminal::Ended { key: Some(key), .. })
-                | api::terminal::State::Unlisted(key),
-            ) => TerminalKey::of(key).ok(),
-            Some(_) => None,
-            None => match &terminal.found {
-                Some(Found::Key(key)) => TerminalKey::of(key).ok(),
-                Some(Found::Lost(()) | Found::Looking(())) | None => None,
-            },
-        };
-        (key, PathBuf::from(&terminal.folder))
-    };
-    Ok(worktrees
-        .into_iter()
-        .flat_map(|worktree| &worktree.terminals)
-        .map(terminal)
-        .collect())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1223,22 +1189,23 @@ mod tests {
             pull_requests: Vec::new(),
             unread_files: Vec::new(),
             sayings: Vec::new(),
-            projects: Held::Kept(api::projects::Kept::default()),
+            projects: crate::api::projects::Held::Kept(crate::api::projects::Kept::default()),
+            held_views: Ok(Vec::new()),
         }
     }
 
-    fn viewed(projects: api::projects::Held) -> core::Local {
+    fn viewed(held_views: Result<Vec<core::HeldView>, String>) -> core::Local {
         core::Local {
-            projects,
+            held_views,
             ..empty_local()
         }
     }
 
     #[test]
     fn an_agent_in_a_worktree_or_under_it_keeps_it() {
-        let agents = vec![api::Agent {
+        let agents = vec![crate::api::Agent {
             cwd: "/w/c/src".to_owned(),
-            ..api::Agent::default()
+            ..crate::api::Agent::default()
         }];
         let local = core::Local {
             agents,
@@ -1269,64 +1236,38 @@ mod tests {
         assert_eq!(occupied.why_in(Path::new("/w/cc")), None);
     }
 
-    fn kept(terminals: Vec<api::Terminal>) -> api::projects::Held {
-        let worktree = api::Worktree {
-            terminals,
-            ..api::Worktree::default()
-        };
-        let holds = Some(api::project::Holds::Folder(worktree));
-        let project = api::Project {
-            name: "lune".to_owned(),
-            holds,
-            ..api::Project::default()
-        };
-        api::projects::Held::Kept(api::projects::Kept {
-            projects: vec![project],
-            version: None,
-        })
-    }
-
-    fn in_layout(folder: &str, found: api::terminal::Found) -> api::Terminal {
-        api::Terminal {
-            folder: folder.to_owned(),
-            found: Some(found),
-            ..api::Terminal::default()
-        }
-    }
-
-    fn terminal_key(id: u32) -> api::TerminalKey {
-        api::TerminalKey {
+    fn terminal_key(id: u32) -> crate::api::TerminalKey {
+        crate::api::TerminalKey {
             id,
             made_at: Some(prost_types::Timestamp::default()),
         }
     }
 
+    fn held_view(folder: &str, key: Option<u32>) -> core::HeldView {
+        use lune_domain::mux::TerminalKey;
+        use lune_domain::projects::Dir;
+
+        core::HeldView {
+            terminal: key.map(|id| TerminalKey::of(&terminal_key(id)).unwrap()),
+            folder: Dir::parse(folder).unwrap(),
+        }
+    }
+
     #[test]
-    fn a_terminal_of_a_layout_keeps_its_folder_found_or_lost() {
-        use api::terminal::Found;
-        let host = viewed(kept(vec![
-            in_layout("/w/a/src", Found::Key(terminal_key(4))),
-            in_layout("/w/b", Found::Lost(())),
-            in_layout("/w/c", Found::Looking(())),
+    fn a_view_of_a_layout_keeps_its_folder_whether_terminal_or_browser() {
+        let host = viewed(Ok(vec![
+            held_view("/w/a/src", Some(4)),
+            held_view("/w/b", None),
+            held_view("/w/docs", None),
         ]));
         let occupied = Occupied::of(&host, Lunes::none()).unwrap();
-        for held in ["/w/a", "/w/b", "/w/c"] {
+        for held in ["/w/a", "/w/b", "/w/docs"] {
             assert_eq!(occupied.why_in(Path::new(held)), Some(A_VIEW), "{held}");
         }
         assert_eq!(occupied.why_in(Path::new("/w/d")), None);
-        let unkept = viewed(api::projects::Held::Unkept("a newer file".to_owned()));
+        let unkept = viewed(Err("a newer file".to_owned()));
         let why = "luned keeps no layouts, and may leave out a terminal: a newer file";
         assert_eq!(Occupied::of(&unkept, Lunes::none()), Err(why.to_owned()));
-        let mut unsaid = kept(Vec::new());
-        let api::projects::Held::Kept(held) = &mut unsaid else {
-            panic!("the projects are kept");
-        };
-        held.projects[0].holds = None;
-        let why = "luned says not what project lune holds";
-        assert_eq!(
-            Occupied::of(&viewed(unsaid), Lunes::none()),
-            Err(why.to_owned())
-        );
     }
 
     #[test]
@@ -1340,21 +1281,20 @@ mod tests {
 
     #[test]
     fn a_file_unread_in_a_terminal_no_layout_holds_could_be_anywhere() {
-        use api::terminal::Found;
         let terminal = Some(terminal_key(4));
-        let file = api::UnreadFile { pid: 9, terminal };
-        let local = |terminals| core::Local {
+        let file = crate::api::UnreadFile { pid: 9, terminal };
+        let local = |views| core::Local {
             unread: 1,
             unread_files: vec![file],
-            ..viewed(kept(terminals))
+            ..viewed(Ok(views))
         };
-        let found = local(vec![in_layout("/w/a", Found::Key(terminal_key(4)))]);
+        let found = local(vec![held_view("/w/a", Some(4))]);
         assert!(Occupied::of(&found, Lunes::none()).is_ok());
         let unheld = "luned cannot read the session file of agent 9, which runs in a terminal no \
                       layout holds";
-        for terminals in [vec![], vec![in_layout("/w/a", Found::Key(terminal_key(5)))]] {
+        for views in [vec![], vec![held_view("/w/a", Some(5))]] {
             assert_eq!(
-                Occupied::of(&local(terminals), Lunes::none()),
+                Occupied::of(&local(views), Lunes::none()),
                 Err(unheld.to_owned())
             );
         }
@@ -1368,7 +1308,7 @@ mod tests {
             unread_files,
             ..empty_local()
         };
-        let file = || api::UnreadFile {
+        let file = || crate::api::UnreadFile {
             pid: 9,
             terminal: None,
         };
@@ -1378,11 +1318,11 @@ mod tests {
             Occupied::of(&files(1, vec![]), Lunes::none()),
             Err(unplaced.to_owned())
         );
-        let zero = api::TerminalKey {
+        let zero = crate::api::TerminalKey {
             id: 0,
             made_at: Some(prost_types::Timestamp::default()),
         };
-        let unkeyed = api::UnreadFile {
+        let unkeyed = crate::api::UnreadFile {
             terminal: Some(zero),
             ..file()
         };

@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use luned::program::{self, Cancel, Ran, Wanted};
 use luned::transcripts::{
@@ -24,7 +25,7 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint};
 use crate::moonlight;
 use crate::reach::{self, Luned};
-use crate::sidebar::{self, ViewKey};
+use crate::sidebar;
 use crate::sweep::Join;
 
 const MODEL: &str = "haiku";
@@ -57,13 +58,6 @@ const SYSTEM: &str = "You brief a developer who is coming back to their desk aft
     to the developer as you. Use only what the notes say, and where they say nothing, say so \
     in a few words rather than guess.";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Scope {
-    Every,
-    Session,
-    Highlighted,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Over {
     Sessions {
@@ -72,7 +66,7 @@ pub enum Over {
     },
     Machine(Machine, Vec<SessionName>),
     Session(Machine, SessionName),
-    Agent(Machine, SessionName, ViewKey),
+    Agent(Machine, SessionName, TerminalKey),
 }
 
 impl Over {
@@ -154,7 +148,7 @@ fn machine_named(on: &Machine) -> String {
 pub struct Note {
     pub on: Machine,
     pub session: SessionName,
-    pub view: ViewKey,
+    pub view: TerminalKey,
     pub name: String,
     pub status: String,
     pub since: Option<SystemTime>,
@@ -200,7 +194,7 @@ impl Brief {
             .collect();
         for (note, alike) in notes.iter_mut().zip(alike) {
             if alike {
-                note.name = format!("{}:{}", note.name, note.view);
+                note.name = format!("{}:{}", note.name, note.view.id);
             }
         }
         let Some(first) = notes.first() else {
@@ -751,11 +745,17 @@ mod tests {
 
     use super::*;
 
+    fn terminal_key(id: u32) -> TerminalKey {
+        crate::sidebar::ViewKey::terminal(id)
+            .terminal_key()
+            .unwrap()
+    }
+
     fn note(session: &str, view: u32, name: &str, transcript: Option<&str>) -> Note {
         Note {
             on: Machine::Local,
             session: named(session),
-            view: ViewKey::terminal(view),
+            view: terminal_key(view),
             name: name.to_owned(),
             status: "idle".to_owned(),
             since: Some(SystemTime::UNIX_EPOCH),
@@ -956,7 +956,7 @@ Its transcript is unknown: Claude Code names none for it.
         let note = |(n, asked): (usize, &String)| Note {
             on: Machine::Local,
             session: named("a"),
-            view: ViewKey::terminal(n as u32 + 1),
+            view: terminal_key(n as u32 + 1),
             name: format!("agent {n}"),
             status: "busy".to_owned(),
             since: None,
@@ -1006,7 +1006,7 @@ Its transcript is unknown: Claude Code names none for it.
         let note = |session: &str, view: usize, name: String| Note {
             on: Machine::Local,
             session: named(session),
-            view: ViewKey::terminal(view as u32 + 1),
+            view: terminal_key(view as u32 + 1),
             name,
             status: "busy".to_owned(),
             since: None,
@@ -1160,7 +1160,7 @@ Its transcript was not read: me@vps: luned did not answer in 6s
             ),
             (Over::Session(nixos(), a()), Ok("Brief of a on nixos")),
             (
-                Over::Agent(nixos(), a(), ViewKey::terminal(1)),
+                Over::Agent(nixos(), a(), terminal_key(1)),
                 Ok("Brief of fold, in a on nixos"),
             ),
             (
@@ -1195,7 +1195,7 @@ Its transcript was not read: me@vps: luned did not answer in 6s
         let of = |view: u32, name: &str, transcript: Transcript| Note {
             on: Machine::Local,
             session: named("a"),
-            view: ViewKey::terminal(view),
+            view: terminal_key(view),
             name: name.to_owned(),
             status: "idle".to_owned(),
             since: None,

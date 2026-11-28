@@ -12,6 +12,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{self, OwnedFolder, ProjectId, ProjectName, Used};
 use ratatui::buffer::Buffer;
@@ -38,8 +39,8 @@ use crate::projected::{self, Projected};
 use crate::reach::{self, Luned};
 use crate::screen;
 use crate::sidebar::{
-    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, Place, ProjectRow, ViewKey,
-    ViewPlace, WorktreePlace,
+    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, Place, ProjectRow,
+    TerminalPlace, ViewKey, ViewPlace, WorktreePlace,
 };
 use crate::spots::{Drawn, Spots};
 use crate::worktrees::Folder;
@@ -141,7 +142,7 @@ pub struct Worktree {
     pub named: sidebar::Named<String>,
     pub folder: projects::Dir,
     pub used: Option<Used>,
-    pub terminals: Vec<ViewKey>,
+    pub terminals: Vec<TerminalKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,7 +180,7 @@ pub struct Runs {
 
 #[derive(Clone, Debug)]
 pub struct Seated {
-    pub place: ViewPlace,
+    pub place: TerminalPlace,
     pub label: String,
     pub mark: Mark,
     pub status: String,
@@ -319,7 +320,7 @@ pub enum Heard {
     Peek {
         on: Machine,
         session: Listed,
-        asked: Option<ViewKey>,
+        asked: Option<TerminalKey>,
         peek: Result<(u32, String), String>,
     },
     Repositories {
@@ -339,7 +340,7 @@ pub enum Ask {
     Peek {
         on: Machine,
         session: Listed,
-        asked: Option<ViewKey>,
+        asked: Option<TerminalKey>,
     },
     Repositories {
         on: Machine,
@@ -356,7 +357,7 @@ pub fn ask(number: u64, ask: Ask, projected: &Projected, events: &Sender<Event>)
     let hear: Box<dyn FnOnce() -> Heard + Send> = match ask {
         Ask::Peek { on, session, asked } => {
             let terminal = match asked {
-                Some(view) => projected::route(&on, view),
+                Some(terminal) => projected::route_terminal(&on, terminal),
                 None => projected.whole(&on, &session),
             };
             Box::new(move || {
@@ -412,7 +413,7 @@ pub enum Key {
     },
     Agent {
         on: Machine,
-        place: ViewPlace,
+        place: TerminalPlace,
     },
     Housed {
         on: Machine,
@@ -739,7 +740,7 @@ impl Contents {
     }
 }
 
-type Looked = (Machine, Listed, Option<ViewKey>);
+type Looked = (Machine, Listed, Option<TerminalKey>);
 
 type Located = (Machine, Directory);
 
@@ -965,13 +966,15 @@ impl Picker {
             .is_some_and(|(at, shown)| at == on && shown == place)
     }
 
-    fn focus(&self, on: &Machine, worktree: &Worktree) -> Option<ViewKey> {
-        let here = self.here_view(on).map(ViewPlace::view);
-        let focused = here.filter(|view| worktree.terminals.contains(view));
+    fn focus(&self, on: &Machine, worktree: &Worktree) -> Option<TerminalKey> {
+        let here = self
+            .here_view(on)
+            .and_then(|place| place.view().terminal_key());
+        let focused = here.filter(|terminal| worktree.terminals.contains(terminal));
         focused.or_else(|| worktree.terminals.first().copied())
     }
 
-    fn seated(&self, on: &Machine, place: &ViewPlace) -> Option<&Seated> {
+    fn seated(&self, on: &Machine, place: &TerminalPlace) -> Option<&Seated> {
         self.runs(on)?
             .agents
             .iter()
@@ -1151,7 +1154,10 @@ impl Picker {
             };
             return Picked::Nothing;
         }
-        Picked::Act { on, act: plan.act }
+        Picked::Act {
+            on,
+            act: plan.into_act(),
+        }
     }
 
     pub fn due(&self) -> Option<Instant> {
@@ -1492,7 +1498,7 @@ impl Picker {
             Key::Machine { .. } => Picked::Nothing,
             Key::Agent { on, place } => Picked::Go {
                 on: on.clone(),
-                place: Place::View(place.clone()),
+                place: Place::View(place.view_place()),
             },
             Key::Housed {
                 on,
@@ -1606,10 +1612,14 @@ impl Picker {
                 Aim::At { target, worktree },
                 _,
             ) => {
-                let mut targets = std::iter::once(target).chain(worktree);
-                targets
-                    .find(|it| it.fits(action))
-                    .map(|it| Run::Menu(Rc::clone(it)))
+                if action.fits(target.noun()) {
+                    target.fits(action).then(|| Run::Menu(Rc::clone(target)))
+                } else {
+                    worktree
+                        .as_ref()
+                        .filter(|it| it.fits(action))
+                        .map(|it| Run::Menu(Rc::clone(it)))
+                }
             }
             (actions::Key::Row(_), Aim::At { target, .. }, Origin::Sidebar) => action
                 .fits(target.noun())
@@ -1680,15 +1690,19 @@ impl Picker {
         };
         let named = match target {
             Target::View(on, row) => {
-                let (project, view) = (row.place.listed().name(), row.place.view());
-                let housed = self.housed(on, &row.place.worktree().project);
+                let project = row.listed().name();
+                let view = match row.view() {
+                    ViewKey::Terminal(key) => format!("view {}", key.id),
+                    ViewKey::Browser(_) => "browser".to_owned(),
+                };
+                let housed = self.housed(on, &row.worktree.project);
                 let mut worktrees = housed.iter().flat_map(|housed| &housed.worktrees);
-                match worktrees.find(|worktree| worktree.place == *row.place.worktree()) {
+                match worktrees.find(|worktree| worktree.place == row.worktree) {
                     Some(worktree) => {
                         let named = in_project(project, worktree.named.name());
-                        format!("{named} · view {view}")
+                        format!("{named} · {view}")
                     }
-                    None => format!("{project} · view {view}"),
+                    None => format!("{project} · {view}"),
                 }
             }
             Target::Worktree(_, row) => in_project(row.place.project.listed().name(), &row.name),
@@ -1759,7 +1773,7 @@ impl Picker {
             Key::Agent { on, place } => self.plan(
                 on,
                 place.listed().clone(),
-                close::Scope::View(place.view()),
+                close::Scope::View(ViewKey::Terminal(place.terminal())),
                 None,
             ),
             Key::Unopened { .. } => {
@@ -1994,7 +2008,7 @@ impl Picker {
         let agents = runs
             .agents
             .iter()
-            .filter(|seated| Some(&seated.place) != yours);
+            .filter(|seated| yours.is_none_or(|here| !seated.place.matches_view(here)));
         let agents: Vec<(Named, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
                 let session = seated.place.listed().name().as_str();
@@ -2102,7 +2116,7 @@ impl Picker {
             Some(Key::Agent { on, place }) => Some(Preview::Screen((
                 on.clone(),
                 place.listed().clone(),
-                Some(place.view()),
+                Some(place.terminal()),
             ))),
             Some(Key::Housed { on, dir, .. }) => Some(Preview::Dir((on.clone(), dir.into()))),
             Some(Key::Repository { on, repository, .. }) => {
@@ -2286,7 +2300,12 @@ impl Picker {
     fn yours(&self) -> Option<(&Seated, &[Seated])> {
         let here = self.listing.here.as_ref()?;
         let (view, agents) = (here.view()?, &self.runs(here.on())?.agents);
-        Some((agents.iter().find(|seated| seated.place == *view)?, agents))
+        Some((
+            agents
+                .iter()
+                .find(|seated| seated.place.matches_view(view))?,
+            agents,
+        ))
     }
 
     fn row_line(&self, row: &Row, width: usize, frame: usize, now: SystemTime) -> Line<'static> {
@@ -2621,7 +2640,7 @@ impl Picker {
                         Span::styled(seated.dir.clone(), grey),
                     ]);
                 }
-                let looked = (on.clone(), place.listed().clone(), Some(place.view()));
+                let looked = (on.clone(), place.listed().clone(), Some(place.terminal()));
                 (row.name.clone(), String::new(), Line::from(caption), looked)
             }
         };
@@ -2887,7 +2906,7 @@ fn agent_name(agents: &[Seated], seated: &Seated) -> String {
         .clone()
         .map(|other| other.place.listed().name().session())
         .collect();
-    let (session, view) = (seated.place.listed().name(), seated.place.view());
+    let (session, view) = (seated.place.listed().name(), seated.place.terminal().id);
     match (alike.count(), sessions.len()) {
         (0 | 1, _) => seated.label.clone(),
         (_, 1) => format!("{}:{view}", seated.label),
@@ -3237,7 +3256,7 @@ mod tests {
 
     use super::*;
     use crate::close::Doing;
-    use crate::menu::{Cwd, Folder, Ran, ViewRow, WorktreeRow};
+    use crate::menu::{Cwd, Folder, Ran, ViewKind, ViewRow, WorktreeRow};
     use crate::spots::Hit;
     use lune_domain::projects::ViewId;
 
@@ -3251,9 +3270,13 @@ mod tests {
         Listed::new_project(name, id)
     }
 
+    fn terminal_key(id: u32) -> TerminalKey {
+        ViewKey::terminal(id).terminal_key().unwrap()
+    }
+
     fn seated(name: &str, started: u64, view: u32, label: &str, mark: Mark) -> Seated {
         Seated {
-            place: ViewPlace::new(place(name, started, 1), ViewKey::terminal(view)),
+            place: TerminalPlace::new(place(name, started, 1), terminal_key(view)),
             label: label.to_owned(),
             mark,
             status: "idle".to_owned(),
@@ -3334,7 +3357,7 @@ mod tests {
             named: sidebar::Named::Unbranched(name.to_owned()),
             folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
             used: used.map(|at| Used::read(at * 1_000).unwrap()),
-            terminals: terminals.iter().map(|id| ViewKey::terminal(*id)).collect(),
+            terminals: terminals.iter().map(|id| terminal_key(*id)).collect(),
         }
     }
 
@@ -3442,15 +3465,18 @@ mod tests {
 
     fn fix_view() -> Target {
         let row = ViewRow {
-            place: ViewPlace::new(fix(), ViewKey::terminal(3)),
-            terminal: ViewId::of(3),
+            worktree: fix(),
+            kind: ViewKind::Terminal {
+                key: terminal_key(3),
+                id: ViewId::of(3),
+                ran: Ran::Unhooked,
+            },
             cwd: Cwd::At(Folder {
                 dir: directory("/home/you/fix"),
                 branch: None,
                 repository: None,
                 pull_request: None,
             }),
-            ran: Ran::Unhooked,
             arranged: None,
         };
         Target::View(Machine::Local, row)
@@ -4115,12 +4141,13 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
-        let terminal = ViewKey::terminal(1).key();
+        let terminal = ViewKey::terminal(1).terminal_key().unwrap();
         let (worktree, views) = (main_place().worktree, vec![terminal]);
         let act = Act::Worktree {
             worktree,
             views,
             seen: Vec::new(),
+            seen_browsers: Vec::new(),
         };
         let busy = Plan::of(act, Ok(&[(terminal, Doing::Busy)]));
         assert_eq!(picker.planned(Ok(busy)), Picked::Nothing);
@@ -4228,12 +4255,13 @@ mod tests {
             scope,
         };
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
-        let terminal = ViewKey::terminal(4).key();
+        let terminal = ViewKey::terminal(4).terminal_key().unwrap();
         let (worktree, views) = (api().worktree, vec![terminal]);
         let act = Act::Worktree {
             worktree,
             views,
             seen: Vec::new(),
+            seen_browsers: Vec::new(),
         };
         let plan = || Plan::of(act.clone(), Ok(&[(terminal, Doing::Busy)]));
         assert_eq!(picker.planned(Ok(plan())), Picked::Nothing);
@@ -4522,7 +4550,7 @@ mod tests {
         let peek = |session: Listed, view| Ask::Peek {
             on: Machine::Local,
             session,
-            asked: Some(ViewKey::terminal(view)),
+            asked: Some(terminal_key(view)),
         };
         let due = picker.due().unwrap();
         picker.ticked(due.checked_sub(Duration::from_millis(1)).unwrap());
@@ -4557,7 +4585,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let peek = Ok((4, format!("{dumped}\n\n\n")));
-        let (session, asked) = (api().project.listed().clone(), Some(ViewKey::terminal(4)));
+        let (session, asked) = (api().project.listed().clone(), Some(terminal_key(4)));
         picker.heard(Heard::Peek {
             on: Machine::Local,
             session,
@@ -4594,7 +4622,7 @@ mod tests {
         let mut picker = opened(machines());
         picker.ticked(picker.due().unwrap());
         let session = place("api", 4, 1).project.listed().clone();
-        let asked = Some(ViewKey::terminal(6));
+        let asked = Some(terminal_key(6));
         assert_eq!(
             picker.asks(),
             [Ask::Peek {
@@ -4629,7 +4657,7 @@ mod tests {
     fn a_preview_that_failed_is_asked_for_again_as_the_highlight_comes_back() {
         let mut picker = opened(works());
         picker.ticked(picker.due().unwrap());
-        let (session, asked) = (api().project.listed().clone(), Some(ViewKey::terminal(4)));
+        let (session, asked) = (api().project.listed().clone(), Some(terminal_key(4)));
         let peek = || Ask::Peek {
             on: Machine::Local,
             session: session.clone(),
@@ -4706,7 +4734,12 @@ mod tests {
             scope,
         };
         let act = || Act::View(ViewKey::terminal(4));
-        let plan = |doing: Doing| Plan::of(act(), Ok(&[(ViewKey::terminal(4).key(), doing)]));
+        let plan = |doing: Doing| {
+            Plan::of(
+                act(),
+                Ok(&[(ViewKey::terminal(4).terminal_key().unwrap(), doing)]),
+            )
+        };
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
         let asks = |picker: &Picker| said(picker).contains("Close the view? 1 agent, 1 busy");
@@ -5307,7 +5340,7 @@ mod tests {
         let peek = Ask::Peek {
             on: far,
             session,
-            asked: Some(ViewKey::terminal(4)),
+            asked: Some(terminal_key(4)),
         };
         let peeked = asked(peek, &projected);
         let Heard::Peek { peek, .. } = peeked else {
@@ -5767,5 +5800,54 @@ mod tests {
                 said(&picker)
             );
         }
+    }
+
+    #[test]
+    fn a_browser_palette_omits_brief_highlighted_and_names_itself_browser() {
+        let browser = Target::View(
+            Machine::Local,
+            ViewRow {
+                worktree: fix(),
+                kind: ViewKind::Browser(ViewId::of(30).unwrap()),
+                cwd: Cwd::At(Folder {
+                    dir: directory("/home/you/fix"),
+                    branch: None,
+                    repository: None,
+                    pull_request: None,
+                }),
+                arranged: Some(projects::Arranged::Tabs),
+            },
+        );
+        let aimed = Palette {
+            aim: Aim::At {
+                target: Rc::new(browser),
+                worktree: Some(Rc::new(fix_worktree())),
+            },
+            origin: Origin::Views,
+        };
+        let mut picker = palette_on(works(), aimed);
+        assert_eq!(picker.aimed_at(), "lune › fix · browser");
+        let actions = every_action(&mut picker);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action == "Brief the highlighted"),
+            "BriefHighlighted must not leak onto a browser view via its worktree: {actions:?}"
+        );
+        for expected in [
+            "Brief this session",
+            "Close the view",
+            "Close the worktree",
+            "Rename the worktree…",
+        ] {
+            assert!(
+                actions.iter().any(|action| action == expected),
+                "{expected}: {actions:?}"
+            );
+        }
+        assert!(
+            !actions.iter().any(|action| action == "Rename the view…"),
+            "{actions:?}"
+        );
     }
 }

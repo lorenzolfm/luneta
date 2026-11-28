@@ -4,6 +4,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{
     self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId,
@@ -25,7 +26,6 @@ use crate::actions::{
     self, Action, Command, Key, MENU_GROUPS, Noun, OPEN, Pasted, REVIEW, ROW_GROUPS, YANK,
 };
 use crate::agents::{self, Harness, Picked};
-use crate::brief;
 use crate::cadence::Cadence;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
@@ -806,7 +806,7 @@ pub struct ProjectTarget {
 enum Offer<'t> {
     SearchSkills(&'t ViewRow),
     Skill(&'t ViewRow, &'static str),
-    Last(&'t ViewRow, Last),
+    Last(&'t ViewRow, TerminalKey, &'t Ran, Last),
     FixChecks(&'t ViewRow),
     NewView(&'t ViewRow),
     NewWelcome(&'t ViewRow),
@@ -822,7 +822,7 @@ enum Offer<'t> {
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
     Rebase(Rebases<'t>),
-    Brief(brief::Scope),
+    Brief(Briefed),
     Ask,
     FileIssue(Repository),
     Quit,
@@ -838,11 +838,20 @@ pub struct WorktreeRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    Terminal {
+        key: TerminalKey,
+        id: Option<ViewId>,
+        ran: Ran,
+    },
+    Browser(ViewId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewRow {
-    pub place: ViewPlace,
-    pub terminal: Option<ViewId>,
+    pub worktree: WorktreePlace,
+    pub kind: ViewKind,
     pub cwd: Cwd,
-    pub ran: Ran,
     pub arranged: Option<Arranged>,
 }
 
@@ -898,6 +907,13 @@ pub struct Ended {
     pub at: SystemTime,
 }
 
+fn view_named(view: ViewKey) -> String {
+    match view {
+        ViewKey::Terminal(key) => format!("view {}", key.id),
+        ViewKey::Browser(_) => "the browser view".to_owned(),
+    }
+}
+
 impl Target {
     pub fn machine(&self) -> &Machine {
         match self {
@@ -913,7 +929,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(Place::Session(target.project.listed().clone())),
             Target::Worktree(_, row) => Some(Place::Worktree(row.place.clone())),
-            Target::View(_, row) => Some(Place::View(row.place.clone())),
+            Target::View(_, row) => Some(Place::View(row.place())),
             Target::Machine(_) => None,
         }
     }
@@ -942,14 +958,20 @@ impl Target {
             (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::View(_, row)) => {
                 Offer::Skill(row, action.skill()?)
             }
-            (Action::FixLast, Target::View(_, row)) => Offer::Last(row, Last::Fix),
-            (Action::ExplainLast, Target::View(_, row)) => Offer::Last(row, Last::Explain),
+            (Action::FixLast, Target::View(_, row)) => match &row.kind {
+                ViewKind::Terminal { key, ran, .. } => Offer::Last(row, *key, ran, Last::Fix),
+                ViewKind::Browser(_) => return None,
+            },
+            (Action::ExplainLast, Target::View(_, row)) => match &row.kind {
+                ViewKind::Terminal { key, ran, .. } => Offer::Last(row, *key, ran, Last::Explain),
+                ViewKind::Browser(_) => return None,
+            },
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
             (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
             (Action::NewBrowser, Target::View(_, row)) => Offer::NewBrowser(BrowserPlace::View {
-                session: row.place.listed().clone(),
-                view: row.place.view(),
+                session: row.listed().clone(),
+                view: row.view(),
             }),
             (Action::NewBrowser, Target::Worktree(_, row)) => {
                 Offer::NewBrowser(BrowserPlace::Worktree(row.place.worktree))
@@ -968,11 +990,11 @@ impl Target {
                 Target::View(
                     _,
                     ViewRow {
-                        terminal: Some(terminal),
+                        kind: ViewKind::Terminal { id: Some(id), .. },
                         ..
                     },
                 ),
-            ) => Offer::Rename(Renames::Terminal(*terminal)),
+            ) => Offer::Rename(Renames::Terminal(*id)),
             (Action::RenameWorktree, Target::Worktree(_, row)) => {
                 Offer::Rename(Renames::Worktree(row.place.worktree))
             }
@@ -1003,9 +1025,15 @@ impl Target {
             (Action::Rebase, Target::Worktree(_, row)) if row.repository.is_some() => {
                 Offer::Rebase(Rebases::Worktree(row, row.branch.as_ref()?))
             }
-            (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
-            (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
-            (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
+            (Action::BriefEvery, _) => Offer::Brief(Briefed::Every),
+            (Action::BriefHighlighted, Target::View(machine, row)) => match &row.kind {
+                ViewKind::Terminal { key, .. } => {
+                    let session = row.listed().name().session().clone();
+                    Offer::Brief(Briefed::Agent(machine.clone(), session, *key))
+                }
+                ViewKind::Browser(_) => return None,
+            },
+            (Action::BriefThis | Action::BriefHighlighted, _) => Offer::Brief(self.brief_session()),
             (Action::Ask, _) => Offer::Ask,
             (Action::FileIssue, _) => Offer::FileIssue(self.repository()?),
             (Action::Quit, _) => Offer::Quit,
@@ -1018,7 +1046,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(target.project.clone()),
             Target::Worktree(_, row) => Some(row.place.project.clone()),
-            Target::View(_, row) => Some(row.place.worktree().project.clone()),
+            Target::View(_, row) => Some(row.worktree.project.clone()),
             Target::Machine(_) => None,
         }
     }
@@ -1077,29 +1105,18 @@ impl Target {
         }
     }
 
-    fn brief(&self, scope: brief::Scope) -> Briefed {
-        match (self, scope) {
-            (_, brief::Scope::Every) => Briefed::Every,
-            (Target::Machine(machine), brief::Scope::Session | brief::Scope::Highlighted) => {
-                Briefed::Machine(machine.clone())
-            }
-            (Target::View(machine, row), brief::Scope::Highlighted) => {
-                let session = row.place.listed().name().session().clone();
-                Briefed::Agent(machine.clone(), session, row.place.view())
-            }
-            (
-                Target::Worktree(machine, WorktreeRow { place, .. }),
-                brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(
+    fn brief_session(&self) -> Briefed {
+        match self {
+            Target::Machine(machine) => Briefed::Machine(machine.clone()),
+            Target::Worktree(machine, WorktreeRow { place, .. }) => Briefed::Session(
                 machine.clone(),
                 place.project.listed().name().session().clone(),
             ),
-            (
-                Target::Project(machine, ProjectTarget { project, .. }),
-                brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), project.listed().name().session().clone()),
-            (Target::View(machine, ViewRow { place, .. }), brief::Scope::Session) => {
-                Briefed::Session(machine.clone(), place.listed().name().session().clone())
+            Target::Project(machine, ProjectTarget { project, .. }) => {
+                Briefed::Session(machine.clone(), project.listed().name().session().clone())
+            }
+            Target::View(machine, row) => {
+                Briefed::Session(machine.clone(), row.listed().name().session().clone())
             }
         }
     }
@@ -1219,12 +1236,30 @@ impl Rebases<'_> {
 }
 
 impl ViewRow {
+    #[must_use]
+    pub fn listed(&self) -> &Listed {
+        self.worktree.project.listed()
+    }
+
+    #[must_use]
+    pub fn view(&self) -> ViewKey {
+        match &self.kind {
+            ViewKind::Terminal { key, .. } => ViewKey::Terminal(*key),
+            ViewKind::Browser(id) => ViewKey::Browser(*id),
+        }
+    }
+
+    #[must_use]
+    pub fn place(&self) -> ViewPlace {
+        ViewPlace::of(&self.worktree, self.view())
+    }
+
     fn folder(&self) -> Result<&Folder, String> {
-        let view = self.place.view();
+        let view = view_named(self.view());
         match &self.cwd {
             Cwd::At(folder) => Ok(folder),
             Cwd::Unsaid => Err(format!(
-                "menu: lune does not know yet where view {view} works; try again in a moment"
+                "menu: lune does not know yet where {view} works; try again in a moment"
             )),
         }
     }
@@ -1232,21 +1267,21 @@ impl ViewRow {
     fn beside(&self) -> Result<Beside, String> {
         let cwd = self.folder()?.dir.clone();
         Ok(Beside {
-            session: self.place.listed().clone(),
-            view: self.place.view(),
+            session: self.listed().clone(),
+            view: self.view(),
             cwd,
         })
     }
 
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
-        let (beside, view) = (self.beside()?, self.place.view());
+        let (beside, view) = (self.beside()?, view_named(self.view()));
         let pull_request = self
             .cwd
             .at()
             .and_then(|folder| folder.pull_request.as_ref());
         let Some(PullRequest { page, state, .. }) = pull_request else {
             return Err(format!(
-                "menu: gh has found no pull request of view {view}'s branch"
+                "menu: gh has found no pull request of {view}'s branch"
             ));
         };
         let number = page.number();
@@ -1257,10 +1292,10 @@ impl ViewRow {
         }
     }
 
-    fn ended(&self) -> Result<(Beside, Ended), String> {
+    fn ended(&self, terminal: TerminalKey, ran: &Ran) -> Result<(Beside, Ended), String> {
         let beside = self.beside()?;
-        let view = beside.view;
-        match &self.ran {
+        let view = terminal.id;
+        match ran {
             Ran::Ended(ended) => Ok((beside, ended.clone())),
             Ran::Going(Some(command)) => Err(format!(
                 "menu: view {view} runs `{}` still, and what it prints is not over",
@@ -1333,7 +1368,7 @@ pub enum Wants {
     Pull(Work, Wanted),
     Printed {
         session: Listed,
-        view: ViewKey,
+        terminal: TerminalKey,
         ended: Ended,
     },
     Checks {
@@ -1400,7 +1435,7 @@ pub enum Briefed {
     Every,
     Machine(Machine),
     Session(Machine, SessionName),
-    Agent(Machine, SessionName, ViewKey),
+    Agent(Machine, SessionName, TerminalKey),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1689,12 +1724,12 @@ impl InteractiveMenu {
                 Ok(done) => Did::Closed(done),
                 Err(reason) => wrong(reason),
             },
-            Offer::Last(row, last) => match row.ended() {
+            Offer::Last(row, terminal, ran, last) => match row.ended(terminal, ran) {
                 Ok((beside, ended)) => {
-                    let (session, view) = (beside.session.clone(), beside.view);
+                    let session = beside.session.clone();
                     let wants = Wants::Printed {
                         session,
-                        view,
+                        terminal,
                         ended: ended.clone(),
                     };
                     pending(
@@ -1727,17 +1762,17 @@ impl InteractiveMenu {
             },
             Offer::NewWelcome(row) => {
                 let on = target.machine().clone();
-                let (session, view) = (row.place.listed().clone(), row.place.view());
+                let (session, view) = (row.listed().clone(), row.view());
                 Did::Closed(Done::Welcome { on, session, view })
             }
             Offer::NewReview(row) => {
                 let on = target.machine().clone();
-                let (session, view) = (row.place.listed().clone(), row.place.view());
+                let (session, view) = (row.listed().clone(), row.view());
                 Did::Closed(Done::Review { on, session, view })
             }
             Offer::Arrange(row, arranged) => {
                 let on = target.machine().clone();
-                let (session, view) = (row.place.listed().clone(), row.place.view());
+                let (session, view) = (row.listed().clone(), row.view());
                 Did::Closed(Done::Arrange {
                     on,
                     session,
@@ -1756,9 +1791,7 @@ impl InteractiveMenu {
                 let chain = chained.expect("a machine, name or browser is typed in a chain");
                 stays(InteractiveStage::Typing { keys, chain }, Wants::Nothing)
             }
-            Offer::CloseView(row) => {
-                closing(keys, row.place.listed(), Scope::View(row.place.view()))
-            }
+            Offer::CloseView(row) => closing(keys, row.listed(), Scope::View(row.view())),
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
                 closing(keys, row.place.project.listed(), scope)
@@ -1784,7 +1817,7 @@ impl InteractiveMenu {
                     wants,
                 )
             }
-            Offer::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
+            Offer::Brief(briefed) => Did::Closed(Done::Brief(briefed)),
             Offer::Ask => Did::Closed(Done::Ask(target.clone())),
             Offer::FileIssue(repository) => Did::Closed(Done::Issue(repository)),
             Offer::Quit => Did::Closed(Done::Quit),
@@ -1992,12 +2025,19 @@ impl InteractiveMenu {
                 Wants::Nothing,
             );
         }
-        Did::Closed(Done::Act(target.machine().clone(), plan.act))
+        Did::Closed(Done::Act(target.machine().clone(), plan.into_act()))
     }
 
     pub fn reran(&mut self, ran: Ran) {
-        if let Target::View(_, row) = &mut self.target {
-            row.ran = ran;
+        if let Target::View(
+            _,
+            ViewRow {
+                kind: ViewKind::Terminal { ran: current, .. },
+                ..
+            },
+        ) = &mut self.target
+        {
+            *current = ran;
         }
     }
 
@@ -2425,11 +2465,11 @@ impl WaitingMenu {
             Err(why) => return unstarted(&work, &why),
         };
         match (at, argv) {
-            (At::There(place), None) => Did::Closed(Done::Go(on, Place::View(place))),
+            (At::There(place), None) => Did::Closed(Done::Go(on, Place::View(place.view_place()))),
             (At::There(place), Some(argv)) => Did::Closed(Done::Open {
                 on,
                 session: place.listed().clone(),
-                view: place.view(),
+                view: ViewKey::Terminal(place.terminal()),
                 opens: Opens::Command(argv),
             }),
             (At::Unopened, argv) => {
@@ -3668,17 +3708,29 @@ mod tests {
     }
 
     fn row_in(folder: Folder) -> ViewRow {
+        let place = ViewPlace::new_in("lune", 1, 1, 4);
         ViewRow {
-            place: ViewPlace::new_in("lune", 1, 1, 4),
-            terminal: None,
+            worktree: place.worktree().clone(),
+            kind: ViewKind::Terminal {
+                key: at(4),
+                id: None,
+                ran: Ran::Unhooked,
+            },
             cwd: Cwd::At(folder),
-            ran: Ran::Unhooked,
             arranged: Some(Arranged::Tabs),
         }
     }
 
     fn row() -> ViewRow {
         row_in(folder())
+    }
+
+    fn row_ran(ran: Ran) -> ViewRow {
+        let mut row = row();
+        if let ViewKind::Terminal { ran: current, .. } = &mut row.kind {
+            *current = ran;
+        }
+        row
     }
 
     fn view_row() -> Target {
@@ -3696,8 +3748,12 @@ mod tests {
     fn own_row() -> ViewRow {
         let place = ViewPlace::new_in("lune", 3, 1, 4);
         ViewRow {
-            place,
-            terminal: Some(terminal()),
+            worktree: place.worktree().clone(),
+            kind: ViewKind::Terminal {
+                key: at(4),
+                id: Some(terminal()),
+                ran: Ran::Unhooked,
+            },
             ..row()
         }
     }
@@ -4186,13 +4242,7 @@ mod tests {
     }
 
     fn ended_row() -> Target {
-        Target::View(
-            Machine::Local,
-            ViewRow {
-                ran: Ran::Ended(cargo_test()),
-                ..row()
-            },
-        )
+        Target::View(Machine::Local, row_ran(Ran::Ended(cargo_test())))
     }
 
     #[test]
@@ -4216,20 +4266,16 @@ mod tests {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
-        let busy = ViewRow {
-            ran: Ran::Going(Some(said("cargo test"))),
-            ..row()
-        };
+        let busy = row_ran(Ran::Going(Some(said("cargo test"))));
         let busy = Target::View(Machine::Local, busy);
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = waits(menu.key(&char('f')));
-        let view = ViewKey::terminal(4);
         assert_eq!(
             wants,
             Wants::Printed {
                 session: listed(),
-                view,
+                terminal: at(4),
                 ended: cargo_test()
             }
         );
@@ -4240,12 +4286,11 @@ mod tests {
         let current = Ran::Ended(cargo_test());
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = waits(menu.key(&char('e')));
-        let view = ViewKey::terminal(4);
         assert_eq!(
             wants,
             Wants::Printed {
                 session: listed(),
-                view,
+                terminal: at(4),
                 ended: cargo_test()
             }
         );
@@ -4542,7 +4587,7 @@ mod tests {
                 done => panic!("it did {done:?}"),
             }
         };
-        let ran = |ran| Target::View(Machine::Local, ViewRow { ran, ..row() });
+        let ran = |ran| Target::View(Machine::Local, row_ran(ran));
         assert_eq!(
             refused(ran(Ran::Going(Some(said("make"))))),
             "menu: view 4 runs `make` still, and what it prints is not over"
@@ -4655,7 +4700,7 @@ mod tests {
             (
                 view_row(),
                 'h',
-                Briefed::Agent(Machine::Local, lune(), ViewKey::terminal(4)),
+                Briefed::Agent(Machine::Local, lune(), at(4)),
             ),
             (session_row(), 'h', Briefed::Session(Machine::Local, lune())),
         ] {
@@ -4897,7 +4942,7 @@ mod tests {
 
         let name = || project().listed().name().session().clone();
         for (row, highlighted) in [
-            (view, Briefed::Agent(vps(), name(), ViewKey::terminal(4))),
+            (view, Briefed::Agent(vps(), name(), self::at(4))),
             (project_on(vps()), Briefed::Session(vps(), name())),
         ] {
             for (key, briefed) in [
@@ -5456,7 +5501,7 @@ mod tests {
     }
 
     fn at(id: u32) -> lune_domain::mux::TerminalKey {
-        ViewKey::terminal(id).key()
+        ViewKey::terminal(id).terminal_key().unwrap()
     }
 
     fn plan(agents: Vec<(u32, Doing)>) -> Plan {
@@ -5537,6 +5582,7 @@ mod tests {
             worktree: worktree(),
             views,
             seen,
+            seen_browsers: Vec::new(),
         }
     }
 
@@ -5577,6 +5623,7 @@ mod tests {
             project: project().id(),
             worktrees: vec![worktree()],
             seen: worktree_seen(),
+            seen_browsers: Vec::new(),
         };
         let planned = |agents: Vec<(u32, Doing)>| planned(act.clone(), agents);
         for on in [Machine::Local, vps()] {
@@ -5893,7 +5940,7 @@ mod tests {
             assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
             assert!(menu.turning());
         }
-        let there = || At::There(ViewPlace::new_in("cdk", 2, 1, 9));
+        let there = || At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
         let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
         assert_eq!(
             closed(pulling('w').pulled(ready(there()))),
@@ -6170,7 +6217,7 @@ mod tests {
         };
         let row = || Target::View(vps(), row());
         let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
-        let there = ready(At::There(ViewPlace::new_in("cdk", 2, 1, 9)));
+        let there = ready(At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9)));
         assert_eq!(
             closed(pulling_on(row(), 'w').pulled(there)),
             Done::Go(vps(), place)
@@ -6203,7 +6250,7 @@ mod tests {
         };
         let rows = [session_row(), view_row(), Target::Machine(Machine::Local)];
         for row in rows {
-            let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
+            let at = At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
             let done = closed(pulling_on(row.clone(), 'r').pulled(found(at)));
             assert!(matches!(
                 done,
@@ -6211,13 +6258,91 @@ mod tests {
             ));
 
             let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
-            let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
+            let at = At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
             let goes = pulling_on(row.clone(), 'w').pulled(found(at));
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
             let (menu, wants) = waits(pulling_on(row, 'r').pulled(found(At::Unopened)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(menu.target(), &Target::Machine(vps()));
+        }
+    }
+
+    #[test]
+    fn a_browser_view_row_offers_view_actions_and_omits_terminal_only_ones() {
+        let worktree = WorktreePlace {
+            project: ProjectRow::new("lune", 1),
+            worktree: WorktreeId::of(2).unwrap(),
+        };
+        let folder = Folder {
+            dir: directory("/w/lune/main"),
+            branch: Said::new("main".to_owned()),
+            repository: Some("/w/lune".to_owned()),
+            pull_request: None,
+        };
+        let row = ViewRow {
+            worktree,
+            kind: ViewKind::Browser(ViewId::of(30).unwrap()),
+            cwd: Cwd::At(folder),
+            arranged: Some(Arranged::Tabs),
+        };
+        assert_eq!(
+            row.pulled().err().as_deref(),
+            Some("menu: gh has found no pull request of the browser view's branch")
+        );
+        let unsaid = ViewRow {
+            cwd: Cwd::Unsaid,
+            ..row.clone()
+        };
+        assert_eq!(
+            unsaid.folder().err().as_deref(),
+            Some(
+                "menu: lune does not know yet where the browser view works; try again in a moment"
+            )
+        );
+        let target = Target::View(Machine::Local, row);
+        let mut menu = InteractiveMenu::new(id(), target.clone(), PICKED);
+        menu.reran(Ran::Ended(cargo_test()));
+        assert_eq!(
+            menu.target(),
+            &target,
+            "reran leaves a browser target untouched"
+        );
+        for allowed in [
+            Action::CloseView,
+            Action::NewView,
+            Action::NewBrowser,
+            Action::NewWelcome,
+            Action::NewReview,
+            Action::ShowPanes,
+            Action::SearchSkills,
+            Action::Review,
+            Action::IllegalStates,
+            Action::TigerStyle,
+            Action::FixChecks,
+            Action::NewWorktree,
+            Action::NewMachine,
+            Action::DeleteMerged,
+            Action::Rebase,
+            Action::BriefEvery,
+            Action::BriefThis,
+            Action::Ask,
+            Action::FileIssue,
+            Action::Quit,
+        ] {
+            assert!(target.fits(allowed), "{allowed:?} should fit a browser row");
+        }
+        for omitted in [
+            Action::RenameView,
+            Action::FixLast,
+            Action::ExplainLast,
+            Action::BriefHighlighted,
+            Action::ShowTabs,
+        ] {
+            assert!(
+                !target.fits(omitted),
+                "{omitted:?} must not fit a browser row"
+            );
         }
     }
 }
