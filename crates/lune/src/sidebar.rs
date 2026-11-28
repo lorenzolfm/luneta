@@ -69,7 +69,7 @@ use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, SidebarBottom, Spots};
-use crate::sweep::{Page, Sweep, cells};
+use crate::sweep::{Continuation, Join, Page, Sweep, cells};
 
 pub const COLUMNS: u16 = 32;
 
@@ -5714,7 +5714,19 @@ impl Sidebar {
         };
         lines.extend(drawn.into_iter().skip(self.top).take(room));
         lines.resize(notes_from, Line::default());
-        let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
+        let joins = notes
+            .goes_on
+            .iter()
+            .map(|line| {
+                (
+                    notes_from + line,
+                    Continuation {
+                        join: Join::Tight,
+                        indent: 1,
+                    },
+                )
+            })
+            .collect();
         let spinners = notes.spinners;
         lines.extend(notes.lines);
         put(buffer, area, &lines, self.framing());
@@ -5763,7 +5775,7 @@ impl Sidebar {
         self.laid = laid;
         self.page = Page {
             lines,
-            goes_on,
+            joins,
             cuts: cut_spots.placed(inside),
         };
         self.aloud_buttons = buttons.down(notes_from).placed(inside);
@@ -6528,20 +6540,28 @@ struct CutAt {
     took: String,
 }
 
-fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> {
+pub fn cut_tail(text: &str, room: usize) -> (String, Option<(usize, String)>) {
     let shown = cut(text, room);
     if shown == text {
-        return None;
+        return (shown, None);
     }
-    let kept = shown.strip_suffix('…')?;
-    let took = text
-        .strip_prefix(kept)?
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    let Some(kept) = shown.strip_suffix('…') else {
+        return (shown, None);
+    };
+    let Some(rest) = text.strip_prefix(kept) else {
+        return (shown, None);
+    };
+    let took = rest.chars().filter(|c| !c.is_control()).collect();
+    let offset = cells(kept);
+    (shown, Some((offset, took)))
+}
+
+fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> {
+    let (_, tail) = cut_tail(text, room);
+    let (offset, took) = tail?;
     Some(CutAt {
         line,
-        column: column + cells(kept),
+        column: column + offset,
         took,
     })
 }

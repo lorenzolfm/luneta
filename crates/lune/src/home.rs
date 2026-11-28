@@ -8,13 +8,14 @@ use lune_domain::projects::{Dir, ProjectId};
 use luned::asks::Marked;
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::ask::{self, Ask};
 use crate::cadence::Cadence;
+use crate::copied::Excerpt;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
@@ -26,8 +27,6 @@ pub const AGAIN: Duration = Duration::from_secs(60);
 pub const KEPT_MAX: usize = 16;
 
 const _: () = assert!(work::FRESH.as_millis() < AGAIN.as_millis());
-
-const ASK_TITLE: &str = "Ask";
 
 const MARKED: &str = "◆";
 
@@ -336,7 +335,47 @@ impl Home {
         matches!(&self.named, Named::As { ask, .. } if ask.turning())
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
+    pub fn selects(&self, at: Position) -> bool {
+        matches!(&self.named, Named::As { ask, .. } if ask.selects(at))
+    }
+
+    pub fn select_from(&mut self, at: Position) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.select_from(at);
+        }
+    }
+
+    pub fn select_to(&mut self, at: Position) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.select_to(at);
+        }
+    }
+
+    pub fn selected_at(&mut self, at: Position) -> Option<Excerpt> {
+        let Named::As { ask, .. } = &mut self.named else {
+            return None;
+        };
+        ask.selected_at(at)
+    }
+
+    pub fn pressed(&self) -> bool {
+        matches!(&self.named, Named::As { ask, .. } if ask.pressed())
+    }
+
+    pub fn unsweep(&mut self) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.unsweep();
+        }
+    }
+
+    pub fn let_go(&mut self) -> bool {
+        let Named::As { ask, .. } = &mut self.named else {
+            return false;
+        };
+        ask.let_go()
+    }
+
+    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
         let mut cadence = Cadence::default();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
@@ -345,48 +384,27 @@ impl Home {
                 }
             }
         }
-        let Some(inner) = area
-            .width
-            .checked_sub(2)
-            .map(usize::from)
-            .filter(|inner| *inner > 0)
-        else {
+        if area.width.checked_sub(2).is_none_or(|inner| inner == 0) {
+            if let Named::As { ask, .. } = &mut self.named {
+                ask.unshown();
+            }
             return cadence;
-        };
-        let Named::As { dir, ask, .. } = &self.named else {
+        }
+        let hints = self.hints();
+        let on = &self.on;
+        let Named::As { dir, ask, .. } = &mut self.named else {
             self.draw_lists(buffer, area);
             return cadence;
         };
         let most = (area.height / 2).max(ASK_ROWS_MIN).min(area.height);
-        let room = usize::from(most.saturating_sub(3));
-        let (mut talk, spinner) = ask.talked(inner, wall);
-        let mut kept_spinner = spinner.is_some_and(|at| at < room);
-        if talk.len() > room {
-            let kept = room.saturating_sub(1);
-            let drained = talk.len() - kept;
-            kept_spinner = spinner.is_some_and(|at| at >= drained);
-            talk.drain(..drained);
-            if room > 0 {
-                talk.insert(
-                    0,
-                    Line::styled(" …", Style::new().add_modifier(Modifier::DIM)),
-                );
-            }
-        }
-        talk.push(menu::keys_line(inner, &self.hints()));
-        let rows = u16::try_from(talk.len() + 2).map_or(most, |rows| rows.min(most));
-        assert!(rows <= area.height, "the prompt's box fits in the home");
-        let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
-        let right = match &self.on {
+        let right = match on {
             Machine::Local => sidebar::short_cwd(dir.as_str()),
             Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(dir.as_str())),
         };
-        menu::boxed(buffer, asked, &menu::rule(ASK_TITLE, &right, inner), &talk);
+        let (rows, ask_cadence) = ask.draw_docked(buffer, area, most, &right, &hints, wall);
+        cadence.merge(ask_cadence);
         let lists = Rect::new(area.x, area.y, area.width, area.height - rows);
         self.draw_lists(buffer, lists);
-        if kept_spinner {
-            cadence.spin();
-        }
         cadence
     }
 
@@ -733,7 +751,7 @@ mod tests {
         home.key(&KeyEvent::from(KeyCode::Esc), asks, &events);
     }
 
-    fn shown(home: &Home, width: u16, height: u16) -> Vec<String> {
+    fn shown(home: &mut Home, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
@@ -755,7 +773,7 @@ mod tests {
         let (mut home, now) = (home(), Instant::now());
         assert!(!home.relist(now), "a new home is asking already");
         assert_eq!(
-            shown(&home, 60, 12)[2],
+            shown(&mut home, 60, 12)[2],
             "   asking gh for the open issues and pull requests…"
         );
         home.listed(Ok(listed()), now);
@@ -774,7 +792,7 @@ mod tests {
         );
         press(&mut home, KeyCode::Down);
         assert_eq!(
-            shown(&home, 60, 14)[..9],
+            shown(&mut home, 60, 14)[..9],
             [
                 " lune  w/lune",
                 "",
@@ -788,7 +806,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            shown(&home, 60, 14)[10..],
+            shown(&mut home, 60, 14)[10..],
             [
                 "┌─ Ask ─────────────────────────────────────────── w/lune ─┐",
                 "│ › _                                                      │",
@@ -801,7 +819,7 @@ mod tests {
         }
         let typed = "│ › go_                                                    │";
         assert_eq!(
-            shown(&home, 60, 14)[11],
+            shown(&mut home, 60, 14)[11],
             typed,
             "the rest of the keys are the prompt's"
         );
@@ -834,7 +852,7 @@ mod tests {
         let (mut home, now) = (home(), Instant::now());
         home.listed(Err("gh is not on the PATH".to_owned()), now);
         assert_eq!(
-            shown(&home, 60, 10)[2],
+            shown(&mut home, 60, 10)[2],
             " gh lists nothing here: gh is not on the PATH"
         );
         home.relist(now + AGAIN);
@@ -847,7 +865,7 @@ mod tests {
         );
         home.relist(now + AGAIN * 2);
         home.listed(Err("HTTP 502".to_owned()), now + AGAIN * 2);
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[1], " not listed again: HTTP 502");
         assert!(lines[4].contains("#524"), "{lines:?}");
         home.relist(now + AGAIN * 3);
@@ -925,7 +943,7 @@ mod tests {
             )),
             now,
         );
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[2], " Pull requests · 1");
         assert!(
             lines[3].starts_with(" › ◇ #524  Say view, not pane")
@@ -957,13 +975,13 @@ mod tests {
         };
         let full = Work::new(Issues::Open(issues.collect()), vec![], more).unwrap();
         home.listed(Ok(Listed::Work(full)), now);
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[2], " Pull requests · 0");
         assert_eq!(lines[5], " Issues · 50+");
         home.relist(now + AGAIN);
         home.listed(Ok(Listed::Unhosted), now + AGAIN);
         assert_eq!(home.cursor, None, "nothing is listed to be on");
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[2], " no remote on GitHub, so nothing is listed here");
         press(&mut home, KeyCode::Tab);
         assert_eq!(home.marked, Marked::default());
@@ -978,7 +996,7 @@ mod tests {
             now + AGAIN * 2,
         );
         assert_eq!(
-            shown(&home, 60, 14)[2],
+            shown(&mut home, 60, 14)[2],
             " gh lists nothing here: git did not say the remotes"
         );
     }
@@ -994,7 +1012,7 @@ mod tests {
             press(&mut home, KeyCode::Char(typed));
         }
         press(&mut home, KeyCode::Enter);
-        let unnamed = shown(&home, 60, 14);
+        let unnamed = shown(&mut home, 60, 14);
         assert_eq!(
             unnamed[..3],
             [
@@ -1013,7 +1031,7 @@ mod tests {
             home.ask_numbered(2).is_none(),
             "a prompt is heard only by its own number"
         );
-        let named = shown(&home, 60, 14);
+        let named = shown(&mut home, 60, 14);
         assert!(
             named.contains(
                 &"│ › _                                                      │".to_owned()
@@ -1084,7 +1102,7 @@ mod tests {
         );
         assert!(home.ask_numbered(1).is_some());
         assert!(
-            shown(&home, 60, 14).contains(
+            shown(&mut home, 60, 14).contains(
                 &"│ › x_                                                     │".to_owned()
             )
         );
@@ -1093,9 +1111,65 @@ mod tests {
         assert_eq!(home.marked, Marked::default());
         assert!(home.ask_numbered(1).is_none() && home.ask_numbered(2).is_some());
         assert!(
-            shown(&home, 60, 14).contains(
+            shown(&mut home, 60, 14).contains(
                 &"│ › _                                                      │".to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn text_in_a_home_s_ask_box_can_be_selected_and_copied_while_the_lists_above_cannot() {
+        let mut home = home();
+        home.ask_numbered(1)
+            .expect("named home holds ask")
+            .heard(ask::Heard::Step(luned::asks::Step::Said(
+                "Ready to merge #524.".to_owned(),
+            )));
+        let area = Rect::new(10, 0, 50, 16);
+        let mut buffer = Buffer::empty(area);
+        home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+        assert!(
+            !home.selects(Position::new(12, 0)),
+            "lists above the ask box do not start ask selection"
+        );
+
+        let answer_y = (area.top()..area.bottom())
+            .find(|&y| {
+                let row: String = (area.left()..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                row.contains("Ready to merge #524.")
+            })
+            .expect("answer row drawn inside home ask box");
+        let start = Position::new(area.x + 2, answer_y);
+        let end = Position::new(area.x + 21, answer_y);
+        assert!(home.selects(start));
+        home.select_from(start);
+        home.select_to(end);
+        assert_eq!(
+            home.selected_at(end).as_deref(),
+            Some("Ready to merge #524.")
+        );
+
+        let mut redrawn = Buffer::empty(area);
+        home.draw(&mut redrawn, area, SystemTime::UNIX_EPOCH);
+        assert!(
+            redrawn[(start.x, answer_y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            redrawn[(end.x, answer_y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        home.unsweep();
+        let mut cleared = Buffer::empty(area);
+        home.draw(&mut cleared, area, SystemTime::UNIX_EPOCH);
+        assert!(
+            !cleared[(start.x, answer_y)]
+                .modifier
+                .contains(Modifier::REVERSED)
         );
     }
 }

@@ -25,6 +25,7 @@ use crate::menu::{self, Hint};
 use crate::moonlight;
 use crate::reach::{self, Luned};
 use crate::sidebar::{self, ViewKey};
+use crate::sweep::Join;
 
 const MODEL: &str = "haiku";
 
@@ -628,10 +629,14 @@ fn width(over: Rect) -> u16 {
     share.max(WIDTH_MIN).min(over.width)
 }
 
-pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &[Line<'_>]) {
-    let Some((inner, room)) = room(over) else {
-        return;
-    };
+pub fn boxed(
+    buffer: &mut Buffer,
+    over: Rect,
+    title: &str,
+    right: &str,
+    lines: &[Line<'_>],
+) -> Option<Rect> {
+    let (inner, room) = room(over)?;
     let lines = &lines[..lines.len().min(room)];
     let width = width(over);
     let height = u16::try_from(lines.len() + 2).map_or(over.height, |tall| tall.min(over.height));
@@ -639,9 +644,21 @@ pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &
     let y = over.y + (over.height - height) / 2;
     let area = Rect::new(x, y, width, height);
     menu::boxed(buffer, area, &menu::rule(title, right, inner), lines);
+    Some(area)
 }
 
 pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    paragraphs_joined(text, width, style)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+pub fn paragraphs_joined(
+    text: &str,
+    width: usize,
+    style: Style,
+) -> Vec<(Line<'static>, Option<Join>)> {
     let mut lines = Vec::new();
     for line in text.lines() {
         let line: String = line
@@ -650,9 +667,9 @@ pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> 
             .collect();
         let line = line.trim_end();
         if line.is_empty() {
-            lines.push(Line::default());
+            lines.push((Line::default(), None));
         } else {
-            lines.extend(menu::wrap(line, width, style));
+            lines.extend(menu::wrap_joined(line, width, style));
         }
     }
     lines

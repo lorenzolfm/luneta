@@ -43,6 +43,7 @@ use crate::sidebar::{
 };
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
+use crate::sweep::Join;
 
 pub const ALL_KEYS: char = '?';
 const ALL_KEYS_DOES: &str = "All keys";
@@ -2870,13 +2871,20 @@ pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>
 }
 
 pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    wrap_joined(text, width, style)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+pub fn wrap_joined(text: &str, width: usize, style: Style) -> Vec<(Line<'static>, Option<Join>)> {
     let room = width.saturating_sub(2).max(1);
-    let mut lines = Vec::new();
+    let mut chunks = Vec::new();
     let mut line = String::new();
     for word in text.split(' ') {
         let spaced = usize::from(!line.is_empty());
         if !line.is_empty() && line.width() + spaced + word.width() > room {
-            lines.push(std::mem::take(&mut line));
+            chunks.push(std::mem::take(&mut line));
         }
         if !line.is_empty() {
             line.push(' ');
@@ -2884,12 +2892,23 @@ pub fn wrap(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
         line.push_str(word);
     }
     if !line.is_empty() {
-        lines.push(line);
+        chunks.push(line);
     }
-    let lines = lines
-        .into_iter()
-        .flat_map(|line| sidebar::wrapped(&line, width, style));
-    lines.collect()
+    let mut lines = Vec::new();
+    for (chunk_at, chunk) in chunks.into_iter().enumerate() {
+        for (part_at, wrapped) in sidebar::wrapped(&chunk, width, style)
+            .into_iter()
+            .enumerate()
+        {
+            let join = match (chunk_at, part_at) {
+                (0, 0) => None,
+                (_, 0) => Some(Join::Space),
+                (_, _) => Some(Join::Tight),
+            };
+            lines.push((wrapped, join));
+        }
+    }
+    lines
 }
 
 fn sweeping(repository: &str) -> String {

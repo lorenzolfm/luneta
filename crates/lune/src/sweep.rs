@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use ratatui::buffer::{Buffer, CellWidth};
@@ -7,10 +8,22 @@ use ratatui::text::{Line, Span};
 
 use crate::spots::Spots;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Join {
+    Tight,
+    Space,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Continuation {
+    pub join: Join,
+    pub indent: u16,
+}
+
 #[derive(Debug, Default)]
 pub struct Page {
     pub lines: Vec<Line<'static>>,
-    pub goes_on: Vec<usize>,
+    pub joins: BTreeMap<usize, Continuation>,
     pub cuts: Spots<String>,
 }
 
@@ -23,20 +36,20 @@ pub struct Sweep {
 impl Sweep {
     pub fn new(from: Position, to: Position, within: Rect) -> Sweep {
         Sweep {
-            from: kept(from, within),
-            to: kept(to, within),
+            from: clamp(from, within),
+            to: clamp(to, within),
         }
     }
 
     pub fn reach(&mut self, to: Position, within: Rect) {
-        self.to = kept(to, within);
+        self.to = clamp(to, within);
     }
 
     pub fn last_y(self) -> u16 {
         self.ends().1.y
     }
 
-    fn ends(self) -> (Position, Position) {
+    pub fn ends(self) -> (Position, Position) {
         if (self.from.y, self.from.x) <= (self.to.y, self.to.x) {
             (self.from, self.to)
         } else {
@@ -72,31 +85,44 @@ impl Sweep {
 
     pub fn text(self, page: &Page, within: Rect) -> String {
         let (first, last) = self.ends();
-        let goes_on = |line: usize| page.goes_on.contains(&line);
+        let join = |line: usize| page.joins.get(&line).copied();
         let mut text = String::new();
         for y in first.y..=last.y {
             let line = usize::from(y.saturating_sub(within.y));
             let mut columns = self.columns(y, within);
-            if y > first.y && goes_on(line) {
-                columns.start = columns.start.saturating_add(1);
+            if y > first.y
+                && let Some(continuation) = join(line)
+            {
+                columns.start = columns.start.saturating_add(continuation.indent);
             }
             let said = page.lines.get(line).map_or_else(String::new, |drawn| {
                 read(drawn, within.x, columns, |x| {
                     page.cuts.at(Position::new(x, y))
                 })
             });
-            if y < last.y && goes_on(line + 1) {
-                text.push_str(&said);
-            } else {
-                text.push_str(said.trim_end());
-                text.push('\n');
+            match (y < last.y)
+                .then(|| join(line + 1))
+                .flatten()
+                .map(|it| it.join)
+            {
+                Some(Join::Tight) => text.push_str(&said),
+                Some(Join::Space) => {
+                    text.push_str(&said);
+                    if !said.is_empty() {
+                        text.push(' ');
+                    }
+                }
+                None => {
+                    text.push_str(said.trim_end());
+                    text.push('\n');
+                }
             }
         }
         text.trim_start_matches('\n').trim_end().to_owned()
     }
 }
 
-fn kept(at: Position, within: Rect) -> Position {
+pub fn clamp(at: Position, within: Rect) -> Position {
     let last = |start: u16, length: u16| start.saturating_add(length.saturating_sub(1));
     Position::new(
         at.x.clamp(within.x, last(within.x, within.width)),
@@ -128,6 +154,12 @@ fn read<'a>(
 pub fn cells(text: &str) -> usize {
     let span = Span::raw(text);
     span.styled_graphemes(Style::new())
+        .map(|it| usize::from(it.symbol.cell_width()))
+        .sum()
+}
+
+pub fn line_cells(line: &Line<'_>) -> usize {
+    line.styled_graphemes(Style::new())
         .map(|it| usize::from(it.symbol.cell_width()))
         .sum()
 }
@@ -201,8 +233,12 @@ mod tests {
 
     #[test]
     fn a_note_wrapped_comes_out_as_one_line() {
+        let tight = Continuation {
+            join: Join::Tight,
+            indent: 1,
+        };
         let page = Page {
-            goes_on: vec![1, 2],
+            joins: BTreeMap::from([(1, tight), (2, tight)]),
             ..page(&[" luned: ", " stopped a", " nswering", " next note"])
         };
         assert_eq!(
@@ -211,6 +247,28 @@ mod tests {
         );
         assert_eq!(swept(at(3, 2), at(5, 3), &page), "stopped answ");
         assert_eq!(swept(at(5, 1), at(11, 1), &page), "ned:");
+    }
+
+    #[test]
+    fn word_and_hard_wrapped_lines_join_with_space_or_tight() {
+        let space = Continuation {
+            join: Join::Space,
+            indent: 0,
+        };
+        let tight = Continuation {
+            join: Join::Tight,
+            indent: 0,
+        };
+        let page = Page {
+            joins: BTreeMap::from([(1, space), (2, tight), (3, space)]),
+            ..page(&["see", "https://ex", "ample.com", "now", "next"])
+        };
+        assert_eq!(
+            swept(at(2, 1), at(5, 5), &page),
+            "see https://example.com now\nnext"
+        );
+        assert_eq!(swept(at(2, 2), at(10, 3), &page), "https://example.com");
+        assert_eq!(swept(at(8, 1), at(6, 2), &page), "https");
     }
 
     #[test]
