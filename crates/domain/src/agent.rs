@@ -127,7 +127,7 @@ impl Harness {
     #[must_use]
     pub const fn flows(self) -> Flows {
         match self {
-            Harness::ClaudeCode | Harness::Pi | Harness::Antigravity => Flows::Steps,
+            Harness::ClaudeCode | Harness::Pi | Harness::Antigravity => Flows::Runs,
             Harness::Codex => CODEX_FLOWS,
         }
     }
@@ -219,21 +219,21 @@ impl Step {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flows {
-    Steps,
+    Runs,
     No { why: &'static str },
 }
 
 impl Flows {
-    pub const fn steps(self) -> Result<(), &'static str> {
+    pub const fn runs(self) -> Result<(), &'static str> {
         match self {
-            Flows::Steps => Ok(()),
+            Flows::Runs => Ok(()),
             Flows::No { why } => Err(why),
         }
     }
 
     const fn gap_explained(self) -> bool {
         match self {
-            Flows::Steps => true,
+            Flows::Runs => true,
             Flows::No { why } => !why.trim_ascii().is_empty(),
         }
     }

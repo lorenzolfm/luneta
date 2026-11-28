@@ -377,6 +377,13 @@ fn validate_run_stages(flow_name: &str, stages: &[RunStage]) -> Result<(), Strin
     Ok(())
 }
 
+fn runs_on(harness: Harness) -> Result<(), String> {
+    harness
+        .flows()
+        .runs()
+        .map_err(|why| format!("no flow runs on {}: {why}", harness.program()))
+}
+
 fn validate_label(field: &str, value: &str) -> Result<(), String> {
     if value.trim().is_empty() {
         return Err(format!("{field} must not be empty"));
@@ -1154,10 +1161,7 @@ impl FlowRun {
         harness: Harness,
         entry: FlowEntry,
     ) -> Result<(FlowRun, Vec<FlowEffect>), String> {
-        harness
-            .flows()
-            .steps()
-            .map_err(|why| format!("no flow runs on {}: {why}", harness.program()))?;
+        runs_on(harness)?;
         let stages = spec.effective_stages(entry)?;
         let FlowSpec { name, policy, .. } = spec;
         let mut effects = Vec::new();
@@ -1188,6 +1192,7 @@ impl FlowRun {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        runs_on(self.harness)?;
         validate_label("flow name", &self.flow_name)?;
         self.policy.validate(&self.flow_name)?;
         validate_run_stages(&self.flow_name, &self.stages)?;
@@ -1306,6 +1311,10 @@ impl FlowRun {
     }
 
     fn assert_invariants(&self) {
+        assert!(
+            self.harness.flows().runs().is_ok(),
+            "a flow runs on a harness whose steps lune runs"
+        );
         assert!(!self.stages.is_empty(), "flow has at least one stage");
         assert!(self.stages.len() <= STAGES_MAX);
         assert!(self.stage_offset() < self.stages.len());
@@ -3766,7 +3775,7 @@ mod tests {
                 FlowEntry::PullRequest,
             );
             match harness.flows() {
-                crate::agent::Flows::Steps => {
+                crate::agent::Flows::Runs => {
                     assert!(started.is_ok(), "{harness:?}: {started:?}");
                     registry.remove(wt(1));
                 }
@@ -3777,7 +3786,7 @@ mod tests {
             }
             assert!(registry.get(wt(1)).is_none(), "{harness:?}");
         }
-        assert!(Harness::Codex.flows().steps().is_err());
+        assert!(Harness::Codex.flows().runs().is_err());
     }
 
     #[test]
@@ -3802,6 +3811,23 @@ mod tests {
             );
         };
         rejects(&|run| run["policy"]["step_timeout_secs"] = serde_json::json!(0));
+        rejects(&|run| run["harness"] = serde_json::json!("opencode"));
+        for harness in Harness::ALL {
+            let mut raw = saved.clone();
+            raw["flows"][0]["harness"] = serde_json::json!(harness.program());
+            let loaded = serde_json::from_value::<FlowRegistry>(raw).map_err(|why| why.to_string());
+            match harness.flows().runs() {
+                Ok(()) => assert!(loaded.is_ok(), "{harness:?}: {loaded:?}"),
+                Err(why) => {
+                    let refused = format!("no flow runs on {}: {why}", harness.program());
+                    assert_eq!(
+                        loaded,
+                        Err(refused),
+                        "a kept flow is held to what starts one"
+                    );
+                }
+            }
+        }
         rejects(&|run| run["phase"] = serde_json::json!({ "Done": "Aborted" }));
         rejects(&|run| {
             run["phase"] = serde_json::json!({
