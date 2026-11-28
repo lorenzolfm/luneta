@@ -458,6 +458,13 @@ impl Rebased {
                 }
             }
         };
+        if let Some(rebase_response::StatusRefresh::RefreshedAt(version)) = said.status_refresh
+            && let Err(why) = lune_protocol::watch::LocalVersion::of_api(version)
+        {
+            return Err(Unanswered::unread(format!(
+                "it sent an invalid refresh version: {why}"
+            )));
+        }
         Ok(Rebased {
             branch: said.branch,
             onto: said.onto,

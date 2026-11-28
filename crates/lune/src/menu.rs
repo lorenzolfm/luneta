@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU64};
@@ -3231,7 +3230,6 @@ fn fitted(
 #[derive(Debug, Default)]
 pub struct AllKeys {
     first: usize,
-    room: Cell<usize>,
 }
 
 struct KeysRow {
@@ -3291,15 +3289,15 @@ impl AllKeys {
         rows
     }
 
-    pub fn scroll(&mut self, by: isize) {
-        let last = AllKeys::rows(0).len().saturating_sub(self.room.get());
+    pub fn scroll(&mut self, by: isize, room: usize) {
+        let body = room.saturating_sub(2);
+        let last = AllKeys::rows(0).len().saturating_sub(body);
         self.first = self.first.min(last).saturating_add_signed(by).min(last);
     }
 
     pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
         let rows = AllKeys::rows(width);
         let body = room.saturating_sub(2);
-        self.room.set(body);
         let first = self.first.min(rows.len().saturating_sub(body));
         let shown = rows.len().min(first + body);
         let right = if rows.len() > body {
