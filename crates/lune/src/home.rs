@@ -8,6 +8,7 @@ use lune_domain::projects::{Dir, ProjectId};
 use lune_protocol::github::Mergeability;
 use lune_protocol::said::Said;
 use luned::asks::Marked;
+use luned::headless::Harness;
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -277,7 +278,7 @@ impl Home {
             .collect()
     }
 
-    pub fn key(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
+    pub fn key(&mut self, key: &KeyEvent, asks: &mut u64, picked: Harness, events: &Sender<Event>) {
         let bare = key.modifiers.is_empty();
         match key.code {
             KeyCode::Up if bare => self.step_up(),
@@ -290,16 +291,16 @@ impl Home {
                 self.mark();
                 self.step_up();
             }
-            _ => self.prompt(key, asks, events),
+            _ => self.prompt(key, asks, picked, events),
         }
     }
 
-    fn prompt(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
+    fn prompt(&mut self, key: &KeyEvent, asks: &mut u64, picked: Harness, events: &Sender<Event>) {
         let Named::As { name, dir, ask } = &mut self.named else {
             return;
         };
         match ask.key(key) {
-            ask::Keyed::Send => ask.send(self.marked.clone(), events),
+            ask::Keyed::Send => ask.send(self.marked.clone(), picked, events),
             ask::Keyed::Close | ask::Keyed::Interrupt if ask.turning() => {
                 *asks += 1;
                 ask.stop(*asks);
@@ -792,12 +793,22 @@ mod tests {
     fn press(home: &mut Home, code: KeyCode) {
         let (events, _heard) = mpsc::channel();
         let mut asks = 1;
-        home.key(&KeyEvent::from(code), &mut asks, &events);
+        home.key(
+            &KeyEvent::from(code),
+            &mut asks,
+            Harness::ClaudeCode,
+            &events,
+        );
     }
 
     fn start_over(home: &mut Home, asks: &mut u64) {
         let (events, _heard) = mpsc::channel();
-        home.key(&KeyEvent::from(KeyCode::Esc), asks, &events);
+        home.key(
+            &KeyEvent::from(KeyCode::Esc),
+            asks,
+            Harness::ClaudeCode,
+            &events,
+        );
     }
 
     fn shown(home: &mut Home, width: u16, height: u16) -> Vec<String> {
@@ -1140,11 +1151,8 @@ mod tests {
         press(&mut home, KeyCode::Char('x'));
         let mut asks = 1;
         let (events, _heard) = mpsc::channel();
-        home.key(
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &mut asks,
-            &events,
-        );
+        let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        home.key(&interrupt, &mut asks, Harness::ClaudeCode, &events);
         assert_eq!(
             (asks, home.marked.iter().count()),
             (1, 1),
@@ -1178,11 +1186,12 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         let mut home = home();
-        home.ask_numbered(1)
-            .expect("named home holds ask")
-            .heard(ask::Heard::Step(luned::asks::Step::Said(
-                "Ready to merge #524.".to_owned(),
-            )));
+        let asked = home.ask_numbered(1).expect("named home holds ask");
+        asked.in_a_turn(Harness::ClaudeCode, None);
+        asked.heard(ask::Heard::Step(luned::asks::Step::Said(
+            "Ready to merge #524.".to_owned(),
+        )));
+        asked.heard(ask::Heard::Ended(Ok(())));
         let area = Rect::new(10, 0, 50, 16);
         let mut buffer = Buffer::empty(area);
         home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);

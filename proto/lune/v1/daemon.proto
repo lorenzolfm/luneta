@@ -157,6 +157,7 @@ message AskRequest {
   repeated uint32 marked_issues = 8;
   repeated uint32 marked_pulls = 9;
   bool review_only = 10;
+  optional Harness harness = 11;
 }
 
 message AskReviewRequest {
@@ -166,6 +167,7 @@ message AskReviewRequest {
     Start start = 3;
     FollowUp follow_up = 4;
   }
+  optional Harness harness = 5;
 
   message Start {
     string context = 1;
@@ -185,6 +187,7 @@ message AskResponse {
     string denied = 3;
     string said = 4;
   }
+  optional Harness runner = 5;
 
   message Ran {
     string id = 1;
@@ -755,6 +758,7 @@ message FileIssueRequest {
   string dir = 2;
   string words = 3;
   string repository = 4;
+  optional Harness harness = 5;
 }
 
 message FileIssueResponse {

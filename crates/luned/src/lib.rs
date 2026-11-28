@@ -17,6 +17,7 @@ mod fetches;
 pub mod folder;
 mod git;
 mod github;
+pub mod headless;
 pub mod helper;
 pub mod images;
 pub mod issues;
@@ -59,7 +60,7 @@ pub mod work;
 pub mod zoxide;
 
 pub use agy::folder as agy_folder;
-pub use claude::{TORN, folder as claude_folder, one_answer};
+pub use claude::{TORN, folder as claude_folder};
 pub use client::{
     ANSWER, Answer, BRIDGED, Daemon, Held, LocalWatch, PeerPid, REACH, Reached, RoundTrip, Shared,
     Unasked, Unbridged, Unmatched, Unreached, Unsent, WatchError, WatchedHost, Watching, connect,
@@ -69,6 +70,7 @@ pub use daemon::{ALONE, ANSWERING_MAX, Claim, LISTENING, SWEEP, WATCH, parked_wa
 pub use directory::Directory;
 pub use folder::Refusal;
 pub use git::{REPOSITORY_VARS as GIT_REPOSITORY_VARS, local as local_git};
+pub use headless::{AnswerWith, NonEmpty, OneAnswer, one_answer};
 pub use keeps::KEPT;
 pub use layouts::RESTORE_PAUSE;
 pub use lune_protocol::release;

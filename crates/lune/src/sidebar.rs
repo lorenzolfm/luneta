@@ -2686,6 +2686,10 @@ enum Highlight {
 }
 
 impl Sidebar {
+    pub fn kept_harness(&self) -> agents::Harness {
+        self.state().agent.harness()
+    }
+
     pub fn new(folds: Folds, news: News, agent: Kept, this: String, framed: Rect) -> Self {
         Sidebar::from_state(SidebarState::new(folds, news, agent, this, framed))
     }
@@ -2698,8 +2702,9 @@ impl Sidebar {
         self.edit_without_layout(|state| state.collapse_rows(framed_rows(framed)));
     }
 
-    pub fn reagent(&mut self) {
-        self.edit_without_layout(SidebarState::reagent);
+    #[must_use]
+    pub fn reagent(&mut self) -> bool {
+        self.edit_if(SidebarState::reagent)
     }
 
     #[must_use]
@@ -3114,10 +3119,12 @@ impl SidebarState {
         }
     }
 
-    fn reagent(&mut self) {
+    fn reagent(&mut self) -> bool {
         if let Err(why) = self.agent.reload() {
-            log::say(&format!("agent: {why}"));
+            self.notify(format!("agent: {why}"));
+            return true;
         }
+        false
     }
 
     fn refold(&mut self, wall: SystemTime) -> bool {
@@ -5438,7 +5445,7 @@ impl SidebarState {
     fn keep_agent(&mut self, harness: agents::Harness) {
         if let Err(why) = self.agent.keep(harness) {
             let name = agents::name(harness);
-            self.say(format!("agent: {name} is for this lune alone: {why}"));
+            self.say(format!("agent: {name} was not kept: {why}"));
         }
     }
 
@@ -7838,7 +7845,7 @@ fn label(agent: Option<&Agent>, view: &FoundTerminal) -> String {
             })
             .filter(|program| !program.is_empty());
         let uses_terminal_title = program
-            .and_then(agents::named)
+            .and_then(agents::Harness::from_program)
             .is_some_and(|harness| harness.topics().has_terminal_title());
         if uses_terminal_title && let Some(topic) = view_topic {
             topic.to_owned()

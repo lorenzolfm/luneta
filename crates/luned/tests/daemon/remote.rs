@@ -1335,7 +1335,10 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
             id: "toolu_1".to_owned(),
             command: "lune agents".to_owned(),
         };
-        let session = Step::Session(SessionId::parse("7c22").unwrap());
+        let session = Step::Session {
+            id: SessionId::parse("7c22").unwrap(),
+            runner: luned::headless::Harness::ClaudeCode,
+        };
         let said = Step::Said("No agent runs.".to_owned());
         assert_eq!(steps, [session.clone(), ran.clone(), said.clone()]);
         ended.unwrap();
@@ -1363,13 +1366,20 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
             Some(dir.clone()),
             "<untrusted-diff-excerpt location=\"src/lib.rs\">\n```patch\n+ok\n```\n</untrusted-diff-excerpt>",
             "explain",
+            luned::headless::Harness::ClaudeCode,
         )
         .unwrap()
         .to_api(on_far());
         let (review_steps, ended) = review_turn(&mut daemon, reviewed).await;
         ended.unwrap();
         let review_session = SessionId::parse("9a11").unwrap();
-        assert_eq!(review_steps[0], Step::Session(review_session.clone()));
+        assert_eq!(
+            review_steps[0],
+            Step::Session {
+                id: review_session.clone(),
+                runner: luned::headless::Harness::ClaudeCode,
+            }
+        );
         let (told_review, words) = told(&far);
         assert_eq!(
             told_review[5..],
@@ -1378,9 +1388,14 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
         assert!(words.contains("<untrusted-diff-excerpt"), "{words}");
         assert!(words.ends_with("\n\nexplain"), "{words}");
 
-        let follow = ReviewAsk::follow_up(Some(dir.clone()), review_session.clone(), "why?")
-            .unwrap()
-            .to_api(on_far());
+        let follow = ReviewAsk::follow_up(
+            Some(dir.clone()),
+            review_session.clone(),
+            "why?",
+            luned::headless::Harness::ClaudeCode,
+        )
+        .unwrap()
+        .to_api(on_far());
         let (_steps, ended) = review_turn(&mut daemon, follow).await;
         ended.unwrap();
         let (told_follow, words) = told(&far);
@@ -1403,6 +1418,7 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
             Some(dir.clone()),
             SessionId::parse("7c22").unwrap(),
             "downgrade",
+            luned::headless::Harness::ClaudeCode,
         )
         .unwrap()
         .to_api(on_far());
@@ -1581,6 +1597,7 @@ fn an_issue_is_written_and_filed_on_the_machine_it_is_for() {
             dir: dir.display().to_string(),
             words: words.to_owned(),
             repository: "o/n".to_owned(),
+            harness: None,
         };
         let listed = IssueRepositoriesRequest {
             on: on("far"),

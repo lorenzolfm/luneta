@@ -789,6 +789,7 @@ impl Core {
             dir,
             words,
             repository,
+            harness: None,
         };
         self.on_runtime(async move {
             let said = rpc
@@ -1095,6 +1096,7 @@ impl Conversation {
             marked_issues: marked.issues,
             marked_pulls: marked.pulls,
             review_only: false,
+            harness: None,
         };
         let (tell, told) = mpsc::channel(STEPS_HELD);
         let talk = Talk {

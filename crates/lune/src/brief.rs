@@ -8,11 +8,12 @@ use std::time::{Duration, SystemTime};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
+use luned::headless::{self, Harness};
 use luned::program::{self, Cancel, Ran, Wanted};
 use luned::transcripts::{
     Digest, IDS_MAX, Reading, SessionId, StepsMax, TranscriptEnd, digest_end,
 };
-use luned::{Destination, one_answer};
+use luned::{AnswerWith, Destination, NonEmpty, OneAnswer, one_answer};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -28,7 +29,7 @@ use crate::reach::{self, Luned};
 use crate::sidebar;
 use crate::sweep::Join;
 
-const MODEL: &str = "haiku";
+const MODEL: NonEmpty<'static> = NonEmpty::try_new("haiku").expect("model name is non-empty");
 
 const WRITING: Duration = Duration::from_mins(2);
 
@@ -45,18 +46,23 @@ const NOTES_BYTES: usize = 100 * 1024;
 
 const LEFT_OUT_BYTES: usize = 4 * 1024;
 
+const _: () = assert!(LEFT_OUT_BYTES < NOTES_BYTES);
+
 const WIDTH_MIN: u16 = 60;
 
-const SYSTEM: &str = "You brief a developer who is coming back to their desk after a break. They \
-    left Claude Code agents at work in lune's projects, and want to know at a glance how each \
-    is doing. The notes you get say where each agent runs, its status and its branch, and end \
-    with what its transcript said last. Write plain text for a terminal: no markdown, no \
-    headings, no bold, no code fences. Say what each agent is working on and where it stands, \
-    in the words of the work and not of the tools it ran. Waiting means it asked the \
-    developer something and stopped: say what it needs. Idle means it finished its turn: say \
-    what it got done, or what it waits on. Busy means it is still at work: say on what. Speak \
-    to the developer as you. Use only what the notes say, and where they say nothing, say so \
-    in a few words rather than guess.";
+const SYSTEM: NonEmpty<'static> = NonEmpty::try_new(
+    "You brief a developer who is coming back to their desk after a break. They \
+     left Claude Code agents at work in lune's projects, and want to know at a glance how each \
+     is doing. The notes you get say where each agent runs, its status and its branch, and end \
+     with what its transcript said last. Write plain text for a terminal: no markdown, no \
+     headings, no bold, no code fences. Say what each agent is working on and where it stands, \
+     in the words of the work and not of the tools it ran. Waiting means it asked the \
+     developer something and stopped: say what it needs. Idle means it finished its turn: say \
+     what it got done, or what it waits on. Busy means it is still at work: say on what. Speak \
+     to the developer as you. Use only what the notes say, and where they say nothing, say so \
+     in a few words rather than guess.",
+)
+.expect("system prompt is non-empty");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Over {
@@ -283,7 +289,16 @@ impl Brief {
         Ok(told.into_iter().map(|(_, told)| told).collect())
     }
 
-    fn prompt(&self, read: &Reads<'_>, now: fn() -> SystemTime) -> Result<String, String> {
+    fn prompt(
+        &self,
+        read: &Reads<'_>,
+        now: fn() -> SystemTime,
+        bytes_max: usize,
+    ) -> Result<String, String> {
+        assert!(
+            bytes_max > LEFT_OUT_BYTES,
+            "a brief budget leaves room for what is left out"
+        );
         let transcripts = self.told(read)?;
         let now = now();
         let mut prompt = self.over.ask();
@@ -325,7 +340,7 @@ impl Brief {
         let mut told = 0;
         for (note, transcript) in self.notes.iter().zip(&transcripts) {
             let written = format!("\n{}", note.written(transcript, now));
-            if prompt.len() + written.len() > NOTES_BYTES - LEFT_OUT_BYTES {
+            if prompt.len() + written.len() > bytes_max - LEFT_OUT_BYTES {
                 break;
             }
             prompt.push_str(&written);
@@ -335,7 +350,10 @@ impl Brief {
         if !left_out.is_empty() {
             prompt.push_str(&leaves_out(left_out));
         }
-        Ok(cut_bytes(prompt, NOTES_BYTES))
+        prompt.retain(|c| c != '\0');
+        let prompt = cut_bytes(prompt, bytes_max);
+        assert!(prompt.len() <= bytes_max);
+        Ok(prompt)
     }
 }
 
@@ -418,7 +436,7 @@ pub struct Written {
     said: Result<String, String>,
 }
 
-pub fn ask(number: u64, brief: Brief, events: &Sender<Event>) -> Briefing {
+pub fn ask(number: u64, brief: Brief, harness: Harness, events: &Sender<Event>) -> Briefing {
     let title = brief.title().to_owned();
     let due = Due::new(events, move |written: Result<Written, String>| {
         let unanswered = |why| Written {
@@ -432,13 +450,13 @@ pub fn ask(number: u64, brief: Brief, events: &Sender<Event>) -> Briefing {
     });
     let asking = Asking::on_thread(move |wanted| {
         let at = clock();
-        let prompt = brief.prompt(&read, SystemTime::now);
+        let prompt = brief.prompt(&read, SystemTime::now, NOTES_BYTES);
         if !wanted.still() {
             return;
         }
         let said = match prompt {
             Ok(prompt) => {
-                let Some(said) = write(&prompt, wanted) else {
+                let Some(said) = write(harness, &prompt, wanted) else {
                     return;
                 };
                 said
@@ -450,8 +468,10 @@ pub fn ask(number: u64, brief: Brief, events: &Sender<Event>) -> Briefing {
     Briefing {
         number,
         title,
-        written: None,
-        _asking: asking,
+        stage: Stage::Asking {
+            harness,
+            _asking: asking,
+        },
     }
 }
 
@@ -488,19 +508,71 @@ fn clock() -> Option<String> {
     (!time.is_empty()).then_some(time)
 }
 
-fn write(prompt: &str, wanted: &Wanted) -> Option<Result<String, String>> {
-    let ran = one_answer(MODEL, SYSTEM, prompt).and_then(|(mut claude, told)| {
-        program::run_while_reading(&mut claude, WRITING, wanted, told)
+fn write(harness: Harness, prompt: &str, wanted: &Wanted) -> Option<Result<String, String>> {
+    let ask = OneAnswer {
+        target: AnswerWith::of(harness, MODEL),
+        system: SYSTEM,
+        prompt,
+    };
+    let ran = one_answer(ask).and_then(|(mut agent, stdin)| {
+        program::run_while_reading(&mut agent, WRITING, wanted, stdin)
     });
-    ran.transpose().map(wrote)
+    ran.transpose().map(|ran| wrote(harness, ran))
 }
 
-fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
+fn first_non_empty(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+fn wrote(harness: Harness, ran: io::Result<Ran>) -> Result<String, String> {
+    let program = harness.program();
     match ran {
+        Ok(Ran::Ended {
+            status,
+            stdout,
+            stderr,
+        }) if harness == Harness::Antigravity => match headless::agy_stream_answer(&stdout) {
+            Ok(headless::AgyAnswer::Said(said)) if status.success() => {
+                if said.trim().is_empty() {
+                    Err(format!("brief: {program} wrote nothing"))
+                } else {
+                    Ok(said)
+                }
+            }
+            Ok(headless::AgyAnswer::StoppedAtTool) if status.success() => Err(format!(
+                "brief: {program} stopped at a tool, and has none here"
+            )),
+            Ok(headless::AgyAnswer::Failed(why)) => Err(format!("brief: {program} failed: {why}")),
+            Ok(headless::AgyAnswer::Said(_) | headless::AgyAnswer::StoppedAtTool) => {
+                let why = first_non_empty(&stderr).unwrap_or_else(|| status.to_string());
+                Err(format!("brief: {program} failed: {why}"))
+            }
+            Err(headless::AgyStreamError::InvalidJson(error)) if status.success() => {
+                let why =
+                    first_non_empty(&stderr).unwrap_or_else(|| format!("invalid JSON: {error}"));
+                Err(format!("brief: {program} failed: {why}"))
+            }
+            Err(headless::AgyStreamError::NoResult) if status.success() => {
+                match first_non_empty(&stderr) {
+                    Some(why) => Err(format!("brief: {program} failed: {why}")),
+                    None => Err(format!("brief: {program} wrote nothing")),
+                }
+            }
+            Err(_) => {
+                let why = first_non_empty(&stderr)
+                    .or_else(|| first_non_empty(&stdout))
+                    .unwrap_or_else(|| status.to_string());
+                Err(format!("brief: {program} failed: {why}"))
+            }
+        },
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => {
             let said = String::from_utf8_lossy(&stdout).trim_end().to_owned();
             if said.trim().is_empty() {
-                return Err("brief: claude wrote nothing".to_owned());
+                return Err(format!("brief: {program} wrote nothing"));
             }
             Ok(said)
         }
@@ -513,27 +585,32 @@ fn wrote(ran: io::Result<Ran>) -> Result<String, String> {
                 [stderr, stdout].map(|said| String::from_utf8_lossy(&said).trim().to_owned());
             let said = said.into_iter().find(|said| !said.is_empty());
             Err(format!(
-                "brief: claude failed: {}",
+                "brief: {program} failed: {}",
                 said.unwrap_or_else(|| status.to_string())
             ))
         }
         Ok(Ran::Stuck) => Err(format!(
-            "brief: claude wrote nothing in {} seconds",
+            "brief: {program} wrote nothing in {} seconds",
             WRITING.as_secs()
         )),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Err("brief: claude is not on the PATH".to_owned())
+            Err(format!("brief: {program} is not on the PATH"))
         }
-        Err(error) => Err(format!("brief: claude could not be run: {error}")),
+        Err(error) => Err(format!("brief: {program} could not be run: {error}")),
     }
+}
+
+#[derive(Debug)]
+enum Stage {
+    Asking { harness: Harness, _asking: Asking },
+    Written(Written),
 }
 
 #[derive(Debug)]
 pub struct Briefing {
     number: u64,
     title: String,
-    written: Option<Written>,
-    _asking: Asking,
+    stage: Stage,
 }
 
 impl Briefing {
@@ -542,7 +619,9 @@ impl Briefing {
     }
 
     pub fn written(&mut self, written: Written) {
-        self.written = Some(written);
+        if matches!(self.stage, Stage::Asking { .. }) {
+            self.stage = Stage::Written(written);
+        }
     }
 
     pub fn closes(&self, key: &KeyEvent) -> bool {
@@ -551,16 +630,16 @@ impl Briefing {
             KeyCode::Char('c') => key.modifiers == KeyModifiers::CONTROL,
             _ => false,
         };
-        self.written.is_some() || gives_up
+        matches!(self.stage, Stage::Written(_)) || gives_up
     }
 
     pub fn clicked(&self) -> bool {
-        self.written.is_some()
+        matches!(self.stage, Stage::Written(_))
     }
 
     #[cfg(test)]
     pub fn turning(&self) -> bool {
-        self.written.is_none()
+        matches!(self.stage, Stage::Asking { .. })
     }
 
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> Cadence {
@@ -569,14 +648,14 @@ impl Briefing {
             return cadence;
         };
         let dim = Style::new().add_modifier(Modifier::DIM);
-        let (mut lines, keys, at, spinner) = match &self.written {
-            None => {
-                let asking = format!("Asking {MODEL}…");
+        let (mut lines, keys, at, spinner) = match &self.stage {
+            Stage::Asking { harness, .. } => {
+                let asking = format!("Asking {}…", headless::writer(*harness, MODEL));
                 let asking = menu::waiting(&asking, inner, dim, sidebar::frame(wall));
                 let spinner = (!asking.is_empty()).then_some(0);
                 (asking, (Hint::Esc, "Close"), None, spinner)
             }
-            Some(Written { at, said }) => {
+            Stage::Written(Written { at, said }) => {
                 let lines = match said {
                     Ok(said) => paragraphs(said, inner, Style::new()),
                     Err(why) => paragraphs(why, inner, Style::new().fg(moonlight::RED)),
@@ -878,7 +957,9 @@ mod tests {
             },
         ];
         let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
-        let prompt = brief.prompt(&read_here(ends), now).expect("a reading");
+        let prompt = brief
+            .prompt(&read_here(ends), now, NOTES_BYTES)
+            .expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;
         assert_eq!(
             notes,
@@ -1031,11 +1112,32 @@ Its transcript is unknown: Claude Code names none for it.
             ),
         ] {
             let brief = Brief::new(every(&["a", "b"]), notes).expect("a brief");
-            let prompt = brief.prompt(&none_read, now).expect("a reading");
+            let prompt = brief
+                .prompt(&none_read, now, NOTES_BYTES)
+                .expect("a reading");
             assert_eq!(prompt.matches("\nAgent \"").count(), told, "{said}");
             assert!(prompt.contains(said), "{said}");
             assert!(prompt.len() <= NOTES_BYTES, "{said}");
         }
+
+        let big = vec![
+            note("a", 0, format!("has\0nul{}", "x".repeat(NOTES_BYTES / 2))),
+            long("b", 1),
+        ];
+        let brief = Brief::new(every(&["a", "b"]), big).expect("a brief");
+        let agy_prompt = brief
+            .prompt(&none_read, now, NOTES_BYTES)
+            .expect("a reading");
+        assert!(!agy_prompt.contains('\0'));
+        assert!(
+            one_answer(OneAnswer {
+                target: AnswerWith::Antigravity,
+                system: SYSTEM,
+                prompt: &agy_prompt,
+            })
+            .is_ok(),
+            "a full brief sends to agy on stdin"
+        );
     }
 
     #[test]
@@ -1099,7 +1201,7 @@ Its transcript is unknown: Claude Code names none for it.
                 end,
             )]))
         };
-        let prompt = brief.prompt(&reads, now);
+        let prompt = brief.prompt(&reads, now, NOTES_BYTES);
         let share = u32::try_from(TAILS_BYTES / 4).expect("a share");
         let of = |ids: &[&str]| (ids.iter().map(|id| (*id).to_owned()).collect(), share);
         let asked_of = HashMap::from([
@@ -1147,7 +1249,7 @@ Its transcript was not read: me@vps: luned did not answer in 6s
         let of_nixos = Brief::new(Over::Machine(nixos(), Vec::new()), notes.clone());
         let of_nixos = of_nixos
             .expect("a brief")
-            .prompt(&none_read, now)
+            .prompt(&none_read, now, NOTES_BYTES)
             .expect("a reading");
         assert_eq!(of_nixos.matches("\nAgent \"").count(), 2);
         assert!(!of_nixos.contains("unknown"), "{of_nixos}");
@@ -1209,7 +1311,7 @@ Its transcript was not read: me@vps: luned did not answer in 6s
         ];
         let brief = Brief::new(every(&["a"]), notes).expect("a brief");
         let prompt = brief
-            .prompt(&none_read, SystemTime::now)
+            .prompt(&none_read, SystemTime::now, NOTES_BYTES)
             .expect("a reading");
         let notes = prompt.split_once("The notes:\n").expect("the notes").1;
         assert_eq!(
@@ -1241,10 +1343,61 @@ Its transcript is unknown: Claude Code names none for it.
             })
         };
         let brief = "You have 1 session open:\n- lune: the brief is back";
-        assert_eq!(wrote(ended(&format!("{brief}\n"))), Ok(brief.to_owned()));
         assert_eq!(
-            wrote(ended(" \n\n")),
+            wrote(Harness::ClaudeCode, ended(&format!("{brief}\n"))),
+            Ok(brief.to_owned())
+        );
+        assert_eq!(
+            wrote(Harness::ClaudeCode, ended(" \n\n")),
             Err("brief: claude wrote nothing".to_owned())
+        );
+        assert_eq!(
+            wrote(Harness::Pi, ended(" \n\n")),
+            Err("brief: pi wrote nothing".to_owned())
+        );
+        let agy_ok = [
+            json!({"event": "init", "conversation_id": "c1"}).to_string(),
+            json!({"event": "result", "result": {"status": "SUCCESS", "response": format!("{brief}\n")}})
+                .to_string(),
+        ]
+        .join("\n");
+        assert_eq!(
+            wrote(Harness::Antigravity, ended(&agy_ok)),
+            Ok(brief.to_owned())
+        );
+        let agy_denied = json!({
+            "event": "result",
+            "result": {"status": "SUCCESS", "response": "", "denied_actions": [{"action": "read_file"}]}
+        })
+        .to_string();
+        assert_eq!(
+            wrote(Harness::Antigravity, ended(&agy_denied)),
+            Err("brief: agy stopped at a tool, and has none here".to_owned())
+        );
+        let agy_error = json!({
+            "event": "result",
+            "result": {"status": "ERROR", "error": "not signed in"}
+        })
+        .to_string();
+        assert_eq!(
+            wrote(
+                Harness::Antigravity,
+                Ok(Ran::Ended {
+                    status: ExitStatus::from_raw(1 << 8),
+                    stdout: agy_error.into_bytes(),
+                    stderr: Vec::new(),
+                }),
+            ),
+            Err("brief: agy failed: not signed in".to_owned())
+        );
+        assert_eq!(
+            wrote(Harness::Antigravity, ended(" \n\n")),
+            Err("brief: agy wrote nothing".to_owned())
+        );
+        assert!(
+            wrote(Harness::Antigravity, ended("stray text"))
+                .unwrap_err()
+                .starts_with("brief: agy failed: invalid JSON: ")
         );
     }
 
@@ -1257,8 +1410,10 @@ Its transcript is unknown: Claude Code names none for it.
         Briefing {
             number,
             title: title.to_owned(),
-            written: None,
-            _asking: asking,
+            stage: Stage::Asking {
+                harness: Harness::ClaudeCode,
+                _asking: asking,
+            },
         }
     }
 
@@ -1334,6 +1489,13 @@ Its transcript is unknown: Claude Code names none for it.
         assert!(briefing.closes(&key(KeyCode::Char('j'))));
         assert!(briefing.clicked());
         assert!(!briefing.turning());
+
+        let before = shown(&briefing, 66, 9);
+        briefing.written(Written {
+            at: Some("19:00".to_owned()),
+            said: Err("late overwrite".to_owned()),
+        });
+        assert_eq!(shown(&briefing, 66, 9), before);
     }
 
     #[test]
