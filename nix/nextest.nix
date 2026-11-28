@@ -2,19 +2,61 @@
 let
   inherit (pkgs) lib;
   awk = lib.getExe pkgs.gawk;
+  chmod = lib.getExe' pkgs.coreutils "chmod";
+  df = lib.getExe' pkgs.coreutils "df";
   jq = lib.getExe pkgs.jq;
+  mktemp = lib.getExe' pkgs.coreutils "mktemp";
   ps = lib.getExe' pkgs.procps "ps";
   realpath = lib.getExe' pkgs.coreutils "realpath";
+  rm = lib.getExe' pkgs.coreutils "rm";
   seq = lib.getExe' pkgs.coreutils "seq";
   sleep = lib.getExe' pkgs.coreutils "sleep";
-  mktemp = lib.getExe' pkgs.coreutils "mktemp";
-  rm = lib.getExe' pkgs.coreutils "rm";
+  shmMinKib = 524288;
   inMemory = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+    shm_tmpdir=""
+    cleanup_shm_tmpdir() {
+      if [ -n "$shm_tmpdir" ]; then
+        case "$shm_tmpdir" in
+          /dev/shm/lune-nextest.*)
+            ${chmod} -R u+rwx -- "$shm_tmpdir" 2>/dev/null || true
+            ${rm} -rf -- "$shm_tmpdir"
+            ;;
+          *)
+            printf 'lune-nextest: refusing to remove unexpected shm_tmpdir %s\n' "$shm_tmpdir" >&2
+            return 1
+            ;;
+        esac
+        shm_tmpdir=""
+      fi
+    }
     if [ -d /dev/shm ] && [ -w /dev/shm ]; then
-      TMPDIR="$(${mktemp} -d /dev/shm/lune-nextest.XXXXXX)"
-      export TMPDIR
-      trap '${rm} -rf -- "$TMPDIR"' EXIT
+      shm_avail_kib="$(${df} -Pk /dev/shm | ${awk} 'NR == 2 { print $4 }')"
+      case "$shm_avail_kib" in
+        "" | *[!0-9]*)
+          printf 'lune-nextest: could not read free space on /dev/shm (got %s)\n' "$shm_avail_kib" >&2
+          exit 2
+          ;;
+      esac
+      if [ "$shm_avail_kib" -ge ${toString shmMinKib} ]; then
+        shm_tmpdir="$(${mktemp} -d /dev/shm/lune-nextest.XXXXXX)"
+        case "$shm_tmpdir" in
+          /dev/shm/lune-nextest.*) ;;
+          *)
+            printf 'lune-nextest: mktemp returned unexpected path %s\n' "$shm_tmpdir" >&2
+            exit 2
+            ;;
+        esac
+        trap cleanup_shm_tmpdir EXIT
+        trap 'cleanup_shm_tmpdir || true; trap - INT EXIT; kill -s INT "$$"' INT
+        trap 'cleanup_shm_tmpdir || true; trap - TERM EXIT; kill -s TERM "$$"' TERM
+        trap 'cleanup_shm_tmpdir || true; trap - HUP EXIT; kill -s HUP "$$"' HUP
+        TMPDIR="$shm_tmpdir"
+        export TMPDIR
+      fi
     fi
+  '';
+  cleanupInMemory = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+    cleanup_shm_tmpdir || [ "$tested" -ne 0 ] || tested=1
   '';
 in
 pkgs.writeShellApplication {
@@ -63,6 +105,7 @@ pkgs.writeShellApplication {
       ${ps} -o pid= -o etime= -o args= "''${shown[@]}" >&2 || true
       [ "$tested" -ne 0 ] || tested=1
     fi
+    ${cleanupInMemory}
     exit "$tested"
   '';
 }

@@ -8,6 +8,33 @@ let
   locked =
     map (package: package.name)
       (builtins.fromTOML (builtins.readFile (root + "/Cargo.lock"))).package;
+  nextest = builtins.fromTOML (builtins.readFile (root + "/.config/nextest.toml"));
+  nextestProfiles = nextest.profile or { };
+  ciProfile = nextestProfiles.ci or null;
+  ciRetries = if builtins.isAttrs ciProfile then ciProfile.retries or null else null;
+  nextestOverrideRetries = builtins.concatLists (
+    map (
+      profileName:
+      let
+        profileAttrs = nextestProfiles.${profileName} or { };
+        overrides = if builtins.isAttrs profileAttrs then profileAttrs.overrides or [ ] else [ ];
+      in
+      builtins.concatLists (
+        map (
+          entry:
+          let
+            retries = if builtins.isAttrs entry then entry.retries or 0 else 0;
+          in
+          if retries == 0 then
+            [ ]
+          else
+            [
+              ".config/nextest.toml: [profile.${profileName}.overrides] sets retries = ${builtins.toJSON retries}; keep retries disabled so CI does not hide flaky tests"
+            ]
+        ) overrides
+      )
+    ) (builtins.attrNames nextestProfiles)
+  );
   devProfile = profile.dev or { };
   releaseProfile = profile.release or { };
   devPackages = devProfile.package or { };
@@ -212,3 +239,18 @@ in
   name:
   "Cargo.toml: ${name} gets a profile override, but no package in Cargo.lock has that name, so the override changes nothing"
 ) missing
+++ (
+  if builtins.isAttrs ciProfile then
+    [ ]
+  else
+    [ ".config/nextest.toml: missing [profile.ci] table required by flake.nix and CI" ]
+)
+++ (
+  if ciRetries == 0 then
+    [ ]
+  else
+    [
+      ".config/nextest.toml: [profile.ci].retries must be 0 so CI does not hide flaky tests (got ${builtins.toJSON ciRetries})"
+    ]
+)
+++ nextestOverrideRetries

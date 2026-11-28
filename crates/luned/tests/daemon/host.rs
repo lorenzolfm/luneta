@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::symlink;
+use std::io::{BufRead, BufReader, Write as _};
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::LazyLock;
@@ -121,11 +121,36 @@ pub fn install(from: &Path, to: &Path) {
 }
 
 pub fn script(path: &Path, text: &str) {
-    let draft = path.with_extension("draft");
-    fs::write(&draft, format!("#!/bin/sh\n{text}")).unwrap();
-    let staged = path.with_extension("staged");
-    install(&draft, &staged);
-    fs::rename(&staged, path).unwrap();
+    assert!(
+        path.file_name().is_some(),
+        "script path has a file name: {}",
+        path.display()
+    );
+    assert!(
+        !text.starts_with("#!"),
+        "script text omits the shebang line: {}",
+        path.display()
+    );
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::Builder::new()
+        .prefix(".script-")
+        .tempfile_in(parent)
+        .unwrap();
+    assert_ne!(
+        staged.path(),
+        path,
+        "staged script path is distinct from target"
+    );
+    write!(staged, "#!/bin/sh\n{text}").unwrap();
+    staged
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o755))
+        .unwrap();
+    staged.into_temp_path().persist(path).unwrap();
+    assert!(path.is_file(), "script is installed at {}", path.display());
 }
 
 pub fn shared_script(path: &Path, text: &str) {
@@ -899,14 +924,12 @@ struct QuickProfile {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CiProfile {
-    #[serde(default, rename = "retries")]
-    _retries: Option<u32>,
+    #[serde(default)]
+    retries: Option<u32>,
     #[serde(default, rename = "slow-timeout")]
     _slow_timeout: Option<toml::Value>,
     #[serde(default, rename = "failure-output")]
     _failure_output: Option<String>,
-    #[serde(default, rename = "final-status-level")]
-    _final_status_level: Option<String>,
     #[serde(default, rename = "junit")]
     _junit: Option<toml::Value>,
     #[serde(default)]
@@ -919,8 +942,8 @@ struct NextestOverride {
     filter: ExactUnionFilter,
     #[serde(default)]
     priority: Option<NextestPriority>,
-    #[serde(default, rename = "retries")]
-    _retries: Option<u32>,
+    #[serde(default)]
+    retries: Option<u32>,
     #[serde(default, rename = "slow-timeout")]
     _slow_timeout: Option<toml::Value>,
 }
@@ -1109,6 +1132,11 @@ fn nextest_toml_names_only_existing_daemon_tests() {
     let text = fs::read_to_string(&path).expect("nextest.toml is in the source tree");
     let config: NextestConfig = toml::from_str(&text).expect("nextest.toml matches typed schema");
 
+    assert_eq!(
+        config.profile.ci.retries,
+        Some(0),
+        "nextest.toml [profile.ci] sets retries = 0 so flaky races are not masked"
+    );
     let active = active_daemon_tests();
     let profile_overrides: [(&str, &[NextestOverride]); 3] = [
         ("default", &config.profile.default.overrides),
@@ -1121,6 +1149,11 @@ fn nextest_toml_names_only_existing_daemon_tests() {
             "profile {profile_name} override count exceeds NEXTEST_OVERRIDES_MAX ({NEXTEST_OVERRIDES_MAX})"
         );
         for entry in overrides {
+            assert_eq!(
+                entry.retries.unwrap_or(0),
+                0,
+                "nextest.toml [profile.{profile_name}.overrides] must not enable retries"
+            );
             for name in &entry.filter.0 {
                 assert!(
                     active.contains(name),
@@ -1228,6 +1261,16 @@ priority = 100
 default-filter = "not test(=a::one)"
 [profile.ci]
 test-threads = 4
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+final-status-level = "flaky"
 "#,
     ];
     for raw in invalid_configs {

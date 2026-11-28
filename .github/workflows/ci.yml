@@ -354,7 +354,15 @@ jobs:
           | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Build and test the daemon
-        run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
+        shell: bash
+        run: |
+          set -euo pipefail
+          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
+          if [[ -z $system ]]; then
+            echo "::error::nix eval returned an empty system name" >&2
+            exit 1
+          fi
+          nix build -L ".#checks.$system.luned"
 
       - *attic-push
 

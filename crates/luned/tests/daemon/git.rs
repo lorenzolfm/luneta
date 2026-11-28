@@ -167,8 +167,47 @@ fn changed_every_way(dir: &Path, origin: &Path) {
     fs::write(dir.join("untracked"), "new\n").unwrap();
 }
 
-fn names(line: &str, tool: &str) -> bool {
-    line.split(' ').any(|word| word == tool)
+fn line_names_tool(line: &str, tool: &str) -> bool {
+    assert!(!tool.is_empty(), "tool name must not be empty");
+    assert!(
+        tool.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+        "tool name must be a single ASCII alphanumeric word: {tool:?}"
+    );
+    line.split_ascii_whitespace().any(|word| {
+        let base = word
+            .strip_suffix("'s")
+            .or_else(|| word.strip_suffix(':'))
+            .unwrap_or(word);
+        base == tool
+    })
+}
+
+#[test]
+fn line_names_tool_matches_words_and_possessives_without_matching_paths() {
+    assert!(line_names_tool(
+        "luned: gh pr view in /tmp/.tmp123: error",
+        "gh"
+    ));
+    assert!(line_names_tool("luned: gh's ask about main panicked", "gh"));
+    assert!(line_names_tool("luned: gh: Not Found", "gh"));
+    assert!(line_names_tool(
+        "luned: git in /tmp/work did not count main's lines",
+        "git"
+    ));
+    assert!(!line_names_tool(
+        "luned: the watch on /tmp/.tmpABgh heard it change",
+        "gh"
+    ));
+    assert!(!line_names_tool(
+        "luned: the watch on /tmp/.tmp123/origin.git heard it change",
+        "git"
+    ));
+    assert!(!line_names_tool(
+        "luned: listening on /tmp/gh/luned.sock",
+        "gh"
+    ));
+    assert!(std::panic::catch_unwind(|| line_names_tool("luned: gh", "")).is_err());
+    assert!(std::panic::catch_unwind(|| line_names_tool("luned: gh pr", "gh pr")).is_err());
 }
 
 #[test]
@@ -332,7 +371,7 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
         daemon
             .said()
             .iter()
-            .find(|line| names(line, "git"))
+            .find(|line| line_names_tool(line, "git"))
             .cloned()
     };
     lune_waits::never("git says something", git_said);
@@ -1307,7 +1346,11 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
     );
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| names(line, "gh")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| line_names_tool(line, "gh") || line_names_tool(line, "git"))
+            .cloned()
     });
 }
 
@@ -1365,7 +1408,11 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
         ]
     );
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| names(line, "gh")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| line_names_tool(line, "gh") || line_names_tool(line, "git"))
+            .cloned()
     });
 }
 
@@ -1402,7 +1449,11 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
         host.gh.asked().contains(&trunk_in_parent).then_some(())
     });
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| names(line, "gh")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| line_names_tool(line, "gh") || line_names_tool(line, "git"))
+            .cloned()
     });
     assert_eq!(found(), None);
 }
@@ -1540,7 +1591,7 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
         daemon
             .said()
             .iter()
-            .find(|line| names(line, "gh") || names(line, "git"))
+            .find(|line| line_names_tool(line, "gh") || line_names_tool(line, "git"))
             .cloned()
     });
 }
@@ -1640,7 +1691,11 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
     });
 
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| names(line, "gh")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| line_names_tool(line, "gh") || line_names_tool(line, "git"))
+            .cloned()
     });
 }
 
@@ -1729,7 +1784,11 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     );
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| names(line, "gh")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| line_names_tool(line, "gh") || line_names_tool(line, "git"))
+            .cloned()
     });
 }
 
