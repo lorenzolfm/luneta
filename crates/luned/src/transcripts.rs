@@ -5,6 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use lune_domain::agent::Harness;
 use lune_protocol::said::Said;
 use serde_json::Value;
 
@@ -20,7 +21,7 @@ pub const SESSION_ID_BYTES_MAX: usize = 128;
 
 pub const STEPS_MAX: usize = 64;
 
-const TITLE_CHARS: usize = 120;
+pub(crate) const TITLE_CHARS: usize = 120;
 const ASKED_CHARS: usize = 500;
 const STEP_CHARS: usize = 300;
 
@@ -75,13 +76,83 @@ pub struct Folders {
     pub agy: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl Folders {
+    #[must_use]
+    pub fn any(&self) -> bool {
+        TranscriptHarness::ALL
+            .into_iter()
+            .any(|harness| self.folder(harness).is_some())
+    }
+
+    #[must_use]
+    pub fn folder(&self, harness: TranscriptHarness) -> Option<&Path> {
+        let path = match harness {
+            TranscriptHarness::Claude => self.claude.as_deref(),
+            TranscriptHarness::Antigravity => self.agy.as_deref(),
+        }?;
+        assert!(
+            !path.as_os_str().is_empty(),
+            "a configured transcript folder is non-empty"
+        );
+        Some(path)
+    }
+
+    #[must_use]
+    pub fn find(&self, harness: TranscriptHarness, id: &SessionId) -> Option<PathBuf> {
+        let root = self.folder(harness)?;
+        let found = match harness {
+            TranscriptHarness::Claude => find(&root.join("projects"), id),
+            TranscriptHarness::Antigravity => agy_file(root, id),
+        };
+        if let Some(path) = &found {
+            assert!(
+                !path.as_os_str().is_empty(),
+                "a found transcript has a non-empty path"
+            );
+        }
+        found
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TranscriptHarness {
     Claude,
     Antigravity,
 }
 
 impl TranscriptHarness {
+    pub const ALL: [TranscriptHarness; 2] =
+        [TranscriptHarness::Claude, TranscriptHarness::Antigravity];
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            TranscriptHarness::Claude => 0,
+            TranscriptHarness::Antigravity => 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn harness(self) -> Harness {
+        match self {
+            TranscriptHarness::Claude => Harness::ClaudeCode,
+            TranscriptHarness::Antigravity => Harness::Antigravity,
+        }
+    }
+
+    #[must_use]
+    pub const fn of(harness: Harness) -> Option<TranscriptHarness> {
+        let mut index = 0;
+        while index < TranscriptHarness::ALL.len() {
+            let reader = TranscriptHarness::ALL[index];
+            if reader.harness().is(harness) {
+                return Some(reader);
+            }
+            index += 1;
+        }
+        None
+    }
+
     const fn kinds(self) -> &'static [&'static str] {
         match self {
             TranscriptHarness::Claude => &KINDS,
@@ -96,6 +167,48 @@ impl TranscriptHarness {
         }
     }
 }
+
+const fn transcript_harness_indices_match_all() -> bool {
+    let mut index = 0;
+    while index < TranscriptHarness::ALL.len() {
+        if TranscriptHarness::ALL[index].index() != index {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    transcript_harness_indices_match_all(),
+    "TranscriptHarness::index matches its slot in TranscriptHarness::ALL"
+);
+
+const fn every_transcript_harness_has_one_reader() -> bool {
+    let mut harness = 0;
+    while harness < Harness::ALL.len() {
+        let of = Harness::ALL[harness];
+        let mut readers = 0;
+        let mut index = 0;
+        while index < TranscriptHarness::ALL.len() {
+            if TranscriptHarness::ALL[index].harness().is(of) {
+                readers += 1;
+            }
+            index += 1;
+        }
+        let wanted = if of.topics().has_transcript() { 1 } else { 0 };
+        if readers != wanted {
+            return false;
+        }
+        harness += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    every_transcript_harness_has_one_reader(),
+    "each harness declaring transcript topics has one TranscriptHarness reader in transcripts.rs"
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TailLines(String);
@@ -124,6 +237,13 @@ pub enum TranscriptEnd {
 }
 
 impl TranscriptEnd {
+    fn of(harness: TranscriptHarness, lines: TailLines) -> Self {
+        match harness {
+            TranscriptHarness::Claude => TranscriptEnd::Claude(lines),
+            TranscriptHarness::Antigravity => TranscriptEnd::Antigravity(lines),
+        }
+    }
+
     #[must_use]
     pub fn lines(&self) -> &str {
         match self {
@@ -257,24 +377,40 @@ impl Reading {
 
     #[must_use]
     pub(crate) fn ends(&self, folders: &Folders) -> HashMap<SessionId, TranscriptEnd> {
-        let dirs = folders
-            .claude
-            .as_deref()
+        assert!(self.ids.len() <= IDS_MAX, "reading stays within IDS_MAX");
+        let claude_dirs = folders
+            .folder(TranscriptHarness::Claude)
             .map(|claude| project_dirs(&claude.join("projects")));
         let mut ends = HashMap::new();
         for id in &self.ids {
-            if let Some(path) = dirs.as_deref().and_then(|dirs| found_in(dirs, id))
-                && let Ok(end) = end(&path, self.share, &KINDS)
-            {
-                ends.insert(id.clone(), TranscriptEnd::Claude(end));
-                continue;
-            }
-            if let Some(path) = folders.agy.as_deref().and_then(|agy| agy_file(agy, id))
-                && let Ok(end) = end(&path, self.share, &AGY_KINDS)
-            {
-                ends.insert(id.clone(), TranscriptEnd::Antigravity(end));
+            for harness in TranscriptHarness::ALL {
+                let path = match harness {
+                    TranscriptHarness::Claude => {
+                        claude_dirs.as_deref().and_then(|dirs| found_in(dirs, id))
+                    }
+                    TranscriptHarness::Antigravity => folders
+                        .folder(TranscriptHarness::Antigravity)
+                        .and_then(|agy| agy_file(agy, id)),
+                };
+                let Some(path) = path else {
+                    continue;
+                };
+                match end(&path, self.share, harness.kinds()) {
+                    Ok(tail) => {
+                        ends.insert(id.clone(), TranscriptEnd::of(harness, tail));
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        crate::log::say(&format!("{}: {error}", path.display()));
+                    }
+                }
             }
         }
+        assert!(
+            ends.len() <= self.ids.len(),
+            "at most one transcript end per requested id"
+        );
         ends
     }
 }
@@ -575,6 +711,11 @@ impl Tail {
             limits,
             state: TailState::Unread,
         })
+    }
+
+    #[must_use]
+    pub const fn harness(&self) -> TranscriptHarness {
+        self.harness
     }
 
     pub fn grown(&mut self) -> io::Result<Option<Digest>> {
