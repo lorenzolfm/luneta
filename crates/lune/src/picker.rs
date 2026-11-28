@@ -3465,6 +3465,7 @@ mod tests {
             folder: directory("/home/you/fix"),
             branch: None,
             repository: None,
+            flow: None,
         };
         Target::Worktree(Machine::Local, row)
     }
@@ -3484,6 +3485,7 @@ mod tests {
                 pull_request: None,
             }),
             arranged: None,
+            flow: None,
         };
         Target::View(Machine::Local, row)
     }
@@ -5730,7 +5732,10 @@ mod tests {
         let issue = "https://github.com/lorenzolfm/lune/issues/648";
         let mut picker = palette(Origin::Views);
         picker.paste(&format!("{issue}\n"));
-        assert_eq!(every_action(&mut picker), ["Tackle #648", "Worktree #648"]);
+        assert_eq!(
+            every_action(&mut picker),
+            ["Tackle #648", "Ship #648", "Worktree #648"]
+        );
         assert_eq!(keyed_action(&picker).1, "lorenzolfm/lune");
         let work = Work::parse(issue, None).expect("an issue's link");
         let origin = Origin::Views;
@@ -5747,8 +5752,9 @@ mod tests {
         typed(&mut picker, pr);
         assert_eq!(
             every_action(&mut picker),
-            ["/thermo-nuclear-review #650", "Worktree #650"]
+            ["/thermo-nuclear-review #650", "Ship #650", "Worktree #650"]
         );
+        press(&mut picker, KeyCode::Up);
         press(&mut picker, KeyCode::Up);
         let work = Work::parse(pr, None).expect("a pull request's link");
         let origin = Origin::Sidebar;
@@ -5822,6 +5828,7 @@ mod tests {
                     pull_request: None,
                 }),
                 arranged: Some(projects::Arranged::Tabs),
+                flow: None,
             },
         );
         let aimed = Palette {

@@ -551,6 +551,7 @@ fn forget_at(file: &Path) -> Result<Forgotten, String> {
         Err(error) => return Err(format!("{}: {error}", file.display())),
     }
     crate::resume::store::forget_in(folder)?;
+    crate::flows::store::forget_in(folder)?;
     drop(lock);
     Ok(held)
 }

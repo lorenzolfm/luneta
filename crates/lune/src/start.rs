@@ -11,10 +11,26 @@ use luned::mux::own::terminal_here;
 use luned::program;
 
 use crate::agents::Kept;
+use crate::flow;
 use crate::machines::Machine;
 use crate::reach::{self, Luned};
 use crate::state;
 use crate::worktrees::{self, Landed, Landing, Opening, Went};
+
+pub struct ShipOptions {
+    pub flow: Option<String>,
+    pub interactive: bool,
+}
+
+impl ShipOptions {
+    fn mode(&self) -> lune_domain::flows::FlowMode {
+        if self.interactive {
+            lune_domain::flows::FlowMode::Interactive
+        } else {
+            lune_domain::flows::FlowMode::Unattended
+        }
+    }
+}
 
 pub const UNFINISHED: u8 = 4;
 
@@ -104,8 +120,8 @@ enum Left {
     Unfinished(String),
 }
 
-pub fn run(what: &str, path: &Path) -> ExitCode {
-    let started = match started(what, path) {
+pub fn run(what: &str, ship: Option<&ShipOptions>, path: &Path) -> ExitCode {
+    let started = match started(what, ship, path) {
         Ok(started) => started,
         Err(why) => {
             eprintln!("lune: {why}");
@@ -169,7 +185,7 @@ fn went(path: &Path, worktree: WorktreeId) -> bool {
     }
 }
 
-fn started(what: &str, path: &Path) -> Result<Started, String> {
+fn started(what: &str, ship: Option<&ShipOptions>, path: &Path) -> Result<Started, String> {
     let cwd = env::current_dir().map_err(|error| format!("no directory to start from: {error}"))?;
     let cwd = worktrees::real(&cwd)?;
     let home = env::var_os("HOME")
@@ -190,10 +206,13 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
                         } else {
                             there
                         };
+                        let left = ship.map_or(Left::Done, |opts| {
+                            start_ship_flow(path, worktree, opts, None, &folder.display())
+                        });
                         Started::Worktree {
                             worktree,
                             folder,
-                            left: Left::Done,
+                            left,
                         }
                     }
                     Landing::Unopened(_) => Started::Project { folder },
@@ -207,18 +226,48 @@ fn started(what: &str, path: &Path) -> Result<Started, String> {
             let folder = worktrees::real(&made)?;
             let at = Directory::parse(utf8(&folder)?.to_owned())?;
             let landed = worktrees::joined_as(path, &at, branch.as_str(), &Opens::Shell)?;
+            let worktree = landed.worktree();
+            let left = ship.map_or(Left::Done, |opts| {
+                start_ship_flow(path, worktree, opts, None, &branch.as_str())
+            });
             Ok(Started::Worktree {
-                worktree: landed.worktree(),
+                worktree,
                 folder,
-                left: Left::Done,
+                left,
             })
         }
-        What::Issue(number) => linked(path, &cwd, &numbered(number, &cwd)?),
-        What::Link(link) => linked(path, &cwd, &link),
+        What::Issue(number) => linked(path, &cwd, &numbered(number, &cwd)?, ship),
+        What::Link(link) => linked(path, &cwd, &link, ship),
     }
 }
 
-fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
+fn start_ship_flow(
+    path: &Path,
+    worktree: WorktreeId,
+    options: &ShipOptions,
+    prompt: Option<String>,
+    label: &dyn std::fmt::Display,
+) -> Left {
+    let harness = Kept::shared(&state::Folder::of_user()).0.harness();
+    match flow::start_on(
+        path,
+        worktree,
+        options.mode(),
+        harness,
+        options.flow.clone(),
+        prompt,
+    ) {
+        Ok(_) => Left::Done,
+        Err(why) => Left::Unfinished(format!("no flow started on {label}: {why}")),
+    }
+}
+
+fn linked(
+    path: &Path,
+    cwd: &Path,
+    link: &Link,
+    ship: Option<&ShipOptions>,
+) -> Result<Started, String> {
     let dir = Directory::parse(utf8(cwd)?.to_owned())?;
     let dirs = worktrees::dirs(path)?
         .into_iter()
@@ -244,32 +293,51 @@ fn linked(path: &Path, cwd: &Path, link: &Link) -> Result<Started, String> {
     let off = ready
         .moved_off
         .then(|| Work::Link(link.clone()).off_branch(ready.branch.as_deref()));
-    let agent = match (link.kind(), &off) {
-        (Kind::Issue, None) => {
+    let agent = match (link.kind(), &off, ship) {
+        (Kind::Issue, None, None) => {
             let harness = Kept::shared(&state::Folder::of_user()).0.harness();
             let agent = Argv::on_words(harness, format!("{TACKLE} {}", link.url()), &[]);
             let unstarted = |why| format!("no agent starts on {}: {why}", link.tab());
             Opens::Command(agent.map_err(unstarted)?)
         }
-        (Kind::Issue, Some(_)) | (Kind::Pull, _) => Opens::Shell,
+        (Kind::Issue, Some(_) | None, Some(_))
+        | (Kind::Issue, Some(_), None)
+        | (Kind::Pull, ..) => Opens::Shell,
     };
     let landed = worktrees::joined_as(path, &ready.folder, &link.tab(), &agent)?;
     let worktree = landed.worktree();
-    let left = match (link.kind(), landed, off) {
-        (Kind::Pull, _, None)
-        | (Kind::Pull | Kind::Issue, Landed::Found(_), Some(_))
-        | (Kind::Issue, Landed::Made(_), None) => Left::Done,
-        (Kind::Pull, Landed::Made(_), Some(off)) => {
-            Left::Noted(format!("{} is {off}", folder.display()))
+    let left = if let Some(opts) = ship {
+        if let Some(off) = off {
+            Left::Noted(format!(
+                "{} is {off}, so no flow starts there",
+                folder.display()
+            ))
+        } else {
+            let prompt = match link.kind() {
+                Kind::Issue => Some(format!("{TACKLE} {}", link.url())),
+                Kind::Pull => None,
+            };
+            start_ship_flow(path, worktree, opts, prompt, &link.tab())
         }
-        (Kind::Issue, Landed::Made(_), Some(off)) => Left::Noted(format!(
-            "{} is {off}, so no agent starts there",
-            folder.display()
-        )),
-        (Kind::Issue, Landed::Found(_), None) => {
-            match worktrees::opened(path, worktree, agent, Opening::IfEmpty) {
-                Ok(()) => Left::Done,
-                Err(why) => Left::Unfinished(format!("no agent started on {}: {why}", link.tab())),
+    } else {
+        match (link.kind(), landed, off) {
+            (Kind::Pull, _, None)
+            | (Kind::Pull | Kind::Issue, Landed::Found(_), Some(_))
+            | (Kind::Issue, Landed::Made(_), None) => Left::Done,
+            (Kind::Pull, Landed::Made(_), Some(off)) => {
+                Left::Noted(format!("{} is {off}", folder.display()))
+            }
+            (Kind::Issue, Landed::Made(_), Some(off)) => Left::Noted(format!(
+                "{} is {off}, so no agent starts there",
+                folder.display()
+            )),
+            (Kind::Issue, Landed::Found(_), None) => {
+                match worktrees::opened(path, worktree, agent, Opening::IfEmpty) {
+                    Ok(()) => Left::Done,
+                    Err(why) => {
+                        Left::Unfinished(format!("no agent started on {}: {why}", link.tab()))
+                    }
+                }
             }
         }
     };

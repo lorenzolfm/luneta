@@ -282,6 +282,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_luned_starts_again() {
                         views: None,
                         used_at: None,
                         arranged: Some(api::Arrangement::Tabs.into()),
+                        flow: None,
                     }],
                     listing: Some(Listing::Unopened(project::Unopened {
                         subfolders: Vec::new(),
@@ -303,6 +304,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_luned_starts_again() {
                     views: None,
                     used_at: None,
                     arranged: None,
+                    flow: None,
                 })),
             },
         ],

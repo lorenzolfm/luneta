@@ -8,13 +8,14 @@ use crate::api::change_projects_request::Change;
 use crate::api::daemon_server::Daemon;
 use crate::api::{
     self, AnswerRequest, AskRequest, AskReviewRequest, ChangeProjectsRequest,
-    ChangeProjectsResponse, FileIssueRequest, FramesRequest, InfoResponse,
-    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest,
-    KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse, ListContentsRequest,
-    ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest,
-    ListResumeResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
-    MakeWorktreeRequest, PasteRequest, PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest,
-    ReloadResumeRequest, ReloadResumeResponse, SayRequest, ShowRequest, TranscriptEndsRequest,
+    ChangeProjectsResponse, ControlFlowRequest, FileIssueRequest, FlowStateResponse, FramesRequest,
+    InfoResponse, IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest,
+    KeepImageRequest, KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse,
+    ListContentsRequest, ListContentsResponse, ListFlowsRequest, ListFlowsResponse,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest, ListResumeResponse,
+    ListSkillsRequest, ListSkillsResponse, ListWorkRequest, MakeWorktreeRequest, PasteRequest,
+    PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest, ReloadResumeRequest,
+    ReloadResumeResponse, SayRequest, ShowRequest, StartFlowRequest, TranscriptEndsRequest,
     TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
 use crate::mux::own::api::FromViewer;
@@ -305,6 +306,27 @@ impl Daemon for OverTailnet {
     ) -> Result<Response<ReloadResumeResponse>, Status> {
         Err(unserved("ReloadResume"))
     }
+
+    async fn start_flow(
+        &self,
+        request: Request<StartFlowRequest>,
+    ) -> Result<Response<FlowStateResponse>, Status> {
+        Daemon::start_flow(&*self.0, request).await
+    }
+
+    async fn control_flow(
+        &self,
+        request: Request<ControlFlowRequest>,
+    ) -> Result<Response<FlowStateResponse>, Status> {
+        Daemon::control_flow(&*self.0, request).await
+    }
+
+    async fn list_flows(
+        &self,
+        request: Request<ListFlowsRequest>,
+    ) -> Result<Response<ListFlowsResponse>, Status> {
+        Daemon::list_flows(&*self.0, request).await
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +504,7 @@ mod tests {
             let socket = folder.path().join("tailnet.sock");
             let (core, questions) = mpsc::sync_channel(1);
             let (layouts, laid) = mpsc::sync_channel(1);
+            let (flows, _flows) = mpsc::sync_channel(1);
             let git_refresher = crate::git::Refresher::disconnected();
             let host = Host {
                 started: SystemTime::now(),
@@ -491,6 +514,7 @@ mod tests {
                 watchers: Arc::default(),
                 bridges: Arc::default(),
                 layouts,
+                flows,
                 listings: Arc::default(),
                 git_refresher,
                 ask_sessions: Arc::new(crate::asks::SessionModes::in_memory()),

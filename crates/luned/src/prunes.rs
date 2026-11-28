@@ -1352,6 +1352,8 @@ mod tests {
                 owner: "o".to_owned(),
                 name: "n".to_owned(),
             }),
+            mergeable: lune_domain::flows::Mergeable::Unknown,
+            merge_state: lune_domain::flows::MergeStateStatus::Unknown,
         }
     }
 

@@ -40,7 +40,8 @@ gh pr view          # the pull request of the branch you run on
 ## Commands
 
 ```sh
-lune start <folder|branch|'#issue'|issue or PR link>
+lune start [--ship] [--flow <name>] [--interactive] <folder|branch|'#issue'|issue or PR link>
+lune flow [status|list|start|advance|auto|pause|resume|retry|skip|takeover|abort] [--dir <dir>] [--prompt <text>] [--flow <name>] [--interactive] [--harness <claude|pi|agy>]
 lune browse [<url>]
 lune agents
 lune prune [--repo <dir>] [--yes <plan>]
@@ -53,8 +54,16 @@ lune terminate [--yes <plan>]
 lune info
 ```
 
-- `start` starts a worktree, with an agent on an issue, and takes the user
-  there: see [Start a worktree](#start-a-worktree).
+- `start` starts a worktree, with an agent on an issue (or a worktree flow with
+  `--ship`), and takes the user there: see [Start a worktree](#start-a-worktree).
+- `flow` starts, inspects, or controls worktree flows (implement, review skills,
+  CI fixes, rebases, and PR merge). Without an action it prints the flow on the
+  current worktree or lists all active flows; it exits 5 where no luned runs.
+  A flow never starts on the default branch, and one without `--prompt` needs
+  the branch's pull request open. A control the flow does not offer at that moment (its `controls:` line) is
+  refused. `pause`, `takeover` and `abort` stop an unattended step that is
+  running; `resume`, `retry` and `skip` refuse while a stopped step is still
+  ending, so run them again once its view says it ended.
 - `browse` opens an embedded browser view beside your view (or in the current
   worktree), on `<url>` or the start page when omitted.
 - `agents` lists the agents that run on this machine.
@@ -101,11 +110,16 @@ each action by name. When they ask you for one, tell them which:
 - "/thermo-nuclear-review", "/tigerstyle" and
   "/make-illegal-states-unrepresentable" start an agent on that skill beside
   the view they are on. "Search skills" finds any other skill.
+- "start PR flow (auto)" (`f a`) and "start prompt flow (auto)…" (`f p`) start
+  a worktree flow from the sidebar; when a flow is running or paused, "advance
+  flow" (`f n`), "auto the rest" (`f u`), "take over" (`f o`), "resume flow"
+  (`f r`), "retry step" (`f t`), "skip step" (`f s`), "pause flow" (`f z`) and
+  "abort flow" (`f x`) control it.
 - A link pasted in lune's sidebar offers `t` to tackle an issue or `r` for
-  /thermo-nuclear-review on a pull request, and `w` for its worktree. A pull
-  request's link goes straight to its worktree when the sidebar has one row of
-  it. Pasted in the palette, a link lists the same choices, and Enter starts
-  the agent.
+  /thermo-nuclear-review on a pull request, `f` to ship it with a worktree
+  flow, and `w` for its worktree. A pull request's link goes straight to its
+  worktree when the sidebar has one row of it. Pasted in the palette, a link
+  lists the same choices, and Enter starts the agent.
 
 ## Start a worktree
 

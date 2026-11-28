@@ -6,13 +6,13 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{self, OwnedFolder};
+use lune_domain::projects::{self, OwnedFolder, WorktreeId};
 use lune_protocol::said::Said;
 use luned::api::keep_checks_response::{self, failed};
 use luned::api::{
-    AskResponse, IssueRepositoriesRequest, KeepChecksRequest, ListContentsRequest,
-    ListRepositoriesRequest, ListRepositoriesResponse, ListSkillsRequest, On,
-    TranscriptEndsResponse,
+    AskResponse, ControlFlowRequest, FlowControl, FlowSummary, IssueRepositoriesRequest,
+    KeepChecksRequest, ListContentsRequest, ListRepositoriesRequest, ListRepositoriesResponse,
+    ListSkillsRequest, On, StartFlowRequest, TranscriptEndsResponse,
 };
 use luned::asks::{self, AskWire, Asked, Step};
 use luned::checks::{self, Failed, Failing, Log, PullPage};
@@ -293,6 +293,31 @@ impl Luned {
         })?;
         let on = self.on.destination();
         Rebased::of_api(answer, branch).map_err(|why| Unrebased::InDoubt(told_by(on, &why)))
+    }
+
+    pub fn start_flow(
+        &mut self,
+        mut request: StartFlowRequest,
+    ) -> Result<Option<FlowSummary>, String> {
+        request.on = self.asked_on();
+        let reply =
+            self.ask(|daemon, patience| async move { daemon.start_flow(patience, request).await })?;
+        Ok(reply.flow)
+    }
+
+    pub fn control_flow(
+        &mut self,
+        worktree: WorktreeId,
+        control: FlowControl,
+    ) -> Result<Option<FlowSummary>, String> {
+        let request = ControlFlowRequest {
+            on: self.asked_on(),
+            worktree: worktree.get(),
+            control: control.into(),
+        };
+        let reply = self
+            .ask(|daemon, patience| async move { daemon.control_flow(patience, request).await })?;
+        Ok(reply.flow)
     }
 
     fn answer_of<T, F>(

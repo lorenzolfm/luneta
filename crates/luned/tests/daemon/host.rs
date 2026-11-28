@@ -278,7 +278,7 @@ if [ "$1 $2 $3" = "pr list --base" ]; then
     echo '[]'
     exit 0
 fi
-if [ "$*" != "pr view --json state,isDraft,url,baseRefName,headRefName,headRefOid,author,headRepository,headRepositoryOwner,statusCheckRollup,mergeable" ]; then
+if [ "$*" != "pr view --json state,isDraft,url,baseRefName,headRefName,headRefOid,author,headRepository,headRepositoryOwner,statusCheckRollup,mergeable,mergeStateStatus" ]; then
     echo "this gh only views a pull request, and was asked: $*" >&2
     exit 2
 fi

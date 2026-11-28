@@ -941,6 +941,39 @@ impl Shared {
         .await
     }
 
+    pub async fn start_flow(
+        &self,
+        answer: Answer,
+        request: api::StartFlowRequest,
+    ) -> Result<api::FlowStateResponse, Unasked> {
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.start_flow(request).await
+        })
+        .await
+    }
+
+    pub async fn control_flow(
+        &self,
+        answer: Answer,
+        request: api::ControlFlowRequest,
+    ) -> Result<api::FlowStateResponse, Unasked> {
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.control_flow(request).await
+        })
+        .await
+    }
+
+    pub async fn list_flows(
+        &self,
+        answer: Answer,
+        request: api::ListFlowsRequest,
+    ) -> Result<api::ListFlowsResponse, Unasked> {
+        self.ask_unary(answer, |mut daemon| async move {
+            daemon.list_flows(request).await
+        })
+        .await
+    }
+
     pub async fn read_diff(
         &self,
         answer: Answer,
@@ -2161,6 +2194,27 @@ mod tests {
             &self,
             _: GrpcRequest<api::ReloadResumeRequest>,
         ) -> Result<GrpcResponse<api::ReloadResumeResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn start_flow(
+            &self,
+            _: GrpcRequest<api::StartFlowRequest>,
+        ) -> Result<GrpcResponse<api::FlowStateResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn control_flow(
+            &self,
+            _: GrpcRequest<api::ControlFlowRequest>,
+        ) -> Result<GrpcResponse<api::FlowStateResponse>, Status> {
+            Err(unserved())
+        }
+
+        async fn list_flows(
+            &self,
+            _: GrpcRequest<api::ListFlowsRequest>,
+        ) -> Result<GrpcResponse<api::ListFlowsResponse>, Status> {
             Err(unserved())
         }
     }

@@ -25,6 +25,7 @@ use crate::agreed::{self, Agreed};
 use crate::bridge;
 use crate::browse;
 use crate::daemon::{self, Unreached};
+use crate::flow;
 use crate::machines::{self, Added};
 use crate::prune;
 use crate::rebase;
@@ -102,6 +103,66 @@ pub enum Command {
                     name goes before a branch of it"
         )]
         what: String,
+        #[arg(
+            long,
+            help = "Start a worktree flow on the opened worktree (unattended by default)"
+        )]
+        ship: bool,
+        #[arg(
+            long,
+            value_name = "NAME",
+            requires = "ship",
+            help = "Flow name from config.toml to start with `--ship`"
+        )]
+        flow: Option<String>,
+        #[arg(
+            long,
+            requires = "ship",
+            help = "Run the started flow in interactive mode instead of unattended"
+        )]
+        interactive: bool,
+    },
+    #[command(
+        about = "Start, inspect, or control worktree flows managed by luned. Without an action, \
+                 shows the flow on this worktree (or lists all active flows). Exits 5 where no \
+                 luned runs"
+    )]
+    Flow {
+        #[arg(
+            value_enum,
+            help = "Action: status, list, start, advance, auto, pause, resume, retry, skip, \
+                    takeover, or abort"
+        )]
+        action: Option<flow::Action>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "A directory inside the target worktree. Without one, this directory"
+        )]
+        dir: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "TEXT",
+            help = "Initial implementation prompt for `lune flow start` (Step 0 before opening PR)"
+        )]
+        prompt: Option<String>,
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "Flow name from config.toml for `lune flow start` (defaults to `default`)"
+        )]
+        flow: Option<String>,
+        #[arg(
+            long,
+            help = "Run `lune flow start` in interactive mode instead of unattended"
+        )]
+        interactive: bool,
+        #[arg(
+            long,
+            value_enum,
+            help = "Agent harness for `lune flow start`: claude, pi, or agy"
+        )]
+        harness: Option<crate::step::StepHarness>,
     },
     #[command(
         about = "Open a browser view in the current worktree, or the start page when no URL is \
@@ -277,7 +338,36 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
             resume::run(action, folder)
         }
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
-        Command::Start { what } => start::run(what, folder),
+        Command::Start {
+            what,
+            ship,
+            flow,
+            interactive,
+        } => {
+            let options = ship.then(|| start::ShipOptions {
+                flow: flow.clone(),
+                interactive: *interactive,
+            });
+            start::run(what, options.as_ref(), folder)
+        }
+        Command::Flow {
+            action,
+            dir,
+            prompt,
+            flow,
+            interactive,
+            harness,
+        } => flow::run(
+            &flow::Args {
+                action: *action,
+                dir: dir.clone(),
+                prompt: prompt.clone(),
+                flow: flow.clone(),
+                interactive: *interactive,
+                harness: *harness,
+            },
+            folder,
+        ),
         Command::Browse { url } => browse::run(url.as_deref(), folder),
     }
 }

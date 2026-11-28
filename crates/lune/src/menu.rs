@@ -4,11 +4,13 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::flows::{FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{
     self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId,
 };
+use lune_domain::rows::FlowRow;
 use lune_protocol::github::{PullRequest, State};
 use lune_protocol::said::Said;
 use lune_protocol::shell::Ending;
@@ -125,6 +127,7 @@ const SSH_TITLE: &str = "ssh";
 const WORKTREE_TITLE: &str = "New worktree";
 const RENAME_TITLE: &str = "Rename";
 const BROWSER_TITLE: &str = "Browser";
+const FLOW_PROMPT_TITLE: &str = "Flow prompt";
 
 const NEXT_DOES: [&str; 2] = ["another agent", "another"];
 
@@ -199,6 +202,7 @@ impl Last {
 pub enum Pull {
     Worktree,
     Agent,
+    Ship,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,9 +228,9 @@ impl Asks {
 }
 
 impl Pull {
-    const ALL: [Pull; 2] = [Pull::Agent, Pull::Worktree];
+    const ALL: [Pull; 3] = [Pull::Agent, Pull::Ship, Pull::Worktree];
 
-    pub fn offered(work: &Work) -> [(Pull, Pasted); 2] {
+    pub fn offered(work: &Work) -> [(Pull, Pasted); 3] {
         let asks = Asks::of(work);
         Pull::ALL.map(|pull| (pull, pull.pasted(asks)))
     }
@@ -236,13 +240,14 @@ impl Pull {
             (Pull::Worktree, _) => Pasted::Worktree,
             (Pull::Agent, Asks::Review) => Pasted::Review,
             (Pull::Agent, Asks::Tackle) => Pasted::Tackle,
+            (Pull::Ship, _) => Pasted::Ship,
         }
     }
 
     const fn wanted(self, asks: Asks) -> Wanted {
         match (self, asks) {
             (Pull::Agent, Asks::Review) => Wanted::AtHead,
-            (Pull::Worktree, _) | (Pull::Agent, Asks::Tackle) => Wanted::AsItIs,
+            (Pull::Worktree | Pull::Ship, _) | (Pull::Agent, Asks::Tackle) => Wanted::AsItIs,
         }
     }
 
@@ -479,6 +484,9 @@ const BRANCH_HINT: &str = "its branch: one git has is checked out, and any other
 
 const BROWSER_HINT: &str = "a URL, or Enter for the start page";
 
+const FLOW_PROMPT_HINT: &str =
+    "what to implement before opening a PR and running the review stages";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrowserPlace {
     View { session: Listed, view: ViewKey },
@@ -491,6 +499,10 @@ enum Typing {
     Branch(ProjectId),
     Rename(Renames),
     Browser(BrowserPlace),
+    FlowPrompt {
+        worktree: WorktreeId,
+        mode: FlowMode,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -534,6 +546,7 @@ impl Typing {
             Typing::Branch(_) => WORKTREE_TITLE,
             Typing::Rename(_) => RENAME_TITLE,
             Typing::Browser(_) => BROWSER_TITLE,
+            Typing::FlowPrompt { .. } => FLOW_PROMPT_TITLE,
         }
     }
 
@@ -544,6 +557,7 @@ impl Typing {
             Typing::Rename(Renames::Terminal(_) | Renames::Worktree(_)) => UNRENAME_HINT,
             Typing::Rename(Renames::Project(_)) => RENAME_HINT,
             Typing::Browser(_) => BROWSER_HINT,
+            Typing::FlowPrompt { .. } => FLOW_PROMPT_HINT,
         }
     }
 
@@ -553,6 +567,7 @@ impl Typing {
             Typing::Branch(_) => "Make",
             Typing::Rename(_) => "Rename",
             Typing::Browser(_) => "Open",
+            Typing::FlowPrompt { .. } => "Start",
         }
     }
 
@@ -593,6 +608,21 @@ impl Typing {
                 }),
                 Err(why) => Entered::Wrong(why),
             },
+            Typing::FlowPrompt { worktree, mode } => {
+                let prompt = typed.trim();
+                if prompt.is_empty() {
+                    Entered::Wrong("type a prompt for the flow".to_owned())
+                } else {
+                    Entered::Done(Done::StartFlow {
+                        on: on.clone(),
+                        worktree,
+                        mode,
+                        harness: None,
+                        prompt: Some(prompt.to_owned()),
+                        go: None,
+                    })
+                }
+            }
         }
     }
 }
@@ -655,7 +685,17 @@ impl Chain {
             Offer::NewMachine => Typing::Machine,
             Offer::Rename(renames) => return Some(Chain::rename(*renames)),
             Offer::NewBrowser(place) => Typing::Browser(place.clone()),
-            Offer::SearchSkills(_)
+            Offer::FlowStart {
+                worktree,
+                mode,
+                prompt: true,
+            } => Typing::FlowPrompt {
+                worktree: *worktree,
+                mode: *mode,
+            },
+            Offer::FlowStart { prompt: false, .. }
+            | Offer::FlowControl(..)
+            | Offer::SearchSkills(_)
             | Offer::Skill(..)
             | Offer::Last(..)
             | Offer::FixChecks(_)
@@ -822,6 +862,12 @@ enum Offer<'t> {
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
     Rebase(Rebases<'t>),
+    FlowStart {
+        worktree: WorktreeId,
+        mode: FlowMode,
+        prompt: bool,
+    },
+    FlowControl(WorktreeId, FlowControl),
     Brief(Briefed),
     Ask,
     FileIssue(Repository),
@@ -835,6 +881,7 @@ pub struct WorktreeRow {
     pub folder: Directory,
     pub branch: Option<Said>,
     pub repository: Option<String>,
+    pub flow: Option<Box<FlowRow>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -853,6 +900,7 @@ pub struct ViewRow {
     pub kind: ViewKind,
     pub cwd: Cwd,
     pub arranged: Option<Arranged>,
+    pub flow: Option<Box<FlowRow>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1025,6 +1073,78 @@ impl Target {
             (Action::Rebase, Target::Worktree(_, row)) if row.repository.is_some() => {
                 Offer::Rebase(Rebases::Worktree(row, row.branch.as_ref()?))
             }
+            (Action::FlowStartPrAuto, _) => {
+                let (worktree, flow) = self.worktree_flow()?;
+                if !flow.is_none_or(FlowRow::is_finished) {
+                    return None;
+                }
+                Offer::FlowStart {
+                    worktree,
+                    mode: FlowMode::Unattended,
+                    prompt: false,
+                }
+            }
+            (Action::FlowStartPrInteractive, _) => {
+                let (worktree, flow) = self.worktree_flow()?;
+                if !flow.is_none_or(FlowRow::is_finished) {
+                    return None;
+                }
+                Offer::FlowStart {
+                    worktree,
+                    mode: FlowMode::Interactive,
+                    prompt: false,
+                }
+            }
+            (Action::FlowStartPromptAuto, _) => {
+                let (worktree, flow) = self.worktree_flow()?;
+                if !flow.is_none_or(FlowRow::is_finished) {
+                    return None;
+                }
+                Offer::FlowStart {
+                    worktree,
+                    mode: FlowMode::Unattended,
+                    prompt: true,
+                }
+            }
+            (Action::FlowStartPromptInteractive, _) => {
+                let (worktree, flow) = self.worktree_flow()?;
+                if !flow.is_none_or(FlowRow::is_finished) {
+                    return None;
+                }
+                Offer::FlowStart {
+                    worktree,
+                    mode: FlowMode::Interactive,
+                    prompt: true,
+                }
+            }
+            (
+                Action::FlowAdvance
+                | Action::FlowAutoRest
+                | Action::FlowPause
+                | Action::FlowResume
+                | Action::FlowRetryStep
+                | Action::FlowSkipStep
+                | Action::FlowTakeOver
+                | Action::FlowAbort,
+                _,
+            ) => {
+                let (worktree, flow) = self.worktree_flow()?;
+                let control = match action {
+                    Action::FlowAdvance => FlowControl::Advance,
+                    Action::FlowAutoRest => FlowControl::AutoRest,
+                    Action::FlowPause => FlowControl::Pause,
+                    Action::FlowResume => FlowControl::Resume,
+                    Action::FlowRetryStep => FlowControl::RetryStep,
+                    Action::FlowSkipStep => FlowControl::SkipStep,
+                    Action::FlowTakeOver => FlowControl::TakeOver,
+                    Action::FlowAbort => FlowControl::Abort,
+                    _ => unreachable!("matched flow control actions above"),
+                };
+                if !flow.is_some_and(|flow| flow.has_control(control)) {
+                    return None;
+                }
+                Offer::FlowControl(worktree, control)
+            }
             (Action::BriefEvery, _) => Offer::Brief(Briefed::Every),
             (Action::BriefHighlighted, Target::View(machine, row)) => match &row.kind {
                 ViewKind::Terminal { key, .. } => {
@@ -1048,6 +1168,14 @@ impl Target {
             Target::Worktree(_, row) => Some(row.place.project.clone()),
             Target::View(_, row) => Some(row.worktree.project.clone()),
             Target::Machine(_) => None,
+        }
+    }
+
+    fn worktree_flow(&self) -> Option<(WorktreeId, Option<&FlowRow>)> {
+        match self {
+            Target::Worktree(_, row) => Some((row.place.worktree, row.flow.as_deref())),
+            Target::View(_, row) => Some((row.place().worktree().worktree, row.flow.as_deref())),
+            Target::Project(..) | Target::Machine(_) => None,
         }
     }
 
@@ -1379,6 +1507,12 @@ pub enum Wants {
         name: String,
         agent: Option<Argv>,
     },
+    MakeAndShip {
+        cwd: Directory,
+        name: String,
+        harness: Harness,
+        prompt: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1424,6 +1558,19 @@ pub enum Done {
         on: Machine,
         worktree: WorktreeId,
         command: Argv,
+    },
+    StartFlow {
+        on: Machine,
+        worktree: WorktreeId,
+        mode: FlowMode,
+        harness: Option<Harness>,
+        prompt: Option<String>,
+        go: Option<Place>,
+    },
+    ControlFlow {
+        on: Machine,
+        worktree: WorktreeId,
+        control: FlowControl,
     },
     Said(String),
     Rename(Machine, Rename),
@@ -1787,8 +1934,28 @@ impl InteractiveMenu {
                     Wants::Cloned(project),
                 )
             }
-            Offer::NewMachine | Offer::Rename(_) | Offer::NewBrowser(_) => {
-                let chain = chained.expect("a machine, name or browser is typed in a chain");
+            Offer::FlowStart {
+                worktree,
+                mode,
+                prompt: false,
+            } => Did::Closed(Done::StartFlow {
+                on: target.machine().clone(),
+                worktree,
+                mode,
+                harness: Some(keys.agent.harness()),
+                prompt: None,
+                go: None,
+            }),
+            Offer::FlowControl(worktree, control) => Did::Closed(Done::ControlFlow {
+                on: target.machine().clone(),
+                worktree,
+                control,
+            }),
+            Offer::NewMachine
+            | Offer::Rename(_)
+            | Offer::NewBrowser(_)
+            | Offer::FlowStart { prompt: true, .. } => {
+                let chain = chained.expect("a machine, name, browser or flow prompt is typed");
                 stays(InteractiveStage::Typing { keys, chain }, Wants::Nothing)
             }
             Offer::CloseView(row) => closing(keys, row.listed(), Scope::View(row.view())),
@@ -2434,7 +2601,7 @@ impl WaitingMenu {
             Ok(found) => found,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
-        if let (Pull::Agent, true) = (pull, moved_off) {
+        if let (Pull::Agent | Pull::Ship, true) = (pull, moved_off) {
             let off = work.off_branch(branch.as_deref());
             let wrong = Some(format!(
                 "{folder} is {off}, so no agent starts there; w opens it"
@@ -2449,8 +2616,47 @@ impl WaitingMenu {
                 Wants::Nothing,
             );
         }
+        if pull == Pull::Ship {
+            let prompt = match &readied {
+                Readied::Link(link) => match link.kind() {
+                    Kind::Issue => Some(format!("{TACKLE} {}", link.url())),
+                    Kind::Pull => None,
+                },
+                Readied::File { real } => Some(format!("{TACKLE} {real}")),
+            };
+            return match at {
+                At::There(place) => {
+                    let view = place.view_place();
+                    Did::Closed(Done::StartFlow {
+                        on,
+                        worktree: view.worktree().worktree,
+                        mode: FlowMode::Unattended,
+                        harness: Some(agent),
+                        prompt,
+                        go: Some(Place::View(view)),
+                    })
+                }
+                At::Unopened => {
+                    let wants = Wants::MakeAndShip {
+                        cwd: folder,
+                        name: work.tab(),
+                        harness: agent,
+                        prompt,
+                    };
+                    let stage = WaitingStage::OpeningPulled { work };
+                    Did::Stays(
+                        Menu::Waiting(WaitingMenu {
+                            number,
+                            target: Target::Machine(on),
+                            stage,
+                        }),
+                        wants,
+                    )
+                }
+            };
+        }
         let argv = match (pull, &readied) {
-            (Pull::Worktree, _) => None,
+            (Pull::Worktree | Pull::Ship, _) => None,
             (Pull::Agent, Readied::Link(link)) => Some(match Asks::of_link(link) {
                 Asks::Review => agents::on_skill(agent, REVIEW, Some(&link.url())),
                 Asks::Tackle => Argv::on_words(agent, format!("{TACKLE} {}", link.url()), &[]),
@@ -3718,6 +3924,7 @@ mod tests {
             },
             cwd: Cwd::At(folder),
             arranged: Some(Arranged::Tabs),
+            flow: None,
         }
     }
 
@@ -3794,6 +4001,7 @@ mod tests {
                 folder: main_dir(),
                 branch: Said::new("feat/menu".to_owned()),
                 repository: Some("/w/lune".to_owned()),
+                flow: None,
             },
         )
     }
@@ -3986,7 +4194,7 @@ mod tests {
     fn the_first_group_has_lune_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(own_view(), None));
         assert_eq!(
-            text(&menu.lines(31, 13, SpinnerFrame::REST).0),
+            text(&menu.lines(31, 14, SpinnerFrame::REST).0),
             [
                 "─ lune ──────────── lune/main ─",
                 " /  Search skills",
@@ -3998,6 +4206,7 @@ mod tests {
                 " r  Rename the view…",
                 " d  Close ▸",
                 " g  Git ▸",
+                " f  Flow ▸",
                 " b  Brief ▸",
                 " q  Quit lune",
                 " <ESC> - Close",
@@ -4055,6 +4264,7 @@ mod tests {
                 " s  Show as panes",
                 " r  Rename the view…",
                 " d  Close ▸",
+                " f  Flow ▸",
                 " b  Brief ▸",
             ]
         );
@@ -4142,10 +4352,37 @@ mod tests {
     #[test]
     fn each_action_of_the_menu_is_offered_on_some_row() {
         let vps = Machine::Remote("me@vps".parse().unwrap());
+        let Target::Worktree(_, mut flowing) = worktree_on(Machine::Local) else {
+            panic!("expected worktree target");
+        };
+        flowing.flow = Some(Box::new(FlowRow {
+            flow_name: "default".to_owned(),
+            mode: FlowMode::Interactive,
+            step_number: 1,
+            step_total: 4,
+            stage_label: "tigerstyle".to_owned(),
+            badge: "paused".to_owned(),
+            badge_kind: lune_domain::flows::FlowBadgeKind::Paused,
+            pause_reason: None,
+            detail: None,
+            active_view: None,
+            resume_session: None,
+            controls: vec![
+                FlowControl::Advance,
+                FlowControl::AutoRest,
+                FlowControl::Pause,
+                FlowControl::Resume,
+                FlowControl::RetryStep,
+                FlowControl::SkipStep,
+                FlowControl::TakeOver,
+                FlowControl::Abort,
+            ],
+        }));
         let rows = [
             own_view(),
             view_row(),
             worktree_on(Machine::Local),
+            Target::Worktree(Machine::Local, flowing),
             project_on(Machine::Local),
             Target::Machine(vps),
             Target::View(
@@ -4871,7 +5108,7 @@ mod tests {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let root = |target: Target| {
             let (menu, _) = stays(opened(target, None));
-            text(&menu.lines(40, 13, SpinnerFrame::REST).0)[1..].to_vec()
+            text(&menu.lines(40, 14, SpinnerFrame::REST).0)[1..].to_vec()
         };
         let view = Target::View(vps(), own_row());
         assert_eq!(
@@ -4886,6 +5123,7 @@ mod tests {
                 " r  Rename the view…",
                 " d  Close ▸",
                 " g  Git ▸",
+                " f  Flow ▸",
                 " b  Brief ▸",
                 " q  Quit lune",
                 " <ESC> - Close",
@@ -5280,6 +5518,7 @@ mod tests {
                 " r  Rename the worktree…",
                 " d  Close ▸",
                 " g  Git ▸",
+                " f  Flow ▸",
                 " b  Brief ▸",
                 " q  Quit lune",
                 " <ESC> - Close",
@@ -5716,7 +5955,7 @@ mod tests {
         let menu = InteractiveMenu::new(id(), view_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
         assert_eq!(
-            floated(drawing(&menu), 50, 14),
+            floated(drawing(&menu), 50, 15),
             [
                 "z".repeat(50),
                 format!("{}┌─ lune ───── lune/main ─┐", "z".repeat(24)),
@@ -5728,6 +5967,7 @@ mod tests {
                 boxed(" s  Show as panes"),
                 boxed(" d  Close ▸"),
                 boxed(" g  Git ▸"),
+                boxed(" f  Flow ▸"),
                 boxed(" b  Brief ▸"),
                 boxed(" q  Quit lune"),
                 boxed(" <ESC> - Close"),
@@ -5897,6 +6137,7 @@ mod tests {
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " r  /thermo-nuclear-review",
+                " f  ship",
                 " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
@@ -5993,13 +6234,13 @@ mod tests {
         assert_eq!(
             menu.lines(31, 9, SpinnerFrame::REST)
                 .1
-                .at(Position::new(5, 3)),
+                .at(Position::new(5, 4)),
             Some(&Choice::Key(tab))
         );
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
         assert_eq!(
-            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[3],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[4],
             " \u{f03ff} pi  <TAB> another agent"
         );
         let (menu, _) = waits(menu.key(&char('r')));
@@ -6034,6 +6275,7 @@ mod tests {
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " t  tackle",
+                " f  ship",
                 " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
@@ -6080,6 +6322,7 @@ mod tests {
         let refused = [
             "─ #2736 ──────── cashubtc/cdk ─",
             " t  tackle",
+            " f  ship",
             " w  worktree",
             " \u{ec82} claude  <TAB> another agent",
             " /w/cdk/issue-2736 is on",
@@ -6088,16 +6331,16 @@ mod tests {
             " opens it",
             " <ESC> - Close",
         ];
-        let (lines, spots, _) = menu.lines(31, 9, SpinnerFrame::REST);
+        let (lines, spots, _) = menu.lines(31, 10, SpinnerFrame::REST);
         assert_eq!(text(&lines), refused);
         assert_eq!(
-            spots.at(Position::new(4, 2)),
+            spots.at(Position::new(4, 3)),
             Some(&pressed(KeyCode::Char('w')))
         );
 
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
-        assert_eq!(text(&menu.lines(31, 9, SpinnerFrame::REST).0), refused);
+        assert_eq!(text(&menu.lines(31, 10, SpinnerFrame::REST).0), refused);
 
         let (menu, wants) = waits(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
@@ -6116,10 +6359,11 @@ mod tests {
         let (menu, wants) = stays(pulling('r').pulled(Ok(here(ready.clone()))));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 11, SpinnerFrame::REST).0),
+            text(&menu.lines(31, 12, SpinnerFrame::REST).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " r  /thermo-nuclear-review",
+                " f  ship",
                 " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " /w/cdk/feat is on stacked,",
@@ -6159,6 +6403,7 @@ mod tests {
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
                 " t  tackle",
+                " f  ship",
                 " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
@@ -6297,6 +6542,76 @@ mod tests {
     }
 
     #[test]
+    fn flow_menu_offers_start_when_idle_and_contextual_controls_when_active() {
+        let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('f')));
+        assert_eq!(
+            text(&menu.lines(40, 10, SpinnerFrame::REST).0),
+            [
+                "─ Flow ───────────────────── lune/main ─",
+                " a  start PR flow (auto)",
+                " i  start PR flow (interactive)",
+                " p  start prompt flow (auto)…",
+                " w  start prompt flow (interactive)…",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            closed(menu.key(&char('a'))),
+            Done::StartFlow {
+                on: Machine::Local,
+                worktree: worktree(),
+                mode: FlowMode::Unattended,
+                harness: Some(CLAUDE),
+                prompt: None,
+                go: None,
+            }
+        );
+
+        let paused_flow = FlowRow {
+            flow_name: "default".to_owned(),
+            mode: FlowMode::Unattended,
+            step_number: 2,
+            step_total: 4,
+            stage_label: "illegal-states".to_owned(),
+            badge: "paused".to_owned(),
+            badge_kind: lune_domain::flows::FlowBadgeKind::Paused,
+            pause_reason: Some(lune_domain::flows::PauseReason::DirtyTree),
+            detail: Some("uncommitted files".to_owned()),
+            active_view: None,
+            resume_session: Some(lune_domain::flows::SessionId::parse("sess-1").unwrap()),
+            controls: vec![
+                FlowControl::Resume,
+                FlowControl::TakeOver,
+                FlowControl::Abort,
+            ],
+        };
+        let Target::Worktree(_, mut wt_row) = worktree_on(Machine::Local) else {
+            panic!("expected worktree target");
+        };
+        wt_row.flow = Some(Box::new(paused_flow));
+        let paused_target = Target::Worktree(Machine::Local, wt_row);
+        let (menu, _) = stays(opened(paused_target, Some('f')));
+        assert_eq!(
+            text(&menu.lines(40, 10, SpinnerFrame::REST).0),
+            [
+                "─ Flow ───────────────────── lune/main ─",
+                " r  resume flow",
+                " o  take over",
+                " x  abort flow",
+                " <BS> - Back, <ESC> - Close",
+            ]
+        );
+        assert_eq!(
+            closed(menu.key(&char('o'))),
+            Done::ControlFlow {
+                on: Machine::Local,
+                worktree: worktree(),
+                control: FlowControl::TakeOver,
+            }
+        );
+    }
+
+    #[test]
     fn a_browser_view_row_offers_view_actions_and_omits_terminal_only_ones() {
         let worktree = WorktreePlace {
             project: ProjectRow::new("lune", 1),
@@ -6313,6 +6628,7 @@ mod tests {
             kind: ViewKind::Browser(ViewId::of(30).unwrap()),
             cwd: Cwd::At(folder),
             arranged: Some(Arranged::Tabs),
+            flow: None,
         };
         assert_eq!(
             row.pulled().err().as_deref(),

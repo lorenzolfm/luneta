@@ -13,6 +13,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::agent::Harness;
+use lune_domain::flows::FlowEntry;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Dir, ProjectId, WorktreeId};
 use lune_domain::projects::{Holders, Made, Opens, OwnedFolder, folder_has_one_worktree};
@@ -42,16 +43,18 @@ use crate::api::list_skills_response::Skill;
 use crate::api::make_worktree_response::Landed;
 use crate::api::{
     self, AnswerRequest, AskRequest, AskResponse, AskReviewRequest, ChangeProjectsRequest,
-    ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
-    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
-    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
-    ListAgentsResponse, ListContentsRequest, ListContentsResponse, ListRepositoriesRequest,
-    ListRepositoriesResponse, ListResumeRequest, ListResumeResponse, ListSkillsRequest,
-    ListSkillsResponse, ListWorkRequest, ListWorkResponse, MakeWorktreeRequest,
+    ChangeProjectsResponse, ControlFlowRequest, FileIssueRequest, FileIssueResponse,
+    FlowStateResponse, FramesRequest, InfoResponse, IssueRepositoriesRequest,
+    IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
+    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse,
+    ListContentsRequest, ListContentsResponse, ListFlowsRequest, ListFlowsResponse,
+    ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest, ListResumeResponse,
+    ListSkillsRequest, ListSkillsResponse, ListWorkRequest, ListWorkResponse, MakeWorktreeRequest,
     MakeWorktreeResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
     PrunesResponse, ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse,
     ReloadResumeRequest, ReloadResumeResponse, SayRequest, ShowRequest, ShowResponse,
-    TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest, WaitingResponse,
+    StartFlowRequest, TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest,
+    WaitingResponse,
 };
 use crate::asks::{AskMode, Asked, ReviewAsk, SessionModes, Step};
 use crate::checks::{Failing, Log};
@@ -75,9 +78,9 @@ use crate::sayings::ToSay;
 use crate::statuses::ReportedAgent;
 use crate::transcripts::{self, Reading, SessionId};
 use crate::{
-    agy, changes, checks, claude, client, devices, eza, fetches, git, github, keeps, log, owns, pi,
-    printed, program, projects, release, remote, repositories, skills, state, tailnet, topics,
-    watch, work,
+    agy, changes, checks, claude, client, devices, eza, fetches, flows, git, github, keeps, log,
+    owns, pi, printed, program, projects, release, remote, repositories, skills, state, tailnet,
+    topics, watch, work,
 };
 
 mod over_tailnet;
@@ -254,7 +257,14 @@ pub async fn serve(
     )?;
     let git_refresher = git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
+    let wake_github_flows = wake_github.clone();
     github::follow(core.clone(), wake_github, github_woken, PULL_REQUEST_RESTS)?;
+    let flows = flows::start(core.clone(), layouts.clone(), wake_github_flows)?;
+    core.send(Command::AttachFlows(flows.clone()))
+        .map_err(|_| io::Error::other("core stopped before attaching flows"))?;
+    layouts
+        .send(layouts::Command::AttachFlows(flows.clone()))
+        .map_err(|_| io::Error::other("layouts stopped before attaching flows"))?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();
@@ -287,6 +297,7 @@ pub async fn serve(
         watchers,
         bridges,
         layouts,
+        flows,
         listings,
         git_refresher,
         ask_sessions,
@@ -636,6 +647,7 @@ struct Host {
     watchers: Arc<Watchers>,
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
+    flows: SyncSender<flows::Command>,
     listings: Arc<work::Listings>,
     git_refresher: git::Refresher,
     ask_sessions: Arc<SessionModes>,
@@ -1512,6 +1524,138 @@ impl Daemon for Host {
         let response = reloaded.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
         Ok(Response::new(response))
     }
+
+    async fn start_flow(
+        &self,
+        request: Request<StartFlowRequest>,
+    ) -> Result<Response<FlowStateResponse>, Status> {
+        let StartFlowRequest {
+            on,
+            worktree,
+            flow_name,
+            mode,
+            harness,
+            entry,
+        } = request.into_inner();
+        let worktree_id = layouts::id("worktree", worktree)
+            .map(WorktreeId::new)
+            .map_err(Status::invalid_argument)?;
+        let parsed_mode =
+            lune_domain::flows::FlowMode::of_api(mode).map_err(Status::invalid_argument)?;
+        let parsed_harness = match api::Harness::try_from(harness) {
+            Ok(api::Harness::ClaudeCode | api::Harness::Unspecified) => Harness::ClaudeCode,
+            Ok(api::Harness::Pi) => Harness::Pi,
+            Ok(api::Harness::Antigravity) => Harness::Antigravity,
+            Err(_) => return Err(Status::invalid_argument("harness: unknown harness")),
+        };
+        let parsed_entry = match &entry {
+            Some(api::start_flow_request::Entry::ImplementPrompt(prompt)) => FlowEntry::Implement {
+                prompt: prompt.clone(),
+            },
+            Some(api::start_flow_request::Entry::PullRequest(())) => FlowEntry::PullRequest,
+            None => {
+                return Err(Status::invalid_argument(
+                    "entry: say whether the flow implements a prompt or starts from the pull request",
+                ));
+            }
+        };
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon
+                .start_flow(StartFlowRequest {
+                    on: None,
+                    worktree,
+                    flow_name,
+                    mode,
+                    harness,
+                    entry,
+                })
+                .await;
+        }
+        let layouts = self.layouts.clone();
+        let flows = self.flows.clone();
+        let started = task::spawn_blocking(move || {
+            let dir = worktree_folder(&layouts, worktree_id)?;
+            flows::ops::check_start(dir.as_str(), &parsed_entry)
+                .map_err(Status::failed_precondition)?;
+            let result = flows::ask(&flows, |answer| flows::Command::Start {
+                worktree: worktree_id,
+                dir: dir.as_str().to_owned(),
+                flow_name,
+                mode: parsed_mode,
+                harness: parsed_harness,
+                entry: parsed_entry,
+                answer,
+            })
+            .map_err(Status::unavailable)?;
+            result.map_err(Status::failed_precondition)
+        })
+        .await
+        .map_err(|error| unfinished(&error))??;
+        Ok(Response::new(FlowStateResponse {
+            flow: Some(started),
+        }))
+    }
+
+    async fn control_flow(
+        &self,
+        request: Request<ControlFlowRequest>,
+    ) -> Result<Response<FlowStateResponse>, Status> {
+        let ControlFlowRequest {
+            on,
+            worktree,
+            control,
+        } = request.into_inner();
+        let worktree_id = layouts::id("worktree", worktree)
+            .map(WorktreeId::new)
+            .map_err(Status::invalid_argument)?;
+        let parsed_control =
+            lune_domain::flows::FlowControl::of_api(control).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon
+                .control_flow(ControlFlowRequest {
+                    on: None,
+                    worktree,
+                    control,
+                })
+                .await;
+        }
+        let layouts = self.layouts.clone();
+        let flows = self.flows.clone();
+        let updated = task::spawn_blocking(move || {
+            let dir = worktree_folder(&layouts, worktree_id)
+                .ok()
+                .map(|dir| dir.as_str().to_owned());
+            let result = flows::ask(&flows, |answer| flows::Command::Control {
+                worktree: worktree_id,
+                dir,
+                control: parsed_control,
+                answer,
+            })
+            .map_err(Status::unavailable)?;
+            result.map_err(Status::failed_precondition)
+        })
+        .await
+        .map_err(|error| unfinished(&error))??;
+        Ok(Response::new(FlowStateResponse { flow: updated }))
+    }
+
+    async fn list_flows(
+        &self,
+        request: Request<ListFlowsRequest>,
+    ) -> Result<Response<ListFlowsResponse>, Status> {
+        let ListFlowsRequest { on } = request.into_inner();
+        if let Some(mut daemon) = self.bridged(on).await? {
+            return daemon.list_flows(ListFlowsRequest { on: None }).await;
+        }
+        let flows = self.flows.clone();
+        let listed = task::spawn_blocking(move || {
+            flows::ask(&flows, |answer| flows::Command::List { answer })
+        })
+        .await
+        .map_err(|error| unfinished(&error))?;
+        let response = listed.map_err(Status::unavailable)?;
+        Ok(Response::new(response))
+    }
 }
 
 fn kept_image(
@@ -2295,6 +2439,7 @@ mod tests {
     fn a_watch_timeout_answers_unchanged_only_after_the_core_parked_it() {
         let host_with = |core| {
             let (layouts, _laid) = mpsc::sync_channel(1);
+            let (flows, _flows) = mpsc::sync_channel(1);
             let git_refresher = crate::git::Refresher::disconnected();
             Host {
                 started: SystemTime::now(),
@@ -2304,6 +2449,7 @@ mod tests {
                 watchers: Arc::default(),
                 bridges: Arc::default(),
                 layouts,
+                flows,
                 listings: Arc::default(),
                 git_refresher,
                 ask_sessions: Arc::new(SessionModes::in_memory()),

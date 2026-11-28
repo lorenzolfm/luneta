@@ -22,6 +22,7 @@ mod desktop;
 mod dictation;
 mod due;
 mod embedded;
+mod flow;
 mod folds;
 mod fuzzy;
 mod home;
@@ -58,6 +59,7 @@ mod speech;
 mod spots;
 mod start;
 mod state;
+pub mod step;
 mod sweep;
 mod terminate;
 mod viewed;
@@ -111,6 +113,13 @@ enum Command {
         socket: PathBuf,
         group: String,
     },
+    #[command(
+        name = "_step",
+        hide = true,
+        about = "Run one unattended flow stage inside a lune-mux terminal with streaming output \
+                 and OSC 7501 status updates"
+    )]
+    Step(step::StepArgs),
 }
 
 #[must_use]
@@ -131,6 +140,7 @@ pub fn main() -> ExitCode {
                 }
             };
         }
+        Command::Step(args) => return step::run(&args),
         Command::Asked(command) => command,
     };
     match folder {

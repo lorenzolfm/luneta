@@ -8,11 +8,12 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use lune_domain::flows::{FlowBadgeKind, FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
 use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
-use lune_domain::rows::{self, Told};
+use lune_domain::rows::{self, FlowRow, Told};
 use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::git::{Changed, Changes, GitStatus, Head, ParsedGitStatuses, Upstream};
 use lune_protocol::github::{Mergeability, ParsedPullRequests, PullRequest, State, Verdict};
@@ -929,6 +930,7 @@ enum Row {
         here: bool,
         colour: Color,
         badge: Option<Badge>,
+        flow: Option<Box<FlowRow>>,
     },
     View {
         machine: Machine,
@@ -1139,7 +1141,7 @@ impl Row {
 
     fn own(&self) -> usize {
         match self {
-            Row::Worktree { named, .. } => named.height(),
+            Row::Worktree { named, flow, .. } => named.height() + usize::from(flow.is_some()),
             Row::Machine { .. } | Row::Project { .. } | Row::View { .. } => 1,
         }
     }
@@ -1246,6 +1248,7 @@ struct KnownWorktree {
     used: Option<Used>,
     views: Vec<KnownView>,
     arranged: Option<Arranged>,
+    flow: Option<Box<FlowRow>>,
 }
 
 impl KnownWorktree {
@@ -1446,6 +1449,7 @@ impl Known {
             used: worktree.used,
             views: worktree.views.iter().map(KnownView::of).collect(),
             arranged: worktree.arranged,
+            flow: worktree.flow.clone(),
         });
         let worktrees = worktrees.collect();
         let unopened = match &said.holds {
@@ -1919,6 +1923,27 @@ pub enum Asked {
         name: String,
         agent: Option<Argv>,
     },
+    MakeAndShip {
+        menu: MenuId,
+        on: Machine,
+        cwd: Directory,
+        name: String,
+        harness: agents::Harness,
+        prompt: Option<String>,
+    },
+    StartFlow {
+        on: Machine,
+        worktree: WorktreeId,
+        mode: FlowMode,
+        harness: agents::Harness,
+        prompt: Option<String>,
+        go: Option<Place>,
+    },
+    ControlFlow {
+        on: Machine,
+        worktree: WorktreeId,
+        control: FlowControl,
+    },
     Pull {
         menu: MenuId,
         on: Machine,
@@ -1965,6 +1990,7 @@ impl Asked {
             | Asked::Prune { menu, .. }
             | Asked::Rebase { menu, .. }
             | Asked::Make { menu, .. }
+            | Asked::MakeAndShip { menu, .. }
             | Asked::Pull { menu, .. }
             | Asked::Find { menu, .. }
             | Asked::Printed { menu, .. }
@@ -1985,6 +2011,8 @@ impl Asked {
             | Asked::Review { .. }
             | Asked::Arrange { .. }
             | Asked::OpenIn { .. }
+            | Asked::StartFlow { .. }
+            | Asked::ControlFlow { .. }
             | Asked::Rename { .. }
             | Asked::Brief(_)
             | Asked::Ask(_)
@@ -4493,6 +4521,7 @@ impl SidebarState {
                             here,
                             colour,
                             badge: Badge::of(tally, under == Under::Folded),
+                            flow: worktree.flow.clone(),
                         });
                         if let Some(found) = worktree_found {
                             let at = Spot::on(&machine, Place::Worktree(worktree.place.clone()));
@@ -5531,13 +5560,26 @@ impl SidebarState {
         let arranged = view_id.and_then(|it| {
             arranged_holding(&self.shelves, self.seat.as_ref(), machine, session, it)
         });
+        let flow = self.worktree_flow(machine, place.worktree());
         let row = ViewRow {
             worktree: place.worktree,
             kind,
             cwd,
             arranged,
+            flow,
         };
         Some(Target::View(machine.clone(), row))
+    }
+
+    fn worktree_flow(&self, machine: &Machine, place: &WorktreePlace) -> Option<Box<FlowRow>> {
+        let known = shelf(&self.shelves, machine)
+            .iter()
+            .find(|it| it.project.id() == place.project.id())?;
+        known
+            .worktrees
+            .iter()
+            .find(|wt| wt.place == *place)
+            .and_then(|wt| wt.flow.clone())
     }
 
     fn browser_folder_of(
@@ -5582,6 +5624,7 @@ impl SidebarState {
             folder,
             branch,
             repository,
+            flow: worktree.flow.clone(),
         };
         Some(Target::Worktree(machine.clone(), row))
     }
@@ -6008,6 +6051,30 @@ impl SidebarState {
                         worktree,
                         command,
                     },
+                    Done::StartFlow {
+                        on,
+                        worktree,
+                        mode,
+                        harness,
+                        prompt,
+                        go,
+                    } => Asked::StartFlow {
+                        on,
+                        worktree,
+                        mode,
+                        harness: harness.unwrap_or_else(|| self.agent.harness()),
+                        prompt,
+                        go,
+                    },
+                    Done::ControlFlow {
+                        on,
+                        worktree,
+                        control,
+                    } => Asked::ControlFlow {
+                        on,
+                        worktree,
+                        control,
+                    },
                     Done::Said(said) => {
                         self.say_of(taken, said);
                         Asked::Nothing
@@ -6126,6 +6193,19 @@ impl SidebarState {
                 cwd,
                 name,
                 agent,
+            },
+            Wants::MakeAndShip {
+                cwd,
+                name,
+                harness,
+                prompt,
+            } => Asked::MakeAndShip {
+                menu: number,
+                on,
+                cwd,
+                name,
+                harness,
+                prompt,
             },
             Wants::Prunes { dir } => Asked::Prunes {
                 menu: number,
@@ -7418,6 +7498,9 @@ impl SidebarState {
         if let Some(why) = self.unreached() {
             notes.say(&why, width, error);
         }
+        if let Some(flow_note) = self.waiting_flow_note() {
+            notes.say(&flow_note, width, error);
+        }
         if let Some(lost) = self.folds.lost() {
             notes.say(&format!("folds stay in this lune: {lost}"), width, error);
         }
@@ -7594,6 +7677,28 @@ impl SidebarState {
             (name, Some(Away::Here), _) => Some(format!("{name}: {}", luned::THIS_MACHINE)),
             (_, None | Some(Away::Reaching), _) => None,
         }
+    }
+
+    fn waiting_flow_note(&self) -> Option<String> {
+        if !self.has_keys() {
+            return None;
+        }
+        let target = self.target()?;
+        let flow = match &target {
+            Target::Worktree(_, row) => row.flow.as_deref(),
+            Target::View(_, row) => row.flow.as_deref(),
+            Target::Project(..) | Target::Machine(_) => None,
+        }?;
+        let keys = match flow.badge_kind {
+            FlowBadgeKind::Paused => "f o take over, f r resume",
+            FlowBadgeKind::ConfirmMerge => "f n merge, f x abort",
+            FlowBadgeKind::Running
+            | FlowBadgeKind::WaitingInteractive
+            | FlowBadgeKind::Merged
+            | FlowBadgeKind::ReadyToMerge => return None,
+        };
+        let detail = flow.detail.as_deref().unwrap_or("waiting for you");
+        Some(format!("flow ({}): {detail} · {keys}", flow.stage_label))
     }
 
     fn bottom(&self) -> Bottom<'_> {
@@ -8439,6 +8544,7 @@ fn row_lines(
             here,
             colour,
             badge,
+            flow,
             ..
         } => {
             let folded = *under == Under::Folded;
@@ -8510,6 +8616,9 @@ fn row_lines(
                 lines.push(drawn);
                 cuts.extend(cut_at(at, LABEL, checkout.branch.as_str(), branch_room));
                 number = numbered;
+            }
+            if let Some(flow) = flow {
+                lines.push(flow_line(*here, flow, width));
             }
             RowLines {
                 lines,
@@ -8802,6 +8911,38 @@ fn checkout_line(
         Style::new().fg(moonlight::PEACH),
     ));
     (Line::from(spans), number, room)
+}
+
+fn flow_line(here: bool, flow: &FlowRow, width: usize) -> Line<'static> {
+    let (glyph, style) = match flow.badge_kind {
+        FlowBadgeKind::Running => ("▸ ", Style::new().fg(moonlight::CYAN)),
+        FlowBadgeKind::WaitingInteractive => ("◈ ", Style::new().fg(ACCENT)),
+        FlowBadgeKind::ConfirmMerge => (
+            "⇡ ",
+            Style::new()
+                .fg(moonlight::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        FlowBadgeKind::Paused => (
+            "⏸ ",
+            Style::new().fg(moonlight::RED).add_modifier(Modifier::BOLD),
+        ),
+        FlowBadgeKind::Merged => ("✓ ", Style::new().fg(moonlight::MAUVE)),
+        FlowBadgeKind::ReadyToMerge => (
+            "✓ ",
+            Style::new()
+                .fg(moonlight::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    let room = width.saturating_sub(LABEL + glyph.width() + 1);
+    let badge = cut(&flow.badge, room);
+    Line::from(vec![
+        margin(here),
+        Span::raw(" ".repeat(LABEL - 1)),
+        Span::styled(glyph, style),
+        Span::styled(badge, style),
+    ])
 }
 
 pub fn cut(text: &str, room: usize) -> String {
@@ -13402,10 +13543,10 @@ mod tests {
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
         assert!(
-            clicked[..6].iter().all(|(_, hit)| hit.is_none()),
+            clicked[..5].iter().all(|(_, hit)| hit.is_none()),
             "{clicked:?}"
         );
-        let legend: Vec<(&str, Option<Hit>)> = clicked[6..]
+        let legend: Vec<(&str, Option<Hit>)> = clicked[5..]
             .iter()
             .map(|(text, hit)| (text.as_str(), hit.clone()))
             .collect();
@@ -13426,6 +13567,7 @@ mod tests {
                 (" s  Show as panes", Some(on_legend('s'))),
                 (" r  Rename the view…", Some(on_legend('r'))),
                 (" d  Close ▸", Some(on_legend('d'))),
+                (" f  Flow ▸", Some(on_legend('f'))),
                 (" b  Brief ▸", Some(on_legend('b'))),
             ]
         );
@@ -14141,10 +14283,11 @@ mod tests {
         );
         let lines = screen(&mut sidebar, true, 32, 17);
         assert_eq!(
-            lines[12..],
+            lines[11..],
             [
                 "─ #5 ──────── lorenzolfm/lune ─",
                 " r  /thermo-nuclear-review",
+                " f  ship",
                 " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
@@ -14487,10 +14630,11 @@ mod tests {
         );
         let lines = screen(&mut sidebar, true, 39, 17);
         assert_eq!(
-            lines[12..],
+            lines[11..],
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
                 " t  tackle",
+                " f  ship",
                 " w  worktree",
                 " \u{ec82} claude  <TAB> another agent",
                 " <ESC> - Close",
@@ -14899,6 +15043,7 @@ mod tests {
                         pull_request: None,
                     }),
                     arranged: Some(Arranged::Tabs),
+                    flow: None,
                 }
             ))
         );
@@ -17138,6 +17283,7 @@ mod tests {
             },
             cwd,
             arranged: Some(Arranged::Tabs),
+            flow: None,
         };
         let menu = sidebar.open().expect("the menu");
         assert_eq!(menu.target(), &Target::View(on.clone(), row.clone()));

@@ -1236,6 +1236,27 @@ fn the_phone_falls_back_to_watch_against_an_older_luned_and_upgrades_on_reconnec
             Err(Status::unimplemented("unused"))
         }
 
+        async fn start_flow(
+            &self,
+            _: Request<api::StartFlowRequest>,
+        ) -> Result<Response<api::FlowStateResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn control_flow(
+            &self,
+            _: Request<api::ControlFlowRequest>,
+        ) -> Result<Response<api::FlowStateResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn list_flows(
+            &self,
+            _: Request<api::ListFlowsRequest>,
+        ) -> Result<Response<api::ListFlowsResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
         type AskStream = tokio_stream::Empty<Result<AskResponse, Status>>;
 
         async fn ask(&self, _: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {

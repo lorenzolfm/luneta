@@ -126,7 +126,55 @@ pub struct Worktree {
     pub branch: Option<String>,
     pub seen: Seen,
     pub views: Vec<View>,
+    pub flow: Option<Flow>,
     pub browsers: Option<Vec<u64>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum FlowBadgeKind {
+    Running,
+    WaitingInteractive,
+    ConfirmMerge,
+    Paused,
+    Merged,
+    ReadyToMerge,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum FlowControl {
+    Advance,
+    AutoRest,
+    Pause,
+    Resume,
+    RetryStep,
+    SkipStep,
+    TakeOver,
+    Abort,
+}
+
+impl FlowControl {
+    pub(crate) fn to_api(self) -> api::FlowControl {
+        match self {
+            FlowControl::Advance => api::FlowControl::Advance,
+            FlowControl::AutoRest => api::FlowControl::AutoRest,
+            FlowControl::Pause => api::FlowControl::Pause,
+            FlowControl::Resume => api::FlowControl::Resume,
+            FlowControl::RetryStep => api::FlowControl::RetryStep,
+            FlowControl::SkipStep => api::FlowControl::SkipStep,
+            FlowControl::TakeOver => api::FlowControl::TakeOver,
+            FlowControl::Abort => api::FlowControl::Abort,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
+pub struct Flow {
+    pub flow_name: String,
+    pub badge: String,
+    pub badge_kind: FlowBadgeKind,
+    pub detail: Option<String>,
+    pub controls: Vec<FlowControl>,
+    pub interactive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -422,8 +470,48 @@ fn worktree_of(
             .iter()
             .map(|it| view_of(on, it))
             .collect(),
+        flow: worktree.flow.as_ref().and_then(flow_of),
         browsers,
     }
+}
+
+fn flow_of(said: &api::FlowSummary) -> Option<Flow> {
+    let badge_kind = match api::FlowBadgeKind::try_from(said.badge_kind) {
+        Ok(api::FlowBadgeKind::Running) => FlowBadgeKind::Running,
+        Ok(api::FlowBadgeKind::WaitingInteractive) => FlowBadgeKind::WaitingInteractive,
+        Ok(api::FlowBadgeKind::ConfirmMerge) => FlowBadgeKind::ConfirmMerge,
+        Ok(api::FlowBadgeKind::Paused) => FlowBadgeKind::Paused,
+        Ok(api::FlowBadgeKind::Merged) => FlowBadgeKind::Merged,
+        Ok(api::FlowBadgeKind::ReadyToMerge) => FlowBadgeKind::ReadyToMerge,
+        Ok(api::FlowBadgeKind::Unspecified) | Err(_) => return None,
+    };
+    let controls = said
+        .controls
+        .iter()
+        .filter_map(|raw| match api::FlowControl::try_from(*raw) {
+            Ok(api::FlowControl::Advance) => Some(FlowControl::Advance),
+            Ok(api::FlowControl::AutoRest) => Some(FlowControl::AutoRest),
+            Ok(api::FlowControl::Pause) => Some(FlowControl::Pause),
+            Ok(api::FlowControl::Resume) => Some(FlowControl::Resume),
+            Ok(api::FlowControl::RetryStep) => Some(FlowControl::RetryStep),
+            Ok(api::FlowControl::SkipStep) => Some(FlowControl::SkipStep),
+            Ok(api::FlowControl::TakeOver) => Some(FlowControl::TakeOver),
+            Ok(api::FlowControl::Abort) => Some(FlowControl::Abort),
+            Ok(api::FlowControl::Unspecified) | Err(_) => None,
+        })
+        .collect();
+    let interactive = matches!(
+        api::FlowMode::try_from(said.mode),
+        Ok(api::FlowMode::Interactive)
+    );
+    Some(Flow {
+        flow_name: said.flow_name.clone(),
+        badge: said.badge.clone(),
+        badge_kind,
+        detail: said.detail.clone(),
+        controls,
+        interactive,
+    })
 }
 
 fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
@@ -1115,6 +1203,81 @@ mod tests {
             }
         );
         assert_eq!(model.inbox[3].status, Status::Stopped);
+    }
+
+    #[test]
+    fn a_worktree_flow_maps_badge_controls_and_pause_detail_onto_the_phone_model() {
+        let mut wt = worktree_with(5, "fix", 9);
+        wt.flow = Some(api::FlowSummary {
+            worktree: 5,
+            flow_name: "default".to_owned(),
+            mode: api::FlowMode::Unattended.into(),
+            harness: api::Harness::ClaudeCode.into(),
+            step_number: 2,
+            step_total: 4,
+            stage_label: "illegal-states".to_owned(),
+            badge: "paused".to_owned(),
+            badge_kind: api::FlowBadgeKind::Paused.into(),
+            pause_reason: Some(api::FlowPauseReason::DirtyTree.into()),
+            detail: Some("working tree has uncommitted changes".to_owned()),
+            active_view: Some(109),
+            resume_session: Some("sess-123".to_owned()),
+            controls: vec![
+                api::FlowControl::Resume.into(),
+                api::FlowControl::TakeOver.into(),
+                api::FlowControl::Abort.into(),
+            ],
+        });
+        let host = api::Host {
+            projects: Some(kept(vec![clone_of(vec![wt])])),
+            ..api::Host::default()
+        };
+        let Held::Kept { projects } = &Model::of(&host).here else {
+            panic!("the projects are kept");
+        };
+        let flow = projects[0].holds.worktrees()[0].flow.as_ref().unwrap();
+        assert_eq!(flow.flow_name, "default");
+        assert_eq!(flow.badge, "paused");
+        assert_eq!(flow.badge_kind, FlowBadgeKind::Paused);
+        assert_eq!(
+            flow.detail.as_deref(),
+            Some("working tree has uncommitted changes")
+        );
+        assert_eq!(
+            flow.controls,
+            vec![
+                FlowControl::Resume,
+                FlowControl::TakeOver,
+                FlowControl::Abort
+            ]
+        );
+        assert!(!flow.interactive);
+    }
+
+    #[test]
+    fn a_flow_of_a_badge_kind_the_phone_does_not_know_is_not_shown_as_paused() {
+        let summary = |badge_kind: api::FlowBadgeKind| api::FlowSummary {
+            worktree: 5,
+            flow_name: "default".to_owned(),
+            mode: api::FlowMode::Interactive.into(),
+            harness: api::Harness::ClaudeCode.into(),
+            step_number: 4,
+            step_total: 4,
+            stage_label: "land".to_owned(),
+            badge: "4/4 merge?".to_owned(),
+            badge_kind: badge_kind.into(),
+            pause_reason: None,
+            detail: None,
+            active_view: None,
+            resume_session: None,
+            controls: vec![api::FlowControl::Advance.into()],
+        };
+        let confirming = flow_of(&summary(api::FlowBadgeKind::ConfirmMerge)).unwrap();
+        assert_eq!(confirming.badge_kind, FlowBadgeKind::ConfirmMerge);
+        assert_eq!(flow_of(&summary(api::FlowBadgeKind::Unspecified)), None);
+        let mut unknown = summary(api::FlowBadgeKind::Paused);
+        unknown.badge_kind = 99;
+        assert_eq!(flow_of(&unknown), None);
     }
 
     #[test]

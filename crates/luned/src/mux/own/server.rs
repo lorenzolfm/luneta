@@ -909,7 +909,7 @@ pub struct Terminal {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Is {
-    Ended,
+    Ended(lune_domain::flows::TerminalExit),
     Running {
         root: AgentPid,
         front: Option<Foreground>,
@@ -973,7 +973,16 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
     };
     let is = match terminal.program {
         None => return Err(format!("terminal {} runs nothing it says", key.id)),
-        Some(api::terminal::Program::Ended(_)) => Is::Ended,
+        Some(api::terminal::Program::Ended(exit)) => {
+            let parsed = match exit.how {
+                Some(api::exit::How::Code(code)) => lune_domain::flows::TerminalExit::Code(code),
+                Some(api::exit::How::Signal(signal)) => {
+                    lune_domain::flows::TerminalExit::Signal(signal)
+                }
+                None => lune_domain::flows::TerminalExit::Unknown,
+            };
+            Is::Ended(parsed)
+        }
         Some(api::terminal::Program::Runs(runs)) => {
             let root = AgentPid::new(runs.pid)
                 .ok_or_else(|| format!("terminal {}'s pid {} is invalid", key.id, runs.pid))?;
@@ -1016,7 +1025,7 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
             }
         }
     };
-    let ended = matches!(is, Is::Ended);
+    let ended = matches!(is, Is::Ended(_));
     let (statuses, status_warnings) =
         ProgramStatuses::of_mux(terminal.statuses, key.id.get(), ended)?;
     warnings.extend(status_warnings);
@@ -1808,7 +1817,7 @@ mod tests {
             .iter()
             .map(|(key, terminal)| match &terminal.is {
                 Is::Running { doing, .. } => (key.id.get(), doing.as_ref()),
-                Is::Ended => panic!("terminal {} runs", key.id),
+                Is::Ended(_) => panic!("terminal {} runs", key.id),
             })
             .collect();
         let going = Doing::Going {
@@ -2065,7 +2074,7 @@ mod tests {
             .iter()
             .map(|(key, terminal)| match &terminal.is {
                 Is::Running { front, .. } => front.as_ref().map(|front| front.pid.get()),
-                Is::Ended => panic!("terminal {} runs", key.id),
+                Is::Ended(_) => panic!("terminal {} runs", key.id),
             })
             .collect();
         assert_eq!(fronts, [None, None, None, Some(42)]);

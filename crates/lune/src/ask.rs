@@ -1294,6 +1294,7 @@ mod tests {
                 },
             ),
             arranged: None,
+            flow: None,
         };
         Target::View(machine, row)
     }
@@ -1596,6 +1597,7 @@ mod tests {
                     pull_request: None,
                 }),
                 arranged: None,
+                flow: None,
             },
         );
         let browser = Ask::new(6, &browser_row, Path::new("/w"));

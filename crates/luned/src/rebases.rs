@@ -133,6 +133,11 @@ enum Onto {
 
 struct NamedBranch(String);
 
+pub(crate) struct RebasedOnto {
+    pub rebased: Rebased,
+    pub onto_ref: String,
+}
+
 pub(crate) fn rebase_at(dir: &Directory, expected: Option<&Said>) -> Attempt {
     let until = Instant::now() + RUNNING_MAX;
     let top = match toplevel(dir, until) {
@@ -144,7 +149,7 @@ pub(crate) fn rebase_at(dir: &Directory, expected: Option<&Said>) -> Attempt {
             };
         }
     };
-    let outcome = rebase_in(&top, expected, until);
+    let outcome = rebase_in(&top, expected, until).map(|named| named.rebased);
     Attempt {
         top: Some(top),
         outcome,
@@ -156,11 +161,20 @@ fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased
     rebase_at(dir, expected).outcome
 }
 
+pub(crate) fn rebase_naming_onto(
+    dir: &Directory,
+    expected: Option<&Said>,
+) -> Result<RebasedOnto, Unrebased> {
+    let until = Instant::now() + RUNNING_MAX;
+    let top = toplevel(dir, until).map_err(Unrebased::Refused)?;
+    rebase_in(&top, expected, until)
+}
+
 fn rebase_in(
     top: &Directory,
     expected: Option<&Said>,
     until: Instant,
-) -> Result<Rebased, Unrebased> {
+) -> Result<RebasedOnto, Unrebased> {
     let top = top.as_str();
     let Ready {
         branch,
@@ -184,7 +198,11 @@ fn rebase_in(
             })
         }
     };
-    Ok(Rebased { branch, onto, came })
+    assert!(!reference.is_empty(), "a rebase names the ref it went onto");
+    Ok(RebasedOnto {
+        rebased: Rebased { branch, onto, came },
+        onto_ref: reference,
+    })
 }
 
 fn toplevel(dir: &Directory, until: Instant) -> Result<Directory, String> {
@@ -531,6 +549,14 @@ impl Unrebased {
         match self {
             Unrebased::Refused(why) => Status::failed_precondition(why),
             Unrebased::InDoubt(why) => Status::aborted(why),
+        }
+    }
+}
+
+impl fmt::Display for Unrebased {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unrebased::Refused(why) | Unrebased::InDoubt(why) => f.write_str(why),
         }
     }
 }
