@@ -220,6 +220,23 @@ impl Window {
         self.screen().iter().any(|line| line.contains(text))
     }
 
+    pub fn seats(&self, view: &str) -> bool {
+        let want = format!(" {view}");
+        self.screen().iter().any(|line| {
+            let sidebar = in_sidebar(line);
+            sidebar.starts_with('▌')
+                && !sidebar.starts_with("▌ ▾ ")
+                && !sidebar.starts_with("▌ ▸ ")
+                && sidebar.contains(&want)
+        })
+    }
+
+    pub fn seated(&self, view: &str) {
+        eventually(&format!("the sidebar seats {view}"), || {
+            self.seats(view).then_some(())
+        });
+    }
+
     pub fn spot_of(&self, text: &str) -> (usize, usize) {
         eventually(&format!("lune shows {text:?}"), || {
             let screen = self.screen();
@@ -242,6 +259,13 @@ impl Window {
         });
         decoded.collect()
     }
+}
+
+pub fn in_sidebar(line: &str) -> String {
+    line.chars()
+        .skip_while(|it| *it == '│')
+        .take_while(|it| *it != '│')
+        .collect()
 }
 
 pub fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {
@@ -473,28 +497,13 @@ fn a_new_worktree_on_a_view_in_a_folder_of_a_project_shows_that_folder_in_the_pr
     );
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar seats its view", || {
-        window
-            .screen()
-            .iter()
-            .any(|line| {
-                let sidebar: String = line
-                    .chars()
-                    .skip_while(|it| *it == '│')
-                    .take_while(|it| *it != '│')
-                    .collect();
-                sidebar.starts_with('▌') && sidebar.contains(" work/main")
-            })
-            .then_some(())
-    });
+    window.seated("work/main");
     window.send(SPLIT);
     eventually("a second view opens in work", || {
         (shown(&owned, &dir.path)?.terminals.len() == 2).then_some(())
     });
     window.send(CD_FEAT);
-    eventually("the view works in feat", || {
-        window.shows(" work/feat ").then_some(())
-    });
+    window.seated("work/feat");
     window.send("\x1b[97;3unw");
     eventually("lune shows feat", || shown(&owned, &feat));
     let projects = projects_of(&owned);

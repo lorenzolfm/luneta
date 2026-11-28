@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::said::Said;
 use lune_waits::eventually;
 use luned::Directory;
@@ -462,6 +463,7 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
     let mut window = Window::open(host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
     window.send(SAYS_WHERE);
+    window.seated("work/main");
     eventually("the view's row says its branch", || {
         window.shows(" fix").then_some(())
     });
@@ -471,6 +473,21 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
         window.shows(clean).then_some(())
     });
     assert!(!asked.exists(), "a clean rebase starts no agent");
+    let work_dir = fs::canonicalize(&dir.path).unwrap();
+    let status = host
+        .host()
+        .git_statuses
+        .into_iter()
+        .find(|status| status.dir == work_dir.to_str().unwrap())
+        .and_then(|status| GitStatus::of_api(&status));
+    assert!(
+        matches!(
+            status,
+            Some(GitStatus::Checkout { head: Head::Branch { ref name, .. }, .. })
+                if name.as_str() == "fix"
+        ),
+        "luned refreshed the branch status before reporting rebase completion: {status:?}"
+    );
 
     commit(&dir.path, "theirs", "mine\n");
     commit(&up, "theirs", "yours\n");

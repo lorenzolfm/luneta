@@ -246,7 +246,14 @@ pub async fn serve(
         owns,
         SWEEP,
     )?;
-    git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
+    let (git, git_refreshes) = git::Refresher::pair(wake_git.clone());
+    git::follow(
+        core.clone(),
+        wake_git,
+        git_woken,
+        git_refreshes,
+        GIT_STATUS_SWEEP,
+    )?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests {
         pending: PENDING_CHECKS_SWEEP,
@@ -283,6 +290,7 @@ pub async fn serve(
         bridges,
         layouts,
         listings,
+        git,
     });
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
@@ -630,6 +638,7 @@ struct Host {
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
     listings: Arc<work::Listings>,
+    git: git::Refresher,
 }
 
 #[tonic::async_trait]
@@ -1042,8 +1051,10 @@ impl Daemon for Host {
             let answer = daemon.rebase(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
+        let git = self.git.clone();
         let answer = late(move || {
             let rebased = rebases::rebase(&dir, branch.as_ref());
+            git.refresh(&dir);
             let rebased = rebased.map_err(rebases::Unrebased::status)?;
             Ok(rebased.to_api())
         });
@@ -2084,6 +2095,7 @@ mod tests {
     fn a_watch_timeout_answers_unchanged_only_after_the_core_parked_it() {
         let host_with = |core| {
             let (layouts, _laid) = mpsc::sync_channel(1);
+            let (git, _refreshes) = crate::git::Refresher::pair(mpsc::sync_channel(1).0);
             Host {
                 started: SystemTime::now(),
                 claude_folder: None,
@@ -2093,6 +2105,7 @@ mod tests {
                 bridges: Arc::default(),
                 layouts,
                 listings: Arc::default(),
+                git,
             }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()

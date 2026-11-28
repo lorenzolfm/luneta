@@ -187,6 +187,11 @@ impl FollowDirs {
     }
 
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -801,6 +806,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let before = known.branch(&dir).map(str::to_owned);
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
+                known.update_local();
                 let _ = answer.send(
                     why.filter(|_| changed)
                         .and_then(|why| why.said(dir.as_str())),
@@ -811,6 +817,7 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 {
                     wake(&wakes.github);
                 }
+                continue;
             }
             Command::PullRequests(now) => known.pull_requests = now,
             Command::Topics(now) => known.topics = now,
