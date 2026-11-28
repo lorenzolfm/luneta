@@ -6050,7 +6050,7 @@ mod tests {
         let pushed_head = head_oid(work_str).unwrap();
         let hook = work.join(".git").join("hooks").join("pre-push");
         let staged = std::process::Command::new("sh")
-            .args(["-c", "printf '#!/bin/sh\\ngit commit -q --allow-empty -m raced\\n' > \"$1\" && chmod +x \"$1\"", "sh"])
+            .args(["-c", "printf '#!/bin/sh\\ngit -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q --allow-empty -m raced\\n' > \"$1\" && chmod +x \"$1\"", "sh"])
             .arg(&hook)
             .status()
             .unwrap();
