@@ -597,6 +597,7 @@ impl Core {
         let (on, key) = terminal.to_api();
         let change = Change::CloseView(CloseView {
             terminal: Some(key),
+            view: None,
         });
         self.changed(on, change).await
     }

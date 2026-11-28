@@ -1558,7 +1558,12 @@ fn a_view_closes_by_its_terminal_s_whole_key_and_the_last_takes_its_worktree() {
     let [stays] = beside.terminals()[..] else {
         panic!("the other holds its first alone")
     };
-    let close = |terminal| Change::CloseView(CloseView { terminal });
+    let close = |terminal| {
+        Change::CloseView(CloseView {
+            terminal,
+            view: None,
+        })
+    };
 
     let mut before = second_key;
     before
@@ -1755,6 +1760,7 @@ fn a_close_luned_cannot_keep_is_in_doubt_only_once_the_mux_closed_a_terminal() {
         let close = match closing {
             "view" => Change::CloseView(CloseView {
                 terminal: Some(key),
+                view: None,
             }),
             "worktree" => Change::CloseWorktree(CloseWorktree {
                 worktree,
@@ -3905,4 +3911,118 @@ fn show_refuses_non_monotonic_asked_numbers_and_awaited_size_while_stranded() {
             other => panic!("expected refusal for awaited size while stranded, got {other:?}"),
         }
     });
+}
+
+#[test]
+fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_view_id() {
+    use luned::api::worktree::view::Kind;
+
+    let owned = Owned::new();
+    let (_, worktree, _) = two_in_a_clone(&owned, "clone");
+    let mut shown = Shown::new(&owned, worktree, 100, 30);
+    let [terminal_id] = shown.terminals()[..] else {
+        panic!("a worktree is made with one terminal");
+    };
+    shown.until("initial terminal key is ready", |laid| {
+        laid.views
+            .iter()
+            .find(|view| view.id == terminal_id)
+            .and_then(key)
+            .is_some()
+    });
+    let terminal_key = shown.key_of(terminal_id);
+
+    shown.ask(Event::Browser(show_request::Browser {
+        url: Some("https://example.com".to_owned()),
+    }));
+    let opened = shown.until("browser opens in layout", |laid| {
+        laid.views
+            .iter()
+            .any(|view| matches!(&view.found, Some(Found::Browser(_))))
+    });
+    let browser_id = opened
+        .views
+        .iter()
+        .find_map(|view| matches!(&view.found, Some(Found::Browser(_))).then_some(view.id))
+        .unwrap();
+
+    eventually("watch lists terminal and browser in layout order", || {
+        let wt = watched_worktree(&owned, worktree)?;
+        let legacy_ok = wt.terminals.len() == 1 && wt.terminals[0].id == terminal_id;
+        let views_ok = wt.views.len() == 2
+            && matches!(&wt.views[0].kind, Some(Kind::Terminal(t)) if t.id == terminal_id)
+            && matches!(
+                &wt.views[1].kind,
+                Some(Kind::Browser(b))
+                    if b.id == browser_id && b.url.as_deref() == Some("https://example.com")
+            );
+        (legacy_ok && views_ok).then_some(())
+    });
+
+    shown.ask(Event::Navigate(show_request::Navigate {
+        view: browser_id,
+        url: Some("https://example.com/docs".to_owned()),
+    }));
+    shown.until("browser layout reflects navigated url", |laid| {
+        laid.views.iter().any(|view| {
+            view.id == browser_id
+                && matches!(
+                    &view.found,
+                    Some(Found::Browser(browser))
+                        if browser.url.as_deref() == Some("https://example.com/docs")
+                )
+        })
+    });
+    eventually("watch updates browser url after navigate", || {
+        let wt = watched_worktree(&owned, worktree)?;
+        wt.views.iter().any(|view| {
+            matches!(
+                &view.kind,
+                Some(Kind::Browser(b))
+                    if b.id == browser_id && b.url.as_deref() == Some("https://example.com/docs")
+            )
+        })
+        .then_some(())
+    });
+
+    let both = asked(
+        &owned.host,
+        Change::CloseView(CloseView {
+            terminal: Some(terminal_key),
+            view: Some(browser_id),
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(both.code(), Code::InvalidArgument, "{both:?}");
+
+    assert_eq!(
+        asked(
+            &owned.host,
+            Change::CloseView(CloseView {
+                terminal: None,
+                view: Some(browser_id)
+            })
+        )
+        .unwrap(),
+        None
+    );
+    eventually(
+        "watch removes closed browser view while terminal stays",
+        || {
+            let wt = watched_worktree(&owned, worktree)?;
+            let only_terminal = wt.views.len() == 1
+                && matches!(&wt.views[0].kind, Some(Kind::Terminal(t)) if t.id == terminal_id);
+            only_terminal.then_some(())
+        },
+    );
+
+    let again = asked(
+        &owned.host,
+        Change::CloseView(CloseView {
+            terminal: None,
+            view: Some(browser_id),
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(again.code(), Code::NotFound, "{again:?}");
 }

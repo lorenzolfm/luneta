@@ -837,6 +837,12 @@ pub enum BrowserTarget {
     Folder(Spot),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseTarget {
+    Terminal(TerminalKey),
+    Browser(ViewId),
+}
+
 #[derive(Debug)]
 pub enum Ask {
     Change(Change),
@@ -853,7 +859,7 @@ pub enum Ask {
         worktree: WorktreeId,
         from: TerminalKey,
     },
-    CloseView(TerminalKey),
+    CloseView(CloseTarget),
     OpenBrowser {
         target: BrowserTarget,
         url: Option<BrowserUrl>,
@@ -987,11 +993,21 @@ impl Ask {
                 let from = TerminalKey::of(&from).map_err(field("from"))?;
                 return Ok(Ask::Bring { worktree, from });
             }
-            Asked::CloseView(asked::CloseView { terminal }) => {
-                let terminal = terminal.ok_or("terminal: it names no terminal")?;
-                return TerminalKey::of(&terminal)
-                    .map_err(field("terminal"))
-                    .map(Ask::CloseView);
+            Asked::CloseView(asked::CloseView { terminal, view }) => {
+                return match (terminal, view) {
+                    (Some(terminal), None) => TerminalKey::of(&terminal)
+                        .map_err(field("terminal"))
+                        .map(CloseTarget::Terminal)
+                        .map(Ask::CloseView),
+                    (None, Some(view)) => id("view", view)
+                        .map(ViewId)
+                        .map(CloseTarget::Browser)
+                        .map(Ask::CloseView),
+                    (Some(_), Some(_)) => {
+                        Err("close_view: it names both a terminal and a view".to_owned())
+                    }
+                    (None, None) => Err("terminal: it names no terminal".to_owned()),
+                };
             }
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
                 Change::RenameTerminal {
@@ -4441,5 +4457,64 @@ mod tests {
             },
         );
         assert_eq!(failed.unwrap_err(), "that project has no open worktree");
+    }
+
+    #[test]
+    fn close_view_accepts_either_a_terminal_or_a_browser_view_and_refuses_both_or_neither() {
+        use api::change_projects_request::{Change as Asked, CloseView};
+
+        let key = api::TerminalKey {
+            id: 4,
+            made_at: Some(prost_types::Timestamp::default()),
+        };
+        let terminal = Asked::CloseView(CloseView {
+            terminal: Some(key),
+            view: None,
+        });
+        let ask = Ask::of_api(terminal, |_| panic!("spot must not run")).unwrap();
+        assert!(matches!(
+            ask,
+            Ask::CloseView(CloseTarget::Terminal(k)) if k == TerminalKey::of(&key).unwrap()
+        ));
+
+        let browser = Asked::CloseView(CloseView {
+            terminal: None,
+            view: Some(42),
+        });
+        let ask = Ask::of_api(browser, |_| panic!("spot must not run")).unwrap();
+        assert!(matches!(
+            ask,
+            Ask::CloseView(CloseTarget::Browser(id)) if id == ViewId::of(42).unwrap()
+        ));
+
+        let zero = Asked::CloseView(CloseView {
+            terminal: None,
+            view: Some(0),
+        });
+        assert!(
+            Ask::of_api(zero, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("no id is 0")
+        );
+
+        let both = Asked::CloseView(CloseView {
+            terminal: Some(key),
+            view: Some(42),
+        });
+        assert!(
+            Ask::of_api(both, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("both")
+        );
+
+        let neither = Asked::CloseView(CloseView {
+            terminal: None,
+            view: None,
+        });
+        assert!(
+            Ask::of_api(neither, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("names no terminal")
+        );
     }
 }

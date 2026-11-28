@@ -18,6 +18,7 @@ pub fn route(on: &Machine, view: ViewKey) -> Result<TerminalKey, String> {
     match (view, on) {
         (ViewKey::Terminal(_), Machine::Remote(_)) => Err(NOT_YET.to_owned()),
         (ViewKey::Terminal(key), Machine::Local) => Ok(key),
+        (ViewKey::Browser(_), _) => Err("a browser view runs no terminal".to_owned()),
     }
 }
 

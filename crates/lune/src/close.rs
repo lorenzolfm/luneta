@@ -121,7 +121,7 @@ impl Act {
 
     pub fn takes(&self, terminal: TerminalKey) -> bool {
         match self {
-            Act::View(view) => terminal == view.key(),
+            Act::View(view) => view.terminal_key() == Some(terminal),
             Act::Worktree { views, .. } => views.contains(&terminal),
             Act::Project { .. } => true,
         }
@@ -131,7 +131,9 @@ impl Act {
         match (self, place) {
             (Act::View(view), Place::View(at)) => at.view() == *view,
             (Act::Worktree { worktree, .. }, Place::Worktree(at)) => at.worktree == *worktree,
-            (Act::Worktree { views, .. }, Place::View(at)) => views.contains(&at.view().key()),
+            (Act::Worktree { worktree, .. }, Place::View(at)) => {
+                at.worktree().worktree == *worktree
+            }
             (Act::Project { project, .. }, _) => place.listed().project() == *project,
             (Act::View(_), Place::Session(_) | Place::Worktree(_))
             | (Act::Worktree { .. }, Place::Session(_)) => false,
@@ -194,10 +196,14 @@ impl Ending {
 
 impl Plan {
     pub fn of(act: Act, agents: Result<&[(TerminalKey, Doing)], Untold>) -> Self {
-        let ending = agents.map(|agents| {
-            let taken = agents.iter().filter(|(terminal, _)| act.takes(*terminal));
-            Ending::of(taken.map(|(_, doing)| *doing))
-        });
+        let ending = match &act {
+            Act::View(ViewKey::Browser(_)) => Ok(Ending::default()),
+            Act::View(ViewKey::Terminal(_)) | Act::Worktree { .. } | Act::Project { .. } => agents
+                .map(|agents| {
+                    let taken = agents.iter().filter(|(terminal, _)| act.takes(*terminal));
+                    Ending::of(taken.map(|(_, doing)| *doing))
+                }),
+        };
         Plan { act, ending }
     }
 
@@ -217,7 +223,7 @@ mod tests {
     use super::*;
 
     fn at(id: u32) -> TerminalKey {
-        ViewKey::terminal(id).key()
+        ViewKey::terminal(id).terminal_key().unwrap()
     }
 
     fn planned(act: &Act, agents: &[(u32, Doing)]) -> Plan {
@@ -312,5 +318,40 @@ mod tests {
         let untold = Plan::of(Act::View(ViewKey::terminal(4)), Err(Untold::Away)).question();
         let says = "Close the view? lune cannot tell which agents it ends: luned does not";
         assert!(untold.is_some_and(|asks| asks.starts_with(says)));
+    }
+
+    #[test]
+    fn a_browser_view_close_never_asks_and_a_worktree_close_covers_its_browser_rows() {
+        use crate::sidebar::{ProjectRow, ViewPlace, WorktreePlace};
+
+        let browser = ViewKey::browser(30);
+        let act = Act::View(browser);
+        assert!(!act.takes(at(4)));
+        assert_eq!(planned(&act, &[(4, Doing::Busy)]).question(), None);
+        assert_eq!(Plan::of(act.clone(), Err(Untold::Away)).question(), None);
+
+        let worktree = WorktreeId::of(31).unwrap();
+        let other = WorktreeId::of(32).unwrap();
+        let project = ProjectRow::new("lune", 6);
+        let place_in = |wt, view| {
+            Place::View(ViewPlace::new(
+                WorktreePlace {
+                    project: project.clone(),
+                    worktree: wt,
+                },
+                view,
+            ))
+        };
+        assert!(act.closes(&place_in(worktree, browser)));
+        assert!(!act.closes(&place_in(worktree, ViewKey::browser(31))));
+        assert!(!act.closes(&place_in(worktree, ViewKey::terminal(4))));
+
+        let wt_act = Act::Worktree {
+            worktree,
+            views: vec![at(4)],
+            seen: vec![ViewId::of(4).unwrap()],
+        };
+        assert!(wt_act.closes(&place_in(worktree, browser)));
+        assert!(!wt_act.closes(&place_in(other, browser)));
     }
 }

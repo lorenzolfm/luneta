@@ -781,6 +781,19 @@ message Worktree {
   repeated Terminal terminals = 8;
   google.protobuf.Timestamp used_at = 9;
   optional Arrangement arranged = 10;
+  repeated View views = 11;
+
+  message View {
+    oneof kind {
+      Terminal terminal = 1;
+      Browser browser = 2;
+    }
+  }
+}
+
+message Browser {
+  fixed64 id = 1;
+  optional string url = 2;
 }
 
 message Terminal {
@@ -946,6 +959,7 @@ message ChangeProjectsRequest {
 
   message CloseView {
     TerminalKey terminal = 1;
+    optional fixed64 view = 2;
   }
 
   message OpenBrowser {

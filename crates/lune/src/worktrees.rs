@@ -401,7 +401,18 @@ pub fn closed(
 pub fn closed_view(path: &Path, machine: &Machine, terminal: TerminalKey) -> Result<(), Unchanged> {
     let (id, made_at) = (terminal.id.get(), Some(terminal.made.into()));
     let terminal = Some(luned::api::TerminalKey { id, made_at });
-    let change = Change::CloseView(CloseView { terminal });
+    let change = Change::CloseView(CloseView {
+        terminal,
+        view: None,
+    });
+    changed_on(path, on(machine), change).map(drop)
+}
+
+pub fn closed_browser_view(path: &Path, machine: &Machine, view: ViewId) -> Result<(), Unchanged> {
+    let change = Change::CloseView(CloseView {
+        terminal: None,
+        view: Some(view.get()),
+    });
     changed_on(path, on(machine), change).map(drop)
 }
 

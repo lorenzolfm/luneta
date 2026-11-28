@@ -227,6 +227,12 @@ fn commands_of(held: &mut Held) -> Vec<Vec<Option<String>>> {
         };
         for worktree in worktrees {
             let terminals = std::mem::take(&mut worktree.terminals);
+            let views = std::mem::take(&mut worktree.views);
+            assert_eq!(
+                views.len(),
+                terminals.len(),
+                "each terminal is also listed as a view"
+            );
             commands.push(terminals.into_iter().map(|it| it.command).collect());
         }
     }
@@ -271,6 +277,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_luned_starts_again() {
                         folder: text(&clone.join("main")),
                         seen: Some(Seen::Stage(Stage::Working.into())),
                         terminals: Vec::new(),
+                        views: Vec::new(),
                         used_at: None,
                         arranged: Some(api::Arrangement::Tabs.into()),
                     }],
@@ -291,6 +298,7 @@ fn projects_and_worktrees_are_watched_and_come_back_when_luned_starts_again() {
                     folder: text(&vault),
                     seen: Some(Seen::Stage(Stage::NoBranch.into())),
                     terminals: Vec::new(),
+                    views: Vec::new(),
                     used_at: None,
                     arranged: None,
                 })),

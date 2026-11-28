@@ -5,7 +5,9 @@ use lune_protocol::shell::Doing;
 use lune_protocol::v1::{self as api, terminal};
 
 use crate::mux::TerminalKey;
-use crate::projects::{Arranged, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId};
+use crate::projects::{
+    Arranged, BrowserUrl, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId,
+};
 use crate::projects::{CLONE_WORKTREES_MAX, VIEWS_MAX, WORKTREES_MAX, WorktreeId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,10 +16,48 @@ pub struct Worktree {
     pub name: String,
     pub folder: Dir,
     pub tab: u32,
-    pub terminals: Vec<Terminal>,
+    pub views: Vec<View>,
     pub used: Option<Used>,
     pub seen: Seen,
     pub arranged: Option<Arranged>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Browser {
+    pub id: ViewId,
+    pub url: Option<BrowserUrl>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum View {
+    Terminal(Terminal),
+    Browser(Browser),
+}
+
+impl View {
+    #[must_use]
+    pub fn id(&self) -> ViewId {
+        match self {
+            View::Terminal(terminal) => terminal.id,
+            View::Browser(browser) => browser.id,
+        }
+    }
+
+    #[must_use]
+    pub fn terminal(&self) -> Option<&Terminal> {
+        match self {
+            View::Terminal(terminal) => Some(terminal),
+            View::Browser(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn browser(&self) -> Option<&Browser> {
+        match self {
+            View::Browser(browser) => Some(browser),
+            View::Terminal(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,10 +172,19 @@ impl Terminal {
 }
 
 impl Worktree {
+    pub fn terminals(&self) -> impl Iterator<Item = &Terminal> {
+        self.views.iter().filter_map(View::terminal)
+    }
+
+    pub fn browsers(&self) -> impl Iterator<Item = &Browser> {
+        self.views.iter().filter_map(View::browser)
+    }
+
     #[must_use]
     pub fn titles(&self) -> BTreeMap<ViewId, String> {
-        let titled = self.terminals.iter();
-        titled.filter_map(|it| Some((it.id, it.title()?))).collect()
+        self.terminals()
+            .filter_map(|it| Some((it.id, it.title()?)))
+            .collect()
     }
 }
 
@@ -154,25 +203,38 @@ impl Project {
 
     #[must_use]
     pub fn terminal_key(&self, view: ViewId) -> Option<TerminalKey> {
-        let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
+        let mut held = self.worktrees().iter().flat_map(Worktree::terminals);
         held.find(|it| it.id == view)?.key()
     }
 
     #[must_use]
     pub fn first_keyed(&self) -> Option<TerminalKey> {
-        let mut held = self.worktrees().iter().flat_map(|it| &it.terminals);
+        let mut held = self.worktrees().iter().flat_map(Worktree::terminals);
         held.find_map(Terminal::key)
     }
 
     #[must_use]
     pub fn view_of(&self, terminal: TerminalKey) -> Option<(WorktreeId, ViewId)> {
         self.worktrees().iter().find_map(|worktree| {
-            let held = worktree
-                .terminals
-                .iter()
-                .find(|it| it.key() == Some(terminal))?;
+            let held = worktree.terminals().find(|it| it.key() == Some(terminal))?;
             Some((worktree.id, held.id))
         })
+    }
+
+    #[must_use]
+    pub fn browser_of(&self, view: ViewId) -> Option<(WorktreeId, ViewId)> {
+        self.worktrees().iter().find_map(|worktree| {
+            let held = worktree.browsers().find(|it| it.id == view)?;
+            Some((worktree.id, held.id))
+        })
+    }
+
+    #[must_use]
+    pub fn view_kind(&self, view: ViewId) -> Option<&View> {
+        self.worktrees()
+            .iter()
+            .flat_map(|it| &it.views)
+            .find(|it| it.id() == view)
     }
 }
 
@@ -188,7 +250,7 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
             "they hold {count} worktrees, over the {WORKTREES_MAX} kept"
         ));
     }
-    let views: usize = worktrees.iter().map(|it| it.terminals.len()).sum();
+    let views: usize = worktrees.iter().map(|it| it.views.len()).sum();
     if views > VIEWS_MAX {
         return Err(format!(
             "they hold {views} views, over the {VIEWS_MAX} kept"
@@ -197,7 +259,7 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
     let mut keyed = BTreeSet::new();
     for key in worktrees
         .iter()
-        .flat_map(|it| &it.terminals)
+        .flat_map(|it| it.terminals())
         .filter_map(Terminal::key)
     {
         if !keyed.insert(key) {
@@ -287,24 +349,63 @@ fn found_of(terminal: &api::Terminal) -> Result<Found, String> {
     }
 }
 
+fn parse_terminal(terminal: &api::Terminal, named: &str) -> Result<Terminal, String> {
+    let held = ViewId::of(terminal.id);
+    let id = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
+    let found = found_of(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
+    let cwd = Dir::parse(&terminal.folder);
+    let cwd = cwd.map_err(|why| format!("terminal {id}'s folder: {why}"))?;
+    Ok(Terminal { id, cwd, found })
+}
+
+fn parse_browser(browser: &api::Browser, named: &str) -> Result<Browser, String> {
+    let held = ViewId::of(browser.id);
+    let id = held.ok_or_else(|| format!("a browser of worktree {named} has id 0"))?;
+    let url = browser
+        .url
+        .as_deref()
+        .map(BrowserUrl::parse)
+        .transpose()
+        .map_err(|why| format!("browser {id}'s url: {why}"))?;
+    Ok(Browser { id, url })
+}
+
 fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, String> {
     let named = &worktree.name;
     let id = WorktreeId::of(worktree.id);
     let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
-    let mut terminals = Vec::with_capacity(worktree.terminals.len());
-    for terminal in &worktree.terminals {
-        let held = ViewId::of(terminal.id);
-        let id = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
-        let found = found_of(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
-        let cwd = Dir::parse(&terminal.folder);
-        let cwd = cwd.map_err(|why| format!("terminal {id}'s folder: {why}"))?;
-        terminals.push(Terminal { id, cwd, found });
-    }
-    assert_eq!(
-        terminals.len(),
-        worktree.terminals.len(),
-        "every terminal said is read"
-    );
+    let views = if worktree.views.is_empty() {
+        let mut views = Vec::with_capacity(worktree.terminals.len());
+        for terminal in &worktree.terminals {
+            views.push(View::Terminal(parse_terminal(terminal, named)?));
+        }
+        assert_eq!(
+            views.len(),
+            worktree.terminals.len(),
+            "every terminal said is read"
+        );
+        views
+    } else {
+        let mut views = Vec::with_capacity(worktree.views.len());
+        for view in &worktree.views {
+            let parsed = match view.kind.as_ref() {
+                Some(api::worktree::view::Kind::Terminal(terminal)) => {
+                    View::Terminal(parse_terminal(terminal, named)?)
+                }
+                Some(api::worktree::view::Kind::Browser(browser)) => {
+                    View::Browser(parse_browser(browser, named)?)
+                }
+                None => {
+                    return Err(format!(
+                        "a view of worktree {named} says not what kind it is"
+                    ));
+                }
+            };
+            views.push(parsed);
+        }
+        assert_eq!(views.len(), worktree.views.len(), "every view said is read");
+        views
+    };
     let folder = Dir::parse(&worktree.folder);
     let folder = folder.map_err(|why| format!("worktree {named}'s folder: {why}"))?;
     let used = worktree.used_at.map(Used::of_api).transpose();
@@ -319,7 +420,7 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
         name,
         folder,
         tab,
-        terminals,
+        views,
         used,
         seen,
         arranged,
@@ -620,7 +721,7 @@ mod tests {
             },
         ];
         let project = read(&typed).unwrap();
-        let terminals = &project.worktrees()[0].terminals;
+        let terminals: Vec<&Terminal> = project.worktrees()[0].terminals().collect();
         assert!(matches!(
             &terminals[0].found,
             Found::Running {
@@ -794,5 +895,82 @@ mod tests {
         let over = format!("it lists {over} worktrees not open, over the {max} a clone holds");
         let over = format!("{clone}: {over}");
         assert_eq!(listing(many(max + 1)), Err(over));
+    }
+
+    #[test]
+    fn worktree_views_preserve_mixed_terminal_and_browser_order_and_reject_bad_browsers() {
+        use api::worktree::{View as ApiView, view::Kind};
+
+        let term_view = |t| ApiView {
+            kind: Some(Kind::Terminal(t)),
+        };
+        let browser_view = |id, url: Option<&str>| ApiView {
+            kind: Some(Kind::Browser(api::Browser {
+                id,
+                url: url.map(str::to_owned),
+            })),
+        };
+        let mut mixed = kept();
+        rows(&mut mixed)[0].views = vec![
+            term_view(terminal(21, terminal::Found::Key(key(4)), Some("Fixing"))),
+            browser_view(30, Some("https://example.com/docs")),
+            browser_view(31, None),
+            term_view(terminal(22, terminal::Found::Lost(()), None)),
+        ];
+        let project = read(&mixed).unwrap();
+        let wt = &project.worktrees()[0];
+        let ids: Vec<u64> = wt.views.iter().map(|it| it.id().get()).collect();
+        assert_eq!(ids, [21, 30, 31, 22]);
+        assert!(matches!(
+            &wt.views[1],
+            View::Browser(Browser { id, url: Some(url) })
+                if id.get() == 30 && url.as_str() == "https://example.com/docs"
+        ));
+        assert!(matches!(
+            &wt.views[2],
+            View::Browser(Browser { id, url: None }) if id.get() == 31
+        ));
+        let browser_30 = ViewId::of(30).unwrap();
+        assert_eq!(
+            project.browser_of(browser_30),
+            Some((worktree(11), browser_30))
+        );
+        assert_eq!(project.browser_of(ViewId::of(21).unwrap()), None);
+        assert!(matches!(
+            project.view_kind(browser_30),
+            Some(View::Browser(_))
+        ));
+        assert!(matches!(
+            project.view_kind(ViewId::of(21).unwrap()),
+            Some(View::Terminal(_))
+        ));
+        assert_eq!(
+            wt.titles()
+                .get(&ViewId::of(21).unwrap())
+                .map(String::as_str),
+            Some("Fixing")
+        );
+        assert_eq!(wt.titles().get(&browser_30), None);
+
+        let bad_cases = [
+            ApiView { kind: None },
+            browser_view(0, None),
+            browser_view(30, Some("not-a-url")),
+            browser_view(30, Some("ftp://example.com")),
+        ];
+        for bad in bad_cases {
+            let mut invalid = kept();
+            rows(&mut invalid)[0].views = vec![bad.clone()];
+            assert!(read(&invalid).is_err(), "{bad:?}");
+        }
+
+        let mut too_many = kept();
+        let over = u64::try_from(VIEWS_MAX).unwrap();
+        rows(&mut too_many)[0].views = (1..=over).map(|id| browser_view(id, None)).collect();
+        let expected = format!(
+            "they hold {} views, over the {VIEWS_MAX} kept",
+            VIEWS_MAX + 1
+        );
+        assert_eq!(read(&too_many), Err(expected));
     }
 }

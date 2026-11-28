@@ -4,6 +4,7 @@ use std::num::NonZeroU32;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{
     self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId,
@@ -805,7 +806,7 @@ pub struct ProjectTarget {
 enum Offer<'t> {
     SearchSkills(&'t ViewRow),
     Skill(&'t ViewRow, &'static str),
-    Last(&'t ViewRow, Last),
+    Last(&'t ViewRow, TerminalKey, Last),
     FixChecks(&'t ViewRow),
     NewView(&'t ViewRow),
     NewWelcome(&'t ViewRow),
@@ -941,8 +942,12 @@ impl Target {
             (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::View(_, row)) => {
                 Offer::Skill(row, action.skill()?)
             }
-            (Action::FixLast, Target::View(_, row)) => Offer::Last(row, Last::Fix),
-            (Action::ExplainLast, Target::View(_, row)) => Offer::Last(row, Last::Explain),
+            (Action::FixLast, Target::View(_, row)) => {
+                Offer::Last(row, row.place.view().terminal_key()?, Last::Fix)
+            }
+            (Action::ExplainLast, Target::View(_, row)) => {
+                Offer::Last(row, row.place.view().terminal_key()?, Last::Explain)
+            }
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
             (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
@@ -1004,6 +1009,11 @@ impl Target {
             }
             (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
             (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
+            (Action::BriefHighlighted, Target::View(_, row))
+                if row.place.view().terminal_key().is_none() =>
+            {
+                return None;
+            }
             (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
             (Action::Ask, _) => Offer::Ask,
             (Action::FileIssue, _) => Offer::FileIssue(self.repository()?),
@@ -1746,9 +1756,10 @@ impl Menu {
                 Ok(wants) => stays(Stage::Opening { keys }, wants),
                 Err(reason) => wrong(reason),
             },
-            Offer::Last(row, last) => match row.ended() {
+            Offer::Last(row, terminal, last) => match row.ended() {
                 Ok((beside, ended)) => {
-                    let (session, view) = (beside.session.clone(), beside.view);
+                    let session = beside.session.clone();
+                    let view = ViewKey::Terminal(terminal);
                     let wants = Wants::Printed {
                         session,
                         view,
@@ -5364,7 +5375,7 @@ mod tests {
     }
 
     fn at(id: u32) -> lune_domain::mux::TerminalKey {
-        ViewKey::terminal(id).key()
+        ViewKey::terminal(id).terminal_key().unwrap()
     }
 
     fn plan(agents: Vec<(u32, Doing)>) -> Plan {
@@ -6146,6 +6157,65 @@ mod tests {
             let (menu, wants) = stays(pulling_on(row, 'r').pulled(found(At::Unopened)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(menu.target(), &Target::Machine(vps()));
+        }
+    }
+
+    #[test]
+    fn a_browser_view_row_offers_view_actions_and_omits_terminal_only_ones() {
+        let worktree = WorktreePlace {
+            project: ProjectRow::new("lune", 1),
+            worktree: WorktreeId::of(2).unwrap(),
+        };
+        let place = ViewPlace::new(worktree, ViewKey::browser(30));
+        let folder = Folder {
+            dir: directory("/w/lune/main"),
+            branch: Said::new("main".to_owned()),
+            repository: Some("/w/lune".to_owned()),
+            pull_request: None,
+        };
+        let row = ViewRow {
+            place,
+            terminal: None,
+            cwd: Cwd::At(folder),
+            ran: Ran::Unhooked,
+            arranged: Some(Arranged::Tabs),
+        };
+        let target = Target::View(Machine::Local, row);
+        for allowed in [
+            Action::CloseView,
+            Action::NewView,
+            Action::NewBrowser,
+            Action::NewWelcome,
+            Action::NewReview,
+            Action::ShowPanes,
+            Action::SearchSkills,
+            Action::Review,
+            Action::IllegalStates,
+            Action::TigerStyle,
+            Action::FixChecks,
+            Action::NewWorktree,
+            Action::NewMachine,
+            Action::DeleteMerged,
+            Action::Rebase,
+            Action::BriefEvery,
+            Action::BriefThis,
+            Action::Ask,
+            Action::FileIssue,
+            Action::Quit,
+        ] {
+            assert!(target.fits(allowed), "{allowed:?} should fit a browser row");
+        }
+        for omitted in [
+            Action::RenameView,
+            Action::FixLast,
+            Action::ExplainLast,
+            Action::BriefHighlighted,
+            Action::ShowTabs,
+        ] {
+            assert!(
+                !target.fits(omitted),
+                "{omitted:?} must not fit a browser row"
+            );
         }
     }
 }

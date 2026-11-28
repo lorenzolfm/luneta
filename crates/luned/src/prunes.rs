@@ -284,11 +284,16 @@ fn terminals(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, Str
         };
         (key, PathBuf::from(&terminal.folder))
     };
-    Ok(worktrees
-        .into_iter()
-        .flat_map(|worktree| &worktree.terminals)
-        .map(terminal)
-        .collect())
+    let mut views = Vec::new();
+    for worktree in worktrees {
+        views.extend(worktree.terminals.iter().map(terminal));
+        for view in &worktree.views {
+            if matches!(view.kind, Some(api::worktree::view::Kind::Browser(_))) {
+                views.push((None, PathBuf::from(&worktree.folder)));
+            }
+        }
+    }
+    Ok(views)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

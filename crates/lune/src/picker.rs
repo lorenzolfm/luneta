@@ -4115,7 +4115,7 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(give_up, Some(Pick::Key(KeyEvent::from(KeyCode::Esc))));
-        let terminal = ViewKey::terminal(1).key();
+        let terminal = ViewKey::terminal(1).terminal_key().unwrap();
         let (worktree, views) = (main_place().worktree, vec![terminal]);
         let act = Act::Worktree {
             worktree,
@@ -4228,7 +4228,7 @@ mod tests {
             scope,
         };
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
-        let terminal = ViewKey::terminal(4).key();
+        let terminal = ViewKey::terminal(4).terminal_key().unwrap();
         let (worktree, views) = (api().worktree, vec![terminal]);
         let act = Act::Worktree {
             worktree,
@@ -4706,7 +4706,12 @@ mod tests {
             scope,
         };
         let act = || Act::View(ViewKey::terminal(4));
-        let plan = |doing: Doing| Plan::of(act(), Ok(&[(ViewKey::terminal(4).key(), doing)]));
+        let plan = |doing: Doing| {
+            Plan::of(
+                act(),
+                Ok(&[(ViewKey::terminal(4).terminal_key().unwrap(), doing)]),
+            )
+        };
         assert_eq!(press(&mut picker, KeyCode::Delete), planning);
         assert_eq!(picker.planned(Ok(plan(Doing::Busy))), Picked::Nothing);
         let asks = |picker: &Picker| said(picker).contains("Close the view? 1 agent, 1 busy");

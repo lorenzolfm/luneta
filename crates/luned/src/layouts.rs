@@ -11,7 +11,7 @@ use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards};
 use lune_domain::projects::{Argv, Arranged, Listed, Opens, WORKTREES_MAX, quoted};
 use lune_domain::projects::{
-    Ask, Browser, BrowserTarget, BrowserUrl, Change, Closing, Dir, Id, Line, Placed,
+    Ask, Browser, BrowserTarget, BrowserUrl, Change, CloseTarget, Closing, Dir, Id, Line, Placed,
 };
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{
@@ -1560,19 +1560,35 @@ impl Layouts {
         Ok(None)
     }
 
-    fn close_view(&mut self, key: TerminalKey) -> Result<Option<Made>, Failed> {
-        let held = self.known.iter().find(|(_, known)| known.key == key);
-        let Some((&terminal, _)) = held else {
-            let id = key.id;
-            return Err(Failed::Gone(format!(
-                "no view holds terminal {id} made then"
-            )));
-        };
-        self.close(terminal.view())?;
-        assert!(
-            !self.known.contains_key(&terminal),
-            "terminal {terminal} is known no more"
-        );
+    fn close_view(&mut self, target: CloseTarget) -> Result<Option<Made>, Failed> {
+        match target {
+            CloseTarget::Terminal(key) => {
+                let held = self.known.iter().find(|(_, known)| known.key == key);
+                let Some((&terminal, _)) = held else {
+                    let id = key.id;
+                    return Err(Failed::Gone(format!(
+                        "no view holds terminal {id} made then"
+                    )));
+                };
+                self.close(terminal.view())?;
+                assert!(
+                    !self.known.contains_key(&terminal),
+                    "terminal {terminal} is known no more"
+                );
+            }
+            CloseTarget::Browser(view) => {
+                let projects = self.kept().map_err(Failed::NotKept)?;
+                if projects.holding_browser(view).is_none() {
+                    return Err(Failed::Gone(format!("no layout holds browser view {view}")));
+                }
+                self.close(view)?;
+                let projects = self.kept().map_err(Failed::NotKept)?;
+                assert!(
+                    projects.holding_browser(view).is_none(),
+                    "browser view {view} left its layout"
+                );
+            }
+        }
         Ok(None)
     }
 
