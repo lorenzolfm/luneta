@@ -2200,6 +2200,13 @@ impl Viewed {
     }
 
     #[must_use]
+    pub fn let_go(&mut self) -> bool {
+        let before = self.layout.pointer;
+        self.layout.pointer = before.let_go();
+        matches!(before, Pointer::Pressed(_) | Pointer::Selecting(_))
+    }
+
+    #[must_use]
     pub(crate) fn pointed(&self, at: Spot) -> Option<Selection> {
         self.layout.pointed(at)
     }
@@ -4120,5 +4127,74 @@ diff --git a/src/lib.rs b/src/lib.rs
             viewed.layout.awaiting.is_none(),
             "losing the stream clears any pending wait"
         );
+    }
+
+    #[test]
+    fn let_go_cancels_active_pointer_captures_while_keeping_shown_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let (events, _heard) = std::sync::mpsc::channel();
+        let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
+        let greeting = Greeting {
+            foreground: None,
+            background: None,
+        };
+        let browser_config = embedded::Config {
+            mode: embedded::Mode::Unsupported,
+            cell: CellPixels {
+                width: NonZeroU16::new(10).unwrap(),
+                height: NonZeroU16::new(20).unwrap(),
+            },
+            colours: Colours::default(),
+        };
+        let mut viewed = Viewed::start(
+            1,
+            dir.path().to_owned(),
+            Machine::Local,
+            worktree(1),
+            size,
+            greeting,
+            None,
+            browser_config,
+            &events,
+        );
+        let one = vec![view(11, (0, 0, 20, 4), Some(1))];
+        assert!(matches!(viewed.heard(laid_in(1, one)), Heeded::Changed));
+        assert!(
+            viewed
+                .layout
+                .framed(whole(1, &["abcdefgh", "ijklmnop"], None))
+                .unwrap()
+        );
+
+        viewed.select_from(spot(2, 1));
+        assert!(viewed.let_go(), "let_go reports clearing an active press");
+        assert_eq!(viewed.layout.pointer, Pointer::Free);
+
+        viewed.select_from(spot(2, 1));
+        viewed.select_to(spot(2, 5));
+        assert!(matches!(viewed.layout.pointer, Pointer::Selecting(_)));
+        assert!(
+            viewed.let_go(),
+            "let_go reports clearing an active selection drag"
+        );
+        assert_eq!(viewed.layout.pointer, Pointer::Free);
+
+        viewed.layout.pointer = Pointer::Sending;
+        assert!(
+            !viewed.let_go(),
+            "clearing Sending does not report a visible selection change"
+        );
+        assert_eq!(viewed.layout.pointer, Pointer::Free);
+
+        viewed.select_from(spot(2, 1));
+        viewed.select_to(spot(2, 5));
+        assert_eq!(viewed.selected().as_deref(), Some("abcde"));
+        let shown = viewed.layout.pointer;
+        assert!(matches!(shown, Pointer::Shown(_)));
+        assert!(
+            !viewed.let_go(),
+            "let_go keeps a completed selection highlight"
+        );
+        assert_eq!(viewed.layout.pointer, shown);
     }
 }

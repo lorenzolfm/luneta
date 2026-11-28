@@ -1,6 +1,5 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
-use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
@@ -173,9 +172,7 @@ enum Selecting {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
-    text_x: u16,
-    text_y: u16,
-    text_width: NonZeroU16,
+    text: NonEmptyRect,
     first_line: usize,
     first: Line<'static>,
     rest: Vec<Line<'static>>,
@@ -183,7 +180,7 @@ struct Snapshot {
 }
 
 impl Snapshot {
-    fn of_range(first_y: u16, last_y: u16, shown: &ShownBody, version: BodyVersion) -> Snapshot {
+    fn of_range(first_y: u16, last_y: u16, shown: &ShownBody) -> Snapshot {
         let text = shown.text();
         let area = text.rect();
         assert!(
@@ -197,31 +194,28 @@ impl Snapshot {
             .split_first()
             .expect("an inclusive row range covers at least one line");
         Snapshot {
-            text_x: text.x(),
-            text_y: text.y(),
-            text_width: text.width(),
+            text,
             first_line,
             first: first.clone(),
             rest: tail.to_vec(),
-            version,
+            version: shown.version(),
         }
     }
 
-    fn of_row(y: u16, shown: &ShownBody, version: BodyVersion) -> Snapshot {
-        Snapshot::of_range(y, y, shown, version)
+    fn of_row(y: u16, shown: &ShownBody) -> Snapshot {
+        Snapshot::of_range(y, y, shown)
     }
 
-    fn of(sweep: Sweep, shown: &ShownBody, version: BodyVersion) -> Snapshot {
+    fn of(sweep: Sweep, shown: &ShownBody) -> Snapshot {
         let (first, last) = sweep.ends();
-        Snapshot::of_range(first.y, last.y, shown, version)
+        Snapshot::of_range(first.y, last.y, shown)
     }
 
-    fn keeps(&self, shown: &ShownBody, version: BodyVersion) -> bool {
-        if self.version != version {
+    fn keeps(&self, shown: &ShownBody) -> bool {
+        if self.version != shown.version() {
             return false;
         }
-        let text = shown.text();
-        if (self.text_x, self.text_y, self.text_width) != (text.x(), text.y(), text.width()) {
+        if self.text != shown.text() {
             return false;
         }
         let end = self.first_line + 1 + self.rest.len();
@@ -238,10 +232,11 @@ impl Snapshot {
 #[derive(Debug)]
 struct ShownBody {
     page: Page,
+    version: BodyVersion,
 }
 
 impl ShownBody {
-    fn new(page: Page) -> Self {
+    fn new(page: Page, version: BodyVersion) -> Self {
         assert!(
             page.area().x() >= 1,
             "a shown ask body leaves room for its one-cell margin"
@@ -251,11 +246,15 @@ impl ShownBody {
             usize::from(page.area().height().get()),
             "each shown row has a page line"
         );
-        Self { page }
+        Self { page, version }
     }
 
     const fn text(&self) -> NonEmptyRect {
         self.page.area()
+    }
+
+    const fn version(&self) -> BodyVersion {
+        self.version
     }
 
     fn hit(&self) -> Rect {
@@ -641,7 +640,6 @@ impl Ask {
 
     pub fn mouse(&mut self, mouse: MouseEvent) -> Mouse {
         let at = Position::new(mouse.column, mouse.row);
-        let version = self.body_version();
         let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
             return Mouse::Ignored;
         };
@@ -649,7 +647,7 @@ impl Ask {
             MouseEventKind::Down(MouseButton::Left) => {
                 if body.hit().contains(at) {
                     let from = body.text().clamp(at);
-                    let snapshot = Box::new(Snapshot::of_row(from.y, body, version));
+                    let snapshot = Box::new(Snapshot::of_row(from.y, body));
                     *selecting = Selecting::Pressed { from, snapshot };
                     Mouse::Started
                 } else {
@@ -667,14 +665,14 @@ impl Ask {
                     let to = body.text().clamp(at);
                     if to != from {
                         let sweep = Sweep::new(from, to, body.text());
-                        let snapshot = Box::new(Snapshot::of(sweep, body, version));
+                        let snapshot = Box::new(Snapshot::of(sweep, body));
                         *selecting = Selecting::Sweeping { sweep, snapshot };
                     }
                     Mouse::Active
                 }
                 Selecting::Sweeping { sweep, snapshot } => {
                     sweep.reach(at, body.text());
-                    **snapshot = Snapshot::of(*sweep, body, version);
+                    **snapshot = Snapshot::of(*sweep, body);
                     Mouse::Active
                 }
                 Selecting::Still | Selecting::Swept { .. } => Mouse::Ignored,
@@ -702,7 +700,7 @@ impl Ask {
                 let Some(excerpt) = Excerpt::of(sweep.text(&body.page)) else {
                     return Mouse::Active;
                 };
-                let snapshot = Box::new(Snapshot::of(sweep, body, version));
+                let snapshot = Box::new(Snapshot::of(sweep, body));
                 *selecting = Selecting::Swept { sweep, snapshot };
                 Mouse::Copied(excerpt)
             }
@@ -855,8 +853,7 @@ impl Ask {
             body_rows <= box_area.height.saturating_sub(2),
             "body rows fit inside the box borders"
         );
-        let shown = ShownBody::new(body.into_page(text));
-        let version = self.body_version();
+        let shown = ShownBody::new(body.into_page(text), self.body_version());
         let selecting = match std::mem::take(&mut self.drawn) {
             DrawnAsk::Unshown => Selecting::Still,
             DrawnAsk::Shown { selecting, .. } => match selecting {
@@ -864,7 +861,7 @@ impl Ask {
                 Selecting::Pressed { ref snapshot, .. }
                 | Selecting::Sweeping { ref snapshot, .. }
                 | Selecting::Swept { ref snapshot, .. }
-                    if !snapshot.keeps(&shown, version) =>
+                    if !snapshot.keeps(&shown) =>
                 {
                     Selecting::Still
                 }
@@ -1853,5 +1850,100 @@ mod tests {
             )),
             Mouse::Ignored
         );
+    }
+
+    #[test]
+    fn mid_frame_mouse_events_and_same_top_vertical_shrink_still_invalidate_selection() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.heard(Heard::Step(Step::Said("same line".to_owned())));
+        ask.heard(Heard::Step(Step::Said("same line".to_owned())));
+        ask.heard(Heard::Step(Step::Said("same line".to_owned())));
+        ask.heard(Heard::Step(Step::Ran {
+            id: "toolu_1".to_owned(),
+            command: "cargo test".to_owned(),
+        }));
+        ask.turn = Some(at_a_turn());
+
+        let area = Rect::new(0, 0, 36, 9);
+        let t0 = SystemTime::UNIX_EPOCH;
+        assert_eq!(reversed_cells(&mut ask, area, t0), []);
+        let text = drawn_body(&ask).text().rect();
+        let left = MouseButton::Left;
+
+        // Drag arriving after in-place denial and before the next paint must not
+        // stamp the old drawn body with the new BodyVersion.
+        assert_eq!(
+            ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y + 1)),
+            Mouse::Started
+        );
+        assert_eq!(
+            ask.mouse(mouse(MouseEventKind::Drag(left), text.x + 4, text.y + 1)),
+            Mouse::Active
+        );
+        ask.heard(Heard::Step(Step::Denied("toolu_1".to_owned())));
+        assert_eq!(
+            ask.mouse(mouse(MouseEventKind::Drag(left), text.x + 6, text.y + 1)),
+            Mouse::Active
+        );
+        assert_eq!(
+            reversed_cells(&mut ask, area, t0),
+            [],
+            "an active drag is still cancelled on the next paint even when Drag arrived after Denied"
+        );
+        assert!(!ask.pressed());
+
+        // Release arriving after a capped scroll of identical lines and before
+        // paint copies what was on screen, then clears the stale highlight on paint.
+        assert_eq!(
+            ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y + 1)),
+            Mouse::Started
+        );
+        assert_eq!(
+            ask.mouse(mouse(MouseEventKind::Drag(left), text.x + 4, text.y + 1)),
+            Mouse::Active
+        );
+        ask.heard(Heard::Step(Step::Said("same line".to_owned())));
+        assert_eq!(
+            ask.mouse(mouse(MouseEventKind::Up(left), text.x + 4, text.y + 1)),
+            Mouse::Copied(Excerpt::of("same".to_owned()).unwrap())
+        );
+        assert_eq!(
+            reversed_cells(&mut ask, area, t0),
+            [],
+            "a highlight completed before paint clears once the scrolled BodyVersion paints"
+        );
+
+        // Shrinking a height-capped box keeps text.x, text.y, and text.width equal
+        // while reducing text.height; row 0 ("…") must not keep a stale drag.
+        let before_shrink = drawn_body(&ask).text().rect();
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Down(left),
+                before_shrink.x,
+                before_shrink.y
+            )),
+            Mouse::Started
+        );
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Drag(left),
+                before_shrink.x + 1,
+                before_shrink.y
+            )),
+            Mouse::Active
+        );
+        let shorter = Rect::new(0, 0, 36, 8);
+        assert_eq!(
+            reversed_cells(&mut ask, shorter, t0),
+            [],
+            "vertical shrink cancels an active drag even when text_y is unchanged"
+        );
+        let after_shrink = drawn_body(&ask).text().rect();
+        assert_eq!(
+            (after_shrink.x, after_shrink.y, after_shrink.width),
+            (before_shrink.x, before_shrink.y, before_shrink.width)
+        );
+        assert!(after_shrink.height < before_shrink.height);
+        assert!(!ask.pressed());
     }
 }
