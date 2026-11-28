@@ -887,23 +887,31 @@ pub enum BrowserTarget {
     Folder(Spot),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseTarget {
+    Terminal(TerminalKey),
+    Browser(ViewId),
+}
+
 #[derive(Debug)]
 pub enum Ask {
     Change(Change),
     CloseWorktree {
         worktree: WorktreeId,
         seen: BTreeSet<ViewId>,
+        seen_browsers: Option<BTreeSet<ViewId>>,
     },
     CloseProject {
         project: ProjectId,
         worktrees: BTreeSet<WorktreeId>,
         seen: BTreeSet<ViewId>,
+        seen_browsers: Option<BTreeSet<ViewId>>,
     },
     Bring {
         worktree: WorktreeId,
         from: TerminalKey,
     },
-    CloseView(TerminalKey),
+    CloseView(CloseTarget),
     OpenBrowser {
         target: BrowserTarget,
         url: Option<BrowserUrl>,
@@ -1008,16 +1016,33 @@ impl Ask {
             Asked::ForgetProject(asked::ForgetProject { project }) => Change::ForgetProject {
                 project: id("project", project).map(ProjectId)?,
             },
-            Asked::CloseWorktree(asked::CloseWorktree { worktree, seen }) => {
+            Asked::CloseWorktree(asked::CloseWorktree {
+                worktree,
+                seen,
+                seen_browsers,
+            }) => {
                 let worktree = id("worktree", worktree).map(WorktreeId)?;
                 let seen = seen.into_iter().map(|it| id("seen", it).map(ViewId));
                 let seen = seen.collect::<Result<BTreeSet<ViewId>, String>>()?;
-                return Ok(Ask::CloseWorktree { worktree, seen });
+                let seen_browsers = seen_browsers
+                    .map(|seen| {
+                        seen.ids
+                            .into_iter()
+                            .map(|it| id("seen_browsers", it).map(ViewId))
+                            .collect::<Result<BTreeSet<ViewId>, String>>()
+                    })
+                    .transpose()?;
+                return Ok(Ask::CloseWorktree {
+                    worktree,
+                    seen,
+                    seen_browsers,
+                });
             }
             Asked::CloseProject(asked::CloseProject {
                 project,
                 worktrees,
                 seen,
+                seen_browsers,
             }) => {
                 let project = id("project", project).map(ProjectId)?;
                 let held = worktrees
@@ -1026,10 +1051,19 @@ impl Ask {
                 let worktrees = held.collect::<Result<BTreeSet<WorktreeId>, String>>()?;
                 let seen = seen.into_iter().map(|it| id("seen", it).map(ViewId));
                 let seen = seen.collect::<Result<BTreeSet<ViewId>, String>>()?;
+                let seen_browsers = seen_browsers
+                    .map(|seen| {
+                        seen.ids
+                            .into_iter()
+                            .map(|it| id("seen_browsers", it).map(ViewId))
+                            .collect::<Result<BTreeSet<ViewId>, String>>()
+                    })
+                    .transpose()?;
                 return Ok(Ask::CloseProject {
                     project,
                     worktrees,
                     seen,
+                    seen_browsers,
                 });
             }
             Asked::Bring(asked::Bring { worktree, from }) => {
@@ -1039,9 +1073,16 @@ impl Ask {
                 return Ok(Ask::Bring { worktree, from });
             }
             Asked::CloseView(asked::CloseView { terminal }) => {
-                let terminal = terminal.ok_or("terminal: it names no terminal")?;
+                let terminal = terminal.ok_or("close_view: it names no terminal")?;
                 return TerminalKey::of(&terminal)
                     .map_err(field("terminal"))
+                    .map(CloseTarget::Terminal)
+                    .map(Ask::CloseView);
+            }
+            Asked::CloseBrowser(asked::CloseBrowser { view }) => {
+                return id("view", view)
+                    .map(ViewId)
+                    .map(CloseTarget::Browser)
                     .map(Ask::CloseView);
             }
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
@@ -4579,6 +4620,72 @@ mod tests {
             },
         );
         assert_eq!(failed.unwrap_err(), "that project has no open worktree");
+    }
+
+    #[test]
+    fn close_view_and_close_browser_parse_their_targets_and_refuse_missing_or_zero() {
+        use api::change_projects_request::{
+            Change as Asked, CloseBrowser, CloseProject, CloseView, CloseWorktree, SeenViews,
+        };
+
+        let key = api::TerminalKey {
+            id: 4,
+            made_at: Some(prost_types::Timestamp::default()),
+        };
+        let terminal = Asked::CloseView(CloseView {
+            terminal: Some(key),
+        });
+        let ask = Ask::of_api(terminal, |_| panic!("spot must not run")).unwrap();
+        assert!(matches!(
+            ask,
+            Ask::CloseView(CloseTarget::Terminal(k)) if k == TerminalKey::of(&key).unwrap()
+        ));
+
+        let browser = Asked::CloseBrowser(CloseBrowser { view: 42 });
+        let ask = Ask::of_api(browser, |_| panic!("spot must not run")).unwrap();
+        assert!(matches!(
+            ask,
+            Ask::CloseView(CloseTarget::Browser(id)) if id == ViewId::of(42).unwrap()
+        ));
+
+        let zero = Asked::CloseBrowser(CloseBrowser { view: 0 });
+        assert!(
+            Ask::of_api(zero, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("no id is 0")
+        );
+
+        let missing = Asked::CloseView(CloseView { terminal: None });
+        assert!(
+            Ask::of_api(missing, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("names no terminal")
+        );
+
+        let worktree_with_browsers = Asked::CloseWorktree(CloseWorktree {
+            worktree: 10,
+            seen: vec![1],
+            seen_browsers: Some(SeenViews { ids: vec![30] }),
+        });
+        assert!(matches!(
+            Ask::of_api(worktree_with_browsers, |_| panic!("spot must not run")).unwrap(),
+            Ask::CloseWorktree {
+                seen_browsers: Some(browsers),
+                ..
+            } if browsers == BTreeSet::from([ViewId::of(30).unwrap()])
+        ));
+
+        let zero_browser = Asked::CloseProject(CloseProject {
+            project: 1,
+            worktrees: vec![10],
+            seen: vec![],
+            seen_browsers: Some(SeenViews { ids: vec![0] }),
+        });
+        assert!(
+            Ask::of_api(zero_browser, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("no id is 0")
+        );
     }
 
     #[test]
