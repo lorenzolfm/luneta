@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write};
 use std::os::unix::process::CommandExt as _;
@@ -38,7 +39,13 @@ const TURN_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 
 const LINES_PER_TURN_MAX: usize = 4 * 1024 * 1024;
 
+const AGY_TOOL_STEPS_MAX: usize = 65_536;
+
 const CONTENT_BLOCKS_MAX: usize = 1024;
+
+const EVENTS_PER_LINE_MAX: usize = CONTENT_BLOCKS_MAX + 1;
+
+const AGY_EVENTS_PER_LINE_MAX: usize = 3;
 
 const PROMPT_BYTES_MAX: usize = 1024 * 1024;
 
@@ -78,7 +85,12 @@ const _: () = assert!(LINE_QUEUE_MAX > 0);
 const _: () = assert!(LINE_QUEUE_MAX * LINE_BYTES_MAX <= QUEUED_BYTES_MAX);
 const _: () = assert!(LINE_BYTES_MAX as u64 <= TURN_BYTES_MAX);
 const _: () = assert!(LINES_PER_TURN_MAX > 0);
+const _: () = assert!(AGY_TOOL_STEPS_MAX > 0);
+const _: () = assert!(AGY_TOOL_STEPS_MAX <= LINES_PER_TURN_MAX);
 const _: () = assert!(CONTENT_BLOCKS_MAX > 0);
+const _: () = assert!(EVENTS_PER_LINE_MAX > CONTENT_BLOCKS_MAX);
+const _: () = assert!(AGY_EVENTS_PER_LINE_MAX > 0);
+const _: () = assert!(AGY_EVENTS_PER_LINE_MAX <= EVENTS_PER_LINE_MAX);
 const _: () = assert!(PROMPT_BYTES_MAX > 0);
 const _: () = assert!(STDERR_BYTES_MAX > 0);
 const _: () = assert!(STDERR_DRAIN_CHUNK_BYTES > 0);
@@ -375,6 +387,13 @@ fn execute(
 
 #[must_use]
 pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>) -> Command {
+    assert!(!prompt.trim().is_empty(), "prompt is non-empty");
+    if let Some(handle) = resume_handle {
+        assert!(!handle.trim().is_empty(), "resume handle is non-empty");
+        if harness != Harness::Pi {
+            assert!(!handle.starts_with('-'), "resume handle is not a flag");
+        }
+    }
     let mut command = Command::new(harness.program());
     match harness {
         Harness::ClaudeCode => {
@@ -392,7 +411,6 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
         }
         Harness::Antigravity => {
             command.args([
-                "-p",
                 "--output-format",
                 "stream-json",
                 "--dangerously-skip-permissions",
@@ -400,7 +418,7 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
             if let Some(id) = resume_handle {
                 command.args(["--resume", id]);
             }
-            command.args(["--", prompt]);
+            command.arg(format!("-p={prompt}"));
         }
         Harness::Pi => {
             command.args(["--mode", "json"]);
@@ -429,10 +447,24 @@ struct TurnPlan<'a> {
     deadline: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgyToolProgress {
+    Announced,
+    Finished,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgyToolState {
+    InProgress,
+    Done,
+    Error,
+}
+
 struct Heard {
     session_id: Option<String>,
     verdict: Option<Verdict>,
     unparsed_lines: u64,
+    agy_tool_steps: BTreeMap<u64, AgyToolProgress>,
 }
 
 fn run_turn(
@@ -482,6 +514,7 @@ fn run_turn(
         session_id: None,
         verdict: None,
         unparsed_lines: 0,
+        agy_tool_steps: BTreeMap::new(),
     };
     let mut ended = false;
     let mut exited_at: Option<Instant> = None;
@@ -576,7 +609,9 @@ fn heard_line(
     heard: &mut Heard,
     renderer: &mut Renderer<impl Write>,
 ) -> Result<(), String> {
-    let events = parse_line(plan.harness, line);
+    assert!(heard.agy_tool_steps.len() <= AGY_TOOL_STEPS_MAX);
+    let events = parse_line_in_turn(plan.harness, line, &mut heard.agy_tool_steps)?;
+    assert!(events.len() <= EVENTS_PER_LINE_MAX);
     if events.is_empty() {
         let trimmed = line.trim();
         if trimmed.starts_with('{') {
@@ -899,14 +934,27 @@ fn finished(ok: bool, summary: Option<String>, fallback: &str) -> StreamEvent {
 
 #[must_use]
 pub fn parse_line(harness: Harness, line: &str) -> Vec<StreamEvent> {
+    parse_line_in_turn(harness, line, &mut BTreeMap::new())
+        .expect("a single line never exceeds AGY_TOOL_STEPS_MAX")
+}
+
+fn parse_line_in_turn(
+    harness: Harness,
+    line: &str,
+    agy_tool_steps: &mut BTreeMap<u64, AgyToolProgress>,
+) -> Result<Vec<StreamEvent>, String> {
+    assert!(agy_tool_steps.len() <= AGY_TOOL_STEPS_MAX);
     let Ok(record) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    match harness {
+    let events = match harness {
         Harness::ClaudeCode => parse_claude(&record),
-        Harness::Antigravity => parse_agy(&record),
+        Harness::Antigravity => parse_agy(&record, agy_tool_steps)?,
         Harness::Pi => parse_pi(&record),
-    }
+    };
+    assert!(events.len() <= EVENTS_PER_LINE_MAX);
+    assert!(agy_tool_steps.len() <= AGY_TOOL_STEPS_MAX);
+    Ok(events)
 }
 
 fn parse_claude(record: &Value) -> Vec<StreamEvent> {
@@ -949,116 +997,183 @@ fn parse_claude(record: &Value) -> Vec<StreamEvent> {
     events
 }
 
-fn parse_agy(record: &Value) -> Vec<StreamEvent> {
+fn parse_agy(
+    record: &Value,
+    tool_steps: &mut BTreeMap<u64, AgyToolProgress>,
+) -> Result<Vec<StreamEvent>, String> {
+    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
     let mut events = Vec::new();
-    if let Some(id) =
-        nonempty_str(&record["session_id"]).or_else(|| nonempty_str(&record["conversation_id"]))
+    if let Some(id) = nonempty_str(&record["conversation_id"])
+        .or_else(|| nonempty_str(&record["step_update"]["conversation_id"]))
+        .or_else(|| nonempty_str(&record["result"]["conversation_id"]))
     {
         events.push(StreamEvent::SessionId(id.to_owned()));
     }
-    match record["type"].as_str() {
+    match record["event"].as_str() {
         Some("step_update") => {
-            if let Some(delta) = record["delta"].as_str().filter(|s| !s.is_empty()) {
-                events.push(StreamEvent::TextDelta(delta.to_owned()));
-            } else if let Some(text) =
-                nonempty_str(&record["text"]).or_else(|| nonempty_str(&record["response"]))
-            {
-                events.push(StreamEvent::TextBlock(text.to_owned()));
-            }
-            if let Some(name) = nonempty_str(&record["tool_name"])
-                .or_else(|| nonempty_str(&record["step_type"]))
-                .filter(|name| !is_text_step_type(name))
-            {
-                let detail = extract_tool_detail(&record["tool_info"])
-                    .or_else(|| extract_tool_detail(record));
-                events.push(StreamEvent::ToolUse {
-                    name: name.to_owned(),
-                    detail,
-                });
-            }
-        }
-        Some("text_delta" | "delta") => {
-            if let Some(delta) = record["delta"]
-                .as_str()
-                .or_else(|| record["text"].as_str())
-                .filter(|s| !s.is_empty())
-            {
-                events.push(StreamEvent::TextDelta(delta.to_owned()));
-            }
-        }
-        Some("assistant") => {
-            let blocks = record["message"]["content"]
-                .as_array()
-                .or_else(|| record["content"].as_array())
-                .into_iter()
-                .flatten()
-                .take(CONTENT_BLOCKS_MAX);
-            let before = events.len();
-            for block in blocks {
-                push_content_block(&mut events, block);
-            }
-            if events.len() == before
-                && let Some(text) = nonempty_str(&record["text"])
-            {
-                events.push(StreamEvent::TextBlock(text.to_owned()));
-            }
-        }
-        Some("tool_use") => {
-            if let Some(name) =
-                nonempty_str(&record["tool_name"]).or_else(|| nonempty_str(&record["name"]))
-            {
-                let detail = extract_tool_detail(&record["input"])
-                    .or_else(|| extract_tool_detail(&record["tool_info"]))
-                    .or_else(|| extract_tool_detail(record));
-                events.push(StreamEvent::ToolUse {
-                    name: name.to_owned(),
-                    detail,
-                });
+            let update = &record["step_update"];
+            match update["step_type"].as_str() {
+                Some("agent_response") => {
+                    if let Some(delta) = update["text_delta"].as_str().filter(|s| !s.is_empty()) {
+                        events.push(StreamEvent::TextDelta(delta.to_owned()));
+                    }
+                }
+                Some("tool") => parse_agy_tool(update, tool_steps, &mut events)?,
+                _ => {}
             }
         }
         Some("result") => {
-            let status_err = record["status"].as_str().is_some_and(|status| {
-                matches!(
-                    status.to_ascii_lowercase().as_str(),
-                    "error" | "failed" | "cancelled" | "canceled" | "interrupted"
-                )
-            });
-            let finished_err = record["finished_reason"].as_str().is_some_and(|reason| {
-                !reason.is_empty()
-                    && !matches!(
-                        reason.to_ascii_lowercase().as_str(),
-                        "normal" | "stop" | "complete" | "success"
-                    )
-            });
-            let subtype_err = record["subtype"].as_str().is_some_and(|s| s != "success");
-            let is_error = record["is_error"].as_bool() == Some(true)
-                || status_err
-                || finished_err
-                || subtype_err;
-            let summary = if is_error {
-                nonempty_str(&record["error"])
-                    .or_else(|| nonempty_str(&record["finished_reason"]))
-                    .or_else(|| nonempty_str(&record["result"]))
-                    .or_else(|| nonempty_str(&record["response"]))
-                    .or_else(|| nonempty_str(&record["status"]))
-                    .map(str::to_owned)
-            } else {
-                nonempty_str(&record["response"])
-                    .or_else(|| nonempty_str(&record["result"]))
-                    .or_else(|| nonempty_str(&record["text"]))
-                    .map(str::to_owned)
-            };
-            events.push(finished(!is_error, summary, "agy reported an error"));
-        }
-        Some("error") => {
-            let summary = nonempty_str(&record["error"])
-                .or_else(|| nonempty_str(&record["message"]))
-                .map(str::to_owned);
-            events.push(finished(false, summary, "agy reported an error"));
+            events.push(StreamEvent::TurnFinished(parse_agy_result(
+                &record["result"],
+            )));
         }
         _ => {}
     }
-    events
+    assert!(events.len() <= AGY_EVENTS_PER_LINE_MAX);
+    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
+    Ok(events)
+}
+
+fn agy_finished_reason_ok(reason: &str) -> bool {
+    assert_ne!(reason.trim(), "");
+    ["normal", "stop", "complete", "success"]
+        .iter()
+        .any(|ok| reason.eq_ignore_ascii_case(ok))
+}
+
+fn agy_result_failure(
+    result: &Value,
+    finished_reason: Option<&str>,
+    response: Option<&str>,
+) -> Verdict {
+    let summary = nonempty_str(&result["error"])
+        .or(finished_reason)
+        .or(response)
+        .or_else(|| nonempty_str(&result["status"]))
+        .unwrap_or("agy reported an error");
+    assert_ne!(summary.trim(), "");
+    Verdict::Failed(summary.to_owned())
+}
+
+fn parse_agy_result(result: &Value) -> Verdict {
+    let status_ok = result["status"].as_str() == Some("SUCCESS");
+    let finished_reason = nonempty_str(&result["finished_reason"]);
+    let finished_reason_ok = finished_reason.is_none_or(agy_finished_reason_ok);
+    let response = nonempty_str(&result["response"]);
+
+    if status_ok {
+        if finished_reason_ok {
+            let has_denied_actions = result["denied_actions"]
+                .as_array()
+                .is_some_and(|denied| !denied.is_empty());
+            if response.is_none() && has_denied_actions {
+                Verdict::Failed("agy stopped because a tool action was denied".to_owned())
+            } else {
+                Verdict::Succeeded(response.map(str::to_owned))
+            }
+        } else {
+            agy_result_failure(result, finished_reason, response)
+        }
+    } else {
+        agy_result_failure(result, finished_reason, response)
+    }
+}
+
+fn agy_tool_state(update: &Value) -> AgyToolState {
+    assert_eq!(update["step_type"].as_str(), Some("tool"));
+    let state = update["state"].as_str();
+    let has_error = update["tool_info"]
+        .get("error")
+        .is_some_and(|value| !value.is_null());
+    if state == Some("ERROR") || has_error {
+        AgyToolState::Error
+    } else if state == Some("DONE") {
+        AgyToolState::Done
+    } else {
+        AgyToolState::InProgress
+    }
+}
+
+fn agy_tool_use_event(update: &Value, name: &str) -> StreamEvent {
+    assert_ne!(name.trim(), "");
+    let detail = extract_tool_detail(&update["tool_info"]["parameters"])
+        .or_else(|| extract_tool_detail(&update["tool_info"]))
+        .or_else(|| parse_agy_subagent_detail(&update["subagent_info"]));
+    StreamEvent::ToolUse {
+        name: name.to_owned(),
+        detail,
+    }
+}
+
+fn parse_agy_tool(
+    update: &Value,
+    tool_steps: &mut BTreeMap<u64, AgyToolProgress>,
+    events: &mut Vec<StreamEvent>,
+) -> Result<(), String> {
+    assert_eq!(update["step_type"].as_str(), Some("tool"));
+    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
+    let state = agy_tool_state(update);
+    let tool_name =
+        nonempty_str(&update["tool_name"]).or_else(|| nonempty_str(&update["tool_info"]["name"]));
+    let step_index = update["step_index"].as_u64();
+
+    match (state, step_index) {
+        (AgyToolState::InProgress, Some(index)) => {
+            if let Some(name) = tool_name
+                && !tool_steps.contains_key(&index)
+            {
+                if tool_steps.len() < AGY_TOOL_STEPS_MAX {
+                    let previous = tool_steps.insert(index, AgyToolProgress::Announced);
+                    assert!(previous.is_none());
+                    events.push(agy_tool_use_event(update, name));
+                } else {
+                    return Err(format!("agy exceeded {AGY_TOOL_STEPS_MAX} tool steps"));
+                }
+            }
+        }
+        (AgyToolState::InProgress, None) => {
+            if let Some(name) = tool_name {
+                events.push(agy_tool_use_event(update, name));
+            }
+        }
+        (AgyToolState::Done | AgyToolState::Error, Some(index)) => {
+            let is_error = state == AgyToolState::Error;
+            match tool_steps.get(&index).copied() {
+                None => {
+                    if tool_steps.len() < AGY_TOOL_STEPS_MAX {
+                        let previous = tool_steps.insert(index, AgyToolProgress::Finished);
+                        assert!(previous.is_none());
+                        if let Some(name) = tool_name {
+                            events.push(agy_tool_use_event(update, name));
+                        }
+                        events.push(StreamEvent::ToolResult {
+                            name: tool_name.map(str::to_owned),
+                            is_error,
+                        });
+                    } else {
+                        return Err(format!("agy exceeded {AGY_TOOL_STEPS_MAX} tool steps"));
+                    }
+                }
+                Some(AgyToolProgress::Announced) => {
+                    let previous = tool_steps.insert(index, AgyToolProgress::Finished);
+                    assert_eq!(previous, Some(AgyToolProgress::Announced));
+                    events.push(StreamEvent::ToolResult {
+                        name: tool_name.map(str::to_owned),
+                        is_error,
+                    });
+                }
+                Some(AgyToolProgress::Finished) => {}
+            }
+        }
+        (AgyToolState::Done | AgyToolState::Error, None) => {
+            events.push(StreamEvent::ToolResult {
+                name: tool_name.map(str::to_owned),
+                is_error: state == AgyToolState::Error,
+            });
+        }
+    }
+    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
+    Ok(())
 }
 
 fn parse_pi(record: &Value) -> Vec<StreamEvent> {
@@ -1160,22 +1275,35 @@ fn push_content_block(events: &mut Vec<StreamEvent>, block: &Value) {
     }
 }
 
-fn is_text_step_type(step_type: &str) -> bool {
-    matches!(
-        step_type.to_ascii_lowercase().as_str(),
-        "text" | "thought" | "thinking" | "planner_response" | "response" | "assistant"
-    )
-}
-
 fn extract_tool_detail(value: &Value) -> Option<String> {
     let raw = nonempty_str(&value["command"])
         .or_else(|| nonempty_str(&value["command_line"]))
+        .or_else(|| nonempty_str(&value["CommandLine"]))
         .or_else(|| nonempty_str(&value["file_path"]))
+        .or_else(|| nonempty_str(&value["FilePath"]))
         .or_else(|| nonempty_str(&value["path"]))
+        .or_else(|| nonempty_str(&value["Path"]))
+        .or_else(|| nonempty_str(&value["TargetFile"]))
+        .or_else(|| nonempty_str(&value["AbsolutePath"]))
         .or_else(|| nonempty_str(&value["pattern"]))
+        .or_else(|| nonempty_str(&value["Pattern"]))
         .or_else(|| nonempty_str(&value["query"]))
-        .or_else(|| nonempty_str(&value["url"]))?;
-    Some(single_line_preview(raw, DETAIL_CHARS_MAX))
+        .or_else(|| nonempty_str(&value["Query"]))
+        .or_else(|| nonempty_str(&value["url"]))
+        .or_else(|| nonempty_str(&value["Url"]))?;
+    assert_ne!(raw.trim(), "");
+    let preview = single_line_preview(raw, DETAIL_CHARS_MAX);
+    assert_ne!(preview, "");
+    Some(preview)
+}
+
+fn parse_agy_subagent_detail(value: &Value) -> Option<String> {
+    let first = value["subagents"].as_array()?.first()?;
+    let raw = nonempty_str(&first["role"]).or_else(|| nonempty_str(&first["type_name"]))?;
+    assert_ne!(raw.trim(), "");
+    let preview = single_line_preview(raw, DETAIL_CHARS_MAX);
+    assert_ne!(preview, "");
+    Some(preview)
 }
 
 fn nonempty_str(value: &Value) -> Option<&str> {
@@ -1286,12 +1414,10 @@ mod tests {
         assert_eq!(
             args,
             [
-                "-p",
                 "--output-format",
                 "stream-json",
                 "--dangerously-skip-permissions",
-                "--",
-                "/tigerstyle"
+                "-p=/tigerstyle",
             ]
             .map(OsStr::new)
         );
@@ -1301,14 +1427,25 @@ mod tests {
         assert_eq!(
             args,
             [
-                "-p",
                 "--output-format",
                 "stream-json",
                 "--dangerously-skip-permissions",
                 "--resume",
                 "conv-9",
-                "--",
-                "fix"
+                "-p=fix",
+            ]
+            .map(OsStr::new)
+        );
+
+        let agy_dash = build_command(Harness::Antigravity, "--help", None);
+        let args: Vec<&OsStr> = agy_dash.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "--output-format",
+                "stream-json",
+                "--dangerously-skip-permissions",
+                "-p=--help",
             ]
             .map(OsStr::new)
         );
@@ -1375,43 +1512,195 @@ mod tests {
 
     #[test]
     fn parses_agy_stream_json_events() {
-        let init = r#"{"type":"init","conversation_id":"conv-42"}"#;
+        let init = r#"{"event":"init","conversation_id":"conv-42","init":{"cwd":"/w","permission_mode":"always-proceed"}}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, init),
             vec![StreamEvent::SessionId("conv-42".to_owned())]
         );
 
-        let update_text =
-            r#"{"type":"step_update","step_type":"planner_response","delta":"Finding 1"}"#;
+        let user_input = r#"{"event":"step_update","step_update":{"conversation_id":"conv-42","step_index":0,"state":"DONE","step_type":"user_input"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, user_input),
+            vec![StreamEvent::SessionId("conv-42".to_owned())]
+        );
+
+        let update_text = r#"{"event":"step_update","step_update":{"conversation_id":"conv-42","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Finding 1"}}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, update_text),
-            vec![StreamEvent::TextDelta("Finding 1".to_owned())]
+            vec![
+                StreamEvent::SessionId("conv-42".to_owned()),
+                StreamEvent::TextDelta("Finding 1".to_owned()),
+            ]
         );
 
-        let update_tool = r#"{"type":"step_update","step_type":"run_command","tool_name":"run_command","tool_info":{"command_line":"cargo clippy"}}"#;
+        let update_tool = r#"{"event":"step_update","step_update":{"conversation_id":"conv-42","step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"cargo clippy"}}}}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, update_tool),
-            vec![StreamEvent::ToolUse {
-                name: "run_command".to_owned(),
-                detail: Some("cargo clippy".to_owned()),
-            }]
+            vec![
+                StreamEvent::SessionId("conv-42".to_owned()),
+                StreamEvent::ToolUse {
+                    name: "run_command".to_owned(),
+                    detail: Some("cargo clippy".to_owned()),
+                },
+            ]
         );
 
-        let result_ok = r#"{"type":"result","status":"SUCCESS","response":"Done"}"#;
+        let update_tool_error = r#"{"event":"step_update","step_update":{"step_index":3,"state":"ERROR","step_type":"tool","tool_name":"read_file","tool_info":{"name":"read_file","parameters":{"Path":"/w/missing.rs"},"error":{"type":"TOOL_ERROR","message":"file does not exist"}}}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, update_tool_error),
+            vec![
+                StreamEvent::ToolUse {
+                    name: "read_file".to_owned(),
+                    detail: Some("/w/missing.rs".to_owned()),
+                },
+                StreamEvent::ToolResult {
+                    name: Some("read_file".to_owned()),
+                    is_error: true,
+                },
+            ]
+        );
+
+        let result_ok = r#"{"event":"result","result":{"conversation_id":"conv-42","status":"SUCCESS","response":"Done\n"}}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, result_ok),
-            vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
-                "Done".to_owned()
-            )))]
+            vec![
+                StreamEvent::SessionId("conv-42".to_owned()),
+                StreamEvent::TurnFinished(Verdict::Succeeded(Some("Done".to_owned()))),
+            ]
         );
 
-        let result_timeout = r#"{"type":"result","status":"ERROR","finished_reason":"print_timeout","error":"timed out"}"#;
+        let result_timeout = r#"{"event":"result","result":{"conversation_id":"","status":"ERROR","finished_reason":"print_timeout","error":"timed out"}}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, result_timeout),
             vec![StreamEvent::TurnFinished(Verdict::Failed(
                 "timed out".to_owned()
             ))]
         );
+
+        let result_waiting = r#"{"event":"result","result":{"status":"WAITING"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_waiting),
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "WAITING".to_owned()
+            ))]
+        );
+
+        let result_denied = r#"{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"run_command"}]}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_denied),
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "agy stopped because a tool action was denied".to_owned()
+            ))]
+        );
+
+        let result_whitespace_reason = r#"{"event":"result","result":{"status":"SUCCESS","finished_reason":"   ","response":"Clean"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_whitespace_reason),
+            vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
+                "Clean".to_owned()
+            )))]
+        );
+
+        let result_denied_with_response = r#"{"event":"result","result":{"status":"SUCCESS","finished_reason":"NORMAL","response":"Answered anyway","denied_actions":[{"action":"run_command"}]}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_denied_with_response),
+            vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
+                "Answered anyway".to_owned()
+            )))]
+        );
+
+        let subagent_role = r#"{"event":"step_update","step_update":{"step_index":7,"state":"ACTIVE","step_type":"tool","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"role":"Codebase Researcher","type_name":"research"}]}}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, subagent_role),
+            vec![StreamEvent::ToolUse {
+                name: "invoke_subagent".to_owned(),
+                detail: Some("Codebase Researcher".to_owned()),
+            }]
+        );
+
+        let subagent_type_fallback = r#"{"event":"step_update","step_update":{"step_index":8,"state":"ACTIVE","step_type":"tool","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"type_name":"research"}]}}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, subagent_type_fallback),
+            vec![StreamEvent::ToolUse {
+                name: "invoke_subagent".to_owned(),
+                detail: Some("research".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn agy_tool_steps_deduplicate_without_dropping_nameless_updates_and_fail_at_bound() {
+        let mut tool_steps = BTreeMap::new();
+
+        let pending_without_name = r#"{"event":"step_update","step_update":{"step_index":5,"state":"PENDING","step_type":"tool"}}"#;
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, pending_without_name, &mut tool_steps)
+                .unwrap(),
+            Vec::new()
+        );
+        assert!(tool_steps.is_empty());
+
+        let active_named = r#"{"event":"step_update","step_update":{"step_index":5,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/w/a.rs"}}}}"#;
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, active_named, &mut tool_steps).unwrap(),
+            vec![StreamEvent::ToolUse {
+                name: "read_file".to_owned(),
+                detail: Some("/w/a.rs".to_owned()),
+            }]
+        );
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, active_named, &mut tool_steps).unwrap(),
+            Vec::new()
+        );
+
+        let error_update = r#"{"event":"step_update","step_update":{"step_index":5,"state":"ERROR","step_type":"tool","tool_name":"read_file","tool_info":{"error":{"message":"missing"}}}}"#;
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, error_update, &mut tool_steps).unwrap(),
+            vec![StreamEvent::ToolResult {
+                name: Some("read_file".to_owned()),
+                is_error: true,
+            }]
+        );
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, error_update, &mut tool_steps).unwrap(),
+            Vec::new()
+        );
+
+        let unindexed_active = r#"{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"bash"}}"#;
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, unindexed_active, &mut tool_steps).unwrap(),
+            vec![StreamEvent::ToolUse {
+                name: "bash".to_owned(),
+                detail: None,
+            }]
+        );
+        let unindexed_done = r#"{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"bash"}}"#;
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, unindexed_done, &mut tool_steps).unwrap(),
+            vec![StreamEvent::ToolResult {
+                name: Some("bash".to_owned()),
+                is_error: false,
+            }]
+        );
+
+        let mut saturated: BTreeMap<u64, AgyToolProgress> = (0..AGY_TOOL_STEPS_MAX as u64)
+            .map(|index| (index, AgyToolProgress::Announced))
+            .collect();
+        let existing_done = r#"{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"tool","tool_name":"read_file"}}"#;
+        assert_eq!(
+            parse_line_in_turn(Harness::Antigravity, existing_done, &mut saturated).unwrap(),
+            vec![StreamEvent::ToolResult {
+                name: Some("read_file".to_owned()),
+                is_error: false,
+            }]
+        );
+
+        let overflow = format!(
+            r#"{{"event":"step_update","step_update":{{"step_index":{AGY_TOOL_STEPS_MAX},"state":"ACTIVE","step_type":"tool","tool_name":"read_file"}}}}"#
+        );
+        let error =
+            parse_line_in_turn(Harness::Antigravity, &overflow, &mut saturated).unwrap_err();
+        assert!(error.contains("tool steps"), "{error}");
     }
 
     #[test]
