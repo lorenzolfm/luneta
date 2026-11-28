@@ -204,7 +204,14 @@ impl Plan {
                     Ending::of(taken.map(|(_, doing)| *doing))
                 }),
         };
-        Plan { act, ending }
+        let plan = Plan { act, ending };
+        if matches!(plan.act, Act::View(ViewKey::Browser(_))) {
+            assert!(
+                plan.question().is_none(),
+                "closing a browser view never prompts"
+            );
+        }
+        plan
     }
 
     pub fn question(&self) -> Option<String> {
@@ -333,11 +340,11 @@ mod tests {
         let worktree = WorktreeId::of(31).unwrap();
         let other = WorktreeId::of(32).unwrap();
         let project = ProjectRow::new("lune", 6);
-        let place_in = |wt, view| {
+        let place_in = |worktree, view| {
             Place::View(ViewPlace::new(
                 WorktreePlace {
                     project: project.clone(),
-                    worktree: wt,
+                    worktree,
                 },
                 view,
             ))
@@ -346,12 +353,12 @@ mod tests {
         assert!(!act.closes(&place_in(worktree, ViewKey::browser(31))));
         assert!(!act.closes(&place_in(worktree, ViewKey::terminal(4))));
 
-        let wt_act = Act::Worktree {
+        let worktree_act = Act::Worktree {
             worktree,
             views: vec![at(4)],
             seen: vec![ViewId::of(4).unwrap()],
         };
-        assert!(wt_act.closes(&place_in(worktree, browser)));
-        assert!(!wt_act.closes(&place_in(other, browser)));
+        assert!(worktree_act.closes(&place_in(worktree, browser)));
+        assert!(!worktree_act.closes(&place_in(other, browser)));
     }
 }

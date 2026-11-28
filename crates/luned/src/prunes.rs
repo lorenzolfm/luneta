@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use lune_domain::mux::TerminalKey;
+use lune_domain::projects::{LAYOUT_VIEWS_MAX, VIEWS_MAX, WORKTREES_MAX};
 use lune_protocol::github::State;
 
 use crate::api::projects::Held;
@@ -209,7 +210,7 @@ impl Occupied {
     pub fn of(local: &core::Local, lunes: Lunes) -> Result<Occupied, String> {
         let unread = seats::unread(local.unread, &local.unread_files);
         let unread = unread.map_err(|unplaced| unplaced.to_string())?;
-        let terminals = terminals(&local.projects)?;
+        let held_views = occupied_views(&local.projects)?;
         for seats::Unread { pid, terminal } in unread {
             match terminal {
                 None => {
@@ -218,7 +219,7 @@ impl Occupied {
                          terminal"
                     ));
                 }
-                Some(key) if !terminals.iter().any(|(it, _)| *it == Some(key)) => {
+                Some(key) if !held_views.iter().any(|(it, _)| *it == Some(key)) => {
                     return Err(format!(
                         "luned cannot read the session file of agent {pid}, which runs in a \
                          terminal no layout holds"
@@ -227,7 +228,7 @@ impl Occupied {
                 Some(_) => {}
             }
         }
-        let views = terminals.into_iter().map(|(_, folder)| folder).collect();
+        let views = held_views.into_iter().map(|(_, folder)| folder).collect();
         let agents = local
             .agents
             .iter()
@@ -255,7 +256,7 @@ impl Occupied {
     }
 }
 
-fn terminals(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
+fn occupied_views(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, String> {
     let kept = match projects {
         Held::Unkept(why) => {
             return Err(format!(
@@ -269,6 +270,10 @@ fn terminals(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, Str
         let unsaid = || format!("luned says not what project {} holds", project.name);
         worktrees.extend(project.worktrees().ok_or_else(unsaid)?);
     }
+    assert!(
+        worktrees.len() <= WORKTREES_MAX,
+        "at most {WORKTREES_MAX} worktrees are kept"
+    );
     let terminal = |terminal: &api::Terminal| {
         let key = match &terminal.state {
             Some(
@@ -286,13 +291,42 @@ fn terminals(projects: &Held) -> Result<Vec<(Option<TerminalKey>, PathBuf)>, Str
     };
     let mut views = Vec::new();
     for worktree in worktrees {
+        assert!(
+            worktree.terminals.len() <= LAYOUT_VIEWS_MAX,
+            "a layout holds at most {LAYOUT_VIEWS_MAX} terminals"
+        );
+        assert!(
+            worktree.views.len() <= LAYOUT_VIEWS_MAX,
+            "a layout holds at most {LAYOUT_VIEWS_MAX} views"
+        );
         views.extend(worktree.terminals.iter().map(terminal));
+        let mut has_browser = false;
         for view in &worktree.views {
-            if matches!(view.kind, Some(api::worktree::view::Kind::Browser(_))) {
-                views.push((None, PathBuf::from(&worktree.folder)));
+            match view.kind.as_ref() {
+                Some(api::worktree::view::Kind::TerminalId(_)) => {}
+                Some(api::worktree::view::Kind::Browser(_)) => has_browser = true,
+                None => {
+                    return Err(format!(
+                        "luned says not what kind a view of worktree {} is",
+                        worktree.name
+                    ));
+                }
             }
         }
+        if has_browser {
+            if worktree.folder.is_empty() {
+                return Err(format!(
+                    "luned says not what folder worktree {} is in",
+                    worktree.name
+                ));
+            }
+            views.push((None, PathBuf::from(&worktree.folder)));
+        }
     }
+    assert!(
+        views.len() <= VIEWS_MAX,
+        "at most {VIEWS_MAX} views are kept"
+    );
     Ok(views)
 }
 
@@ -1330,6 +1364,61 @@ mod tests {
         assert_eq!(
             Occupied::of(&viewed(unsaid), Lunes::none()),
             Err(why.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_browser_view_keeps_its_worktree_and_an_untyped_or_unplaced_view_fails_closed() {
+        use api::worktree::{View as ApiView, view::Kind};
+
+        let with_worktree = |worktree: api::Worktree| {
+            let project = api::Project {
+                name: "lune".to_owned(),
+                holds: Some(api::project::Holds::Folder(worktree)),
+                ..api::Project::default()
+            };
+            viewed(api::projects::Held::Kept(api::projects::Kept {
+                projects: vec![project],
+                version: None,
+            }))
+        };
+        let browser_worktree = api::Worktree {
+            name: "docs".to_owned(),
+            folder: "/w/docs".to_owned(),
+            views: vec![ApiView {
+                kind: Some(Kind::Browser(api::Browser {
+                    id: 30,
+                    url: Some("https://example.com".to_owned()),
+                })),
+            }],
+            ..api::Worktree::default()
+        };
+        let occupied = Occupied::of(&with_worktree(browser_worktree), Lunes::none()).unwrap();
+        assert_eq!(occupied.why_in(Path::new("/w/docs")), Some(A_VIEW));
+        assert_eq!(occupied.why_in(Path::new("/w/other")), None);
+
+        let untyped = api::Worktree {
+            name: "docs".to_owned(),
+            folder: "/w/docs".to_owned(),
+            views: vec![ApiView { kind: None }],
+            ..api::Worktree::default()
+        };
+        assert_eq!(
+            Occupied::of(&with_worktree(untyped), Lunes::none()),
+            Err("luned says not what kind a view of worktree docs is".to_owned())
+        );
+
+        let unplaced = api::Worktree {
+            name: "docs".to_owned(),
+            folder: String::new(),
+            views: vec![ApiView {
+                kind: Some(Kind::Browser(api::Browser { id: 30, url: None })),
+            }],
+            ..api::Worktree::default()
+        };
+        assert_eq!(
+            Occupied::of(&with_worktree(unplaced), Lunes::none()),
+            Err("luned says not what folder worktree docs is in".to_owned())
         );
     }
 

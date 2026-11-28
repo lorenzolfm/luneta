@@ -1006,7 +1006,9 @@ impl Ask {
                     (Some(_), Some(_)) => {
                         Err("close_view: it names both a terminal and a view".to_owned())
                     }
-                    (None, None) => Err("terminal: it names no terminal".to_owned()),
+                    (None, None) => {
+                        Err("close_view: it names neither a terminal nor a view".to_owned())
+                    }
                 };
             }
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
@@ -4514,7 +4516,7 @@ mod tests {
         assert!(
             Ask::of_api(neither, |_| panic!("spot must not run"))
                 .unwrap_err()
-                .contains("names no terminal")
+                .contains("neither a terminal nor a view")
         );
     }
 }

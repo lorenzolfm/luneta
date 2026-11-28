@@ -1025,39 +1025,39 @@ struct KnownWorktree {
     folder: Dir,
     seen: projects::Seen,
     used: Option<Used>,
-    views: Vec<KnownSlot>,
+    views: Vec<KnownView>,
     arranged: Option<Arranged>,
 }
 
 impl KnownWorktree {
     fn shown(&self) -> impl Iterator<Item = KnownShown<'_>> {
-        self.views.iter().filter_map(KnownSlot::shown)
+        self.views.iter().filter_map(KnownView::shown)
     }
 
-    fn terminals(&self) -> impl Iterator<Item = &KnownView> {
-        self.views.iter().filter_map(KnownSlot::terminal)
+    fn terminals(&self) -> impl Iterator<Item = &FoundTerminal> {
+        self.views.iter().filter_map(KnownView::terminal)
     }
 
     fn terminal_ids(&self) -> impl Iterator<Item = ViewId> + '_ {
-        self.views.iter().filter_map(KnownSlot::terminal_id)
+        self.views.iter().filter_map(KnownView::terminal_id)
     }
 
     fn view_ids(&self) -> impl Iterator<Item = ViewId> + '_ {
-        self.views.iter().map(KnownSlot::id)
+        self.views.iter().map(KnownView::id)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum KnownSlot {
+enum KnownView {
     Terminal(KnownTerminal),
     Browser(KnownBrowser),
 }
 
-impl KnownSlot {
+impl KnownView {
     fn of(view: &rows::View) -> Self {
         match view {
-            rows::View::Terminal(terminal) => KnownSlot::Terminal(KnownTerminal::of(terminal)),
-            rows::View::Browser(browser) => KnownSlot::Browser(KnownBrowser {
+            rows::View::Terminal(terminal) => KnownView::Terminal(KnownTerminal::of(terminal)),
+            rows::View::Browser(browser) => KnownView::Browser(KnownBrowser {
                 id: browser.id,
                 url: browser.url.clone(),
             }),
@@ -1066,29 +1066,29 @@ impl KnownSlot {
 
     fn id(&self) -> ViewId {
         match self {
-            KnownSlot::Terminal(terminal) => terminal.id(),
-            KnownSlot::Browser(browser) => browser.id,
+            KnownView::Terminal(terminal) => terminal.id(),
+            KnownView::Browser(browser) => browser.id,
         }
     }
 
     fn terminal_id(&self) -> Option<ViewId> {
         match self {
-            KnownSlot::Terminal(terminal) => Some(terminal.id()),
-            KnownSlot::Browser(_) => None,
+            KnownView::Terminal(terminal) => Some(terminal.id()),
+            KnownView::Browser(_) => None,
         }
     }
 
-    fn terminal(&self) -> Option<&KnownView> {
+    fn terminal(&self) -> Option<&FoundTerminal> {
         match self {
-            KnownSlot::Terminal(terminal) => terminal.found(),
-            KnownSlot::Browser(_) => None,
+            KnownView::Terminal(terminal) => terminal.found(),
+            KnownView::Browser(_) => None,
         }
     }
 
     fn shown(&self) -> Option<KnownShown<'_>> {
         match self {
-            KnownSlot::Terminal(terminal) => terminal.found().map(KnownShown::Terminal),
-            KnownSlot::Browser(browser) => Some(KnownShown::Browser(browser)),
+            KnownView::Terminal(terminal) => terminal.found().map(KnownShown::Terminal),
+            KnownView::Browser(browser) => Some(KnownShown::Browser(browser)),
         }
     }
 }
@@ -1101,7 +1101,7 @@ struct KnownBrowser {
 
 #[derive(Clone, Copy, Debug)]
 enum KnownShown<'a> {
-    Terminal(&'a KnownView),
+    Terminal(&'a FoundTerminal),
     Browser(&'a KnownBrowser),
 }
 
@@ -1123,7 +1123,7 @@ impl KnownShown<'_> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum KnownTerminal {
-    Found(KnownView),
+    Found(FoundTerminal),
     Unfound(ViewId),
 }
 
@@ -1135,7 +1135,7 @@ impl KnownTerminal {
                 command,
                 titled,
                 told,
-            } => KnownTerminal::Found(KnownView {
+            } => KnownTerminal::Found(FoundTerminal {
                 id: terminal.id,
                 key: *key,
                 cwd: terminal.cwd.clone(),
@@ -1146,7 +1146,7 @@ impl KnownTerminal {
                     .map(|said| said.as_str().to_owned()),
                 told: told.clone(),
             }),
-            rows::Found::Ended { key, titled } => KnownTerminal::Found(KnownView {
+            rows::Found::Ended { key, titled } => KnownTerminal::Found(FoundTerminal {
                 id: terminal.id,
                 key: *key,
                 cwd: terminal.cwd.clone(),
@@ -1157,7 +1157,7 @@ impl KnownTerminal {
                     .map(|said| said.as_str().to_owned()),
                 told: Told::Unhooked,
             }),
-            rows::Found::Unlisted(key) => KnownTerminal::Found(KnownView {
+            rows::Found::Unlisted(key) => KnownTerminal::Found(FoundTerminal {
                 id: terminal.id,
                 key: *key,
                 cwd: terminal.cwd.clone(),
@@ -1176,7 +1176,7 @@ impl KnownTerminal {
         }
     }
 
-    fn found(&self) -> Option<&KnownView> {
+    fn found(&self) -> Option<&FoundTerminal> {
         match self {
             KnownTerminal::Found(view) => Some(view),
             KnownTerminal::Unfound(_) => None,
@@ -1185,7 +1185,7 @@ impl KnownTerminal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct KnownView {
+struct FoundTerminal {
     id: ViewId,
     key: TerminalKey,
     cwd: Dir,
@@ -1210,7 +1210,7 @@ impl Known {
             folder: worktree.folder.clone(),
             seen: worktree.seen,
             used: worktree.used,
-            views: worktree.views.iter().map(KnownSlot::of).collect(),
+            views: worktree.views.iter().map(KnownView::of).collect(),
             arranged: worktree.arranged,
         });
         let worktrees = worktrees.collect();
@@ -1248,11 +1248,11 @@ impl Known {
         self.worktrees.iter().flat_map(KnownWorktree::view_ids)
     }
 
-    fn terminals(&self) -> impl Iterator<Item = &KnownView> {
+    fn terminals(&self) -> impl Iterator<Item = &FoundTerminal> {
         self.worktrees.iter().flat_map(KnownWorktree::terminals)
     }
 
-    fn placed_terminals(&self) -> impl Iterator<Item = (&WorktreePlace, &KnownView)> {
+    fn placed_terminals(&self) -> impl Iterator<Item = (&WorktreePlace, &FoundTerminal)> {
         let each = self.worktrees.iter();
         each.flat_map(|worktree| {
             worktree
@@ -1266,7 +1266,7 @@ impl Known {
         each.flat_map(|worktree| worktree.shown().map(move |view| (&worktree.place, view)))
     }
 
-    fn terminal(&self, key: TerminalKey) -> Option<&KnownView> {
+    fn terminal(&self, key: TerminalKey) -> Option<&FoundTerminal> {
         self.terminals().find(|view| view.key == key)
     }
 
@@ -1275,7 +1275,7 @@ impl Known {
             worktree
                 .views
                 .iter()
-                .any(|slot| matches!(slot, KnownSlot::Browser(b) if b.id == id))
+                .any(|view| matches!(view, KnownView::Browser(browser) if browser.id == id))
         })
     }
 }
@@ -1521,7 +1521,7 @@ impl Seen<'_> {
             .collect()
     }
 
-    fn terminals(&self) -> impl Iterator<Item = (&WorktreePlace, &KnownView)> {
+    fn terminals(&self) -> impl Iterator<Item = (&WorktreePlace, &FoundTerminal)> {
         self.projects.iter().flat_map(Known::placed_terminals)
     }
 }
@@ -1703,7 +1703,7 @@ pub enum Asked {
         menu: u64,
         on: Machine,
         session: Listed,
-        view: ViewKey,
+        terminal: TerminalKey,
         ended: menu::Ended,
     },
     Checks {
@@ -3327,7 +3327,7 @@ impl Sidebar {
                 let project = known.project.id();
                 let folded = self.folds.contains(Fold::Project(&machine, project));
                 let colour = colour_of(project);
-                let agent = |view: &KnownView| agents.get(&view.key).copied();
+                let agent = |view: &FoundTerminal| agents.get(&view.key).copied();
                 let mut worktrees = Vec::with_capacity(known.worktrees.len());
                 for worktree in &known.worktrees {
                     let mut by_view: Vec<Shows<'_>> = Vec::with_capacity(worktree.views.len());
@@ -4442,9 +4442,9 @@ impl Sidebar {
             ViewKey::Terminal(key) => self
                 .terminal_of(machine, session, key)
                 .map(|shown| Directory::from(&shown.cwd)),
-            ViewKey::Browser(_) => self.worktree_folder_of(machine, place.worktree()),
+            ViewKey::Browser(id) => self.browser_folder_of(machine, session, id),
         };
-        let cwd = Cwd::of(dir, |dir| {
+        let cwd = Cwd::of(dir.clone(), |dir| {
             let (branch, repository) = git_in(seen.as_ref(), &dir);
             let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
             let pull_request = pulls.into_iter().find(|pull| pull.dir == dir.as_str());
@@ -4458,10 +4458,19 @@ impl Sidebar {
         });
         let ran = self.ran_in(machine, session, view);
         let view_id = view_id_of(&self.shelves, machine, session, view);
+        assert_eq!(
+            dir.is_some(),
+            view_id.is_some(),
+            "view folder and id resolve together"
+        );
         let terminal = match view {
             ViewKey::Terminal(_) => view_id,
             ViewKey::Browser(_) => None,
         };
+        if view.terminal_key().is_none() {
+            assert!(terminal.is_none(), "a browser view has no terminal id");
+            assert_eq!(ran, Ran::Unhooked, "a browser view runs no shell");
+        }
         let arranged = view_id.and_then(|it| {
             arranged_holding(&self.shelves, self.seat.as_ref(), machine, session, it)
         });
@@ -4475,13 +4484,20 @@ impl Sidebar {
         Some(Target::View(machine.clone(), row))
     }
 
-    fn worktree_folder_of(&self, machine: &Machine, place: &WorktreePlace) -> Option<Directory> {
+    fn browser_folder_of(
+        &self,
+        machine: &Machine,
+        listed: &Listed,
+        id: ViewId,
+    ) -> Option<Directory> {
         let mut known = shelf(&self.shelves, machine).iter();
-        let known = known.find(|it| it.project.id() == place.project.id())?;
-        let worktree = known
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.place == *place)?;
+        let known = known.find(|it| it.listed() == listed)?;
+        let worktree = known.worktrees.iter().find(|worktree| {
+            worktree
+                .views
+                .iter()
+                .any(|view| matches!(view, KnownView::Browser(browser) if browser.id == id))
+        })?;
         Some(Directory::from(&worktree.folder))
     }
 
@@ -4831,7 +4847,7 @@ impl Sidebar {
         machine: &Machine,
         listed: &Listed,
         key: TerminalKey,
-    ) -> Option<&KnownView> {
+    ) -> Option<&FoundTerminal> {
         let mut known = shelf(&self.shelves, machine).iter();
         known.find(|known| known.listed() == listed)?.terminal(key)
     }
@@ -4998,13 +5014,13 @@ impl Sidebar {
             },
             Wants::Printed {
                 session,
-                view,
+                terminal,
                 ended,
             } => Asked::Printed {
                 menu: number,
                 on,
                 session,
-                view,
+                terminal,
                 ended,
             },
             Wants::Checks { page } => Asked::Checks {
@@ -5201,11 +5217,16 @@ impl Sidebar {
         let Some(found) = held.next() else {
             return Err(format!("worktree {worktree} is no longer listed"));
         };
-        let views = found.terminals().map(|view| view.key).collect();
+        let views: Vec<TerminalKey> = found.terminals().map(|view| view.key).collect();
+        let seen: Vec<ViewId> = found.terminal_ids().collect();
+        assert!(
+            views.len() <= seen.len(),
+            "every keyed terminal is counted among the worktree's terminal ids"
+        );
         Ok(Act::Worktree {
             worktree,
             views,
-            seen: found.terminal_ids().collect(),
+            seen,
         })
     }
 
@@ -6387,7 +6408,7 @@ fn browser_label(browser: &KnownBrowser) -> String {
         .map_or_else(|| BROWSER_LABEL.to_owned(), |url| url.short().to_owned())
 }
 
-fn label(agent: Option<&Agent>, view: &KnownView) -> String {
+fn label(agent: Option<&Agent>, view: &FoundTerminal) -> String {
     if let Some(agent) = agent {
         let topic = agent.topic.as_deref().or(view.topic.as_deref());
         let name = given_name(agent).or(topic);
@@ -7448,8 +7469,8 @@ mod tests {
         made(name, id, Timestamp::default(), views)
     }
 
-    fn known(view: &View) -> KnownView {
-        KnownView {
+    fn known(view: &View) -> FoundTerminal {
+        FoundTerminal {
             id: ViewId::of(u64::from(view.id)).unwrap(),
             key: TerminalKey::of(&key_in(1, view.id)).unwrap(),
             cwd: Dir::parse(&view.cwd).unwrap(),
@@ -8435,8 +8456,13 @@ mod tests {
     #[test]
     fn collapsed_the_sidebar_keeps_the_dots_the_work_and_the_shells() {
         let mut sidebar = fresh();
-        let mut views: Vec<View> = (1..=103).map(|id| view(id, 0, "/w/a", "claude")).collect();
-        views.push(in_shell(104, going("make", 159, Front::Working)));
+        let per_tab = u32::try_from(projects::LAYOUT_VIEWS_MAX).unwrap();
+        let mut views: Vec<View> = (1..=103)
+            .map(|id| view(id, (id - 1) / per_tab, "/w/a", "claude"))
+            .collect();
+        let mut shell = in_shell(104, going("make", 159, Front::Working));
+        shell.tab = 103 / per_tab;
+        views.push(shell);
         let mut agents = vec![
             agent("s", 1, Status::Idle, None),
             agent("s", 2, Status::Waiting, None),
@@ -12563,12 +12589,12 @@ mod tests {
             at,
         };
         let (on, s) = (Machine::Local, listed("s", 10));
-        let view = view_key(10, 1);
+        let terminal = view_key(10, 1).terminal_key().unwrap();
         let printed = Asked::Printed {
             menu: 1,
             on,
             session: s,
-            view,
+            terminal,
             ended: failed,
         };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
@@ -12610,12 +12636,12 @@ mod tests {
             at,
         };
         let (on, s) = (Machine::Local, listed("s", 10));
-        let view = view_key(10, 2);
+        let terminal = view_key(10, 2).terminal_key().unwrap();
         let printed = Asked::Printed {
             menu: 3,
             on,
             session: s,
-            view,
+            terminal,
             ended: make,
         };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
@@ -16535,7 +16561,7 @@ mod tests {
                 seconds: 1,
                 nanos: 0,
             });
-            let term = api::Terminal {
+            let terminal = api::Terminal {
                 id: 1,
                 found: Some(api::terminal::Found::Key(api::TerminalKey {
                     id: 1,
@@ -16555,10 +16581,10 @@ mod tests {
                 name: "main".to_owned(),
                 folder: "/w/lune/main".to_owned(),
                 seen: Some(api::worktree::Seen::Unread(())),
-                terminals: vec![term.clone()],
+                terminals: vec![terminal.clone()],
                 views: vec![
                     ApiView {
-                        kind: Some(Kind::Terminal(term)),
+                        kind: Some(Kind::TerminalId(terminal.id)),
                     },
                     ApiView {
                         kind: Some(Kind::Browser(browser_a)),
@@ -16589,12 +16615,12 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(make_host(Some("https://example.com/docs/")));
 
-        let wt_place = WorktreePlace {
+        let worktree_place = WorktreePlace {
             project: project_row("lune", 1),
             worktree: tab_of(1, 0),
         };
-        let browser_20 = ViewPlace::new(wt_place.clone(), ViewKey::browser(20));
-        let browser_21 = ViewPlace::new(wt_place.clone(), ViewKey::browser(21));
+        let browser_20 = ViewPlace::new(worktree_place.clone(), ViewKey::browser(20));
+        let browser_21 = ViewPlace::new(worktree_place.clone(), ViewKey::browser(21));
 
         let lines = screen(&mut sidebar, false, 36, 12);
         let view_lines: Vec<&str> = lines.iter().skip(6).take(3).map(String::as_str).collect();
@@ -16612,7 +16638,7 @@ mod tests {
             on: Machine::Local,
             project: ProjectId::of(1).unwrap(),
             at: Sitting::Worktree {
-                worktree: wt_place.worktree,
+                worktree: worktree_place.worktree,
                 layout: SeatedLayout::Live {
                     arranged: Arranged::Tabs,
                     version: None,
@@ -16645,6 +16671,19 @@ mod tests {
                         }
                     ) if *place == browser_20
                 )
+        ));
+        let gone_browser = ViewPlace::new(worktree_place.clone(), ViewKey::browser(99));
+        assert!(matches!(
+            sidebar.target_at(&Machine::Local, Place::View(gone_browser)),
+            Some(Target::View(
+                Machine::Local,
+                ViewRow {
+                    terminal: None,
+                    cwd: Cwd::Unsaid,
+                    arranged: None,
+                    ..
+                }
+            ))
         ));
 
         sidebar.focus(Keys::Sidebar);
@@ -16707,12 +16746,12 @@ mod tests {
             "closing a browser row lands on the next browser row"
         );
 
-        sidebar.light(Spot::Local(Place::Worktree(wt_place.clone())));
+        sidebar.light(Spot::Local(Place::Worktree(worktree_place.clone())));
         let plan = sidebar
             .plan(
                 &Machine::Local,
-                wt_place.project.listed(),
-                Scope::Worktree(wt_place.worktree),
+                worktree_place.project.listed(),
+                Scope::Worktree(worktree_place.worktree),
             )
             .unwrap();
         let Act::Worktree { seen, .. } = plan.act else {
@@ -16762,11 +16801,11 @@ mod tests {
         });
         sidebar.focus(Keys::Sidebar);
 
-        let wt_place = WorktreePlace {
+        let worktree_place = WorktreePlace {
             project: project_row("lune", 1),
             worktree: tab_of(1, 0),
         };
-        let browser_place = ViewPlace::new(wt_place.clone(), ViewKey::browser(30));
+        let browser_place = ViewPlace::new(worktree_place.clone(), ViewKey::browser(30));
         let lines = screen(&mut sidebar, true, 36, 10);
         assert!(
             lines.iter().any(|line| line.contains("lune.dev")),
@@ -16777,7 +16816,7 @@ mod tests {
         sidebar.key(&char('h'), moment(160_000));
         assert_eq!(
             sidebar.lit_spot(),
-            Some(&Spot::Local(Place::Worktree(wt_place)))
+            Some(&Spot::Local(Place::Worktree(worktree_place)))
         );
         assert!(
             !screen(&mut sidebar, true, 36, 10)

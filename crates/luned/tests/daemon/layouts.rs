@@ -3947,14 +3947,16 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
         .unwrap();
 
     eventually("watch lists terminal and browser in layout order", || {
-        let wt = watched_worktree(&owned, worktree)?;
-        let legacy_ok = wt.terminals.len() == 1 && wt.terminals[0].id == terminal_id;
-        let views_ok = wt.views.len() == 2
-            && matches!(&wt.views[0].kind, Some(Kind::Terminal(t)) if t.id == terminal_id)
+        let worktree_row = watched_worktree(&owned, worktree)?;
+        let legacy_ok =
+            worktree_row.terminals.len() == 1 && worktree_row.terminals[0].id == terminal_id;
+        let views_ok = worktree_row.views.len() == 2
+            && matches!(&worktree_row.views[0].kind, Some(Kind::TerminalId(id)) if *id == terminal_id)
             && matches!(
-                &wt.views[1].kind,
-                Some(Kind::Browser(b))
-                    if b.id == browser_id && b.url.as_deref() == Some("https://example.com")
+                &worktree_row.views[1].kind,
+                Some(Kind::Browser(browser))
+                    if browser.id == browser_id
+                        && browser.url.as_deref() == Some("https://example.com")
             );
         (legacy_ok && views_ok).then_some(())
     });
@@ -3974,15 +3976,19 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
         })
     });
     eventually("watch updates browser url after navigate", || {
-        let wt = watched_worktree(&owned, worktree)?;
-        wt.views.iter().any(|view| {
-            matches!(
-                &view.kind,
-                Some(Kind::Browser(b))
-                    if b.id == browser_id && b.url.as_deref() == Some("https://example.com/docs")
-            )
-        })
-        .then_some(())
+        let worktree_row = watched_worktree(&owned, worktree)?;
+        worktree_row
+            .views
+            .iter()
+            .any(|view| {
+                matches!(
+                    &view.kind,
+                    Some(Kind::Browser(browser))
+                        if browser.id == browser_id
+                            && browser.url.as_deref() == Some("https://example.com/docs")
+                )
+            })
+            .then_some(())
     });
 
     let both = asked(
@@ -4009,9 +4015,9 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
     eventually(
         "watch removes closed browser view while terminal stays",
         || {
-            let wt = watched_worktree(&owned, worktree)?;
-            let only_terminal = wt.views.len() == 1
-                && matches!(&wt.views[0].kind, Some(Kind::Terminal(t)) if t.id == terminal_id);
+            let worktree_row = watched_worktree(&owned, worktree)?;
+            let only_terminal = worktree_row.views.len() == 1
+                && matches!(&worktree_row.views[0].kind, Some(Kind::TerminalId(id)) if *id == terminal_id);
             only_terminal.then_some(())
         },
     );

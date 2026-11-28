@@ -785,7 +785,7 @@ message Worktree {
 
   message View {
     oneof kind {
-      Terminal terminal = 1;
+      fixed64 terminal_id = 1;
       Browser browser = 2;
     }
   }

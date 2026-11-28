@@ -934,6 +934,12 @@ impl Target {
     }
 
     fn offer(&self, action: Action) -> Option<Offer<'_>> {
+        if let Target::View(_, row) = self
+            && matches!(row.place.view(), ViewKey::Browser(_))
+        {
+            assert!(row.terminal.is_none(), "a browser row has no terminal id");
+            assert_eq!(row.ran, Ran::Unhooked, "a browser row runs no shell");
+        }
         if !action.fits(self.noun()) {
             return None;
         }
@@ -1009,11 +1015,10 @@ impl Target {
             }
             (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
             (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
-            (Action::BriefHighlighted, Target::View(_, row))
-                if row.place.view().terminal_key().is_none() =>
-            {
-                return None;
-            }
+            (Action::BriefHighlighted, Target::View(_, row)) => match row.place.view() {
+                ViewKey::Terminal(_) => Offer::Brief(brief::Scope::Highlighted),
+                ViewKey::Browser(_) => return None,
+            },
             (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
             (Action::Ask, _) => Offer::Ask,
             (Action::FileIssue, _) => Offer::FileIssue(self.repository()?),
@@ -1346,7 +1351,7 @@ pub enum Wants {
     Pull(Work, Wanted),
     Printed {
         session: Listed,
-        view: ViewKey,
+        terminal: TerminalKey,
         ended: Ended,
     },
     Checks {
@@ -1759,10 +1764,9 @@ impl Menu {
             Offer::Last(row, terminal, last) => match row.ended() {
                 Ok((beside, ended)) => {
                     let session = beside.session.clone();
-                    let view = ViewKey::Terminal(terminal);
                     let wants = Wants::Printed {
                         session,
-                        view,
+                        terminal,
                         ended: ended.clone(),
                     };
                     stays(
@@ -4133,12 +4137,11 @@ mod tests {
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
         let (_, wants) = stays(menu.key(&char('f')));
-        let view = ViewKey::terminal(4);
         assert_eq!(
             wants,
             Wants::Printed {
                 session: listed(),
-                view,
+                terminal: at(4),
                 ended: cargo_test()
             }
         );
@@ -4148,12 +4151,11 @@ mod tests {
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
         let (menu, _) = stays(opened(ended_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&char('e')));
-        let view = ViewKey::terminal(4);
         assert_eq!(
             wants,
             Wants::Printed {
                 session: listed(),
-                view,
+                terminal: at(4),
                 ended: cargo_test()
             }
         );

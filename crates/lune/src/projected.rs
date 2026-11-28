@@ -14,11 +14,17 @@ use crate::machines::{self, Machine};
 use crate::sidebar::{Listed, ViewKey};
 use crate::viewed::{Tab, WorktreeTabs};
 
+pub fn route_terminal(on: &Machine, key: TerminalKey) -> Result<TerminalKey, String> {
+    match on {
+        Machine::Remote(_) => Err(NOT_YET.to_owned()),
+        Machine::Local => Ok(key),
+    }
+}
+
 pub fn route(on: &Machine, view: ViewKey) -> Result<TerminalKey, String> {
-    match (view, on) {
-        (ViewKey::Terminal(_), Machine::Remote(_)) => Err(NOT_YET.to_owned()),
-        (ViewKey::Terminal(key), Machine::Local) => Ok(key),
-        (ViewKey::Browser(_), _) => Err("a browser view runs no terminal".to_owned()),
+    match view {
+        ViewKey::Terminal(key) => route_terminal(on, key),
+        ViewKey::Browser(_) => Err("a browser view runs no terminal".to_owned()),
     }
 }
 
@@ -350,6 +356,7 @@ mod tests {
         let (here, project) = (Machine::Local, Listed::new_project("bitwarden backup", 7));
         let unlisted = ViewKey::Terminal(keyed(9));
         assert_eq!(route(&here, unlisted), Ok(keyed(9)));
+        assert_eq!(route_terminal(&here, keyed(9)), Ok(keyed(9)));
         assert_eq!(
             projected.whole(&here, &project),
             Ok(keyed(4)),
@@ -357,6 +364,11 @@ mod tests {
         );
         let far = Machine::Remote("far".parse().unwrap());
         assert_eq!(route(&far, unlisted), Err(NOT_YET.to_owned()));
+        assert_eq!(route_terminal(&far, keyed(9)), Err(NOT_YET.to_owned()));
+        let browser = ViewKey::browser(30);
+        let no_terminal = Err("a browser view runs no terminal".to_owned());
+        assert_eq!(route(&here, browser), no_terminal);
+        assert_eq!(route(&far, browser), no_terminal);
         assert_eq!(projected.whole(&far, &project), Err(NOT_YET.to_owned()));
         let gone = Listed::new_project("gone", 8);
         let unkept = Err("luned keeps no such project".to_owned());

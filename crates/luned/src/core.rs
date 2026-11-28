@@ -1227,14 +1227,15 @@ impl Known {
         };
         let worktree = |folder: Dir, given: &str, worktree: &Worktree| {
             let renamed = worktree.renamed().map(Name::as_str);
+            let (terminals, views) = self.built_views_and_terminals(worktree);
             api::Worktree {
                 id: worktree.id().get(),
                 name: renamed.unwrap_or(given).to_owned(),
                 renamed: renamed.is_some(),
                 seen: Some(self.seen(&folder).to_api()),
                 folder: folder.as_str().to_owned(),
-                terminals: self.built_terminals(worktree),
-                views: self.built_views(worktree),
+                terminals,
+                views,
                 used_at: worktree.used().map(|used| used.time().into()),
                 arranged: worktree.layout().arranged().map(|it| it.to_api().into()),
             }
@@ -1290,37 +1291,43 @@ impl Known {
         Said::Unopened(api::project::Unopened { subfolders })
     }
 
-    fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {
-        worktree
-            .layout()
-            .terminals()
-            .map(|terminal| self.built_terminal(terminal))
-            .collect()
-    }
-
-    fn built_views(&self, worktree: &Worktree) -> Vec<api::worktree::View> {
+    fn built_views_and_terminals(
+        &self,
+        worktree: &Worktree,
+    ) -> (Vec<api::Terminal>, Vec<api::worktree::View>) {
         use api::worktree::view::Kind;
-        let views: Vec<api::worktree::View> = worktree
-            .layout()
-            .views()
-            .filter_map(|view| match view {
-                View::Terminal(terminal) => Some(api::worktree::View {
-                    kind: Some(Kind::Terminal(self.built_terminal(terminal))),
-                }),
-                View::Browser(browser) => Some(api::worktree::View {
-                    kind: Some(Kind::Browser(api::Browser {
-                        id: browser.id().get(),
-                        url: browser.url().map(|url| url.as_str().to_owned()),
-                    })),
-                }),
-                View::Welcome(_) | View::Review(_) => None,
-            })
-            .collect();
+        let mut terminals = Vec::new();
+        let mut views = Vec::new();
+        for view in worktree.layout().views() {
+            match view {
+                View::Terminal(terminal) => {
+                    let built = self.built_terminal(terminal);
+                    let terminal_id = built.id;
+                    terminals.push(built);
+                    views.push(api::worktree::View {
+                        kind: Some(Kind::TerminalId(terminal_id)),
+                    });
+                }
+                View::Browser(browser) => {
+                    views.push(api::worktree::View {
+                        kind: Some(Kind::Browser(api::Browser {
+                            id: browser.id().get(),
+                            url: browser.url().map(|url| url.as_str().to_owned()),
+                        })),
+                    });
+                }
+                View::Welcome(_) | View::Review(_) => {}
+            }
+        }
         assert!(
             views.len() <= LAYOUT_VIEWS_MAX,
             "a worktree layout holds at most {LAYOUT_VIEWS_MAX} views"
         );
-        views
+        assert!(
+            terminals.len() <= views.len(),
+            "every terminal is listed as a view"
+        );
+        (terminals, views)
     }
 
     fn built_terminal(&self, terminal: &Terminal) -> api::Terminal {
@@ -1398,7 +1405,7 @@ impl Known {
                 false,
             ),
         };
-        api::Terminal {
+        let built = api::Terminal {
             id: id.get(),
             found: Some(told),
             folder: folder.as_str().to_owned(),
@@ -1408,7 +1415,14 @@ impl Known {
             held,
             name: terminal.name().map(|name| name.as_str().to_owned()),
             state: Some(state),
-        }
+        };
+        assert_ne!(built.id, 0, "a terminal id is never 0");
+        assert_eq!(
+            built.held,
+            matches!(built.state, Some(State::Ended(_))),
+            "legacy held flag matches ended state"
+        );
+        built
     }
 
     fn seen(&self, folder: &Dir) -> Seen {
@@ -3048,23 +3062,27 @@ mod tests {
         let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
             panic!("projects kept");
         };
-        let wt = &kept.projects[0].worktrees().unwrap()[0];
-        assert_eq!(wt.terminals.len(), 1);
-        assert_eq!(wt.terminals[0].id, terminal_id.get());
+        let worktree_row = &kept.projects[0].worktrees().unwrap()[0];
+        assert_eq!(worktree_row.terminals.len(), 1);
+        assert_eq!(worktree_row.terminals[0].id, terminal_id.get());
         assert_eq!(
-            wt.views.len(),
+            worktree_row.views.len(),
             3,
             "welcome and review are omitted from sidebar views"
         );
-        assert!(matches!(&wt.views[0].kind, Some(Kind::Terminal(t)) if t.id == terminal_id.get()));
         assert!(matches!(
-            &wt.views[1].kind,
-            Some(Kind::Browser(b))
-                if b.id == browser_a.get() && b.url.as_deref() == Some("https://example.com")
+            &worktree_row.views[0].kind,
+            Some(Kind::TerminalId(id)) if *id == terminal_id.get()
         ));
         assert!(matches!(
-            &wt.views[2].kind,
-            Some(Kind::Browser(b)) if b.id == browser_b.get() && b.url.is_none()
+            &worktree_row.views[1].kind,
+            Some(Kind::Browser(browser))
+                if browser.id == browser_a.get()
+                    && browser.url.as_deref() == Some("https://example.com")
+        ));
+        assert!(matches!(
+            &worktree_row.views[2].kind,
+            Some(Kind::Browser(browser)) if browser.id == browser_b.get() && browser.url.is_none()
         ));
 
         let url_next = BrowserUrl::parse("https://lune.dev/docs").unwrap();
@@ -3087,11 +3105,12 @@ mod tests {
         let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
             panic!("projects kept");
         };
-        let wt = &kept.projects[0].worktrees().unwrap()[0];
+        let worktree_row = &kept.projects[0].worktrees().unwrap()[0];
         assert!(matches!(
-            &wt.views[1].kind,
-            Some(Kind::Browser(b))
-                if b.id == browser_a.get() && b.url.as_deref() == Some("https://lune.dev/docs")
+            &worktree_row.views[1].kind,
+            Some(Kind::Browser(browser))
+                if browser.id == browser_a.get()
+                    && browser.url.as_deref() == Some("https://lune.dev/docs")
         ));
     }
 }

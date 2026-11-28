@@ -2216,12 +2216,12 @@ impl App {
     }
 
     fn palette(&self) -> Palette {
-        let non_terminal = self
+        let aims_worktree = self
             .viewed()
             .is_some_and(|right| right.welcomes() || right.reviews());
         let (aim, origin) = match self.focus.side {
             Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
-            Side::Session | Side::Collapsed if non_terminal => {
+            Side::Session | Side::Collapsed if aims_worktree => {
                 (self.sidebar.aimed_worktree(), Origin::Views)
             }
             Side::Session | Side::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
@@ -2873,11 +2873,11 @@ impl App {
             Asked::Printed {
                 menu,
                 on,
-                view,
+                terminal,
                 ended,
                 ..
             } => {
-                let terminal = projected::route(&on, view);
+                let terminal = projected::route_terminal(&on, terminal);
                 printed::read(menu, on, terminal, ended, &self.events);
             }
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
@@ -3743,12 +3743,12 @@ impl App {
             Some(Right::Worktree(right)) => right,
         };
         let (on, worktree) = (right.machine().clone(), right.worktree());
-        let Some((project, _)) = self.projected.holding(&on, worktree) else {
+        let Some((project, shown_worktree)) = self.projected.holding(&on, worktree) else {
             return;
         };
         let view = right
             .focused()
-            .and_then(|focused| match project.view_kind(focused)? {
+            .and_then(|focused| match shown_worktree.view(focused)? {
                 rows::View::Terminal(terminal) => terminal.key().map(ViewKey::Terminal),
                 rows::View::Browser(browser) => Some(ViewKey::Browser(browser.id)),
             });
@@ -5292,12 +5292,12 @@ mod tests {
         };
         let projected = Projected::adapted(&host).unwrap();
         let project_id = ProjectId::of(1).unwrap();
-        let wt_id = WorktreeId::of(100).unwrap();
+        let worktree_id = WorktreeId::of(100).unwrap();
         let browser_id = ViewId::of(30).unwrap();
         let parsed = projected.project(&Machine::Local, project_id).unwrap();
         assert_eq!(
             view_location(parsed, ViewKey::Browser(browser_id)),
-            Some((wt_id, browser_id))
+            Some((worktree_id, browser_id))
         );
         assert_eq!(
             view_location(parsed, ViewKey::Browser(ViewId::of(99).unwrap())),
@@ -5309,6 +5309,6 @@ mod tests {
         app.handle_at(Event::Daemon(Ok(host)), &mut terminal, Moment::now())
             .unwrap();
         app.go_other_than(&Machine::Local, None);
-        assert_eq!(app.viewed().map(Viewed::worktree), Some(wt_id));
+        assert_eq!(app.viewed().map(Viewed::worktree), Some(worktree_id));
     }
 }

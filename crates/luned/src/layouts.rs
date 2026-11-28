@@ -695,7 +695,7 @@ impl Layouts {
                     Ask::Bring { worktree, from } => {
                         self.bring(worktree, from).map(|made| alone(Some(made)))
                     }
-                    Ask::CloseView(terminal) => self.close_view(terminal).map(alone),
+                    Ask::CloseView(target) => self.close_view(target).map(alone),
                     Ask::OpenBrowser { target, url } => self.open_browser(target, url),
                 };
                 let kept = self.store.revision();
@@ -1581,11 +1581,20 @@ impl Layouts {
                 if projects.holding_browser(view).is_none() {
                     return Err(Failed::Gone(format!("no layout holds browser view {view}")));
                 }
+                let known_count = self.known.len();
                 self.close(view)?;
-                let projects = self.kept().map_err(Failed::NotKept)?;
+                let projects = self
+                    .store
+                    .projects()
+                    .expect("projects just changed are kept");
                 assert!(
                     projects.holding_browser(view).is_none(),
                     "browser view {view} left its layout"
+                );
+                assert_eq!(
+                    self.known.len(),
+                    known_count,
+                    "closing a browser leaves known terminals unchanged"
                 );
             }
         }
