@@ -21,11 +21,14 @@ import { pathToFileURL } from "node:url";
 
 const [, extension, mode] = process.argv;
 const url = pathToFileURL(extension).href;
-let handlers, loads = 0, session = "first";
+let handlers, loads = 0, session = "first", thinking = undefined;
 async function load() {
   handlers = new Map();
   const { default: factory } = await import(`${url}?${loads++}`);
-  factory({ on: (name, handler) => handlers.set(name, handler) });
+  factory({
+    on: (name, handler) => handlers.set(name, handler),
+    getThinkingLevel: () => thinking,
+  });
 }
 await load();
 const ctx = {
@@ -40,6 +43,12 @@ for await (const line of createInterface({ input: process.stdin })) {
     await load();
   } else if (typeof event.idle === "boolean") {
     ctx.isIdle = () => event.idle;
+  } else if ("setModel" in event) {
+    ctx.model = event.setModel;
+  } else if ("setThinking" in event) {
+    thinking = event.setThinking;
+  } else if ("setContext" in event) {
+    ctx.getContextUsage = () => event.setContext;
   } else {
     await handlers.get(event.type)?.(event, ctx);
   }
@@ -776,4 +785,102 @@ fn a_turn_goes_on_through_a_reload() {
     assert_eq!(status_in(&file), "stopped");
     let refreshed = as_status(&host, pid, Status::Stopped);
     assert_eq!(refreshed.session_id.as_deref(), Some("first"));
+}
+
+#[test]
+fn a_pi_agent_reports_model_effort_context_and_session_cost_telemetry() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+
+    pi.says(&json!({ "setModel": { "id": "claude-opus-4-7", "name": "Opus 4.7", "contextWindow": 1_000_000 } }));
+    pi.says(&json!({ "setThinking": "high" }));
+    pi.says(
+        &json!({ "setContext": { "tokens": 19_000, "contextWindow": 1_000_000, "percent": 1.9 } }),
+    );
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    pi.event("agent_start");
+    pi.says(&json!({
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "stopReason": "stop",
+            "usage": { "cost": { "total": 0.26 } }
+        }
+    }));
+    pi.event("turn_end");
+    pi.event("agent_settled");
+
+    let agent = eventually("pi telemetry arrives", || {
+        host.agents().into_iter().find(|agent| {
+            agent.pid == pid
+                && agent.parsed_telemetry().and_then(|telemetry| {
+                    telemetry
+                        .usage()
+                        .and_then(lune_protocol::telemetry::AgentUsage::session_cost_micro_usd)
+                }) == Some(260_000)
+        })
+    });
+    let telemetry = agent.parsed_telemetry().unwrap();
+    assert_eq!(
+        telemetry
+            .model()
+            .map(lune_protocol::telemetry::TelemetryText::as_str),
+        Some("Opus 4.7")
+    );
+    assert_eq!(
+        telemetry
+            .effort()
+            .map(lune_protocol::telemetry::TelemetryText::as_str),
+        Some("high")
+    );
+    let context = telemetry.context().unwrap();
+    assert_eq!(context.used_permille.get(), 19);
+    assert_eq!(context.used_tokens, Some(19_000));
+    assert_eq!(
+        telemetry.usage().unwrap().session_cost_micro_usd(),
+        Some(260_000)
+    );
+}
+
+#[test]
+fn reload_preserves_running_state_across_early_telemetry_events_and_syncs_telemetry() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+
+    pi.says(&json!({ "setModel": { "id": "claude-opus-4-7", "name": "Opus 4.7", "contextWindow": 1_000_000 } }));
+    pi.says(&json!({ "setThinking": "high" }));
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    pi.event("agent_start");
+    let file = file_of(&host, pid);
+    assert_eq!(status_in(&file), "busy");
+
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "setModel": { "id": "claude-sonnet-4-6", "name": "Sonnet 4.6", "contextWindow": 200_000 } }));
+    pi.says(&json!({ "type": "model_select" }));
+    pi.says(&json!({ "type": "thinking_level_select" }));
+    pi.says(&json!({ "type": "turn_end" }));
+    pi.says(&json!({ "type": "session_compact" }));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "stop", "usage": { "cost": { "total": 0.1 } } }
+    }));
+    assert_eq!(status_in(&file), "busy");
+
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "busy");
+    let updated: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(updated["telemetry"]["model"], json!("Sonnet 4.6"));
+
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "setModel": null }));
+    pi.says(&json!({ "setThinking": null }));
+    pi.says(&json!({ "setContext": null }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "busy");
+    let cleared: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(cleared.get("telemetry").is_none(), "{cleared}");
 }

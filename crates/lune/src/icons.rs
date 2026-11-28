@@ -21,7 +21,7 @@ const AGY: &str = "\u{f0674}";
 
 const PYTHON: &str = "\u{e73c}";
 
-const GIT: &str = "\u{e702}";
+pub const GIT: &str = "\u{e702}";
 
 const ICONS: [(&str, &str); 13] = [
     ("claude", CLAUDE),

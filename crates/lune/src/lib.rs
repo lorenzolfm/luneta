@@ -59,6 +59,7 @@ mod speech;
 mod spots;
 mod start;
 mod state;
+mod statusbar;
 pub mod step;
 mod sweep;
 mod terminate;

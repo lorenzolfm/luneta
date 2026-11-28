@@ -62,3 +62,19 @@ fn an_app_opens_its_sidebar_as_wide_as_its_state_folder_kept_it() {
     assert_eq!(column_of(&wide, SIDEBAR_EDGE) + 1, usize::from(KEPT));
     assert!(column_of(&narrow, SIDEBAR_EDGE) + 1 < usize::from(KEPT));
 }
+
+#[test]
+fn an_app_renders_the_status_bar_on_the_bottom_row() {
+    let state = tempfile::tempdir().unwrap();
+    let shown = screen(state.path(), Err("none runs"));
+    let bottom = shown.last().expect("screen has a bottom row");
+    assert!(
+        bottom.contains('☾'),
+        "bottom status bar renders luneta icon: {bottom:?}"
+    );
+    let above_bottom = &shown[shown.len() - 2];
+    assert!(
+        above_bottom.contains('╰'),
+        "sidebar bottom border sits directly above status bar: {above_bottom:?}"
+    );
+}

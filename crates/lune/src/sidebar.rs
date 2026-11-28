@@ -19,6 +19,7 @@ use lune_protocol::git::{Changed, Changes, GitStatus, Head, ParsedGitStatuses, U
 use lune_protocol::github::{Mergeability, ParsedPullRequests, PullRequest, State, Verdict};
 use lune_protocol::said::Said;
 use lune_protocol::shell::{Doing, Ending, Front};
+use lune_protocol::telemetry::{AgentTelemetry, AgentUsage};
 use lune_protocol::unread;
 #[cfg(test)]
 use luned::api::Status;
@@ -73,7 +74,9 @@ use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, SidebarBottom, Spots};
+use crate::statusbar;
 use crate::sweep::{Continuation, CutAt, Join, NonEmptyRect, Page, Sweep, cells};
+use crate::viewed::FocusedView;
 
 pub const COLUMNS: u16 = 32;
 
@@ -476,6 +479,20 @@ impl Seat {
             | Sitting::Home => None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RightTarget {
+    None,
+    Home {
+        on: Machine,
+        project: ProjectId,
+    },
+    Worktree {
+        on: Machine,
+        worktree: WorktreeId,
+        focused: Option<FocusedView>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2899,6 +2916,27 @@ impl Sidebar {
         self.state().here_agent()
     }
 
+    #[must_use]
+    pub fn status_bar(
+        &self,
+        target: &RightTarget,
+        last_usage: Option<&(agents::Harness, AgentUsage)>,
+        sidebar_focused: bool,
+        sidebar_collapsed: bool,
+        wall: SystemTime,
+    ) -> statusbar::Snapshot {
+        self.state()
+            .status_bar(target, last_usage, sidebar_focused, sidebar_collapsed, wall)
+    }
+
+    #[must_use]
+    pub fn focused_subscription_usage(
+        &self,
+        target: &RightTarget,
+    ) -> Option<(agents::Harness, AgentUsage)> {
+        self.state().focused_subscription_usage(target)
+    }
+
     pub fn on_header(&self) -> Option<Machine> {
         self.state().on_header()
     }
@@ -3902,6 +3940,182 @@ impl SidebarState {
             dir,
             harness,
         })
+    }
+
+    fn focused_subscription_usage(
+        &self,
+        target: &RightTarget,
+    ) -> Option<(agents::Harness, AgentUsage)> {
+        let RightTarget::Worktree {
+            on,
+            worktree,
+            focused: Some(FocusedView::Terminal { id, key }),
+        } = target
+        else {
+            return None;
+        };
+        let seen = self.seen(on)?;
+        let seated = seen.seated();
+        let terminal = self.find_worktree(on, *worktree).and_then(|(_, wt)| {
+            wt.terminals()
+                .find(|term| Some(term.key) == *key || term.id == *id)
+        })?;
+        let agent = seated.get(&terminal.key)?;
+        let harness = agents::of(agent)?;
+        let telemetry = agent.parsed_telemetry()?;
+        let usage = telemetry.usage()?.clone();
+        usage.has_windows().then_some((harness, usage))
+    }
+
+    fn find_worktree(
+        &self,
+        on: &Machine,
+        worktree: WorktreeId,
+    ) -> Option<(&Known, &KnownWorktree)> {
+        for known in shelf(&self.shelves, on) {
+            if let Some(wt) = known
+                .worktrees
+                .iter()
+                .find(|wt| wt.place.worktree == worktree)
+            {
+                return Some((known, wt));
+            }
+        }
+        None
+    }
+
+    fn status_bar(
+        &self,
+        target: &RightTarget,
+        last_usage: Option<&(agents::Harness, AgentUsage)>,
+        sidebar_focused: bool,
+        sidebar_collapsed: bool,
+        wall: SystemTime,
+    ) -> statusbar::Snapshot {
+        let tallies = if sidebar_collapsed {
+            statusbar::CollapsedTallies {
+                waiting: self.counts.waiting,
+                unread: self.counts.new,
+                busy: self.counts.busy,
+            }
+        } else {
+            statusbar::CollapsedTallies::default()
+        };
+        let away = self.away.is_some();
+        let (machine, project, worktree, view, usage_machine) = match target {
+            RightTarget::None => (None, None, None, None, &Machine::Local),
+            RightTarget::Home {
+                on,
+                project: project_id,
+            } => {
+                let project = shelf(&self.shelves, on)
+                    .iter()
+                    .find(|known| known.project.id() == *project_id)
+                    .map(|known| statusbar::ProjectInfo {
+                        name: known.listed().name().as_str().to_owned(),
+                        colour: colour_of(known.project.id()),
+                    });
+                (
+                    remote_machine_name(on),
+                    project,
+                    None,
+                    Some(statusbar::ViewInfo::plain("home".to_owned())),
+                    on,
+                )
+            }
+            RightTarget::Worktree {
+                on,
+                worktree: worktree_id,
+                focused,
+            } => {
+                let seen = self.seen(on);
+                let found = self.find_worktree(on, *worktree_id);
+                let project = found.map(|(known, _)| statusbar::ProjectInfo {
+                    name: known.listed().name().as_str().to_owned(),
+                    colour: colour_of(known.project.id()),
+                });
+                let worktree_info = found.map(|(_, wt)| build_worktree_status(wt, seen.as_ref()));
+                let view_info = build_view_status(
+                    focused.as_ref(),
+                    found.map(|(_, wt)| wt),
+                    seen.as_ref(),
+                    wall,
+                );
+                (
+                    remote_machine_name(on),
+                    project,
+                    worktree_info,
+                    view_info,
+                    on,
+                )
+            }
+        };
+        let has_own_usage = view
+            .as_ref()
+            .and_then(|info| info.telemetry.as_ref())
+            .and_then(AgentTelemetry::usage)
+            .is_some();
+        let fallback_usage = if has_own_usage {
+            None
+        } else {
+            self.fallback_subscription_usage(usage_machine, last_usage, wall)
+        };
+        statusbar::Snapshot {
+            sidebar_focused,
+            sidebar_collapsed,
+            away,
+            tallies,
+            machine,
+            project,
+            worktree,
+            view,
+            fallback_usage,
+        }
+    }
+
+    fn fallback_subscription_usage(
+        &self,
+        on: &Machine,
+        last_usage: Option<&(agents::Harness, AgentUsage)>,
+        wall: SystemTime,
+    ) -> Option<(agents::Harness, AgentUsage)> {
+        let preferred = last_usage.map(|(harness, _)| *harness);
+        let from_seen = |seen: Seen<'_>| {
+            let mut candidates: Vec<(agents::Harness, u32, AgentUsage)> = seen
+                .agents
+                .iter()
+                .filter_map(|agent| {
+                    let harness = agents::of(agent)?;
+                    let telemetry = agent.parsed_telemetry()?;
+                    let usage = telemetry.usage()?.clone();
+                    usage.has_windows().then_some((harness, agent.pid, usage))
+                })
+                .collect();
+            if candidates.is_empty() {
+                return None;
+            }
+            candidates.sort_by_key(|(harness, pid, _)| {
+                let matches_preferred = preferred == Some(*harness);
+                let rank = match harness {
+                    agents::Harness::ClaudeCode => 0u8,
+                    agents::Harness::Antigravity => 1u8,
+                    agents::Harness::Pi => 2u8,
+                };
+                (!matches_preferred, rank, std::cmp::Reverse(*pid))
+            });
+            let (harness, _, usage) = candidates.into_iter().next()?;
+            Some((harness, usage))
+        };
+        self.seen(on)
+            .and_then(from_seen)
+            .or_else(|| {
+                if *on == Machine::Local {
+                    None
+                } else {
+                    self.seen(&Machine::Local).and_then(from_seen)
+                }
+            })
+            .or_else(|| last_usage.and_then(|cached| fresh_cached_usage(cached, wall)))
     }
 
     fn lit_machine(&self) -> Option<Machine> {
@@ -7972,6 +8186,155 @@ fn transcript(agent: &Agent) -> Transcript {
             .map_or(Transcript::Unnamed, Transcript::Named)
     } else {
         Transcript::NotRead
+    }
+}
+
+fn remote_machine_name(machine: &Machine) -> Option<String> {
+    match machine {
+        Machine::Local => None,
+        Machine::Remote(destination) => Some(destination.to_string()),
+    }
+}
+
+fn fresh_cached_usage(
+    (harness, usage): &(agents::Harness, AgentUsage),
+    wall: SystemTime,
+) -> Option<(agents::Harness, AgentUsage)> {
+    let windows: Vec<_> = usage
+        .windows()
+        .iter()
+        .filter(|window| window.resets_at.is_none_or(|resets_at| resets_at > wall))
+        .cloned()
+        .collect();
+    AgentUsage::new(windows, None).map(|usage| (*harness, usage))
+}
+
+fn build_worktree_status(
+    worktree: &KnownWorktree,
+    seen: Option<&Seen<'_>>,
+) -> statusbar::WorktreeInfo {
+    let dir = worktree.folder.as_str();
+    let statuses = seen
+        .map(|s| git_statuses(s.git_statuses))
+        .unwrap_or_default();
+    let pulls = seen
+        .map(|s| pull_requests(s.pull_requests))
+        .unwrap_or_default();
+    let co = statuses
+        .get(dir)
+        .and_then(|status| checkout(status, pulls.get(dir)));
+    let branch = co
+        .as_ref()
+        .filter(|checkout| checkout.branch.as_str() != worktree.name)
+        .map(|checkout| checkout.branch.as_str().to_owned());
+    let git_status = co
+        .as_ref()
+        .map(|checkout| checkout.status.clone())
+        .unwrap_or_default();
+    let changed = co.as_ref().and_then(|checkout| checkout.changed);
+    let pull_request = co
+        .as_ref()
+        .and_then(|checkout| checkout.pull_request.as_ref())
+        .map(|pr| {
+            let (verdict, conflicting, stale) = match pr.state {
+                NumberedState::Open {
+                    checks,
+                    conflicting,
+                    stale,
+                    ..
+                } => (checks, conflicting, stale),
+                NumberedState::Merged => (None, false, false),
+            };
+            statusbar::PullRequestInfo {
+                label: pr.shown(),
+                link: pr.link().cloned(),
+                colour: pr.colour(),
+                verdict,
+                conflicting,
+                stale,
+            }
+        });
+    statusbar::WorktreeInfo {
+        name: worktree.name.clone(),
+        branch,
+        git_status,
+        changed,
+        pull_request,
+        missing: worktree.seen == projects::Seen::Missing,
+    }
+}
+
+fn build_view_status(
+    focused: Option<&FocusedView>,
+    worktree: Option<&KnownWorktree>,
+    seen: Option<&Seen<'_>>,
+    wall: SystemTime,
+) -> Option<statusbar::ViewInfo> {
+    let focused = focused?;
+    match focused {
+        FocusedView::Welcome => Some(statusbar::ViewInfo::plain("welcome".to_owned())),
+        FocusedView::Review { title } => Some(statusbar::ViewInfo::labeled(
+            Some(icons::GIT),
+            title.clone(),
+        )),
+        FocusedView::Browser { id, title } => {
+            let label = title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let wt = worktree?;
+                    wt.views.iter().find_map(|view| match view {
+                        KnownView::Browser(browser) if browser.id == *id => {
+                            Some(browser_label(browser))
+                        }
+                        KnownView::Browser(_) | KnownView::Terminal(_) => None,
+                    })
+                })
+                .unwrap_or_else(|| BROWSER_LABEL.to_owned());
+            Some(statusbar::ViewInfo::labeled(Some(icons::BROWSER), label))
+        }
+        FocusedView::Terminal { id, key } => {
+            let terminal = worktree?
+                .terminals()
+                .find(|term| key.is_some_and(|key| term.key == key) || term.id == *id)?;
+            let seated = seen.map(Seen::seated).unwrap_or_default();
+            if let Some(agent) = seated.get(&terminal.key).copied() {
+                let harness = agents::of(agent);
+                let icon = icons::agent(agent.runs_in()).and_then(icons::of);
+                let view_label = label(Some(agent), terminal);
+                let telemetry = agent.parsed_telemetry();
+                return Some(statusbar::ViewInfo {
+                    mark: Some(Mark::of(agent)),
+                    icon,
+                    label: view_label,
+                    harness,
+                    telemetry,
+                });
+            }
+            let shell = match &terminal.told {
+                Told::Doing(doing) => {
+                    Marked::of_shell(doing, wall).filter(|(marked, _)| marked.ended().is_none())
+                }
+                Told::Unhooked | Told::Unread => None,
+            };
+            let (marked, ran) = shell.unzip();
+            let ran = ran.flatten().filter(|cmd| !cmd.trim().is_empty());
+            let view_label = ran.unwrap_or_else(|| label(None, terminal));
+            let icon = terminal
+                .command
+                .as_deref()
+                .and_then(icons::program)
+                .and_then(icons::of);
+            Some(statusbar::ViewInfo {
+                mark: marked.map(|marked| marked.mark),
+                icon,
+                label: view_label,
+                harness: None,
+                telemetry: None,
+            })
+        }
     }
 }
 
@@ -20161,5 +20524,47 @@ mod tests {
             panic!("expected worktree fallback aim");
         };
         assert!(matches!(target.as_ref(), Target::Worktree(_, row) if row.place.worktree == older));
+    }
+
+    #[test]
+    fn fresh_cached_usage_drops_expired_windows_and_session_cost() {
+        use lune_protocol::telemetry::{TelemetryText, UsageWindow, UsedPermille};
+
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_007);
+        let window = |label: &str, resets_at: Option<SystemTime>| UsageWindow {
+            label: TelemetryText::parse(label).unwrap(),
+            used_permille: UsedPermille::try_new(500).unwrap(),
+            resets_at,
+        };
+        let mixed = AgentUsage::new(
+            vec![
+                window("5h", Some(wall)),
+                window("7d", Some(wall + Duration::from_mins(1))),
+            ],
+            Some(420_000),
+        )
+        .unwrap();
+        let (harness, kept) =
+            fresh_cached_usage(&(agents::Harness::ClaudeCode, mixed), wall).unwrap();
+        assert_eq!(harness, agents::Harness::ClaudeCode);
+        assert_eq!(kept.windows().len(), 1);
+        assert_eq!(kept.windows()[0].label.as_str(), "7d");
+        assert_eq!(kept.session_cost_micro_usd(), None);
+
+        let all_expired = AgentUsage::new(
+            vec![window("5h", Some(wall - Duration::from_secs(1)))],
+            Some(420_000),
+        )
+        .unwrap();
+        assert_eq!(
+            fresh_cached_usage(&(agents::Harness::ClaudeCode, all_expired), wall),
+            None
+        );
+
+        let undated = AgentUsage::new(vec![window("5h", None)], Some(100_000)).unwrap();
+        let (_, undated_kept) =
+            fresh_cached_usage(&(agents::Harness::Antigravity, undated), wall).unwrap();
+        assert_eq!(undated_kept.windows().len(), 1);
+        assert_eq!(undated_kept.session_cost_micro_usd(), None);
     }
 }

@@ -111,6 +111,25 @@ impl<'a> Clean<'a> {
         self.area
     }
 
+    pub(crate) fn trim_bottom(self, height: u16) -> (Clean<'a>, Rect) {
+        let height = height.min(self.area.height);
+        let top_height = self.area.height - height;
+        let top = Rect::new(self.area.x, self.area.y, self.area.width, top_height);
+        let bottom = Rect::new(
+            self.area.x,
+            self.area.y + top_height,
+            self.area.width,
+            height,
+        );
+        (
+            Clean {
+                buffer: self.buffer,
+                area: top,
+            },
+            bottom,
+        )
+    }
+
     pub(crate) fn paint_left<R>(
         self,
         width: u16,
