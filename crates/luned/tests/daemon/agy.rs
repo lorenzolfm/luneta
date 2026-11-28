@@ -121,7 +121,8 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
     assert_eq!(agent.cwd, "/home/you/work");
     assert!(agent.at_a_prompt());
     assert_eq!(agent.terminal, Some(terminal(4)));
-    assert_eq!(agent.name.as_ref().and_then(|name| name.given()), Some("Feature parity"));
+    assert_eq!(agent.name.as_ref().and_then(luned::api::Name::given), None);
+    assert_eq!(agent.name.as_ref().and_then(luned::api::Name::auto), Some("Feature parity"));
 }
 
 #[test]
@@ -155,7 +156,7 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
     }));
     let still_busy = eventually("the agent gets its title", || {
         let agent = host.agents().into_iter().find(|agent| agent.pid == pid)?;
-        agent.name.as_ref().and_then(|name| name.given()).is_some().then_some(agent)
+        agent.name.as_ref().and_then(luned::api::Name::auto).is_some().then_some(agent)
     });
     assert_eq!(still_busy.status_since, busy.status_since);
 

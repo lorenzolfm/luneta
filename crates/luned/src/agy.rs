@@ -345,7 +345,7 @@ impl Payload {
 
     fn name(&self) -> Option<Name> {
         let text = Said::new(self.conversation_title.as_deref()?.trim().to_owned())?;
-        Some(Name { text, source: Some(Source::User) })
+        Some(Name { text, source: Some(Source::Auto) })
     }
 }
 
@@ -1125,6 +1125,23 @@ mod tests {
         assert_eq!(make(Some("relative/path"), Some(" /w/two ")).cwd().unwrap().as_str(), "/w/two");
         assert_eq!(make(Some("  "), Some("/w/two")).cwd().unwrap().as_str(), "/w/two");
         assert!(make(Some("relative"), Some("also-relative")).cwd().is_none());
+    }
+
+    #[test]
+    fn payload_conversation_title_is_tagged_as_auto_not_user_given() {
+        let payload = Payload {
+            cwd: Some("/w".to_owned()),
+            workspace: None,
+            conversation_id: Some("9c696c75-660f-4097-934f-e1cc290e4bd1".to_owned()),
+            session_id: None,
+            conversation_title: Some("  Feature parity  ".to_owned()),
+            agent_state: Some("working".to_owned()),
+            tool_confirmation_pending: None,
+        };
+        let name = payload.name().expect("non-empty title produces a Name");
+        assert_eq!(name.source, Some(Source::Auto));
+        assert!(!name.given());
+        assert_eq!(name.auto(), Some("Feature parity"));
     }
 
     #[test]

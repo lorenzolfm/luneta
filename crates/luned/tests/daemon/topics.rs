@@ -1,13 +1,14 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::PathBuf;
+use std::process::Stdio;
 
 use lune_waits::{eventually, Span};
-use luned::api::{self, remote::Reached, ClientWaiter, WatchChangesRequest};
+use luned::api::{self, remote::Reached, ClientWaiter, Harness, WatchChangesRequest};
 use luned::SWEEP;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::agents::{file_for, process};
+use crate::agents::{file_for, process, MADE_NANOS};
 use crate::host::{folder_in, script, side_by_side, start, Host, Running, Slot, Waits, PATIENT};
 use crate::remote::{hosts, FakeSsh};
 
@@ -79,6 +80,10 @@ fn the_topics_a_window_has_named_hold_side_by_side() {
             (
                 "another machine names its agents' topics",
                 a_window_here_has_another_machine_name_its_agents_topics,
+            ),
+            (
+                "this daemon names an agy agent's topic",
+                a_window_has_the_daemon_name_an_agy_agent_s_topic_on_each_new_prompt,
             ),
         ])
     });
@@ -177,4 +182,101 @@ fn a_window_here_has_another_machine_name_its_agents_topics(_: Slot) {
         let called = lune_waits::seen_within(SWEEPS, || (calls(&far).len() != before).then_some(()));
         called.is_none().then_some(())
     });
+}
+
+const FAKE_AGY: &str = r#"
+import { createInterface } from "node:readline";
+import { execSync } from "node:child_process";
+
+const [, cmd] = process.argv;
+for await (const line of createInterface({ input: process.stdin })) {
+  const out = execSync(cmd, { input: line, encoding: "utf8" });
+  console.log(JSON.stringify(out));
+}
+"#;
+
+fn agy_prompted(host: &Host, step: usize, words: &str) {
+    let path = host
+        .home
+        .path()
+        .join(".gemini/antigravity-cli/brain")
+        .join(ID)
+        .join(".system_generated/logs/transcript.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
+    let record = json!({
+        "step_index": step,
+        "source": "USER_EXPLICIT",
+        "type": "USER_INPUT",
+        "content": format!("<USER_REQUEST>\n{words}\n</USER_REQUEST>")
+    });
+    writeln!(file, "{record}").unwrap();
+}
+
+fn a_window_has_the_daemon_name_an_agy_agent_s_topic_on_each_new_prompt(_: Slot) {
+    let host = Host::new();
+    claude_that_names_topics(&host);
+    let agy_dir = host.home.path().join(".gemini/antigravity-cli");
+    fs::create_dir_all(&agy_dir).unwrap();
+    assert!(!host.home.path().join(".claude").exists());
+    let _daemon = start(host.vars()).unwrap();
+
+    let cmd = eventually("luned wires agy's title hook", || {
+        let text = fs::read_to_string(agy_dir.join("settings.json")).ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        value["title"]["command"].as_str().map(str::to_owned)
+    });
+
+    let mut command = host.vars().command("node");
+    command
+        .args(["--input-type=module", "--eval", FAKE_AGY])
+        .arg(&cmd)
+        .env("LUNE_MUX_TERMINAL", "4")
+        .env("LUNE_MUX_TERMINAL_MADE", MADE_NANOS.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut running = Running::spawn(&mut command);
+    let (mut events, told) = running.piped();
+    let mut told = BufReader::new(told);
+    let mut send = |payload: &Value| {
+        writeln!(events, "{payload}").unwrap();
+        let mut line = String::new();
+        told.read_line(&mut line).unwrap();
+    };
+    send(&json!({
+        "cwd": "/home/you/work",
+        "conversation_id": ID,
+        "conversation_title": "Initial agy title",
+        "agent_state": "working"
+    }));
+    eventually("the agy agent appears", || {
+        host.host().agents.into_iter().find(|agent| {
+            agent.session_id.as_deref() == Some(ID) && agent.runs_in() == Harness::Antigravity
+        })
+    });
+    agy_prompted(&host, 0, "fold the sessions");
+
+    lune_waits::through(SWEEPS, "no topic is named with no window to show it", || {
+        topic(&host.host().agents).map(str::to_owned)
+    });
+    assert_eq!(calls(&host), Vec::<String>::new());
+
+    eventually("the agy topic is named", || {
+        (topic(&seen(&host).agents) == Some("Session folds")).then_some(())
+    });
+    let called = calls(&host);
+    let [first] = called.as_slice() else {
+        panic!("{called:?}");
+    };
+    assert!(first.contains("The topic the row goes by now: Initial agy title"), "{first}");
+    assert!(first.contains("The developer last asked it: fold the sessions"), "{first}");
+
+    agy_prompted(&host, 1, "and now the tabs");
+    eventually("the agy topic moves with the next prompt", || {
+        (topic(&seen(&host).agents) == Some("Tab order")).then_some(())
+    });
+    let called = calls(&host);
+    assert_eq!(called.len(), 2, "{called:?}");
+    assert!(called[1].contains("The topic the row goes by now: Session folds"), "{called:?}");
+    assert_eq!(topic(&host.host().agents), Some("Tab order"));
 }

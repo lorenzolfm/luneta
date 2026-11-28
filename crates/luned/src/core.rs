@@ -34,7 +34,8 @@ use crate::projects::Revision;
 use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::statuses::{ActiveStatus, Proof, Report, ReportedAgent, Statuses, Subagent};
-use crate::transcripts::SessionId;
+use crate::topics::TopicKey;
+use crate::transcripts::{SessionId, TranscriptHarness};
 use crate::watch::Troubles;
 use crate::Directory;
 
@@ -191,7 +192,7 @@ pub enum Command {
         answer: oneshot::Sender<Option<String>>,
     },
     PullRequests(BTreeMap<String, Found>),
-    Topics(HashMap<SessionId, Said>),
+    Topics(HashMap<TopicKey, Said>),
     Hosts(Named),
     Projects { projects: Result<Projects, String>, revision: Revision },
     Missing(BTreeSet<Dir>),
@@ -204,7 +205,6 @@ pub enum Command {
     Plain(oneshot::Sender<BTreeSet<Dir>>),
     Branches(oneshot::Sender<BTreeMap<String, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
-    Claudes(oneshot::Sender<Vec<Agent>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
     HostAll(oneshot::Sender<AllSnapshot>),
@@ -598,7 +598,7 @@ struct Known {
     terminals: BTreeMap<ViewId, Located>,
     statuses: BTreeMap<Dir, GitStatus>,
     pull_requests: BTreeMap<String, Found>,
-    topics: HashMap<SessionId, Said>,
+    topics: HashMap<TopicKey, Said>,
     remotes: KnownRemotes,
     projects: Result<Projects, String>,
     revision: Revision,
@@ -769,15 +769,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             },
             Command::Tracking(answer) => {
                 let _ = answer.send(known.tracking());
-                continue;
-            },
-            Command::Claudes(answer) => {
-                let claudes = known
-                    .all_agents()
-                    .into_iter()
-                    .filter(|agent| agent.harness == Harness::ClaudeCode)
-                    .collect();
-                let _ = answer.send(claudes);
                 continue;
             },
             Command::AllAgents(answer) => {
@@ -1021,15 +1012,10 @@ impl Known {
             .all_agents()
             .into_iter()
             .map(|agent| {
-                let topic = (agent.harness == Harness::ClaudeCode)
-                    .then(|| {
-                        agent
-                            .session_id
-                            .as_ref()
-                            .and_then(|id| self.topics.get(id.as_str()))
-                            .cloned()
-                    })
-                    .flatten();
+                let topic = TranscriptHarness::of(agent.harness).and_then(|harness| {
+                    let id = SessionId::parse(agent.session_id.as_ref()?.as_str())?;
+                    self.topics.get(&TopicKey::new(harness, id)).cloned()
+                });
                 agent.to_api(topic)
             })
             .collect();

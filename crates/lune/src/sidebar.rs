@@ -23,7 +23,7 @@ use luned::api::remote::unreached::Stopped;
 use luned::api::remote::{self, Reached};
 #[cfg(test)]
 use luned::api::Status;
-use luned::api::{self, Agent, Harness, Host, Saying, UnreadFile};
+use luned::api::{self, Agent, Host, Saying, UnreadFile};
 use luned::changes::Unchanged;
 use luned::issues::{Filed, Unfiled};
 use luned::links::{self, Branch};
@@ -567,7 +567,7 @@ impl Tally {
 struct Shows<'a> {
     view: &'a KnownView,
     marked: Option<Marked>,
-    ran: Option<String>,
+    label: String,
     unread: bool,
 }
 
@@ -1545,6 +1545,7 @@ pub struct Sidebar {
     tickets: u64,
     here_key: Option<Key>,
     finished: HashMap<Key, SystemTime>,
+    view_titles: HashMap<(Machine, WorktreeId), BTreeMap<ViewId, String>>,
     rows: Vec<Row>,
     counts: Counts,
     refused: Vec<String>,
@@ -1892,6 +1893,7 @@ impl Sidebar {
             tickets: 0,
             here_key: None,
             finished: HashMap::new(),
+            view_titles: HashMap::new(),
             rows: Vec::new(),
             counts: Counts::default(),
             refused: Vec::new(),
@@ -2397,6 +2399,11 @@ impl Sidebar {
         self.seat_name.as_deref()
     }
 
+    #[must_use]
+    pub fn view_titles(&self, on: &Machine, worktree: WorktreeId) -> BTreeMap<ViewId, String> {
+        self.view_titles.get(&(on.clone(), worktree)).cloned().unwrap_or_default()
+    }
+
     fn listed_of(&self, project: ProjectId) -> Option<Listed> {
         Some(self.known_of(project)?.listed().clone())
     }
@@ -2793,6 +2800,8 @@ impl Sidebar {
         };
         let finder = term.map(|term| Finder::new(term, typos));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
+        let mut view_titles: HashMap<(Machine, WorktreeId), BTreeMap<ViewId, String>> =
+            HashMap::new();
         let mut counts = Counts::default();
         let mut rows = Vec::new();
         let mut best: Option<(Spot, Fit)> = None;
@@ -2844,15 +2853,17 @@ impl Sidebar {
                         let here = on && here_key == Some(key);
                         let unread = self.news.is_unread(key);
                         if let Some(agent) = agent(view) {
-                            let (agent, done) = agent_marked(&self.news, agent, key, here);
+                            let (marked, done) = agent_marked(&self.news, agent, key, here);
                             if let Some(done) = done {
                                 finished.insert(key, done);
                             }
-                            by_view.push(Shows { view, marked: Some(agent), ran: None, unread });
+                            let label = label(Some(agent), view);
+                            by_view.push(Shows { view, marked: Some(marked), label, unread });
                             continue;
                         }
                         let Told::Doing(doing) = &view.told else {
-                            by_view.push(Shows { view, marked: None, ran: None, unread });
+                            let label = label(None, view);
+                            by_view.push(Shows { view, marked: None, label, unread });
                             continue;
                         };
                         if let Some(long) = long_at(doing).filter(|long| *long > now) {
@@ -2867,8 +2878,12 @@ impl Sidebar {
                             }
                         }
                         let (marked, ran) = shell.unzip();
-                        by_view.push(Shows { view, marked, ran: ran.flatten(), unread });
+                        let label = ran.flatten().unwrap_or_else(|| label(None, view));
+                        by_view.push(Shows { view, marked, label, unread });
                     }
+                    let titles: BTreeMap<ViewId, String> =
+                        by_view.iter().map(|shows| (shows.view.id, shows.label.clone())).collect();
+                    view_titles.insert((machine.clone(), worktree.place.worktree), titles);
                     let tally = Tally::of(&by_view);
                     counts.waiting += tally.waiting;
                     counts.new += tally.dots;
@@ -2910,15 +2925,11 @@ impl Sidebar {
                             .unzip();
                         let mut shown = Vec::with_capacity(worktree.terminals.len());
                         let listing = by_view.into_iter().filter(|_| !worktree_folded);
-                        for Shows { view, marked, ran, unread } in listing {
+                        for Shows { view, marked, label, unread } in listing {
                             let command = view.command.as_deref();
                             let program = agent(view)
                                 .and_then(|agent| icons::agent(agent.runs_in()))
                                 .or_else(|| command.and_then(icons::program));
-                            let label = match ran {
-                                Some(ran) => ran,
-                                None => label(agent(view), view),
-                            };
                             let dir = view.cwd.as_str();
                             let (found, hits) = finder
                                 .as_ref()
@@ -3053,6 +3064,7 @@ impl Sidebar {
             self.lit = Some(Lit::On(kin));
         }
         self.rows = rows;
+        self.view_titles = view_titles;
         self.counts = counts;
         self.refused = refused;
         self.unlisted_machines = unlisted_machines;
@@ -5386,19 +5398,21 @@ fn moved<T: Clone>(items: &[T], taken: Range<usize>, to: usize) -> Vec<T> {
 }
 
 fn transcript(agent: &Agent) -> Transcript {
-    match agent.runs_in() {
-        Harness::ClaudeCode | Harness::Antigravity => agent
+    if agents::of(agent).is_some_and(|harness| harness.topics().has_transcript()) {
+        agent
             .session_id
             .as_deref()
             .and_then(SessionId::parse)
-            .map_or(Transcript::Unnamed, Transcript::Named),
-        Harness::Pi | Harness::Unspecified => Transcript::NotRead,
+            .map_or(Transcript::Unnamed, Transcript::Named)
+    } else {
+        Transcript::NotRead
     }
 }
 
 fn label(agent: Option<&Agent>, view: &KnownView) -> String {
     if let Some(agent) = agent {
-        let topic = agent.topic.as_deref().or(view.topic.as_deref());
+        let topic =
+            agent.topic.as_deref().or(view.topic.as_deref()).or_else(|| auto_name(agent));
         let name = given_name(agent).or(topic);
         return name.map_or_else(|| short_cwd(view.cwd.as_str()), str::to_owned);
     }
@@ -5440,6 +5454,10 @@ fn status_word(agent: &Agent) -> String {
 
 fn given_name(agent: &Agent) -> Option<&str> {
     agent.name.as_ref()?.given()
+}
+
+fn auto_name(agent: &Agent) -> Option<&str> {
+    agent.name.as_ref()?.auto()
 }
 
 pub fn short_cwd(path: &str) -> String {
@@ -6174,7 +6192,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use luned::api::shell::{ended, Doing, Ended, Going, Stopped};
-    use luned::api::{self, Front, NameSource, Shell, UnreadFile, Version};
+    use luned::api::{self, Front, Harness, NameSource, Shell, UnreadFile, Version};
     use lune_protocol::github::PullPage;
     use lune_protocol::said::Said;
     use prost_types::Timestamp;
@@ -7559,11 +7577,66 @@ mod tests {
         let source = Some(NameSource::Derived.into());
         derived.name = derived.name.map(|name| api::Name { source, ..name });
         assert_eq!(label(Some(&derived), &topic), "Fix the fold");
+        assert_eq!(label(Some(&derived), &titled(None)), "w/x");
+        let mut auto = agent("s", 1, Status::Idle, Some("Feature parity"));
+        auto.name = auto.name.map(|name| api::Name { source: Some(NameSource::Auto.into()), ..name });
+        assert_eq!(label(Some(&auto), &titled(None)), "Feature parity");
+        assert_eq!(label(Some(&auto), &topic), "Fix the fold");
         let kept =
             |agent: &Agent| Agent { topic: Some("Session folds".to_owned()), ..agent.clone() };
         assert_eq!(label(Some(&kept(&named)), &topic), "fold");
         assert_eq!(label(Some(&kept(&unnamed)), &topic), "Session folds");
         assert_eq!(label(Some(&kept(&derived)), &titled(None)), "Session folds");
+        assert_eq!(label(Some(&kept(&auto)), &titled(None)), "Session folds");
+    }
+
+    #[test]
+    fn view_titles_match_the_sidebar_row_for_agents_and_shells() {
+        let mut sidebar = fresh();
+        let renamed_agent = agent("s", 1, Status::Idle, Some("fold"));
+        let mut agy_auto = agent("s", 2, Status::Busy, Some("Initial agy title"));
+        agy_auto.harness = Some(Harness::Antigravity.into());
+        agy_auto.name =
+            agy_auto.name.map(|name| api::Name { source: Some(NameSource::Auto.into()), ..name });
+        let mut agy_live = agent("s", 3, Status::Busy, Some("Initial agy title"));
+        agy_live.harness = Some(Harness::Antigravity.into());
+        agy_live.name =
+            agy_live.name.map(|name| api::Name { source: Some(NameSource::Auto.into()), ..name });
+        agy_live.topic = Some("View tabs".to_owned());
+
+        let worktree_id = tab_of(10, 0);
+        let ran = View {
+            shell: Some(Shell {
+                doing: Some(Doing::Ended(Ended {
+                    command: Some("cargo test".to_owned()),
+                    at: Some(Timestamp { seconds: 100, nanos: 0 }),
+                    ending: Some(ended::Ending::Status(0)),
+                    took: Some(prost_types::Duration { seconds: 6, nanos: 0 }),
+                })),
+            }),
+            ..view(6, 0, "/w/lune/main", "-fish")
+        };
+        let views = vec![
+            view(1, 0, "/w/lune/main", "claude"),
+            view(2, 0, "/w/lune/main", "agy"),
+            view(3, 0, "/w/lune/main", "agy"),
+            view(4, 0, "/w/lune/main", "nvim Cargo.toml"),
+            view(5, 0, "/w/lune/main", "-fish"),
+            ran,
+        ];
+        sidebar.hear(host(
+            vec![session("s", 10, views)],
+            vec![renamed_agent, agy_auto, agy_live],
+        ));
+
+        let titles = sidebar.view_titles(&Machine::Local, worktree_id);
+        let at = |id: u64| titles.get(&ViewId::of(id).unwrap()).map(String::as_str);
+        assert_eq!(at(1), Some("fold"));
+        assert_eq!(at(2), Some("Initial agy title"));
+        assert_eq!(at(3), Some("View tabs"));
+        assert_eq!(at(4), Some("nvim Cargo.toml"));
+        assert_eq!(at(5), Some("lune/main"));
+        assert_eq!(at(6), Some("cargo test"));
     }
 
     #[test]

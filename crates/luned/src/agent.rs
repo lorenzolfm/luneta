@@ -83,6 +83,12 @@ impl Name {
     pub fn given(&self) -> bool {
         self.to_api().given().is_some()
     }
+
+    #[must_use]
+    pub fn auto(&self) -> Option<&str> {
+        let text = self.text.as_str().trim();
+        (self.source == Some(Source::Auto) && !text.is_empty()).then_some(text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

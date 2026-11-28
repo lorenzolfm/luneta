@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
@@ -108,28 +108,6 @@ impl Terminal {
             },
             Found::Lost | Found::Looking => None,
         }
-    }
-
-    fn title(&self) -> Option<String> {
-        match &self.found {
-            Found::Running { titled, command, .. } => titled
-                .as_ref()
-                .and_then(|titled| titled.topic.as_ref())
-                .or(command.as_ref())
-                .map(|said| said.as_str().to_owned()),
-            Found::Ended { titled, .. } => {
-                titled.as_ref().and_then(|titled| titled.topic.as_ref()).map(|s| s.as_str().to_owned())
-            },
-            Found::Unlisted(_) | Found::Lost | Found::Looking => None,
-        }
-    }
-}
-
-impl Worktree {
-    #[must_use]
-    pub fn titles(&self) -> BTreeMap<ViewId, String> {
-        let titled = self.terminals.iter();
-        titled.filter_map(|it| Some((it.id, it.title()?))).collect()
     }
 }
 

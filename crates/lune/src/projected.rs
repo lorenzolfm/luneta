@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{ProjectId, ViewId, WorktreeId};
+use lune_domain::projects::{ProjectId, WorktreeId};
 use lune_domain::rows::{self, Project, Worktree};
 
 use luned::api::projects::Held;
@@ -128,18 +128,12 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn tabs(
-        &self,
-        on: &Machine,
-        worktree: WorktreeId,
-    ) -> (Option<WorktreeTabs>, BTreeMap<ViewId, String>) {
-        let Some((project, shown)) = self.holding(on, worktree) else {
-            return (None, BTreeMap::new());
-        };
+    pub fn tabs(&self, on: &Machine, worktree: WorktreeId) -> Option<WorktreeTabs> {
+        let (project, _) = self.holding(on, worktree)?;
         let tab = |it: &Worktree| Tab { worktree: it.id, name: it.name.clone() };
         let tabs: Vec<Tab> = project.worktrees().iter().map(tab).collect();
         assert!(tabs.iter().any(|tab| tab.worktree == worktree), "the tabs hold the worktree held");
-        (Some(WorktreeTabs { project: project.id, tabs }), shown.titles())
+        Some(WorktreeTabs { project: project.id, tabs })
     }
 }
 
@@ -226,6 +220,8 @@ mod tests {
 
     #[test]
     fn a_view_of_a_project_on_any_machine_leads_back_to_its_worktree() {
+        use lune_domain::projects::ViewId;
+
         let mut host = host();
         let far =
             api::remote::Host { projects: host.projects.clone(), ..api::remote::Host::default() };
@@ -249,19 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn a_project_row_s_tabs_are_its_worktrees_titled_by_their_terminals() {
+    fn a_project_row_s_tabs_are_its_worktrees() {
         let projected = Projected::adapted(&host()).unwrap();
-        let terminal = ViewId::of(21).unwrap();
         assert!(projected.project(&Machine::Local, seven()).is_some());
         assert_eq!(projected.project(&Machine::Local, ProjectId::of(8).unwrap()), None);
-        let (bar, titles) = projected.tabs(&Machine::Local, worktree(11));
-        let bar = bar.unwrap();
+        let bar = projected.tabs(&Machine::Local, worktree(11)).unwrap();
         let names: Vec<&str> = bar.tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
         assert_eq!(bar.project, seven(), "the tabs are the project's");
-        assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
-        let lost = ViewId::of(22).unwrap();
-        assert_eq!(titles.get(&lost), None);
+        assert_eq!(projected.tabs(&Machine::Local, worktree(99)), None);
     }
 
     #[test]

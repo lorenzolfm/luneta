@@ -188,6 +188,13 @@ impl v1::Name {
         let given = matches!(source, None | Some(Ok(v1::NameSource::User | v1::NameSource::Peer)));
         Some(self.text.trim()).filter(|text| given && !text.is_empty())
     }
+
+    #[must_use]
+    pub fn auto(&self) -> Option<&str> {
+        let source = self.source.map(v1::NameSource::try_from);
+        let auto = matches!(source, Some(Ok(v1::NameSource::Auto)));
+        Some(self.text.trim()).filter(|text| auto && !text.is_empty())
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +234,30 @@ mod tests {
         assert_eq!(ReadyPrefix::try_new(too_long), None);
         let valid = ReadyPrefix::try_new("luned: listening on ").expect("valid prefix");
         assert_eq!(valid.as_str(), "luned: listening on ");
+    }
+
+    #[test]
+    fn name_distinguishes_given_from_auto_and_other_sources() {
+        use super::v1::{Name, NameSource};
+
+        let named = |text: &str, source: Option<NameSource>| Name {
+            text: text.to_owned(),
+            source: source.map(Into::into),
+        };
+        assert_eq!(named("  fold  ", None).given(), Some("fold"));
+        assert_eq!(named("fold", Some(NameSource::User)).given(), Some("fold"));
+        assert_eq!(named("fold", Some(NameSource::Peer)).given(), Some("fold"));
+        assert_eq!(named("   ", Some(NameSource::User)).given(), None);
+        assert_eq!(named("fold", Some(NameSource::Auto)).given(), None);
+        assert_eq!(named("fold", Some(NameSource::Derived)).given(), None);
+
+        assert_eq!(
+            named("  Feature parity  ", Some(NameSource::Auto)).auto(),
+            Some("Feature parity")
+        );
+        assert_eq!(named("   ", Some(NameSource::Auto)).auto(), None);
+        assert_eq!(named("fold", None).auto(), None);
+        assert_eq!(named("fold", Some(NameSource::User)).auto(), None);
+        assert_eq!(named("fold", Some(NameSource::Derived)).auto(), None);
     }
 }

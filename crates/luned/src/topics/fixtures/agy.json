@@ -1,0 +1,38 @@
+{
+  "first_prompt": [
+    {
+      "step_index": 0,
+      "source": "USER_EXPLICIT",
+      "type": "USER_INPUT",
+      "status": "DONE",
+      "content": "<USER_REQUEST>\nfix the sidebar fold\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nnow\n</ADDITIONAL_METADATA>"
+    },
+    {
+      "step_index": 1,
+      "source": "MODEL",
+      "type": "PLANNER_RESPONSE",
+      "status": "DONE",
+      "tool_calls": [
+        {
+          "name": "read_file",
+          "args": {
+            "Path": "\"/w/crates/lune/src/sidebar.rs\""
+          }
+        }
+      ],
+      "content": "Inspecting the sidebar fold state."
+    }
+  ],
+  "follow_up": [
+    {
+      "step_index": 2,
+      "source": "USER_EXPLICIT",
+      "type": "USER_INPUT",
+      "status": "DONE",
+      "content": "<USER_REQUEST>\nnow align the view tabs\n</USER_REQUEST>"
+    }
+  ],
+  "expected_first_asked": "fix the sidebar fold",
+  "expected_step": "ran read_file: /w/crates/lune/src/sidebar.rs",
+  "expected_follow_up_asked": "now align the view tabs"
+}

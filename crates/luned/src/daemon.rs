@@ -229,9 +229,16 @@ pub async fn serve(
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();
     remote::follow(core.clone(), standing, SWEEP, folder, Arc::clone(&bridges))?;
-    if let Some(claude) = &claude_folder {
-        let projects = claude.join("projects");
-        topics::follow(core.clone(), watchers.shown.subscribe(), projects, started, SWEEP)?;
+    let transcript_folders =
+        transcripts::Folders { claude: claude_folder.clone(), agy: agy_folder.clone() };
+    if transcript_folders.any() {
+        topics::follow(
+            core.clone(),
+            watchers.shown.subscribe(),
+            transcript_folders,
+            started,
+            SWEEP,
+        )?;
     }
     tokio::spawn(sweep_keeps(claim.folder.clone()));
     let browser_bound = crate::terminal_socket::bind(&claim.folder);
@@ -797,7 +804,7 @@ impl Daemon for Host {
             claude: self.claude_folder.clone(),
             agy: self.agy_folder.clone(),
         };
-        if folders.claude.is_none() && folders.agy.is_none() {
+        if !folders.any() {
             return Ok(Response::new(TranscriptEndsResponse::default()));
         }
         let read = task::spawn_blocking(move || reading.ends(&folders)).await;
