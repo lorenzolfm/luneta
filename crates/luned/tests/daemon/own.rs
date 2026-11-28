@@ -89,20 +89,10 @@ enum MuxChild {
 }
 
 impl MuxChild {
-    fn running(&self) -> &Running {
-        match self {
-            MuxChild::Server(running) | MuxChild::StandIn(running) => running,
-        }
-    }
-
     fn running_mut(&mut self) -> &mut Running {
         match self {
             MuxChild::Server(running) | MuxChild::StandIn(running) => running,
         }
-    }
-
-    fn pid(&self) -> u32 {
-        self.running().pid()
     }
 
     fn exit_status(&mut self) -> Option<ExitStatus> {
@@ -308,25 +298,11 @@ impl OwnedMux {
     }
 
     pub fn kill(&mut self) {
-        if self
-            .child
-            .as_mut()
-            .is_some_and(|child| child.exit_status().is_some())
-        {
-            self.child = None;
-        }
+        self.child = None;
         let handle = MuxHandle::attach(self)
             .unwrap_or_else(|error| panic!("lune-mux attach failed before killing: {error}"));
         if let Some(handle) = handle {
-            let killed = handle.pid.get();
             handle.kill_and_wait(&self.runtime);
-            if self
-                .child
-                .as_ref()
-                .is_some_and(|child| child.pid() == killed)
-            {
-                self.child = None;
-            }
         }
     }
 
@@ -773,10 +749,18 @@ impl MuxHandle {
                 continue;
             };
             #[cfg(target_os = "macos")]
-            let Some((start_time, _)) = macos_process_state(pid.as_pid())
-                .map_err(|error| MuxAttachError::State(pid, error))?
-            else {
-                continue;
+            let start_time = match macos_process_state(pid.as_pid()) {
+                Ok(Some((start_time, _))) => start_time,
+                Ok(None) => continue,
+                Err(error) => {
+                    if exit
+                        .has_exited()
+                        .map_err(|exit_error| MuxAttachError::ExitCheck(pid, exit_error))?
+                    {
+                        continue;
+                    }
+                    return Err(MuxAttachError::State(pid, error));
+                }
             };
             match mux.mux_socket().map_err(MuxAttachError::Socket)? {
                 MuxSocket::Listening(confirmed) if confirmed == pid => {}
@@ -812,10 +796,19 @@ impl MuxHandle {
         {
             return Ok(MuxInstance::Exited);
         }
-        let Some((start_time, _)) =
-            macos_process_state(self.pid.as_pid()).map_err(MuxInstanceError::State)?
-        else {
-            return Ok(MuxInstance::Exited);
+        let start_time = match macos_process_state(self.pid.as_pid()) {
+            Ok(Some((start_time, _))) => start_time,
+            Ok(None) => return Ok(MuxInstance::Exited),
+            Err(error) => {
+                if self
+                    .exit
+                    .has_exited()
+                    .map_err(MuxInstanceError::ExitCheck)?
+                {
+                    return Ok(MuxInstance::Exited);
+                }
+                return Err(MuxInstanceError::State(error));
+            }
         };
         if start_time != self.start_time {
             return Ok(MuxInstance::PidReused {
@@ -1626,6 +1619,17 @@ fn kill_mux_clears_spawned_child_so_a_fresh_mux_can_spawn() {
     owned.kill_mux();
     let second = owned.spawn_mux(|_| {});
     assert_ne!(first, second);
+    let second_exit = ProcessExit::watch(second.as_pid())
+        .unwrap()
+        .expect("spawned lune-mux is watched");
+    fs::remove_file(owned.socket()).unwrap();
+    owned.kill_mux();
+    eventually(
+        "kill_mux ends the tracked child even without mux.sock",
+        || second_exit.has_exited().unwrap().then_some(()),
+    );
+    let third = owned.spawn_mux(|_| {});
+    assert_ne!(second, third);
     let _stalled = owned.mux.stall();
     let _ = &owned.host;
 }

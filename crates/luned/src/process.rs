@@ -598,6 +598,7 @@ mod tests {
     #[test]
     fn concurrent_has_exited_calls_never_revert_to_false_after_exit() {
         use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         const WORKERS: usize = 4;
         const ROUNDS: usize = 8;
@@ -612,18 +613,21 @@ mod tests {
             child.kill().unwrap();
             child.wait().unwrap();
             let barrier = Barrier::new(WORKERS);
+            let saw_exited = AtomicBool::new(false);
             thread::scope(|scope| {
                 for _ in 0..WORKERS {
                     scope.spawn(|| {
                         barrier.wait();
-                        let mut saw_exited = false;
                         lune_waits::eventually("concurrent has_exited observes exit", || {
+                            let already = saw_exited.load(Ordering::Acquire);
                             let exited = exit.has_exited().unwrap();
                             assert!(
-                                !saw_exited || exited,
-                                "has_exited reverted to false after observing exit"
+                                !already || exited,
+                                "has_exited reverted to false after another call observed exit"
                             );
-                            saw_exited |= exited;
+                            if exited {
+                                saw_exited.store(true, Ordering::Release);
+                            }
                             exited.then_some(())
                         });
                         assert!(exit.has_exited().unwrap());
