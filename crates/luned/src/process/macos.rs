@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::{Mutex, PoisonError};
@@ -16,8 +17,8 @@ use lune_protocol::process::{EXEC_STRINGS_BYTES_MAX, laid_in_procargs};
 use lune_protocol::program_resume::ProcessArgv;
 
 use super::{
-    Found, Id, Mine, ProcessMeta, SPURIOUS_WAKES_MAX, Start, Unended, Unread, Unreadable,
-    program_named, readable_fd,
+    Found, Id, Mine, OPEN_FILES_MAX, ProcessMeta, SPURIOUS_WAKES_MAX, Start, Unended, Unread,
+    Unreadable, program_named, readable_fd,
 };
 
 fn with<T>(pid: u32, refresh: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
@@ -48,6 +49,93 @@ pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
         ))),
         None => Err(Unread::Gone),
     }
+}
+
+const PROC_PIDFDVNODEPATHINFO: libc::c_int = 2;
+
+#[repr(C)]
+struct FileInfo {
+    open_flags: u32,
+    status: u32,
+    offset: libc::off_t,
+    kind: i32,
+    guard_flags: u32,
+}
+
+#[repr(C)]
+struct VnodeFdInfoWithPath {
+    file: FileInfo,
+    vnode: libc::vnode_info_path,
+}
+
+const _: () = assert!(size_of::<FileInfo>() == 24);
+const _: () = assert!(
+    size_of::<VnodeFdInfoWithPath>() == size_of::<FileInfo>() + size_of::<libc::vnode_info_path>()
+);
+
+pub fn open_files(pid: u32) -> Result<Vec<PathBuf>, Unread> {
+    let Ok(native) = libc::c_int::try_from(pid) else {
+        return Err(Unread::Failed(format!("pid {pid} does not fit a c_int")));
+    };
+    let mut files = Vec::new();
+    for fd in open_fds(pid, native)? {
+        if fd.proc_fdtype != libc::PROX_FDTYPE_VNODE.cast_unsigned() {
+            continue;
+        }
+        if let Some(path) = fd_path(native, fd.proc_fd) {
+            files.push(path);
+        }
+    }
+    assert!(files.len() <= OPEN_FILES_MAX);
+    Ok(files)
+}
+
+#[expect(
+    unsafe_code,
+    reason = "proc_pidinfo writes at most the bytes it is told into `fds`, whose length says so"
+)]
+fn open_fds(pid: u32, native: libc::c_int) -> Result<Vec<libc::proc_fdinfo>, Unread> {
+    let each = size_of::<libc::proc_fdinfo>();
+    let mut fds: Vec<libc::proc_fdinfo> = Vec::with_capacity(OPEN_FILES_MAX);
+    let size = libc::c_int::try_from(OPEN_FILES_MAX * each).expect("the list fits a c_int");
+    let read = unsafe {
+        let into = fds.as_mut_ptr().cast();
+        libc::proc_pidinfo(native, libc::PROC_PIDLISTFDS, 0, into, size)
+    };
+    if read <= 0 {
+        return Err(unread(pid, &io::Error::last_os_error()));
+    }
+    let count = usize::try_from(read).expect("a positive c_int fits a usize") / each;
+    assert!(count <= OPEN_FILES_MAX);
+    unsafe { fds.set_len(count) };
+    Ok(fds)
+}
+
+#[expect(
+    unsafe_code,
+    reason = "proc_pidfdinfo writes at most `size` bytes into `held`, which is that long"
+)]
+fn fd_path(native: libc::c_int, fd: i32) -> Option<PathBuf> {
+    let size = libc::c_int::try_from(size_of::<VnodeFdInfoWithPath>()).expect("it fits a c_int");
+    let (read, held) = unsafe {
+        let mut held: VnodeFdInfoWithPath = std::mem::zeroed();
+        let into = (&raw mut held).cast();
+        let read = libc::proc_pidfdinfo(native, fd, PROC_PIDFDVNODEPATHINFO, into, size);
+        (read, held)
+    };
+    if read != size {
+        return None;
+    }
+    let bytes: Vec<u8> = held
+        .vnode
+        .vip_path
+        .as_flattened()
+        .iter()
+        .map(|ch| ch.cast_unsigned())
+        .take_while(|byte| *byte != 0)
+        .collect();
+    let path = PathBuf::from(OsString::from_vec(bytes));
+    path.is_absolute().then_some(path)
 }
 
 pub fn environ(pid: u32) -> Result<Vec<OsString>, Unread> {

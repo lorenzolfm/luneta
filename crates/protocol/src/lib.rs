@@ -183,7 +183,7 @@ impl v1::Harness {
     pub fn prompt_word(self) -> Option<&'static str> {
         match self {
             v1::Harness::ClaudeCode => Some("cli"),
-            v1::Harness::Pi | v1::Harness::Antigravity => Some("tui"),
+            v1::Harness::Pi | v1::Harness::Antigravity | v1::Harness::Codex => Some("tui"),
             v1::Harness::Unspecified => None,
         }
     }

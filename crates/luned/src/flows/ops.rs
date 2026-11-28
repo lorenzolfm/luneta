@@ -62,6 +62,7 @@ pub fn spelled_skill(harness: Harness, skill: &str) -> String {
     match harness {
         Harness::ClaudeCode | Harness::Antigravity => format!("/{skill}"),
         Harness::Pi => format!("/skill:{skill}"),
+        Harness::Codex => format!("${skill}"),
     }
 }
 
@@ -382,7 +383,9 @@ pub fn interactive_stage_argv(
             let scope = pr_scope(dir, pr_url.map(PullPage::url));
             let prompt = format!("{spelled} {scope}");
             let words = match harness {
-                Harness::ClaudeCode | Harness::Pi => vec![harness.program().to_owned(), prompt],
+                Harness::ClaudeCode | Harness::Pi | Harness::Codex => {
+                    vec![harness.program().to_owned(), prompt]
+                }
                 Harness::Antigravity => {
                     vec![harness.program().to_owned(), "-i".to_owned(), prompt]
                 }

@@ -27,7 +27,13 @@ compile_error!("luned reads processes on Linux and macOS, and on nothing else ye
 
 #[cfg(target_os = "macos")]
 pub use os::{ActiveState, ProcessState, ProcessStateError, StartTime, state};
-pub use os::{Domain, cwd, environ, meta, parent, same_root, signalled, start, started};
+pub use os::{
+    Domain, cwd, environ, meta, open_files, parent, same_root, signalled, start, started,
+};
+
+pub const OPEN_FILES_MAX: usize = 4096;
+
+const _: () = assert!(OPEN_FILES_MAX > 0);
 
 pub const ANCESTOR_DEPTH_MAX: usize = 64;
 
@@ -526,6 +532,26 @@ mod tests {
         );
         child.wait().unwrap();
         assert_eq!(super::cwd(pid), Err(super::Unread::Gone));
+    }
+
+    #[test]
+    fn the_files_a_process_holds_open_read_while_it_runs_and_are_gone_once_it_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let held = dir.join("held.lock");
+        let file = std::fs::File::create(&held).unwrap();
+        let mine = super::open_files(std::process::id()).unwrap();
+        assert!(mine.contains(&held), "{mine:?} lists {held:?}");
+        assert!(mine.len() <= super::OPEN_FILES_MAX);
+        drop(file);
+        let after = super::open_files(std::process::id()).unwrap();
+        assert!(!after.contains(&held), "{after:?} still lists {held:?}");
+
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(super::open_files(pid), Err(super::Unread::Gone));
     }
 
     #[test]

@@ -279,7 +279,7 @@ impl CommandHarness {
     #[must_use]
     pub const fn from_picked(harness: Harness) -> Self {
         match harness {
-            Harness::ClaudeCode | Harness::Antigravity => Self::ClaudeCode,
+            Harness::ClaudeCode | Harness::Antigravity | Harness::Codex => Self::ClaudeCode,
             Harness::Pi => Self::Pi,
         }
     }
@@ -1263,6 +1263,15 @@ impl Asked {
                     gate: None,
                 })
             }
+            Harness::Codex => {
+                let bare = bare_folder()?;
+                Ok(Run {
+                    command: self.codex_review(resumed, &bare),
+                    reader: Reader::codex(),
+                    stdin: format!("{REVIEW_SYSTEM}\n\n{prompt}"),
+                    gate: None,
+                })
+            }
         }
     }
 
@@ -1366,6 +1375,19 @@ impl Asked {
         }
         self.placed_in(&mut agy, bare);
         agy
+    }
+
+    fn codex_review(&self, resumed: Option<&SessionId>, bare: &Path) -> Command {
+        let mut codex = Command::new(Harness::Codex.program());
+        codex
+            .args(["exec", "--json"])
+            .args(headless::CODEX_READS_ONLY);
+        if let Some(session) = resumed {
+            codex.args([Harness::Codex.resumes(), session.as_str()]);
+        }
+        codex.arg(headless::CODEX_TOLD_ON_STDIN);
+        self.placed_in(&mut codex, bare);
+        codex
     }
 
     fn placed_env(agent: &mut Command) {
@@ -1483,6 +1505,13 @@ enum Reader {
     Claude,
     Pi { tools: PiTools, outcome: PiOutcome },
     Agy { said: String, tools: BTreeSet<u64> },
+    Codex { outcome: CodexOutcome },
+}
+
+#[derive(Debug)]
+enum CodexOutcome {
+    Last(String),
+    Failed(String),
 }
 
 impl Reader {
@@ -1507,11 +1536,18 @@ impl Reader {
         }
     }
 
+    const fn codex() -> Reader {
+        Reader::Codex {
+            outcome: CodexOutcome::Last(String::new()),
+        }
+    }
+
     const fn harness(&self) -> Harness {
         match self {
             Reader::Claude => Harness::ClaudeCode,
             Reader::Pi { .. } => Harness::Pi,
             Reader::Agy { .. } => Harness::Antigravity,
+            Reader::Codex { .. } => Harness::Codex,
         }
     }
 
@@ -1521,6 +1557,7 @@ impl Reader {
             Reader::Claude => read_claude(&record),
             Reader::Pi { tools, outcome } => read_pi(tools, outcome, &record),
             Reader::Agy { said, tools } => read_agy(said, tools, &record),
+            Reader::Codex { outcome } => read_codex(outcome, &record),
         })
     }
 }
@@ -1626,6 +1663,44 @@ fn read_pi(tools: &mut PiTools, outcome: &mut PiOutcome, record: &Value) -> Vec<
             let ended = match mem::replace(outcome, PiOutcome::Last(String::new())) {
                 PiOutcome::Failed(why) => Err(why),
                 PiOutcome::Last(last) => Ok(last),
+            };
+            vec![Read::Ended(ended)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn read_codex(outcome: &mut CodexOutcome, record: &Value) -> Vec<Read> {
+    let item = &record["item"];
+    match (record["type"].as_str(), item["type"].as_str()) {
+        (Some("thread.started"), _) => session(&record["thread_id"], Harness::Codex),
+        (Some("item.started"), Some(tool)) if tool != "agent_message" && tool != "reasoning" => {
+            let ran = Step::Ran {
+                id: item["id"].as_str().unwrap_or_default().to_owned(),
+                command: item["command"].as_str().unwrap_or(tool).to_owned(),
+            };
+            vec![Read::Step(ran)]
+        }
+        (Some("item.completed"), Some("agent_message")) => {
+            let text = item["text"].as_str().unwrap_or_default().trim();
+            if text.is_empty() {
+                return Vec::new();
+            }
+            *outcome = CodexOutcome::Last(text.to_owned());
+            vec![Read::Step(Step::Said(text.to_owned()))]
+        }
+        (Some("error"), _) => {
+            *outcome = CodexOutcome::Failed(why(record["message"].as_str()));
+            Vec::new()
+        }
+        (Some("turn.failed"), _) => {
+            *outcome = CodexOutcome::Last(String::new());
+            vec![Read::Ended(Err(why(record["error"]["message"].as_str())))]
+        }
+        (Some("turn.completed"), _) => {
+            let ended = match mem::replace(outcome, CodexOutcome::Last(String::new())) {
+                CodexOutcome::Last(last) => Ok(last),
+                CodexOutcome::Failed(why) => Err(why),
             };
             vec![Read::Ended(ended)]
         }
@@ -2749,6 +2824,59 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains(&long_ctx) && text.ends_with("\n\nExplain."))
         );
+        let legacy_codex_commands = AskRequest {
+            harness: Some(Harness::Codex.to_api().into()),
+            review_only: false,
+            ..general(Some("7c22"), CommandHarness::ClaudeCode).asked(None)
+        };
+        assert_eq!(
+            Asked::of(legacy_codex_commands).unwrap().1.runner(),
+            Harness::ClaudeCode,
+            "nothing holds Codex to lune's commands"
+        );
+        let begun = Asked::review_start(
+            Some(PathBuf::from("/w/lune")),
+            "the diff",
+            "Explain.",
+            Harness::Codex,
+        )
+        .unwrap();
+        assert_eq!(begun.runner(), Harness::Codex);
+        let Run {
+            command,
+            reader,
+            stdin,
+            gate,
+        } = begun.run().unwrap();
+        assert!(gate.is_none());
+        assert!(matches!(reader, Reader::Codex { .. }));
+        assert_eq!(command.get_program(), "codex");
+        assert_eq!(command.get_current_dir(), Some(expected_bare.as_path()));
+        assert_eq!(stdin, format!("{REVIEW_SYSTEM}\n\nthe diff\n\nExplain."));
+        let reads_only = [
+            "exec",
+            "--json",
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "--color",
+            "never",
+        ];
+        assert_eq!(args(&command), [&reads_only[..], &["-"]].concat());
+        let followed = Asked::review_follow_up(
+            Some(PathBuf::from("/w/lune")),
+            session("7c22"),
+            "why?",
+            Harness::Codex,
+        )
+        .unwrap();
+        let Run { command, stdin, .. } = followed.run().unwrap();
+        assert_eq!(stdin, format!("{REVIEW_SYSTEM}\n\nwhy?"));
+        assert_eq!(
+            args(&command),
+            [&reads_only[..], &["resume", "7c22", "-"]].concat(),
+            "the words of a resumed turn still come on stdin"
+        );
         let unknown = AskRequest {
             harness: Some(99),
             ..general(None, CommandHarness::ClaudeCode).asked(None)
@@ -2970,6 +3098,97 @@ console.log(JSON.stringify({ entries, results }));
 
     fn why_of(said: &str) -> String {
         why(Some(said))
+    }
+
+    #[test]
+    fn what_codex_writes_says_what_the_agent_said_and_ran() {
+        let mut reader = Reader::codex();
+        assert!(reader.read("not json").is_err());
+        let mut read = |record: Value| reader.read(&record.to_string()).unwrap();
+        let id = "01a22305-f8e8-7980-b481-40cdea7e70e2";
+        assert_eq!(
+            read(json!({"type": "thread.started", "thread_id": id})),
+            [Read::Step(Step::Session {
+                id: session(id),
+                runner: Harness::Codex,
+            })]
+        );
+        assert_eq!(read(json!({"type": "turn.started"})), []);
+        let command = "/bin/bash -lc 'ls -a .'";
+        let ran = |event: &str, status: &str| {
+            json!({"type": event, "item": {"id": "item_0", "type": "command_execution",
+                   "command": command, "aggregated_output": "", "exit_code": null, "status": status}})
+        };
+        assert_eq!(
+            read(ran("item.started", "in_progress")),
+            [Read::Step(Step::Ran {
+                id: "item_0".to_owned(),
+                command: command.to_owned(),
+            })]
+        );
+        assert_eq!(read(ran("item.completed", "completed")), []);
+        let searched =
+            json!({"type": "item.started", "item": {"id": "item_1", "type": "web_search"}});
+        assert_eq!(
+            read(searched),
+            [Read::Step(Step::Ran {
+                id: "item_1".to_owned(),
+                command: "web_search".to_owned(),
+            })],
+            "a tool with no command line is named by its kind"
+        );
+        let thought =
+            json!({"type": "item.started", "item": {"id": "item_2", "type": "reasoning"}});
+        assert_eq!(read(thought), []);
+        let says = |text: &str| json!({"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": text}});
+        let said = |text: &str| Read::Step(Step::Said(text.to_owned()));
+        assert_eq!(
+            read(says("It lists the folder.")),
+            [said("It lists the folder.")]
+        );
+        assert_eq!(
+            read(says("It renames the field.\n")),
+            [said("It renames the field.")]
+        );
+        assert_eq!(read(says("  ")), []);
+        let usage = json!({"input_tokens": 1, "output_tokens": 1});
+        let completed = json!({"type": "turn.completed", "usage": usage});
+        assert_eq!(
+            read(completed.clone()),
+            [Read::Ended(Ok("It renames the field.".to_owned()))]
+        );
+        assert_eq!(
+            read(completed.clone()),
+            [Read::Ended(Ok(String::new()))],
+            "a turn that says nothing ends with nothing, not the turn before's words"
+        );
+
+        let warned = json!({"type": "item.completed", "item": {"id": "item_0", "type": "error",
+                            "message": "Model metadata not found."}});
+        assert_eq!(
+            read(warned),
+            [],
+            "a warning Codex lists as an item fails no turn"
+        );
+        let unsupported = "The 'x' model is not supported when using Codex with a ChatGPT account.";
+        assert_eq!(read(json!({"type": "error", "message": unsupported})), []);
+        assert_eq!(
+            read(json!({"type": "turn.failed", "error": {"message": unsupported}})),
+            [Read::Ended(Err(unsupported.to_owned()))]
+        );
+        assert_eq!(
+            read(json!({"type": "error", "message": "stream disconnected"})),
+            []
+        );
+        assert_eq!(
+            read(completed),
+            [Read::Ended(Err("stream disconnected".to_owned()))],
+            "a turn Codex ends after an error has failed"
+        );
+        assert_eq!(
+            read(json!({"type": "turn.failed"})),
+            [Read::Ended(Err(TURN_FAILED.to_owned()))]
+        );
     }
 
     #[test]

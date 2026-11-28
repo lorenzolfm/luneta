@@ -308,6 +308,7 @@ enum KeptHarness {
     ClaudeCode,
     Pi,
     Antigravity,
+    Codex,
 }
 
 pub struct Parsed {
@@ -1206,6 +1207,7 @@ impl KeptHarness {
             KeptHarness::ClaudeCode => Harness::ClaudeCode,
             KeptHarness::Pi => Harness::Pi,
             KeptHarness::Antigravity => Harness::Antigravity,
+            KeptHarness::Codex => Harness::Codex,
         }
     }
 
@@ -1214,6 +1216,7 @@ impl KeptHarness {
             Harness::ClaudeCode => KeptHarness::ClaudeCode,
             Harness::Pi => KeptHarness::Pi,
             Harness::Antigravity => KeptHarness::Antigravity,
+            Harness::Codex => KeptHarness::Codex,
         }
     }
 }
@@ -1316,6 +1319,21 @@ mod tests {
     fn parse(text: &str) -> Result<Projects, String> {
         let alone = |dir: &Dir| Ok(Some(Spot::in_folder(dir.clone(), None)));
         rooted_as(text, alone).map(|read| read.projects)
+    }
+
+    #[test]
+    fn each_harness_is_kept_under_a_name_of_its_own_and_read_back() {
+        let mut names = std::collections::BTreeSet::new();
+        for harness in Harness::ALL {
+            let kept = KeptHarness::of(harness);
+            assert_eq!(kept.read(), harness);
+            let name = serde_json::to_string(&kept).unwrap();
+            let read: KeptHarness = serde_json::from_str(&name).unwrap();
+            assert_eq!(read.read(), harness, "{name}");
+            assert!(names.insert(name), "{harness:?}");
+        }
+        assert!(names.contains("\"codex\""), "{names:?}");
+        assert!(names.contains("\"claude-code\""), "{names:?}");
     }
 
     #[test]

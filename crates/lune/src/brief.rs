@@ -569,6 +569,10 @@ fn wrote(harness: Harness, ran: io::Result<Ran>) -> Result<String, String> {
                 Err(format!("brief: {program} failed: {why}"))
             }
         },
+        Ok(Ran::Ended { status, stderr, .. }) if harness == Harness::Codex && !status.success() => {
+            let why = headless::codex_failure(&stderr).unwrap_or_else(|| status.to_string());
+            Err(format!("brief: {program} failed: {why}"))
+        }
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => {
             let said = String::from_utf8_lossy(&stdout).trim_end().to_owned();
             if said.trim().is_empty() {
@@ -1398,6 +1402,33 @@ Its transcript is unknown: Claude Code names none for it.
             wrote(Harness::Antigravity, ended("stray text"))
                 .unwrap_err()
                 .starts_with("brief: agy failed: invalid JSON: ")
+        );
+        assert_eq!(
+            wrote(Harness::Codex, ended(&format!("{brief}\n"))),
+            Ok(brief.to_owned())
+        );
+        assert_eq!(
+            wrote(Harness::Codex, ended(" \n\n")),
+            Err("brief: codex wrote nothing".to_owned())
+        );
+        let failed = |stderr: &str| {
+            Ok(Ran::Ended {
+                status: ExitStatus::from_raw(1 << 8),
+                stdout: Vec::new(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        };
+        assert_eq!(
+            wrote(
+                Harness::Codex,
+                failed("OpenAI Codex v0.172.0\n--------\nuser\nSay hi\nERROR: not signed in\n")
+            ),
+            Err("brief: codex failed: not signed in".to_owned()),
+            "Codex's banner on stderr is not why it failed"
+        );
+        assert_eq!(
+            wrote(Harness::Codex, failed("OpenAI Codex v0.172.0\n")),
+            Err("brief: codex failed: exit status: 1".to_owned())
         );
     }
 

@@ -9,6 +9,8 @@ mod attach;
 #[cfg(test)]
 mod bridge;
 #[cfg(test)]
+mod codex;
+#[cfg(test)]
 mod demand;
 #[cfg(test)]
 mod folder;

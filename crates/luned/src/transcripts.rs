@@ -269,6 +269,7 @@ impl TranscriptEnd {
             Ok(api::Harness::ClaudeCode) => Ok(TranscriptEnd::Claude(lines)),
             Ok(api::Harness::Antigravity) => Ok(TranscriptEnd::Antigravity(lines)),
             Ok(api::Harness::Pi) => Err("pi keeps no transcript this lune reads".to_owned()),
+            Ok(api::Harness::Codex) => Err("Codex keeps no transcript this lune reads".to_owned()),
             Ok(api::Harness::Unspecified) => Err("it names no harness".to_owned()),
             Err(_) => Err(format!(
                 "harness {} is one this lune does not know",

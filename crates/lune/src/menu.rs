@@ -4458,6 +4458,9 @@ mod tests {
         assert_eq!(wants, Wants::Keep(Harness::Antigravity));
         assert_eq!(line(&menu, 31), " \u{f0674} agy  <TAB> another agent");
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
+        assert_eq!(wants, Wants::Keep(Harness::Codex));
+        assert_eq!(line(&menu, 31), " \u{f07b5} codex  <TAB> another agent");
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(CLAUDE));
         assert_eq!(line(&menu, 31), " \u{ec82} claude  <TAB> another agent");
     }

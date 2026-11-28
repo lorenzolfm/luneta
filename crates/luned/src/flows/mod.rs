@@ -1171,7 +1171,7 @@ impl Actor {
         let stamp = store::step_stamp(std::process::id(), worktree, self.steps_opened_count);
         let pi_session = match harness {
             Harness::Pi => self.store.pi_session_file(&stamp).map(Some),
-            Harness::ClaudeCode | Harness::Antigravity => Ok(None),
+            Harness::ClaudeCode | Harness::Antigravity | Harness::Codex => Ok(None),
         };
         let (run_dir, pi_session) =
             match self.store.run_dir().and_then(|dir| Ok((dir, pi_session?))) {

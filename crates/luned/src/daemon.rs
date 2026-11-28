@@ -78,9 +78,9 @@ use crate::sayings::ToSay;
 use crate::statuses::ReportedAgent;
 use crate::transcripts::{self, Reading, SessionId};
 use crate::{
-    agy, changes, checks, claude, client, devices, eza, fetches, flows, git, github, keeps, log,
-    owns, pi, printed, program, projects, release, remote, repositories, skills, state, tailnet,
-    topics, watch, work,
+    agy, changes, checks, claude, client, codex, devices, eza, fetches, flows, git, github, keeps,
+    log, owns, pi, printed, program, projects, release, remote, repositories, skills, state,
+    tailnet, topics, watch, work,
 };
 
 mod over_tailnet;
@@ -484,7 +484,8 @@ fn follow(
         let core = core.clone();
         move |found| core.send(Command::AgyAgents(found)).is_ok()
     };
-    watch::watch_ending("agy", dir, mode, any, SWEEP, read, pids, tell)
+    watch::watch_ending("agy", dir, mode, any, SWEEP, read, pids, tell)?;
+    codex::follow(core.clone(), codex::folder(), SWEEP)
 }
 
 async fn stand(
@@ -1546,6 +1547,7 @@ impl Daemon for Host {
             Ok(api::Harness::ClaudeCode | api::Harness::Unspecified) => Harness::ClaudeCode,
             Ok(api::Harness::Pi) => Harness::Pi,
             Ok(api::Harness::Antigravity) => Harness::Antigravity,
+            Ok(api::Harness::Codex) => Harness::Codex,
             Err(_) => return Err(Status::invalid_argument("harness: unknown harness")),
         };
         let parsed_entry = match &entry {
@@ -2128,6 +2130,10 @@ impl Host {
             api::Harness::Antigravity => {
                 let why =
                     format!("terminal {id} runs Antigravity, whose menus luned does not read");
+                return Runs::Unread(why);
+            }
+            api::Harness::Codex => {
+                let why = format!("terminal {id} runs Codex, whose menus luned does not read");
                 return Runs::Unread(why);
             }
             api::Harness::Unspecified => {

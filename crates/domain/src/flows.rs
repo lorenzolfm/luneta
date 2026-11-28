@@ -1154,6 +1154,10 @@ impl FlowRun {
         harness: Harness,
         entry: FlowEntry,
     ) -> Result<(FlowRun, Vec<FlowEffect>), String> {
+        harness
+            .flows()
+            .steps()
+            .map_err(|why| format!("no flow runs on {}: {why}", harness.program()))?;
         let stages = spec.effective_stages(entry)?;
         let FlowSpec { name, policy, .. } = spec;
         let mut effects = Vec::new();
@@ -2815,14 +2819,8 @@ mod harness_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Harness, D::Error> {
         let raw = String::deserialize(d)?;
-        match raw.as_str() {
-            "claude" => Ok(Harness::ClaudeCode),
-            "pi" => Ok(Harness::Pi),
-            "agy" => Ok(Harness::Antigravity),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown harness {other:?}"
-            ))),
-        }
+        Harness::from_program(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown harness {raw:?}")))
     }
 }
 
@@ -3754,6 +3752,32 @@ mod tests {
             run.summary().pause_reason,
             Some(PauseReason::PullRequestUnstable)
         );
+    }
+
+    #[test]
+    fn a_flow_starts_on_no_harness_whose_steps_lune_does_not_run() {
+        let mut registry = FlowRegistry::default();
+        for harness in Harness::ALL {
+            let started = registry.start(
+                wt(1),
+                FlowSpec::default_spec(),
+                FlowMode::Unattended,
+                harness,
+                FlowEntry::PullRequest,
+            );
+            match harness.flows() {
+                crate::agent::Flows::Steps => {
+                    assert!(started.is_ok(), "{harness:?}: {started:?}");
+                    registry.remove(wt(1));
+                }
+                crate::agent::Flows::No { why } => {
+                    let program = harness.program();
+                    assert_eq!(started, Err(format!("no flow runs on {program}: {why}")));
+                }
+            }
+            assert!(registry.get(wt(1)).is_none(), "{harness:?}");
+        }
+        assert!(Harness::Codex.flows().steps().is_err());
     }
 
     #[test]

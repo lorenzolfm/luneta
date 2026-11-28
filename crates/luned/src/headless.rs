@@ -14,6 +14,18 @@ pub const TOOLLESS: &str = "You have no tools here: read no file and run nothing
 
 const BARE_FOLDER: &str = "bare";
 
+pub const CODEX_READS_ONLY: [&str; 5] = [
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "--color",
+    "never",
+];
+
+pub const CODEX_TOLD_ON_STDIN: &str = "-";
+
+const CODEX_ERROR: &str = "ERROR:";
+
 pub const PI_BARE: [&str; 6] = [
     "--no-extensions",
     "--no-mcp",
@@ -61,6 +73,7 @@ pub enum AnswerWith<'a> {
     ClaudeCode { model: NonEmpty<'a> },
     Pi,
     Antigravity,
+    Codex,
 }
 
 impl<'a> AnswerWith<'a> {
@@ -72,6 +85,7 @@ impl<'a> AnswerWith<'a> {
             },
             Harness::Pi => AnswerWith::Pi,
             Harness::Antigravity => AnswerWith::Antigravity,
+            Harness::Codex => AnswerWith::Codex,
         }
     }
 }
@@ -87,7 +101,7 @@ pub struct OneAnswer<'a> {
 pub const fn writer(harness: Harness, model: NonEmpty<'static>) -> &'static str {
     match harness {
         Harness::ClaudeCode => model.as_str(),
-        Harness::Pi | Harness::Antigravity => harness.program(),
+        Harness::Pi | Harness::Antigravity | Harness::Codex => harness.program(),
     }
 }
 
@@ -147,6 +161,32 @@ pub fn agy_strict() -> Command {
         "stream-json",
     ]);
     agy
+}
+
+#[must_use]
+pub fn codex_toolless_message(system: &str, prompt: &str) -> String {
+    format!("{system} {TOOLLESS}\n\n{prompt}")
+}
+
+#[must_use]
+pub fn codex_once() -> Command {
+    let mut codex = Command::new(Harness::Codex.program());
+    codex
+        .args(["exec", "--ephemeral"])
+        .args(CODEX_READS_ONLY)
+        .arg(CODEX_TOLD_ON_STDIN);
+    codex
+}
+
+#[must_use]
+pub fn codex_failure(stderr: &[u8]) -> Option<String> {
+    let said = String::from_utf8_lossy(stderr);
+    let errors = said
+        .lines()
+        .rev()
+        .filter_map(|line| line.trim().strip_prefix(CODEX_ERROR));
+    let last = errors.map(str::trim).find(|why| !why.is_empty());
+    last.map(str::to_owned)
 }
 
 pub fn agy_stream_result(stdout: &[u8]) -> Result<Value, AgyStreamError> {
@@ -232,6 +272,10 @@ pub fn one_answer(ask: OneAnswer<'_>) -> io::Result<(Command, Stdio)> {
             let agy = agy_strict();
             let message = agy_toolless_message(system, ask.prompt);
             (agy, program::saying(&message)?)
+        }
+        AnswerWith::Codex => {
+            let message = codex_toolless_message(system, ask.prompt);
+            (codex_once(), program::saying(&message)?)
         }
     };
     agent.current_dir(bare_folder()?);
@@ -344,7 +388,29 @@ mod tests {
                 "message": { "content": format!("be brief {TOOLLESS}\n\nthe prompt") },
             })
         );
-        for agent in [&pi, &agy] {
+        let (codex, stdin) = one_answer(sample(Harness::Codex)).unwrap();
+        assert_eq!(codex.get_program(), "codex");
+        assert_eq!(codex.get_current_dir(), Some(bare.as_path()));
+        assert_eq!(
+            args(&codex),
+            [
+                "exec",
+                "--ephemeral",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "-",
+            ]
+        );
+        let heard = Command::new("cat").stdin(stdin).output().unwrap();
+        assert_eq!(
+            String::from_utf8(heard.stdout).unwrap(),
+            format!("be brief {TOOLLESS}\n\nthe prompt"),
+            "Codex takes no system prompt, so the words it is told open with it"
+        );
+        for agent in [&pi, &agy, &codex] {
             let unset = |name: &str| {
                 agent
                     .get_envs()
@@ -421,9 +487,26 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_run_that_failed_says_why_on_its_last_error_line() {
+        let stderr = "OpenAI Codex v0.172.0\n--------\nworkdir: /w\nmodel: x\n--------\nuser\nSay hi\n\
+            warning: Model metadata for `x` not found.\n\
+            ERROR: stream disconnected\n\
+            hook: Stop\n\
+            ERROR: The 'x' model is not supported when using Codex with a ChatGPT account.\n\
+            ERROR:   \n";
+        assert_eq!(
+            codex_failure(stderr.as_bytes()).as_deref(),
+            Some("The 'x' model is not supported when using Codex with a ChatGPT account.")
+        );
+        assert_eq!(codex_failure(b"OpenAI Codex v0.172.0\n--------\n"), None);
+        assert_eq!(codex_failure(b""), None);
+    }
+
+    #[test]
     fn what_writes_is_named_by_its_model_or_its_program() {
         assert_eq!(writer(Harness::ClaudeCode, SONNET), "sonnet");
         assert_eq!(writer(Harness::Pi, SONNET), "pi");
         assert_eq!(writer(Harness::Antigravity, SONNET), "agy");
+        assert_eq!(writer(Harness::Codex, SONNET), "codex");
     }
 }

@@ -114,7 +114,7 @@ fn system(harness: Harness) -> String {
     };
     match harness {
         Harness::ClaudeCode => SYSTEM.to_owned(),
-        Harness::Pi => format!("{}{SHAPED}", toolless()),
+        Harness::Pi | Harness::Codex => format!("{}{SHAPED}", toolless()),
         Harness::Antigravity => toolless(),
     }
 }
@@ -405,6 +405,25 @@ impl Filing {
                 let ended = self.ran(&mut agy, stdin)?;
                 parse_agy_issue(&ended, labels)
             }
+            Harness::Codex => {
+                let bare = bare_folder()?;
+                let mut codex = Self::codex(&bare);
+                let message = format!("{}\n\n{told}", system(Harness::Codex));
+                let stdin =
+                    program::saying(&message).map_err(|error| untold(self.harness, &error))?;
+                let ended = self.ran(&mut codex, stdin)?;
+                if !ended.status.success() {
+                    let why = headless::codex_failure(&ended.stderr)
+                        .unwrap_or_else(|| ended.status.to_string());
+                    return Err(format!("codex wrote no issue: {why}"));
+                }
+                let said = String::from_utf8_lossy(&ended.stdout);
+                DraftIssue::parse(
+                    self.harness,
+                    said_as_issue(self.harness, said.trim())?,
+                    labels,
+                )
+            }
         }
     }
 
@@ -464,6 +483,12 @@ impl Filing {
         agy.arg("--json-schema").arg(schema(labels));
         placed_in(&mut agy, bare);
         agy
+    }
+
+    fn codex(bare: &Path) -> Command {
+        let mut codex = headless::codex_once();
+        placed_in(&mut codex, bare);
+        codex
     }
 
     fn placed(&self, agent: &mut Command) {
