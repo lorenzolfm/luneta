@@ -24,7 +24,7 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint, ProjectTarget, Target};
 use crate::moonlight;
 use crate::reach::{self, Luned};
-use crate::sidebar::{self, ACCENT, ViewKey};
+use crate::sidebar::{self, ACCENT, SpinnerFrame, ViewKey};
 use crate::spots::Spots;
 use crate::sweep::{self, Continuation, Join, NonEmptyRect, Page, Sweep};
 
@@ -927,7 +927,7 @@ impl Ask {
         };
     }
 
-    fn body(&self, inner: usize, rows_max: usize, frame: usize) -> Body {
+    fn body(&self, inner: usize, rows_max: usize, frame: SpinnerFrame) -> Body {
         if rows_max == 0 {
             return Body { rows: Vec::new() };
         }

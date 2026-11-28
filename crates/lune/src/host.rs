@@ -5418,12 +5418,22 @@ mod tests {
         );
         written.borrow_mut().clear();
 
+        let mut screen = Term::new(Config::default(), &TermSize::new(80, 20), VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let mut title_row = |written: &Written| {
+            for write in written.borrow_mut().drain(..) {
+                parser.advance(&mut screen, &write);
+            }
+            (0..usize::from(sidebar::COLUMNS))
+                .map(|column| screen.grid()[Point::new(Line(1), Column(column))].c)
+                .collect::<String>()
+        };
         let (mut tall, tall_written) = test_terminal(80, 20);
         let shown_at = Duration::from_secs(10);
         app.give(SplitSide::Sidebar, None, at(shown_at).system);
         app.pacing.mark_dirty();
         assert!(drew(&mut app, &mut tall, &tall_written, at(shown_at)));
-        tall_written.borrow_mut().clear();
+        assert!(title_row(&tall_written).contains("⠋1"));
 
         assert_eq!(
             app.wait(at(shown_at)),
@@ -5437,6 +5447,7 @@ mod tests {
         app.tick(at(next_frame));
         assert!(drew(&mut app, &mut tall, &tall_written, at(next_frame)));
         assert!(!tall_written.borrow().is_empty());
+        assert!(title_row(&tall_written).contains("⠙1"));
     }
 
     #[test]

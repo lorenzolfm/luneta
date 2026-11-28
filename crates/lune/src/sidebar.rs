@@ -115,11 +115,19 @@ const BROWSER_LABEL: &str = "browser";
 const COMPUTER: &str = "\u{f108}";
 const EDGE: &str = "│";
 const INDENT: &str = " ";
-const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const SPIN: Duration = Duration::from_millis(100);
 pub const SCROLL: Duration = Duration::from_millis(60);
 pub const ROWS_MAX: usize = 8192;
+const FILING_MAX: usize = 64;
+const WORKING_MAX: usize = 64;
+const NOTES_SPINNERS_MAX: usize = FILING_MAX + WORKING_MAX + 1;
+const NOTES_LINES_MAX: usize = ROWS_MAX;
+const TALLIES_MAX: usize = 3;
 
+const _: () = assert!(
+    NOTES_SPINNERS_MAX <= NOTES_LINES_MAX,
+    "note spinners never exceed note lines"
+);
 const _: () = assert!(
     SPIN.as_millis() > 0 && SPIN.as_nanos() == SPIN.as_millis() * 1_000_000,
     "spin steps are whole positive milliseconds so frame and next_spin agree"
@@ -546,6 +554,64 @@ impl Spot {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpinnerFrame {
+    F0,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+}
+
+impl SpinnerFrame {
+    pub const REST: Self = Self::F0;
+
+    const ALL: [Self; 10] = [
+        Self::F0,
+        Self::F1,
+        Self::F2,
+        Self::F3,
+        Self::F4,
+        Self::F5,
+        Self::F6,
+        Self::F7,
+        Self::F8,
+        Self::F9,
+    ];
+
+    #[must_use]
+    pub fn at(wall: SystemTime) -> Self {
+        let since = wall
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO);
+        let turns = since.as_millis() / SPIN.as_millis();
+        let frames = u128::try_from(Self::ALL.len()).expect("a spinner of ten frames");
+        let index = usize::try_from(turns % frames).expect("a frame of the spinner's");
+        Self::ALL[index]
+    }
+
+    #[must_use]
+    pub const fn glyph(self) -> &'static str {
+        match self {
+            Self::F0 => "⠋",
+            Self::F1 => "⠙",
+            Self::F2 => "⠹",
+            Self::F3 => "⠸",
+            Self::F4 => "⠼",
+            Self::F5 => "⠴",
+            Self::F6 => "⠦",
+            Self::F7 => "⠧",
+            Self::F8 => "⠇",
+            Self::F9 => "⠏",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mark {
     Waiting,
@@ -583,7 +649,7 @@ impl Mark {
         )
     }
 
-    pub fn glyph(&self, frame: usize) -> (String, Style) {
+    pub fn glyph(&self, spinner_frame: SpinnerFrame) -> (String, Style) {
         let style = Style::new();
         match self {
             Mark::Waiting => (
@@ -595,7 +661,7 @@ impl Mark {
                 "✓".to_owned(),
                 style.fg(moonlight::GREEN).add_modifier(Modifier::BOLD),
             ),
-            Mark::Busy => (SPINNER[frame].to_owned(), style.fg(TAG)),
+            Mark::Busy => (spinner_frame.glyph().to_owned(), style.fg(TAG)),
             Mark::Error | Mark::Failed => (
                 "✗".to_owned(),
                 style.fg(moonlight::RED).add_modifier(Modifier::BOLD),
@@ -800,6 +866,42 @@ fn long_at(doing: &Doing) -> Option<SystemTime> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Badge {
+    Waiting(NonZeroUsize),
+    New,
+    Busy,
+}
+
+impl Badge {
+    fn of(tally: Tally, folded: bool) -> Option<Self> {
+        if let Some(waiting) = NonZeroUsize::new(tally.waiting) {
+            return Some(Self::Waiting(waiting));
+        }
+        if folded && tally.dots > 0 {
+            return Some(Self::New);
+        }
+        if folded && tally.busy > 0 {
+            return Some(Self::Busy);
+        }
+        None
+    }
+
+    fn span(self, spinner_frame: SpinnerFrame) -> Span<'static> {
+        match self {
+            Self::Waiting(waiting) => {
+                let (dot, style) = Mark::Waiting.glyph(SpinnerFrame::REST);
+                Span::styled(format!("{dot}{waiting}"), style)
+            }
+            Self::New => dot(),
+            Self::Busy => {
+                let (spinner, style) = Mark::Busy.glyph(spinner_frame);
+                Span::styled(spinner, style)
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Row {
     Machine {
@@ -815,9 +917,7 @@ enum Row {
         under: Under,
         here: bool,
         colour: Color,
-        waiting: usize,
-        dot: bool,
-        busy: bool,
+        badge: Option<Badge>,
     },
     Worktree {
         machine: Machine,
@@ -828,9 +928,7 @@ enum Row {
         under: Under,
         here: bool,
         colour: Color,
-        waiting: usize,
-        dot: bool,
-        busy: bool,
+        badge: Option<Badge>,
     },
     View {
         machine: Machine,
@@ -851,9 +949,7 @@ enum Heads {
     Projects {
         folded: bool,
         here: bool,
-        waiting: usize,
-        dot: bool,
-        busy: bool,
+        badge: Option<Badge>,
     },
 }
 
@@ -1052,37 +1148,19 @@ impl Row {
         self.gap() + self.own()
     }
 
+    #[cfg(test)]
     fn spinning(&self) -> bool {
         match self {
             Row::Machine {
-                heads:
-                    Heads::Projects {
-                        folded,
-                        waiting,
-                        dot,
-                        busy,
-                        ..
-                    },
+                heads: Heads::Projects { badge, .. },
                 ..
-            } => *folded && *busy && *waiting == 0 && !*dot,
+            }
+            | Row::Project { badge, .. }
+            | Row::Worktree { badge, .. } => matches!(badge, Some(Badge::Busy)),
             Row::Machine {
                 heads: Heads::Nothing,
                 ..
             } => false,
-            Row::Project {
-                under,
-                waiting,
-                dot,
-                busy,
-                ..
-            }
-            | Row::Worktree {
-                under,
-                waiting,
-                dot,
-                busy,
-                ..
-            } => *under == Under::Folded && *busy && *waiting == 0 && !*dot,
             Row::View { marked, .. } => marked
                 .as_ref()
                 .is_some_and(|marked| marked.mark == Mark::Busy),
@@ -4039,13 +4117,13 @@ impl SidebarState {
         };
         let width = usize::from(laid.area.width.saturating_sub(1));
         let height = usize::from(laid.area.height);
-        let NotesAt { mut notes, .. } = self.notes_at(width, height, 0);
+        let NotesAt { mut notes, .. } = self.notes_at(width, height, SpinnerFrame::REST);
         assert_eq!(
             laid.room,
-            height.saturating_sub(HEADER + notes.lines.len()),
+            height.saturating_sub(HEADER + notes.len()),
             "the sidebar's laid-out room matches its state before diffing"
         );
-        notes.lines.truncate(height);
+        notes.truncate(height);
         let all = matches!(moving, Moving::Lifted(_) | Moving::Swept(..))
             || matches!(self.mode, Mode::Reorder(_));
         let top = laid.top;
@@ -4059,6 +4137,7 @@ impl SidebarState {
             }
             line = end;
         }
+        let (note_lines, _, _) = notes.into_parts();
         SidebarView::Expanded(Box::new(ExpandedView {
             framed: self.has_keys(),
             has_host: self.host.is_some(),
@@ -4074,7 +4153,7 @@ impl SidebarState {
             here: self.here_row.clone(),
             holding: self.holding(),
             title: self.seat_name.clone(),
-            notes: notes.lines,
+            notes: note_lines,
         }))
     }
 
@@ -4406,9 +4485,7 @@ impl SidebarState {
                             under,
                             here,
                             colour,
-                            waiting: tally.waiting,
-                            dot: tally.dots > 0,
-                            busy: tally.busy > 0,
+                            badge: Badge::of(tally, under == Under::Folded),
                         });
                         if let Some(found) = worktree_found {
                             let at = Spot::on(&machine, Place::Worktree(worktree.place.clone()));
@@ -4441,9 +4518,7 @@ impl SidebarState {
                     under,
                     here: project_here,
                     colour,
-                    waiting: tally.waiting,
-                    dot: tally.dots > 0,
-                    busy: tally.busy > 0,
+                    badge: Badge::of(tally, under == Under::Folded),
                 });
                 machine_rows.append(&mut project_rows);
             }
@@ -4455,9 +4530,7 @@ impl SidebarState {
             let heads = Heads::Projects {
                 folded: machine_folded,
                 here: machine_here,
-                waiting: machine_tally.waiting,
-                dot: machine_tally.dots > 0,
-                busy: machine_tally.busy > 0,
+                badge: Badge::of(machine_tally, machine_folded),
             };
             rows.push(Row::Machine {
                 machine,
@@ -6861,7 +6934,7 @@ impl SidebarState {
             top,
             rows,
             notes_y: geometry.notes_y,
-            notes: notes.said,
+            notes: notes.into_parts().2,
             aloud_buttons,
         }
     }
@@ -6879,8 +6952,8 @@ impl SidebarState {
         );
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
-        let NotesAt { notes, buttons, .. } = self.notes_at(width, height, 0);
-        let geometry = notes_geometry(area, notes.lines.len());
+        let NotesAt { notes, buttons, .. } = self.notes_at(width, height, SpinnerFrame::REST);
+        let geometry = notes_geometry(area, notes.len());
         let mut top = self.viewport.top();
         let top_before = top;
         let mut landing = self.lifted_landing_at(top);
@@ -6966,15 +7039,13 @@ impl SidebarState {
         let top = laid.top;
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
-        let frame = frame(wall);
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
-        lines.extend(self.top(width));
+        let spinner_frame = SpinnerFrame::at(wall);
         let NotesAt {
             notes,
             bottom: spotted,
             buttons,
-        } = self.notes_at(width, height, frame);
-        let geometry = notes_geometry(area, notes.lines.len());
+        } = self.notes_at(width, height, spinner_frame);
+        let geometry = notes_geometry(area, notes.len());
         let room = geometry.room;
         let highlight = self.highlight();
         let landing = match moving {
@@ -6984,23 +7055,6 @@ impl SidebarState {
             Moving::Still | Moving::Down { .. } | Moving::Sweeping(_) | Moving::Swept(..) => None,
         };
         let lifted = landing.is_some();
-        if self.host.is_none() {
-            let waiting = if self.away.is_some() {
-                ""
-            } else {
-                "asking luned…"
-            };
-            lines.push(Line::styled(
-                format!(" {waiting}"),
-                Style::new().add_modifier(Modifier::DIM),
-            ));
-        } else if self.rows.is_empty() {
-            assert!(self.typed(), "only a search hides this machine's row");
-            lines.push(Line::styled(
-                " no match",
-                Style::new().add_modifier(Modifier::DIM),
-            ));
-        }
         let lit = match (&landing, highlight) {
             (Some((_, lifted)), _) => Some((lifted.clone(), None, LIT)),
             (None, Highlight::Lit(at)) => {
@@ -7049,7 +7103,8 @@ impl SidebarState {
                 lines: row_drawn,
                 number,
                 cuts: row_cuts,
-            } = row_lines(row, width, frame, wall);
+                spinner_visible,
+            } = row_lines(row, width, spinner_frame, wall);
             assert_eq!(row_drawn.len(), row.own(), "a row draws the lines it takes");
             drawn.resize(drawn.len() + row.gap(), Line::default());
             if !lifted && let Some(number) = number {
@@ -7059,7 +7114,14 @@ impl SidebarState {
                 });
             }
             let first = drawn.len();
-            marks.push((first, row.spinning(), row.since()));
+            let since = row.since();
+            if spinner_visible || since.is_some() {
+                marks.push(RowMark {
+                    line: first,
+                    spinning: spinner_visible,
+                    since,
+                });
+            }
             cuts.extend(row_cuts.into_iter().map(|cut| CutAt {
                 line: first + cut.line,
                 ..cut
@@ -7086,7 +7148,8 @@ impl SidebarState {
             "the sidebar's laid-out notes row matches its state before drawing"
         );
         assert_eq!(
-            laid.notes, notes.said,
+            laid.notes,
+            notes.said(),
             "the sidebar's laid-out notes match its state before drawing"
         );
         assert_eq!(
@@ -7098,10 +7161,47 @@ impl SidebarState {
             !matches!(moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
             "a stale sweep is cleared before drawing"
         );
+        let notes_visible = height - geometry.notes_from;
+        let shown = top..top + room;
+        let cadence = if width == 0 {
+            Cadence::default()
+        } else {
+            draw_rows_painted_cadence(&CadenceInput {
+                marks: &marks,
+                shown: &shown,
+                notes_spinners: notes.spinners(),
+                notes_visible,
+                wall,
+            })
+        };
+        let (note_lines, note_goes_on, _) = notes.into_parts();
+        let title_spinner_frame = if cadence.spinning() {
+            spinner_frame
+        } else {
+            SpinnerFrame::REST
+        };
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
+        lines.extend(self.top(width, title_spinner_frame));
+        if self.host.is_none() {
+            let waiting = if self.away.is_some() {
+                ""
+            } else {
+                "asking luned…"
+            };
+            lines.push(Line::styled(
+                format!(" {waiting}"),
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        } else if self.rows.is_empty() {
+            assert!(self.typed(), "only a search hides this machine's row");
+            lines.push(Line::styled(
+                " no match",
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        }
         lines.extend(drawn.into_iter().skip(top).take(room));
         lines.resize(geometry.notes_from, Line::default());
-        let joins = notes
-            .goes_on
+        let joins = note_goes_on
             .iter()
             .map(|line| {
                 (
@@ -7113,31 +7213,9 @@ impl SidebarState {
                 )
             })
             .collect();
-        let spinners = notes.spinners;
-        lines.extend(notes.lines);
+        lines.extend(note_lines);
         let mut spots = Spots::default();
         let mut cut_spots = Spots::default();
-        let shown = top..top + room;
-        let mut cadence = Cadence::default();
-        if width > 0 {
-            for (line, spinning, since) in marks {
-                if !shown.contains(&line) {
-                    continue;
-                }
-                if spinning {
-                    cadence.spin();
-                }
-                if let Some(since) = since {
-                    cadence.age(since, wall);
-                }
-            }
-            if spinners
-                .iter()
-                .any(|line| geometry.notes_from + line < height)
-            {
-                cadence.spin();
-            }
-        }
         for NumberAt {
             line,
             columns,
@@ -7198,7 +7276,7 @@ impl SidebarState {
             Style::new().fg(moonlight::MUTE)
         };
         let mut lines = vec![Line::styled(RULE.repeat(width), rule), Line::default()];
-        for (count, (glyph, style)) in tallies(self.counts) {
+        for (count, (glyph, style)) in tallies(self.counts, SpinnerFrame::REST) {
             if count == 0 {
                 continue;
             }
@@ -7211,11 +7289,15 @@ impl SidebarState {
         if self.aloud.as_ref().is_some_and(aloud::Shown::paused) {
             lines.push(Line::styled(aloud::PLAY, Style::new().fg(ACCENT)));
         }
+        assert!(
+            lines.len() <= HEADER + TALLIES_MAX + 1,
+            "collapsed sidebar lines fit header, tallies, and play mark"
+        );
         put(buffer, area, &lines, self.framing());
     }
 
-    fn top(&self, width: usize) -> [Line<'static>; HEADER] {
-        [self.title(width), Line::default()]
+    fn top(&self, width: usize, spinner_frame: SpinnerFrame) -> [Line<'static>; HEADER] {
+        [self.title(width, spinner_frame), Line::default()]
     }
 
     fn frame(&self, buffer: &mut Buffer, framed: Rect) {
@@ -7233,7 +7315,7 @@ impl SidebarState {
         }
     }
 
-    fn title(&self, width: usize) -> Line<'static> {
+    fn title(&self, width: usize, spinner_frame: SpinnerFrame) -> Line<'static> {
         let focused = self.has_keys();
         let dim = Style::new().fg(moonlight::MUTE);
         let moon = if focused {
@@ -7250,8 +7332,10 @@ impl SidebarState {
             projects, waiting, ..
         } = self.counts;
         let mut counts: Vec<Span<'static>> = Vec::new();
-        let waits = (waiting, Mark::Waiting.glyph(0));
-        for (count, (glyph, style)) in std::iter::once(waits).chain(tallies(self.counts)) {
+        let waits = (waiting, Mark::Waiting.glyph(SpinnerFrame::REST));
+        for (count, (glyph, style)) in
+            std::iter::once(waits).chain(tallies(self.counts, spinner_frame))
+        {
             if count == 0 {
                 continue;
             }
@@ -7291,7 +7375,11 @@ impl SidebarState {
         line
     }
 
-    fn notes_above(&self, width: usize, frame: usize) -> (Notes, Spots<aloud::Button>) {
+    fn notes_above(
+        &self,
+        width: usize,
+        spinner_frame: SpinnerFrame,
+    ) -> (Notes, Spots<aloud::Button>) {
         let mut notes = Notes::default();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -7338,22 +7426,42 @@ impl SidebarState {
         if let Some(filed) = &self.filed {
             notes.say(filed, width, Style::new().fg(NAME));
         }
-        for repository in self.filing.values() {
+        for repository in self.filing.values().take(FILING_MAX) {
             let filing = format!("Filing an issue in {repository}…");
-            notes.wait(&filing, width, Style::new().fg(NAME), frame);
+            notes.wait(&filing, width, Style::new().fg(NAME), spinner_frame);
+        }
+        let extra_filing = self.filing.len().saturating_sub(FILING_MAX);
+        if extra_filing > 0 {
+            let noun = if extra_filing == 1 { "issue" } else { "issues" };
+            let more = format!("…and {extra_filing} more {noun} filing");
+            notes.say(&more, width, Style::new().fg(NAME));
         }
         if let Some(to) = &self.image_going {
             let going = format!("image on its way to {to}");
             notes.say(&going, width, Style::new().fg(NAME));
         }
-        for working in self.working.values() {
-            notes.wait(&working.doing(), width, Style::new().fg(NAME), frame);
+        for working in self.working.values().take(WORKING_MAX) {
+            notes.wait(
+                &working.doing(),
+                width,
+                Style::new().fg(NAME),
+                spinner_frame,
+            );
+        }
+        let working_extra = self.working.len().saturating_sub(WORKING_MAX);
+        if working_extra > 0 {
+            let noun = if working_extra == 1 { "task" } else { "tasks" };
+            let more = format!("…and {working_extra} more {noun} running");
+            notes.say(&more, width, Style::new().fg(NAME));
         }
         let mut buttons = Spots::default();
-        if let Some(aloud) = &self.aloud {
+        if let Some(aloud) = &self.aloud
+            && notes.remaining() > 0
+        {
             let (line, spots) = aloud.line(width);
-            buttons = spots.down(notes.lines.len());
-            notes.lines.push(line);
+            if let Some(at) = notes.push_line(line) {
+                buttons = spots.down(at);
+            }
         }
         (notes, buttons)
     }
@@ -7364,52 +7472,54 @@ impl SidebarState {
         };
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
-        let (notes, _) = self.notes_above(width, 0);
-        height.saturating_sub(HEADER + 1 + notes.lines.len())
+        let (notes, _) = self.notes_above(width, SpinnerFrame::REST);
+        height
+            .saturating_sub(HEADER + 1 + notes.len())
+            .min(notes.remaining())
     }
 
-    fn notes_at(&self, width: usize, height: usize, frame: usize) -> NotesAt {
-        let (mut notes, buttons) = self.notes_above(width, frame);
-        let room = height.saturating_sub(HEADER + 1 + notes.lines.len());
-        let above = notes.lines.len();
-        let (lines, spotted) = match self.bottom() {
+    fn notes_at(&self, width: usize, height: usize, spinner_frame: SpinnerFrame) -> NotesAt {
+        let (mut notes, buttons) = self.notes_above(width, spinner_frame);
+        let room = height
+            .saturating_sub(HEADER + 1 + notes.len())
+            .min(notes.remaining());
+        let above = notes.len();
+        let spotted = match self.bottom() {
             Bottom::Menu(menu) => {
-                let (lines, spots, spinner) = menu.lines(width, room, frame);
-                if let Some(at) = spinner {
-                    notes.spinners.push(above + at);
+                let (lines, spots, spinner) = menu.lines(width, room, spinner_frame);
+                let added = notes.extend_bottom(lines, spinner, width);
+                SidebarBottom::Menu {
+                    number: menu.number(),
+                    spots: spots.first(added).down(above),
                 }
-                let spots = spots.down(above);
-                (
-                    lines,
-                    SidebarBottom::Menu {
-                        number: menu.number(),
-                        spots,
-                    },
-                )
             }
             Bottom::Search(search) => {
                 let (lines, spots) = self.searching(search, width, room);
-                (lines, SidebarBottom::Keys(Keyed::Search, spots.down(above)))
+                let added = notes.extend_bottom(lines, None, width);
+                SidebarBottom::Keys(Keyed::Search, spots.first(added).down(above))
             }
             Bottom::Legend => {
                 let (lines, spots) = menu::legend(self.target().as_ref(), width, room);
-                (lines, SidebarBottom::Keys(Keyed::Legend, spots.down(above)))
+                let added = notes.extend_bottom(lines, None, width);
+                SidebarBottom::Keys(Keyed::Legend, spots.first(added).down(above))
             }
             Bottom::Group(key) => {
                 let (lines, spots) = menu::grouped(key, width, room);
-                (lines, SidebarBottom::Keys(Keyed::Legend, spots.down(above)))
+                let added = notes.extend_bottom(lines, None, width);
+                SidebarBottom::Keys(Keyed::Legend, spots.first(added).down(above))
             }
             Bottom::Keys(title, keys) => {
                 let (lines, spots) = menu::shortcuts(title, keys, width, room);
-                (lines, SidebarBottom::Keys(Keyed::Legend, spots.down(above)))
+                let added = notes.extend_bottom(lines, None, width);
+                SidebarBottom::Keys(Keyed::Legend, spots.first(added).down(above))
             }
             Bottom::AllKeys(all) => {
                 let (lines, spots) = all.lines(width, room);
-                (lines, SidebarBottom::Keys(Keyed::Legend, spots.down(above)))
+                let added = notes.extend_bottom(lines, None, width);
+                SidebarBottom::Keys(Keyed::Legend, spots.first(added).down(above))
             }
-            Bottom::Nothing => (Vec::new(), SidebarBottom::Nothing),
+            Bottom::Nothing => SidebarBottom::Nothing,
         };
-        notes.lines.extend(lines);
         NotesAt {
             notes,
             bottom: spotted,
@@ -7540,12 +7650,56 @@ enum Bottom<'a> {
     Nothing,
 }
 
-fn tallies(counts: Counts) -> [(usize, (String, Style)); 3] {
+struct RowMark {
+    line: usize,
+    spinning: bool,
+    since: Option<SystemTime>,
+}
+
+struct CadenceInput<'a> {
+    marks: &'a [RowMark],
+    shown: &'a Range<usize>,
+    notes_spinners: &'a [usize],
+    notes_visible: usize,
+    wall: SystemTime,
+}
+
+fn draw_rows_painted_cadence(input: &CadenceInput<'_>) -> Cadence {
+    assert!(
+        input.marks.len() <= ROWS_MAX,
+        "sidebar cadence marks stay within ROWS_MAX"
+    );
+    assert!(
+        input.notes_spinners.len() <= NOTES_SPINNERS_MAX,
+        "note spinners stay within NOTES_SPINNERS_MAX"
+    );
+    let mut cadence = Cadence::default();
+    for mark in input.marks {
+        if input.shown.contains(&mark.line) {
+            if mark.spinning {
+                cadence.spin();
+            }
+            if let Some(since) = mark.since {
+                cadence.age(since, input.wall);
+            }
+        }
+    }
+    if input
+        .notes_spinners
+        .iter()
+        .any(|&line| line < input.notes_visible)
+    {
+        cadence.spin();
+    }
+    cadence
+}
+
+fn tallies(counts: Counts, spinner_frame: SpinnerFrame) -> [(usize, (String, Style)); TALLIES_MAX] {
     let dot = dot();
     [
         (counts.new, (dot.content.into_owned(), dot.style)),
-        (counts.busy, Mark::Busy.glyph(0)),
-        (counts.shell, Mark::Shell.glyph(0)),
+        (counts.busy, Mark::Busy.glyph(spinner_frame)),
+        (counts.shell, Mark::Shell.glyph(SpinnerFrame::REST)),
     ]
 }
 
@@ -7999,13 +8153,9 @@ pub fn next_age(since: SystemTime, wall: SystemTime) -> Option<SystemTime> {
     Some(at)
 }
 
-pub fn frame(wall: SystemTime) -> usize {
-    let since = wall
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO);
-    let turns = since.as_millis() / SPIN.as_millis();
-    let frames = u128::try_from(SPINNER.len()).expect("a spinner of ten frames");
-    usize::try_from(turns % frames).expect("a frame of the spinner's")
+#[must_use]
+pub fn frame(wall: SystemTime) -> SpinnerFrame {
+    SpinnerFrame::at(wall)
 }
 
 #[must_use]
@@ -8106,9 +8256,15 @@ struct RowLines<'a> {
     lines: Vec<Line<'static>>,
     number: Option<NumberAt<'a>>,
     cuts: Vec<CutAt>,
+    spinner_visible: bool,
 }
 
-fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines<'_> {
+fn row_lines(
+    row: &Row,
+    width: usize,
+    spinner_frame: SpinnerFrame,
+    now: SystemTime,
+) -> RowLines<'_> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     match row {
         Row::Machine {
@@ -8154,6 +8310,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 lines: vec![line],
                 number: None,
                 cuts,
+                spinner_visible: false,
             }
         }
         Row::Machine {
@@ -8163,14 +8320,14 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 Heads::Projects {
                     folded,
                     here,
-                    waiting,
-                    dot,
-                    busy,
+                    badge,
                 },
             ..
         } => {
-            let badge = badge(*waiting, *folded && *dot, *folded && *busy, frame);
-            let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
+            let badge_span = badge.map(|badge| badge.span(spinner_frame));
+            let reserve = badge_span
+                .as_ref()
+                .map_or(0, |badge| badge.content.width() + 1);
             let (word, since) = away.as_ref().map(Away::said).unzip();
             let word = word.map_or_default(|word| format!(" · {word}"));
             let age = since.flatten().map_or_default(|since| age(since, now));
@@ -8203,14 +8360,18 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(age, dim));
             }
-            if let Some(badge) = badge {
+            let mut spinner_visible = false;
+            if let Some(badge_span) = badge_span {
                 spans.push(Span::raw(" "));
-                spans.push(badge);
+                let column: usize = spans.iter().map(Span::width).sum();
+                spinner_visible = matches!(badge, Some(Badge::Busy)) && column < width;
+                spans.push(badge_span);
             }
             RowLines {
                 lines: vec![Line::from(spans)],
                 number: None,
                 cuts,
+                spinner_visible,
             }
         }
         Row::Project {
@@ -8219,15 +8380,15 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             under,
             here,
             colour,
-            waiting,
-            dot,
-            busy,
+            badge,
             ..
         } => {
             let session = project.listed();
             let folded = *under == Under::Folded;
-            let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
-            let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
+            let badge_span = badge.map(|badge| badge.span(spinner_frame));
+            let reserve = badge_span
+                .as_ref()
+                .map_or(0, |badge| badge.content.width() + 1);
             let fixed = PROJECT + reserve + 1;
             let room = width.saturating_sub(fixed);
             let bold = Style::new().fg(*colour).add_modifier(Modifier::BOLD);
@@ -8249,14 +8410,18 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             ];
             spans.extend(name);
             spans.push(Span::raw(" ".repeat(gap)));
-            if let Some(badge) = badge {
+            let mut spinner_visible = false;
+            if let Some(badge_span) = badge_span {
                 spans.push(Span::raw(" "));
-                spans.push(badge);
+                let column: usize = spans.iter().map(Span::width).sum();
+                spinner_visible = matches!(badge, Some(Badge::Busy)) && column < width;
+                spans.push(badge_span);
             }
             RowLines {
                 lines: vec![Line::from(spans)],
                 number: None,
                 cuts,
+                spinner_visible,
             }
         }
         Row::Worktree {
@@ -8266,14 +8431,14 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             under,
             here,
             colour,
-            waiting,
-            dot,
-            busy,
+            badge,
             ..
         } => {
             let folded = *under == Under::Folded;
-            let badge = badge(*waiting, folded && *dot, folded && *busy, frame);
-            let reserve = badge.as_ref().map_or(0, |badge| badge.content.width() + 1);
+            let badge_span = badge.map(|badge| badge.span(spinner_frame));
+            let reserve = badge_span
+                .as_ref()
+                .map_or(0, |badge| badge.content.width() + 1);
             let gone = if *missing { MISSING } else { "" };
             let name = named.name();
             let line_room = width.saturating_sub(WORKTREE + gone.width() + reserve + 1);
@@ -8319,9 +8484,12 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             } else {
                 spans.push(Span::raw(" ".repeat(gap)));
             }
-            if let Some(badge) = badge {
+            let mut spinner_visible = false;
+            if let Some(badge_span) = badge_span {
                 spans.push(Span::raw(" "));
-                spans.push(badge);
+                let column: usize = spans.iter().map(Span::width).sum();
+                spinner_visible = matches!(badge, Some(Badge::Busy)) && column < width;
+                spans.push(badge_span);
             }
             let mut lines = vec![Line::from(spans)];
             if let Named::Apart { name, checkout } = named {
@@ -8340,6 +8508,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 lines,
                 number,
                 cuts,
+                spinner_visible,
             }
         }
         Row::View {
@@ -8363,9 +8532,12 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
             let mut spans = vec![margin(*here), Span::raw(INDENT)];
             let dotted = dotted(*unread, marked.as_ref());
             spans.push(if dotted { dot() } else { Span::raw(" ") });
+            let mut spinner_visible = false;
             match mark {
                 Some(mark) => {
-                    let (glyph, style) = mark.glyph(frame);
+                    let column: usize = spans.iter().map(Span::width).sum();
+                    spinner_visible = *mark == Mark::Busy && column < width;
+                    let (glyph, style) = mark.glyph(spinner_frame);
                     spans.push(Span::styled(glyph, style));
                 }
                 None => spans.push(Span::raw(" ".repeat(MARK))),
@@ -8387,6 +8559,7 @@ fn row_lines(row: &Row, width: usize, frame: usize, now: SystemTime) -> RowLines
                 lines: vec![Line::from(spans)],
                 number: None,
                 cuts,
+                spinner_visible,
             }
         }
     }
@@ -8430,21 +8603,6 @@ pub fn lit(
         }
     }
     (spans, cells(&shown))
-}
-
-fn badge(waiting: usize, dotted: bool, spinning: bool, frame: usize) -> Option<Span<'static>> {
-    if waiting > 0 {
-        let (dot, style) = Mark::Waiting.glyph(frame);
-        return Some(Span::styled(format!("{dot}{waiting}"), style));
-    }
-    if dotted {
-        return Some(dot());
-    }
-    if spinning {
-        let (spinner, style) = Mark::Busy.glyph(frame);
-        return Some(Span::styled(spinner, style));
-    }
-    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8679,31 +8837,135 @@ pub fn tail(text: &str, room: usize) -> String {
     format!("…{}", &text[start..])
 }
 
-#[derive(Debug, Default)]
-struct Notes {
-    lines: Vec<Line<'static>>,
-    goes_on: Vec<usize>,
-    said: Vec<String>,
-    spinners: Vec<usize>,
-}
+mod notes {
+    use ratatui::style::Style;
+    use ratatui::text::Line;
 
-impl Notes {
-    fn say(&mut self, text: &str, width: usize, style: Style) {
-        let lines = wrapped(text, width, style);
-        let start = self.lines.len();
-        self.goes_on.extend(start + 1..start + lines.len());
-        self.lines.extend(lines);
-        self.said.push(text.to_owned());
+    use crate::menu;
+
+    use super::{NOTES_LINES_MAX, NOTES_SPINNERS_MAX, SpinnerFrame, wrapped};
+
+    #[derive(Debug, Default)]
+    pub(super) struct Notes {
+        lines: Vec<Line<'static>>,
+        goes_on: Vec<usize>,
+        said: Vec<String>,
+        spinners: Vec<usize>,
     }
 
-    fn wait(&mut self, text: &str, width: usize, style: Style, frame: usize) {
-        let start = self.lines.len();
-        self.lines.extend(menu::waiting(text, width, style, frame));
-        if start < self.lines.len() {
-            self.spinners.push(start);
+    impl Notes {
+        pub(super) fn len(&self) -> usize {
+            self.lines.len()
+        }
+
+        pub(super) fn remaining(&self) -> usize {
+            NOTES_LINES_MAX - self.lines.len()
+        }
+
+        pub(super) fn spinners(&self) -> &[usize] {
+            &self.spinners
+        }
+
+        #[cfg(test)]
+        pub(super) fn lines(&self) -> &[Line<'static>] {
+            &self.lines
+        }
+
+        #[cfg(test)]
+        pub(super) fn goes_on(&self) -> &[usize] {
+            &self.goes_on
+        }
+
+        pub(super) fn said(&self) -> &[String] {
+            &self.said
+        }
+
+        pub(super) fn say(&mut self, text: &str, width: usize, style: Style) {
+            let remaining = self.remaining();
+            if remaining == 0 {
+                return;
+            }
+            let mut lines = wrapped(text, width, style);
+            if lines.len() > remaining {
+                lines.truncate(remaining);
+            }
+            if lines.is_empty() {
+                return;
+            }
+            let start = self.lines.len();
+            self.goes_on.extend(start + 1..start + lines.len());
+            self.lines.extend(lines);
+            self.said.push(text.to_owned());
+        }
+
+        pub(super) fn wait(
+            &mut self,
+            text: &str,
+            width: usize,
+            style: Style,
+            spinner_frame: SpinnerFrame,
+        ) {
+            let remaining = self.remaining();
+            if remaining == 0 {
+                return;
+            }
+            let mut lines = menu::waiting(text, width, style, spinner_frame);
+            if lines.len() > remaining {
+                lines.truncate(remaining);
+            }
+            let start = self.lines.len();
+            self.lines.extend(lines);
+            if start < self.lines.len() && width > 1 && self.spinners.len() < NOTES_SPINNERS_MAX {
+                self.spinners.push(start);
+            }
+        }
+
+        pub(super) fn push_line(&mut self, line: Line<'static>) -> Option<usize> {
+            if self.remaining() == 0 {
+                return None;
+            }
+            let at = self.lines.len();
+            self.lines.push(line);
+            Some(at)
+        }
+
+        pub(super) fn extend_bottom(
+            &mut self,
+            mut lines: Vec<Line<'static>>,
+            spinner: Option<usize>,
+            width: usize,
+        ) -> usize {
+            let remaining = self.remaining();
+            if lines.len() > remaining {
+                lines.truncate(remaining);
+            }
+            let start = self.lines.len();
+            let added = lines.len();
+            self.lines.extend(lines);
+            if let Some(at) = spinner
+                && at < added
+                && width > 1
+                && self.spinners.len() < NOTES_SPINNERS_MAX
+            {
+                self.spinners.push(start + at);
+            }
+            added
+        }
+
+        pub(super) fn truncate(&mut self, max: usize) {
+            let keep = max.min(self.lines.len());
+            self.lines.truncate(keep);
+            self.goes_on.retain(|line| *line < keep);
+            self.spinners.retain(|line| *line < keep);
+        }
+
+        pub(super) fn into_parts(self) -> (Vec<Line<'static>>, Vec<usize>, Vec<String>) {
+            (self.lines, self.goes_on, self.said)
         }
     }
 }
+
+use notes::Notes;
 
 fn note_room(width: usize) -> usize {
     width.saturating_sub(2).max(1)
@@ -18206,19 +18468,46 @@ mod tests {
     }
 
     #[test]
-    fn only_on_screen_spinners_spin_and_the_tallies_stay_still() {
+    fn only_on_screen_spinners_spin_and_the_title_follows_them() {
         let mut busy = agent("s", 1, Status::Busy, Some("work"));
         busy.status_since = None;
         let views = vec![view(1, 0, "/w/a", "claude")];
         let mut sidebar = fresh();
         sidebar.hear(host(vec![session("s", 10, views)], vec![busy]));
 
-        let title_at = |sidebar: &mut Sidebar, at| seen_at(sidebar, false, 32, 8, at).0[0].clone();
-        assert_eq!(
-            title_at(&mut sidebar, moment(160_000)),
-            title_at(&mut sidebar, moment(160_300))
+        let title_at = |sidebar: &mut Sidebar, height, at| {
+            seen_at(sidebar, false, 32, height, at).0[0].clone()
+        };
+        assert!(title_at(&mut sidebar, 8, moment(160_000)).contains("⠋1"));
+        assert!(
+            title_at(&mut sidebar, 8, moment(160_300)).contains("⠸1"),
+            "title tally spins in step with an on-screen busy row"
         );
-        assert!(title_at(&mut sidebar, moment(160_300)).contains("⠋1"));
+        assert_eq!(
+            title_at(&mut sidebar, 4, moment(160_000)),
+            title_at(&mut sidebar, 4, moment(160_300)),
+            "title tally stays still when the busy row is below the viewport"
+        );
+        assert!(title_at(&mut sidebar, 4, moment(160_300)).contains("⠋1"));
+
+        sidebar.filing(1, "o/lune");
+        assert!(
+            title_at(&mut sidebar, 4, moment(160_300)).contains("⠸1"),
+            "title tally spins while an on-screen note spinner animates"
+        );
+        sidebar.filed(
+            1,
+            "o/lune",
+            &Err(luned::issues::Unfiled::Refused("no".to_owned())),
+        );
+        assert!(
+            sidebar.clear_notice(),
+            "refused filing leaves a notice to clear"
+        );
+        assert!(
+            title_at(&mut sidebar, 4, moment(160_300)).contains("⠋1"),
+            "title tally returns to its resting glyph once the note spinner stops"
+        );
 
         let strip_at = |sidebar: &mut Sidebar, at| {
             let buffer = collapsed(sidebar, 6, at);
@@ -18262,6 +18551,10 @@ mod tests {
             Some(SPIN),
             "folded project shows a busy spinner badge"
         );
+        assert!(
+            title_at(&mut sidebar, 5, moment(160_300)).contains("⠸1"),
+            "title tally spins with a folded project's busy spinner badge"
+        );
 
         let mut waiting = agent("s", 2, Status::Waiting, Some("ask"));
         waiting.status_since = None;
@@ -18273,6 +18566,151 @@ mod tests {
             paint(&mut sidebar, 7).wait(drawn, drawn),
             None,
             "a waiting badge hides the folded busy spinner, so nothing spins"
+        );
+        assert!(
+            title_at(&mut sidebar, 5, moment(160_300)).contains("⠋1"),
+            "title tally stays still when a waiting badge hides the folded busy spinner"
+        );
+    }
+
+    #[test]
+    fn spinner_frame_and_cadence_helper_respect_viewport_and_bounds() {
+        assert_eq!(SpinnerFrame::REST, SpinnerFrame::F0);
+        assert_eq!(SpinnerFrame::REST.glyph(), "⠋");
+        assert_eq!(SpinnerFrame::at(moment(300).system), SpinnerFrame::F3);
+        assert_eq!(SpinnerFrame::F3.glyph(), "⠸");
+        for ms in [0, 99, 100, 300, 999, 1_000] {
+            let wall = moment(ms).system;
+            assert_eq!(SpinnerFrame::at(wall), frame(wall));
+        }
+
+        let wall = moment(160_000).system;
+        let marks = [RowMark {
+            line: 2,
+            spinning: true,
+            since: None,
+        }];
+        let shown = 0..4;
+        assert!(
+            !draw_rows_painted_cadence(&CadenceInput {
+                marks: &[RowMark {
+                    line: 5,
+                    spinning: true,
+                    since: None,
+                }],
+                shown: &shown,
+                notes_spinners: &[2, usize::MAX],
+                notes_visible: 2,
+                wall,
+            })
+            .spinning(),
+            "off-screen marks and clipped or huge note spinner indices do not spin or overflow"
+        );
+        assert!(
+            draw_rows_painted_cadence(&CadenceInput {
+                marks: &marks,
+                shown: &shown,
+                notes_spinners: &[],
+                notes_visible: 0,
+                wall,
+            })
+            .spinning(),
+            "visible spinning mark drives cadence"
+        );
+        assert!(
+            draw_rows_painted_cadence(&CadenceInput {
+                marks: &[],
+                shown: &shown,
+                notes_spinners: &[1],
+                notes_visible: 2,
+                wall,
+            })
+            .spinning(),
+            "visible note spinner drives cadence"
+        );
+
+        let mut sidebar = fresh();
+        for number in 0..u64::try_from(FILING_MAX + 5).unwrap() {
+            sidebar.filing(number, "o/lune");
+        }
+        let NotesAt { mut notes, .. } = sidebar.notes_at(32, 8, SpinnerFrame::REST);
+        assert_eq!(notes.spinners().len(), FILING_MAX);
+        assert!(notes.spinners().len() <= NOTES_SPINNERS_MAX);
+        assert!(notes.lines().len() <= NOTES_LINES_MAX);
+        assert!(
+            notes
+                .said()
+                .iter()
+                .any(|said| said == "…and 5 more issues filing"),
+            "overflowing filing tasks are summarized instead of silently dropped"
+        );
+        notes.truncate(3);
+        assert_eq!(notes.len(), 3);
+        assert!(notes.spinners().iter().all(|&line| line < notes.len()));
+        assert!(notes.goes_on().iter().all(|&line| line < notes.len()));
+
+        let busy_and_dot = Tally {
+            waiting: 0,
+            dots: 1,
+            busy: 1,
+            shell: 0,
+        };
+        assert_eq!(Badge::of(busy_and_dot, false), None);
+        assert_eq!(Badge::of(busy_and_dot, true), Some(Badge::New));
+        let busy_only = Tally {
+            waiting: 0,
+            dots: 0,
+            busy: 1,
+            shell: 0,
+        };
+        assert_eq!(Badge::of(busy_only, false), None);
+        assert_eq!(Badge::of(busy_only, true), Some(Badge::Busy));
+        let waiting_all = Tally {
+            waiting: 2,
+            dots: 1,
+            busy: 1,
+            shell: 0,
+        };
+        assert_eq!(
+            Badge::of(waiting_all, false),
+            Some(Badge::Waiting(NonZeroUsize::new(2).unwrap()))
+        );
+        assert_eq!(
+            Badge::of(waiting_all, true),
+            Some(Badge::Waiting(NonZeroUsize::new(2).unwrap()))
+        );
+
+        let mut narrow = fresh();
+        let mut busy = agent("s", 1, Status::Busy, Some("work"));
+        busy.status_since = None;
+        narrow.hear(host(
+            vec![session("s", 10, vec![view(1, 0, "/w/a", "claude")])],
+            vec![busy],
+        ));
+        let paint_rows = |sidebar: &mut Sidebar, area_width: u16, height: u16| {
+            let framed = Rect::new(0, 0, area_width + 1, height + 2);
+            let mut buffer = Buffer::empty(framed);
+            sidebar.place(framed);
+            sidebar.draw(&mut buffer, framed, moment(160_300).system).1
+        };
+        assert!(
+            !paint_rows(&mut narrow, 4, 8).spinning(),
+            "width 3 clips Row::View mark at col 3, so cadence does not spin"
+        );
+        assert!(
+            paint_rows(&mut narrow, 5, 8).spinning(),
+            "width 4 shows Row::View mark at col 3, so cadence spins"
+        );
+
+        let mut note_narrow = fresh();
+        note_narrow.filing(1, "o/lune");
+        assert!(
+            !paint_rows(&mut note_narrow, 2, 8).spinning(),
+            "width 1 clips note spinner at col 1, so cadence does not spin"
+        );
+        assert!(
+            paint_rows(&mut note_narrow, 3, 8).spinning(),
+            "width 2 shows note spinner at col 1, so cadence spins"
         );
     }
 
