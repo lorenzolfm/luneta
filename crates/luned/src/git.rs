@@ -6,7 +6,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read as _};
 use std::mem;
-use std::ops::Bound;
+use std::ops::{Bound, ControlFlow};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
@@ -58,7 +58,7 @@ const RECURSIVE_ADD_RETRIES: usize = 4;
 
 const REFRESHES_MAX: usize = 16;
 
-const REFRESH_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const REFRESH_WAIT_MAX: Duration = Duration::from_secs(5);
 
 const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
 const _: () = assert!(UNTRACKED_PATHS_INSPECTED_MAX >= UNTRACKED_FILES_MAX);
@@ -74,7 +74,8 @@ const _: () = assert!(WATCHES_MAX <= u32::MAX as usize);
 const _: () = assert!(PATH_ANCESTORS_MAX > 0);
 const _: () = assert!(RECURSIVE_ADD_RETRIES > 0);
 const _: () = assert!(REFRESHES_MAX > 0);
-const _: () = assert!(REFRESH_WAIT.as_secs() > 0 && REFRESH_WAIT.as_secs() <= LIMIT.as_secs());
+const _: () = assert!(REFRESH_WAIT_MAX.as_millis() > 0);
+const _: () = assert!(REFRESH_WAIT_MAX.as_millis() <= LIMIT.as_millis());
 
 pub const REPOSITORY_VARS: [&str; 13] = [
     "GIT_DIR",
@@ -1004,6 +1005,12 @@ struct Place {
 }
 
 fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
+    place_within(dir, LIMIT)
+}
+
+fn place_within(dir: &str, limit: Duration) -> Result<Option<Place>, Unanswered> {
+    assert!(!limit.is_zero());
+    assert!(limit.as_millis() <= LIMIT.as_millis());
     let mut git = Git::at(dir, "rev-parse");
     git.args([
         "--path-format=absolute",
@@ -1011,7 +1018,7 @@ fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
         "--git-dir",
         "--git-common-dir",
     ]);
-    match git.run(LIMIT) {
+    match git.run(limit) {
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => Ok(Place::parse(&stdout)),
         Ok(Ran::Ended { .. }) => Ok(None),
         Ok(Ran::Stuck) | Err(_) => Err(Unanswered),
@@ -3522,8 +3529,16 @@ fn ask(
 }
 
 pub(crate) struct Refresh {
-    dir: Dir,
+    dir: Directory,
     done: SyncSender<()>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefreshOutcome {
+    Done,
+    Full,
+    TimedOut,
+    Disconnected,
 }
 
 #[derive(Clone)]
@@ -3538,30 +3553,53 @@ impl Refresher {
         (Refresher { requests, wake }, refreshes)
     }
 
-    pub(crate) fn refresh(&self, dir: &Directory) {
-        let Ok(dir) = Dir::parse(dir.as_str()) else {
-            return;
-        };
+    #[must_use]
+    pub(crate) fn refresh(&self, dir: &Directory) -> RefreshOutcome {
+        self.refresh_within(dir, REFRESH_WAIT_MAX)
+    }
+
+    fn refresh_within(&self, dir: &Directory, wait: Duration) -> RefreshOutcome {
+        assert!(!wait.is_zero());
+        assert!(wait.as_millis() <= REFRESH_WAIT_MAX.as_millis());
         let (done, waited) = mpsc::sync_channel(1);
-        match self.requests.try_send(Refresh { dir, done }) {
+        match self.requests.try_send(Refresh {
+            dir: dir.clone(),
+            done,
+        }) {
             Ok(()) => {}
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
-                let _ = self.wake.try_send(());
-                return;
+            Err(TrySendError::Full(_)) => {
+                wake_up(&self.wake);
+                return RefreshOutcome::Full;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return RefreshOutcome::Disconnected;
             }
         }
-        let _ = self.wake.try_send(());
-        let _ = waited.recv_timeout(REFRESH_WAIT);
+        wake_up(&self.wake);
+        match waited.recv_timeout(wait) {
+            Ok(()) => RefreshOutcome::Done,
+            Err(RecvTimeoutError::Timeout) => RefreshOutcome::TimedOut,
+            Err(RecvTimeoutError::Disconnected) => RefreshOutcome::Disconnected,
+        }
     }
 }
 
 fn drain_refreshes(refreshes: &Receiver<Refresh>, pending: &mut Vec<Refresh>) {
+    assert!(pending.capacity() >= REFRESHES_MAX);
+    assert!(pending.len() <= REFRESHES_MAX);
     while pending.len() < REFRESHES_MAX {
         match refreshes.try_recv() {
             Ok(request) => pending.push(request),
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         }
     }
+    assert!(pending.len() <= REFRESHES_MAX);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryKind {
+    Forced,
+    Scheduled,
 }
 
 struct Follow {
@@ -3581,13 +3619,18 @@ impl Follow {
         }
     }
 
-    fn query(&mut self, core: &SyncSender<core::Command>, dir: Dir, forced: bool) -> bool {
+    fn query(
+        &mut self,
+        core: &SyncSender<core::Command>,
+        dir: Dir,
+        kind: QueryKind,
+    ) -> ControlFlow<()> {
+        assert!(self.asked.len() <= FOLLOW_DIRS_MAX);
         let started = Instant::now();
         let was = self.asked.remove(&dir);
-        let why = if forced {
-            None
-        } else {
-            was.as_ref().map(|was| was.next)
+        let why = match kind {
+            QueryKind::Forced => None,
+            QueryKind::Scheduled => was.as_ref().map(|was| was.next),
         };
         let before = was.map(|was| was.placed);
         let (placed, said, moved) = ask(
@@ -3617,6 +3660,8 @@ impl Follow {
                 trouble,
             },
         );
+        assert!(self.asked.contains_key(&dir));
+        assert!(self.asked.len() <= FOLLOW_DIRS_MAX);
         assert_watches_consistent(&self.asked, &self.trees, &self.watches);
         if let Ok((status, _)) = said {
             let stored = |answer| core::Command::GitStatus {
@@ -3628,40 +3673,58 @@ impl Follow {
             match core::ask(core, stored) {
                 Some(Some(line)) => log::say(&line),
                 Some(None) => {}
-                None => return false,
+                None => return ControlFlow::Break(()),
             }
         }
-        true
+        ControlFlow::Continue(())
     }
 
-    fn in_same_worktree(&self, dir: &Dir, top: Option<&AbsPath>) -> bool {
-        let Some(top) = top else {
+    fn in_any_worktree(&self, dir: &Dir, tops: &BTreeSet<AbsPath>) -> bool {
+        assert!(self.asked.len() <= FOLLOW_DIRS_MAX);
+        assert!(tops.len() <= REFRESHES_MAX);
+        if tops.is_empty() {
             return false;
-        };
-        match self.asked.get(dir) {
-            Some(was) => was.placed.top() == Some(top),
-            None => {
-                fs::canonicalize(dir.as_str()).is_ok_and(|path| path.starts_with(top.as_path()))
-            }
+        }
+        match self.asked.get(dir).map(|was| &was.placed) {
+            Some(Placed::In(top)) => tops.contains(top),
+            Some(Placed::Outside(_)) => false,
+            Some(Placed::Unsaid) | None => fs::canonicalize(dir.as_str())
+                .is_ok_and(|path| tops.iter().any(|top| path.starts_with(top.as_path()))),
         }
     }
 
-    fn refresh_targets(&self, dirs: &FollowDirs, pending: &[Refresh]) -> BTreeSet<Dir> {
+    fn refresh_targets(&mut self, dirs: &FollowDirs, pending: &[Refresh]) -> BTreeSet<Dir> {
+        assert!(pending.len() <= REFRESHES_MAX);
+        assert!(dirs.len() <= FOLLOW_DIRS_MAX);
         if pending.is_empty() || dirs.is_empty() {
             return BTreeSet::new();
         }
-        let mut forced = BTreeSet::new();
-        for request in pending {
-            let top = place(request.dir.as_str())
-                .ok()
-                .flatten()
-                .map(|found| found.top);
-            for dir in dirs.iter() {
-                if *dir == request.dir || self.in_same_worktree(dir, top.as_ref()) {
-                    forced.insert(dir.clone());
+        let requested: BTreeSet<&str> =
+            pending.iter().map(|request| request.dir.as_str()).collect();
+        assert!(requested.len() <= REFRESHES_MAX);
+        let mut tops = BTreeSet::new();
+        for &dir in &requested {
+            match place_within(dir, REFRESH_WAIT_MAX) {
+                Ok(Some(found)) => {
+                    tops.insert(found.top);
+                }
+                Ok(None) => {}
+                Err(Unanswered) => {
+                    self.troubles.say(format!(
+                        "git rev-parse in {dir} did not answer during refresh"
+                    ));
                 }
             }
         }
+        assert!(tops.len() <= requested.len());
+        let mut forced = BTreeSet::new();
+        for dir in dirs.iter() {
+            if requested.contains(dir.as_str()) || self.in_any_worktree(dir, &tops) {
+                forced.insert(dir.clone());
+            }
+        }
+        assert!(forced.len() <= dirs.len());
+        debug_assert!(forced.iter().all(|dir| dirs.contains(dir)));
         forced
     }
 
@@ -3672,8 +3735,9 @@ impl Follow {
         refreshes: &Receiver<Refresh>,
         sweep: Duration,
     ) {
-        let mut pending = Vec::new();
+        let mut pending = Vec::with_capacity(REFRESHES_MAX);
         'sweep: loop {
+            assert!(pending.len() <= REFRESHES_MAX);
             drain_refreshes(refreshes, &mut pending);
             let Some(dirs) = core::ask(core, core::Command::Dirs) else {
                 return;
@@ -3725,14 +3789,22 @@ impl Follow {
             }
             if !pending.is_empty() {
                 let forced = self.refresh_targets(&dirs, &pending);
+                assert!(forced.len() <= FOLLOW_DIRS_MAX);
                 for dir in forced {
-                    if !self.query(core, dir, true) {
+                    if self.query(core, dir, QueryKind::Forced).is_break() {
                         return;
                     }
                 }
                 for request in pending.drain(..) {
-                    let _ = request.done.send(());
+                    assert!(
+                        matches!(
+                            request.done.try_send(()),
+                            Ok(()) | Err(TrySendError::Disconnected(()))
+                        ),
+                        "each refresh acknowledges its waiter once"
+                    );
                 }
+                assert!(pending.is_empty());
                 if woken.try_recv().is_ok() {
                     continue 'sweep;
                 }
@@ -3742,7 +3814,7 @@ impl Follow {
             let mut due: Vec<Dir> = dirs.iter().filter(due).cloned().collect();
             due.sort_by_key(|dir| self.asked.get(dir).map(|was| was.due(sweep)));
             for dir in due {
-                if !self.query(core, dir, false) {
+                if self.query(core, dir, QueryKind::Scheduled).is_break() {
                     return;
                 }
                 if woken.try_recv().is_ok() {
@@ -3773,10 +3845,9 @@ impl Follow {
                     drain_refreshes(refreshes, &mut pending);
                     if pending.is_empty() {
                         watch::settle(woken);
-                        drain_refreshes(refreshes, &mut pending);
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => drain_refreshes(refreshes, &mut pending),
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -5532,17 +5603,105 @@ mod tests {
         );
 
         let sub_dir = Directory::parse(sub.to_str().unwrap().to_owned()).unwrap();
-        refresher.refresh(&sub_dir);
+        assert_eq!(
+            refresher.refresh(&sub_dir),
+            super::RefreshOutcome::Done,
+            "refresh acknowledges completion"
+        );
         assert_eq!(
             branch_of(&core).as_deref(),
             Some("fix"),
             "refresh restores the live branch in core before returning"
         );
 
-        let untracked_dir = Directory::parse(untracked.to_str().unwrap().to_owned()).unwrap();
-        refresher.refresh(&untracked_dir);
+        let stale_again = crate::core::ask(&core, |answer| crate::core::Command::GitStatus {
+            dir: repo_dir.clone(),
+            status: lune_protocol::git::GitStatus::Checkout {
+                repository: None,
+                head: lune_protocol::git::Head::Detached,
+                changes: lune_protocol::git::Changes::default(),
+                stashes: 0,
+            },
+            why: None,
+            answer,
+        });
+        assert!(stale_again.is_some());
+        assert_eq!(branch_of(&core), None);
+        let trailing_dir = Directory::parse(format!("{}/", sub.to_str().unwrap())).unwrap();
+        assert_eq!(
+            refresher.refresh(&trailing_dir),
+            super::RefreshOutcome::Done,
+            "refresh accepts valid non-normalized directories"
+        );
+        assert_eq!(
+            branch_of(&core).as_deref(),
+            Some("fix"),
+            "refresh with a trailing slash restores the live branch in core before returning"
+        );
 
-        drop(core);
-        refresher.refresh(&sub_dir);
+        let untracked_dir = Directory::parse(untracked.to_str().unwrap().to_owned()).unwrap();
+        assert_eq!(
+            refresher.refresh(&untracked_dir),
+            super::RefreshOutcome::Done
+        );
+        assert_eq!(branch_of(&core).as_deref(), Some("fix"));
+    }
+
+    #[test]
+    fn refresher_reports_full_timed_out_and_disconnected_outcomes() {
+        let dir = Directory::parse("/tmp/lune-refresher-test".to_owned()).unwrap();
+
+        let (wake, _woken) = mpsc::sync_channel(1);
+        let (refresher, requests) = super::Refresher::pair(wake);
+        drop(requests);
+        assert_eq!(
+            refresher.refresh(&dir),
+            super::RefreshOutcome::Disconnected,
+            "dropped refresh receiver reports Disconnected"
+        );
+
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, requests) = super::Refresher::pair(wake);
+        let reader = std::thread::spawn(move || {
+            let _dropped = lune_waits::heard("refresh request reaches receiver", &requests);
+        });
+        assert_eq!(
+            refresher.refresh(&dir),
+            super::RefreshOutcome::Disconnected,
+            "dropped reply sender reports Disconnected"
+        );
+        reader.join().unwrap();
+        assert_eq!(woken.try_recv(), Ok(()));
+
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, _requests) = super::Refresher::pair(wake);
+        let mut held = Vec::with_capacity(super::REFRESHES_MAX);
+        for _ in 0..super::REFRESHES_MAX {
+            let (done, waiter) = mpsc::sync_channel(1);
+            refresher
+                .requests
+                .try_send(super::Refresh {
+                    dir: dir.clone(),
+                    done,
+                })
+                .unwrap();
+            held.push(waiter);
+        }
+        assert_eq!(
+            refresher.refresh(&dir),
+            super::RefreshOutcome::Full,
+            "saturated queue reports Full"
+        );
+        assert_eq!(woken.try_recv(), Ok(()));
+        drop(held);
+
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, _requests) = super::Refresher::pair(wake);
+        assert_eq!(
+            refresher.refresh_within(&dir, Duration::from_millis(1)),
+            super::RefreshOutcome::TimedOut,
+            "unacknowledged refresh reports TimedOut"
+        );
+        assert_eq!(woken.try_recv(), Ok(()));
     }
 }

@@ -11,7 +11,8 @@ use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::starts::UNSHOWN;
 use crate::starts::{
-    SPLIT, Window, cloned, directory, in_sidebar, mouse, projects_of, shown, work_in,
+    SPLIT, Window, cloned, directory, in_sidebar, mouse, projects_of, seats_in, shown,
+    sidebar_view_rows, work_in,
 };
 use crate::worktree::worktree_added;
 
@@ -65,28 +66,12 @@ fn as_panes(owned: &Owned, window: &mut Window, folder: &Path) {
     });
 }
 
-fn sidebar_views(window: &Window, view: &str) -> usize {
-    let want = format!(" {view}");
-    window
-        .screen()
-        .iter()
-        .filter(|line| {
-            let sidebar = in_sidebar(line);
-            !sidebar.starts_with("▌ ▾ ")
-                && !sidebar.starts_with("▌ ▸ ")
-                && !sidebar.starts_with("  ▾ ")
-                && !sidebar.starts_with("  ▸ ")
-                && sidebar.contains(&want)
-        })
-        .count()
+fn frames_in(screen: &[String]) -> Option<usize> {
+    screen.iter().map(|line| line.matches('╭').count()).max()
 }
 
 fn frames(window: &Window) -> Option<usize> {
-    window
-        .screen()
-        .iter()
-        .map(|line| line.matches('╭').count())
-        .max()
+    frames_in(&window.screen())
 }
 
 fn seam(window: &Window) -> Option<usize> {
@@ -112,8 +97,7 @@ fn side(window: &Window, split: usize) -> Option<Side> {
     })
 }
 
-fn tops(window: &Window) -> Vec<(usize, usize)> {
-    let screen = window.screen();
+fn tops_in(screen: &[String]) -> Vec<(usize, usize)> {
     let edge = screen
         .first()
         .and_then(|line| line.chars().position(|it| it == '╮'));
@@ -125,6 +109,10 @@ fn tops(window: &Window) -> Vec<(usize, usize)> {
             .map(move |(column, _)| (row, column))
     });
     tops.collect()
+}
+
+fn tops(window: &Window) -> Vec<(usize, usize)> {
+    tops_in(&window.screen())
 }
 
 #[test]
@@ -205,9 +193,10 @@ fn the_menu_opens_a_view_beside_the_one_lune_shows_and_closes_it() {
     window.send(CLOSE);
     let id = eventually("the view lune is on closes", || {
         let worktree = shown(&owned, &dir.path)?;
+        let screen = window.screen();
         let closed = worktree.terminals.len() == 1
-            && frames(&window) == Some(1)
-            && window.seats("work/main");
+            && frames_in(&screen) == Some(1)
+            && seats_in(&screen, "work/main");
         closed.then_some(worktree.id)
     });
     window.send(CLOSE);
@@ -398,10 +387,11 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
         let found = terminals
             .iter()
             .filter(|it| matches!(it.found, Some(Found::Key(_))));
+        let screen = window.screen();
         let ready = found.count() == 2
-            && !window.shows("─ Actions ")
-            && sidebar_views(&window, "work/main") == 2
-            && window.seats("work/main");
+            && !screen.iter().any(|line| line.contains("─ Actions "))
+            && sidebar_view_rows(&screen, "work/main") == 2
+            && seats_in(&screen, "work/main");
         ready.then_some(())
     });
     window.send(PALETTE);
@@ -456,8 +446,10 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
             let found = terminals
                 .iter()
                 .filter(|it| matches!(it.found, Some(Found::Key(_))));
-            let drawn = tops(&window);
-            let ready = found.count() == count && drawn.len() == count && window.seats("work/main");
+            let screen = window.screen();
+            let drawn = tops_in(&screen);
+            let ready =
+                found.count() == count && drawn.len() == count && seats_in(&screen, "work/main");
             ready.then_some(drawn)
         });
         window.send(&format!("printf 'own-%s\\n' {count}\r"));

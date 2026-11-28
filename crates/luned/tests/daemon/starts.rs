@@ -221,17 +221,11 @@ impl Window {
     }
 
     pub fn seats(&self, view: &str) -> bool {
-        let want = format!(" {view}");
-        self.screen().iter().any(|line| {
-            let sidebar = in_sidebar(line);
-            sidebar.starts_with('▌')
-                && !sidebar.starts_with("▌ ▾ ")
-                && !sidebar.starts_with("▌ ▸ ")
-                && sidebar.contains(&want)
-        })
+        seats_in(&self.screen(), view)
     }
 
     pub fn seated(&self, view: &str) {
+        assert!(!view.is_empty(), "sidebar view label must be non-empty");
         eventually(&format!("the sidebar seats {view}"), || {
             self.seats(view).then_some(())
         });
@@ -266,6 +260,35 @@ pub fn in_sidebar(line: &str) -> String {
         .skip_while(|it| *it == '│')
         .take_while(|it| *it != '│')
         .collect()
+}
+
+fn is_worktree_row(sidebar: &str) -> bool {
+    let body = sidebar
+        .strip_prefix('▌')
+        .or_else(|| sidebar.strip_prefix(' '))
+        .unwrap_or(sidebar);
+    body.starts_with(" ▾ ") || body.starts_with(" ▸ ")
+}
+
+pub fn seats_in(screen: &[String], view: &str) -> bool {
+    assert!(!view.is_empty(), "sidebar view label must be non-empty");
+    let want = format!(" {view}");
+    screen.iter().any(|line| {
+        let sidebar = in_sidebar(line);
+        sidebar.starts_with('▌') && !is_worktree_row(&sidebar) && sidebar.contains(&want)
+    })
+}
+
+pub fn sidebar_view_rows(screen: &[String], view: &str) -> usize {
+    assert!(!view.is_empty(), "sidebar view label must be non-empty");
+    let want = format!(" {view}");
+    screen
+        .iter()
+        .filter(|line| {
+            let sidebar = in_sidebar(line);
+            !is_worktree_row(&sidebar) && sidebar.contains(&want)
+        })
+        .count()
 }
 
 pub fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {

@@ -807,6 +807,8 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
                 known.update_local();
+                assert!(known.statuses.contains_key(&dir));
+                assert!(known.statuses.len() <= FOLLOW_DIRS_MAX);
                 let _ = answer.send(
                     why.filter(|_| changed)
                         .and_then(|why| why.said(dir.as_str())),

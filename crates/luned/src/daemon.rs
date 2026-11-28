@@ -246,12 +246,12 @@ pub async fn serve(
         owns,
         SWEEP,
     )?;
-    let (git, git_refreshes) = git::Refresher::pair(wake_git.clone());
+    let (git_refresher, refresh_requests) = git::Refresher::pair(wake_git.clone());
     git::follow(
         core.clone(),
         wake_git,
         git_woken,
-        git_refreshes,
+        refresh_requests,
         GIT_STATUS_SWEEP,
     )?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
@@ -290,7 +290,7 @@ pub async fn serve(
         bridges,
         layouts,
         listings,
-        git,
+        git_refresher,
     });
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
@@ -638,7 +638,7 @@ struct Host {
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
     listings: Arc<work::Listings>,
-    git: git::Refresher,
+    git_refresher: git::Refresher,
 }
 
 #[tonic::async_trait]
@@ -1051,10 +1051,26 @@ impl Daemon for Host {
             let answer = daemon.rebase(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
-        let git = self.git.clone();
+        let git_refresher = self.git_refresher.clone();
         let answer = late(move || {
             let rebased = rebases::rebase(&dir, branch.as_ref());
-            git.refresh(&dir);
+            match git_refresher.refresh(&dir) {
+                git::RefreshOutcome::Done => {}
+                git::RefreshOutcome::Full => {
+                    log::say(&format!(
+                        "git refresh queue is full, leaving {dir} to the next sweep"
+                    ));
+                }
+                git::RefreshOutcome::TimedOut => {
+                    log::say(&format!(
+                        "git refresh of {dir} did not finish within {:?}",
+                        git::REFRESH_WAIT_MAX
+                    ));
+                }
+                git::RefreshOutcome::Disconnected => {
+                    log::say(&format!("git watcher ended before refreshing {dir}"));
+                }
+            }
             let rebased = rebased.map_err(rebases::Unrebased::status)?;
             Ok(rebased.to_api())
         });
@@ -2095,7 +2111,7 @@ mod tests {
     fn a_watch_timeout_answers_unchanged_only_after_the_core_parked_it() {
         let host_with = |core| {
             let (layouts, _laid) = mpsc::sync_channel(1);
-            let (git, _refreshes) = crate::git::Refresher::pair(mpsc::sync_channel(1).0);
+            let (git_refresher, _refreshes) = crate::git::Refresher::pair(mpsc::sync_channel(1).0);
             Host {
                 started: SystemTime::now(),
                 claude_folder: None,
@@ -2105,7 +2121,7 @@ mod tests {
                 bridges: Arc::default(),
                 layouts,
                 listings: Arc::default(),
-                git,
+                git_refresher,
             }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
