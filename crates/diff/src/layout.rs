@@ -7,7 +7,7 @@ const DRIFT_ROWS_MAX: usize = 10;
 
 const _: () = assert!(DRIFT_ROWS_MAX > 0);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ContextRef {
     file: usize,
     hunk: usize,
@@ -19,6 +19,11 @@ impl ContextRef {
     #[must_use]
     pub const fn file(self) -> usize {
         self.file
+    }
+
+    #[must_use]
+    pub const fn hunk(self) -> usize {
+        self.hunk
     }
 
     #[must_use]
@@ -46,6 +51,11 @@ impl DeletedRef {
     }
 
     #[must_use]
+    pub const fn hunk(self) -> usize {
+        self.hunk
+    }
+
+    #[must_use]
     pub fn get(self, patch: &Patch) -> &ChangedLine {
         let block = &patch.files[self.file].hunks()[self.hunk].blocks[self.block];
         match block {
@@ -67,6 +77,11 @@ impl AddedRef {
     #[must_use]
     pub const fn file(self) -> usize {
         self.file
+    }
+
+    #[must_use]
+    pub const fn hunk(self) -> usize {
+        self.hunk
     }
 
     #[must_use]
@@ -94,17 +109,24 @@ pub enum LeftRow {
         line: u32,
         at: DeletedRef,
     },
-    Spacer,
 }
 
 impl LeftRow {
     #[must_use]
-    pub const fn file_index(&self) -> Option<usize> {
+    pub const fn file_index(&self) -> usize {
         match self {
-            LeftRow::HunkHeader { file, .. } => Some(*file),
-            LeftRow::Context { at, .. } => Some(at.file()),
-            LeftRow::Deleted { at, .. } => Some(at.file()),
-            LeftRow::Spacer => None,
+            LeftRow::HunkHeader { file, .. } => *file,
+            LeftRow::Context { at, .. } => at.file(),
+            LeftRow::Deleted { at, .. } => at.file(),
+        }
+    }
+
+    #[must_use]
+    pub const fn hunk_index(&self) -> usize {
+        match self {
+            LeftRow::HunkHeader { hunk, .. } => *hunk,
+            LeftRow::Context { at, .. } => at.hunk(),
+            LeftRow::Deleted { at, .. } => at.hunk(),
         }
     }
 
@@ -112,7 +134,7 @@ impl LeftRow {
     pub const fn line_number(&self) -> Option<u32> {
         match self {
             LeftRow::Context { line, .. } | LeftRow::Deleted { line, .. } => Some(*line),
-            LeftRow::HunkHeader { .. } | LeftRow::Spacer => None,
+            LeftRow::HunkHeader { .. } => None,
         }
     }
 
@@ -122,7 +144,6 @@ impl LeftRow {
             LeftRow::HunkHeader { text, .. } => text,
             LeftRow::Context { at, .. } => &at.get(patch).text,
             LeftRow::Deleted { at, .. } => &at.get(patch).text,
-            LeftRow::Spacer => "",
         }
     }
 }
@@ -142,17 +163,24 @@ pub enum RightRow {
         line: u32,
         at: AddedRef,
     },
-    Spacer,
 }
 
 impl RightRow {
     #[must_use]
-    pub const fn file_index(&self) -> Option<usize> {
+    pub const fn file_index(&self) -> usize {
         match self {
-            RightRow::HunkHeader { file, .. } => Some(*file),
-            RightRow::Context { at, .. } => Some(at.file()),
-            RightRow::Added { at, .. } => Some(at.file()),
-            RightRow::Spacer => None,
+            RightRow::HunkHeader { file, .. } => *file,
+            RightRow::Context { at, .. } => at.file(),
+            RightRow::Added { at, .. } => at.file(),
+        }
+    }
+
+    #[must_use]
+    pub const fn hunk_index(&self) -> usize {
+        match self {
+            RightRow::HunkHeader { hunk, .. } => *hunk,
+            RightRow::Context { at, .. } => at.hunk(),
+            RightRow::Added { at, .. } => at.hunk(),
         }
     }
 
@@ -160,7 +188,7 @@ impl RightRow {
     pub const fn line_number(&self) -> Option<u32> {
         match self {
             RightRow::Context { line, .. } | RightRow::Added { line, .. } => Some(*line),
-            RightRow::HunkHeader { .. } | RightRow::Spacer => None,
+            RightRow::HunkHeader { .. } => None,
         }
     }
 
@@ -170,35 +198,48 @@ impl RightRow {
             RightRow::HunkHeader { text, .. } => text,
             RightRow::Context { at, .. } => &at.get(patch).text,
             RightRow::Added { at, .. } => &at.get(patch).text,
-            RightRow::Spacer => "",
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SplitLine {
-    FileHeader { file: usize },
-    BinaryNotice { file: usize },
-    Pair { left: LeftRow, right: RightRow },
+pub enum SplitPair {
+    LeftOnly(LeftRow),
+    RightOnly(RightRow),
+    Both { left: LeftRow, right: RightRow },
 }
 
-impl SplitLine {
+impl SplitPair {
     #[must_use]
-    pub const fn file_index(&self) -> Option<usize> {
+    pub const fn left(&self) -> Option<&LeftRow> {
         match self {
-            SplitLine::FileHeader { file } | SplitLine::BinaryNotice { file } => Some(*file),
-            SplitLine::Pair { left, right } => match right.file_index() {
-                Some(file) => Some(file),
-                None => left.file_index(),
-            },
+            SplitPair::LeftOnly(left) | SplitPair::Both { left, .. } => Some(left),
+            SplitPair::RightOnly(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn right(&self) -> Option<&RightRow> {
+        match self {
+            SplitPair::RightOnly(right) | SplitPair::Both { right, .. } => Some(right),
+            SplitPair::LeftOnly(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn file_index(&self) -> usize {
+        match self {
+            SplitPair::LeftOnly(left) => left.file_index(),
+            SplitPair::RightOnly(right) | SplitPair::Both { right, .. } => right.file_index(),
         }
     }
 
     #[must_use]
     pub const fn primary_line(&self) -> Option<u32> {
         match self {
-            SplitLine::FileHeader { .. } | SplitLine::BinaryNotice { .. } => None,
-            SplitLine::Pair { left, right } => match right.line_number() {
+            SplitPair::LeftOnly(left) => left.line_number(),
+            SplitPair::RightOnly(right) => right.line_number(),
+            SplitPair::Both { left, right } => match right.line_number() {
                 Some(line) => Some(line),
                 None => left.line_number(),
             },
@@ -207,12 +248,47 @@ impl SplitLine {
 
     #[must_use]
     pub const fn has_line(&self, target: u32) -> bool {
+        let on_right = match self.right() {
+            Some(right) => matches!(right.line_number(), Some(n) if n == target),
+            None => false,
+        };
+        let on_left = match self.left() {
+            Some(left) => matches!(left.line_number(), Some(n) if n == target),
+            None => false,
+        };
+        on_right || on_left
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SplitLine {
+    FileHeader { file: usize },
+    BinaryNotice { file: usize },
+    Pair(SplitPair),
+}
+
+impl SplitLine {
+    #[must_use]
+    pub const fn file_index(&self) -> usize {
+        match self {
+            SplitLine::FileHeader { file } | SplitLine::BinaryNotice { file } => *file,
+            SplitLine::Pair(pair) => pair.file_index(),
+        }
+    }
+
+    #[must_use]
+    pub const fn primary_line(&self) -> Option<u32> {
+        match self {
+            SplitLine::FileHeader { .. } | SplitLine::BinaryNotice { .. } => None,
+            SplitLine::Pair(pair) => pair.primary_line(),
+        }
+    }
+
+    #[must_use]
+    pub const fn has_line(&self, target: u32) -> bool {
         match self {
             SplitLine::FileHeader { .. } | SplitLine::BinaryNotice { .. } => false,
-            SplitLine::Pair { left, right } => {
-                matches!(right.line_number(), Some(n) if n == target)
-                    || matches!(left.line_number(), Some(n) if n == target)
-            }
+            SplitLine::Pair(pair) => pair.has_line(target),
         }
     }
 }
@@ -477,10 +553,20 @@ fn flush_pair_rows(
     let mut left_iter = pending_left.drain(..);
     let mut right_iter = pending_right.drain(..);
     for _ in 0..count {
-        rows.push(SplitLine::Pair {
-            left: left_iter.next().unwrap_or(LeftRow::Spacer),
-            right: right_iter.next().unwrap_or(RightRow::Spacer),
-        });
+        let pair = match (left_iter.next(), right_iter.next()) {
+            (Some(left), Some(right)) => {
+                assert_eq!(
+                    left.file_index(),
+                    right.file_index(),
+                    "paired split sides belong to the same file"
+                );
+                SplitPair::Both { left, right }
+            }
+            (Some(left), None) => SplitPair::LeftOnly(left),
+            (None, Some(right)) => SplitPair::RightOnly(right),
+            (None, None) => unreachable!("pair loop runs up to max pending length"),
+        };
+        rows.push(SplitLine::Pair(pair));
     }
 }
 
@@ -535,6 +621,17 @@ impl UnifiedRow {
             UnifiedRow::FileHeader { .. }
             | UnifiedRow::BinaryNotice { .. }
             | UnifiedRow::HunkHeader { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn hunk_index(&self) -> Option<usize> {
+        match self {
+            UnifiedRow::HunkHeader { hunk, .. } => Some(*hunk),
+            UnifiedRow::Context { at, .. } => Some(at.hunk()),
+            UnifiedRow::Deleted { at, .. } => Some(at.hunk()),
+            UnifiedRow::Added { at, .. } => Some(at.hunk()),
+            UnifiedRow::FileHeader { .. } | UnifiedRow::BinaryNotice { .. } => None,
         }
     }
 

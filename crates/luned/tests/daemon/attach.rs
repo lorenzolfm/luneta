@@ -11,7 +11,7 @@ use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::starts::UNSHOWN;
 use crate::starts::{SPLIT, Window, cloned, directory, mouse, projects_of, shown, work_in};
-use crate::worktree::worktree_added;
+use crate::worktree::{git, worktree_added};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
@@ -50,6 +50,8 @@ const WELCOMES: &str = "d d  close it";
 const CLOSE: &str = "\x1b[97;3udd";
 
 const WELCOME: &str = "\x1b[97;3unh";
+
+const REVIEW: &str = "\x1b[97;3unr";
 
 const PANES: &str = "\x1b[97;3us";
 
@@ -822,7 +824,23 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_lune_picks
         "one's last pane closed, lune goes to the first open of those left",
         || (gone_to() == [two]).then_some(()),
     );
-    let row = sidebar_row(&window, "● other");
+    let row = eventually("one, with no pane left, leaves lune's sidebar", || {
+        let rows: Vec<String> = window
+            .screen()
+            .iter()
+            .map(|line| in_sidebar(line))
+            .collect();
+        let work = rows.iter().position(|row| row.contains("● work"))?;
+        let other = rows.iter().position(|row| row.contains("● other"))?;
+        assert!(
+            work < other,
+            "work precedes other in sidebar ({work} >= {other}): {rows:?}"
+        );
+        let work_rows = &rows[work + 1..other];
+        let keeps_two = work_rows.iter().any(|row| row.contains("▾ two"));
+        let dropped_main = work_rows.iter().all(|row| !row.contains("▾ main"));
+        (keeps_two && dropped_main).then_some(other)
+    });
     click(&mut window, row);
     eventually("a click on other's row shows its home", || {
         window.shows(UNHOSTED).then_some(())
@@ -1041,4 +1059,80 @@ fn a_lune_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     let resized = || (size() != Some(first)).then(|| (size(), window.screen()));
     let quiet = const { Span::of(QUIET.saturating_mul(2)) };
     lune_waits::through(quiet, "the inner lune resizes its view", resized);
+}
+
+#[test]
+fn review_explain_and_ask_send_diff_context_and_use_system_prompt() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    fs::create_dir_all(dir.path.join("src")).unwrap();
+    fs::write(
+        dir.path.join("src/lib.rs"),
+        "fn alpha() {\n    old_call();\n}\n",
+    )
+    .unwrap();
+    git(&dir.path, &["add", "src/lib.rs"]);
+    git(&dir.path, &["commit", "-m", "add lib"]);
+    fs::write(
+        dir.path.join("src/lib.rs"),
+        "fn alpha() {\n    new_call();\n}\n",
+    )
+    .unwrap();
+
+    let home = owned.host.home.path().to_owned();
+    let at = home.display();
+    let claude = format!(
+        r#"n=$(cat "{at}/turns" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$@" > "{at}/args-$n"
+cat > "{at}/words-$n"
+echo "$n" > "{at}/turns.tmp"
+mv "{at}/turns.tmp" "{at}/turns"
+echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Replaces old_call with new_call."}}'
+"#
+    );
+    script(&owned.host.bin().join("claude"), &claude);
+
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("lune shows work", || shown(&owned, &dir.path));
+    window.send(REVIEW);
+    eventually("review loads the diff", || {
+        (window.shows("src/lib.rs") && window.shows("new_call")).then_some(())
+    });
+
+    window.send("e");
+    eventually("explain answers on row 0", || {
+        window
+            .shows("Replaces old_call with new_call.")
+            .then_some(())
+    });
+    let args1 = fs::read_to_string(home.join("args-1")).unwrap();
+    let lines1: Vec<&str> = args1.lines().collect();
+    assert!(
+        lines1.windows(2).any(|pair| pair == ["--tools", ""]),
+        "{args1}"
+    );
+    assert!(lines1.contains(&"--system-prompt"), "{args1}");
+    assert!(!lines1.contains(&"--append-system-prompt"), "{args1}");
+    let words1 = fs::read_to_string(home.join("words-1")).unwrap();
+    assert!(words1.contains("<untrusted-diff-excerpt"), "{words1}");
+    assert!(words1.contains("-    old_call();"), "{words1}");
+    assert!(words1.contains("+    new_call();"), "{words1}");
+
+    window.send(ESC);
+    eventually("ask box closes", || (!window.shows("┌─ Ask")).then_some(()));
+    window.send("jjj?");
+    eventually("ask box opens", || window.shows("┌─ Ask").then_some(()));
+    window.send("why?\r");
+    eventually("second review turn answers", || {
+        (fs::read_to_string(home.join("turns")).ok()?.trim() == "2"
+            && window.shows("Replaces old_call with new_call."))
+        .then_some(())
+    });
+    let words2 = fs::read_to_string(home.join("words-2")).unwrap();
+    assert!(words2.contains("<untrusted-diff-hunk"), "{words2}");
+    assert!(words2.contains(" fn alpha() {"), "{words2}");
+    assert!(words2.contains("<untrusted-diff-excerpt"), "{words2}");
+    assert!(words2.contains("why?"), "{words2}");
 }

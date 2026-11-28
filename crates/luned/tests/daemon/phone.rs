@@ -943,7 +943,7 @@ fn the_phone_falls_back_to_watch_against_an_older_luned_and_upgrades_on_reconnec
     use lune_protocol::watch::HostVersion;
     use luned::api::daemon_server::{Daemon, DaemonServer};
     use luned::api::{
-        self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest,
+        self, AnswerRequest, AskRequest, AskResponse, AskReviewRequest, ChangeProjectsRequest,
         ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
         IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
         KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
@@ -1207,6 +1207,15 @@ fn the_phone_falls_back_to_watch_against_an_older_luned_and_upgrades_on_reconnec
         type AskStream = tokio_stream::Empty<Result<AskResponse, Status>>;
 
         async fn ask(&self, _: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        type AskReviewStream = tokio_stream::Empty<Result<AskResponse, Status>>;
+
+        async fn ask_review(
+            &self,
+            _: Request<AskReviewRequest>,
+        ) -> Result<Response<Self::AskReviewStream>, Status> {
             Err(Status::unimplemented("unused"))
         }
 
