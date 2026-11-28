@@ -50,7 +50,7 @@ use crate::checks;
 use crate::clock::Moment;
 use crate::close::{self, Act, Plan, Scope, Untold};
 use crate::copied::{Copied, Excerpt};
-use crate::folds::{Fold, Folds};
+use crate::folds::{Fold, FoldSet, Folds};
 use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::icons;
 use crate::issue::Repository;
@@ -62,7 +62,7 @@ use crate::menu::{
     ProjectTarget, Pull, Ran, Rename, Target, Top, ViewRow, Wants, WorktreeRow,
 };
 use crate::moonlight;
-use crate::news::News;
+use crate::news::{Dwell, News};
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::prune;
@@ -423,6 +423,15 @@ impl Spot {
             Spot::Machine(machine) => machine.clone(),
             Spot::Local(_) => Machine::Local,
             Spot::Remote(destination, _) => Machine::Remote(destination.clone()),
+        }
+    }
+
+    fn is_on(&self, machine: &Machine) -> bool {
+        match (self, machine) {
+            (Spot::Machine(spot_machine), machine) => spot_machine == machine,
+            (Spot::Local(_), Machine::Local) => true,
+            (Spot::Remote(destination, _), Machine::Remote(other)) => destination == other,
+            (Spot::Local(_), Machine::Remote(_)) | (Spot::Remote(..), Machine::Local) => false,
         }
     }
 
@@ -879,6 +888,28 @@ impl Row {
                 Spot::on(machine, Place::Worktree(place.clone()))
             }
             Row::View { machine, place, .. } => Spot::on(machine, Place::View(place.clone())),
+        }
+    }
+
+    fn is_spot(&self, spot: &Spot) -> bool {
+        match self {
+            Row::Machine { machine, .. } => {
+                matches!(spot, Spot::Machine(other) if other == machine)
+            }
+            Row::Project {
+                machine, project, ..
+            } => {
+                spot.is_on(machine)
+                    && matches!(spot.place(), Some(Place::Session(other)) if other == project.listed())
+            }
+            Row::Worktree { machine, place, .. } => {
+                spot.is_on(machine)
+                    && matches!(spot.place(), Some(Place::Worktree(other)) if other == place)
+            }
+            Row::View { machine, place, .. } => {
+                spot.is_on(machine)
+                    && matches!(spot.place(), Some(Place::View(other)) if other == place)
+            }
         }
     }
 
@@ -1781,7 +1812,48 @@ pub struct ExpandedView {
     notes: Vec<Line<'static>>,
 }
 
-pub struct Sidebar {
+mod sealed {
+    use super::SidebarState;
+
+    pub struct Sidebar {
+        state: SidebarState,
+    }
+
+    impl Sidebar {
+        pub(super) fn from_state(state: SidebarState) -> Self {
+            Sidebar { state }
+        }
+
+        pub(super) fn state(&self) -> &SidebarState {
+            &self.state
+        }
+
+        pub(super) fn edit<R>(&mut self, change: impl FnOnce(&mut SidebarState) -> R) -> R {
+            let result = change(&mut self.state);
+            self.state.relayout();
+            result
+        }
+
+        pub(super) fn edit_if(&mut self, change: impl FnOnce(&mut SidebarState) -> bool) -> bool {
+            let changed = change(&mut self.state);
+            if changed {
+                self.state.relayout();
+            }
+            changed
+        }
+
+        pub(super) fn edit_without_layout<R>(
+            &mut self,
+            change: impl FnOnce(&mut SidebarState) -> R,
+        ) -> R {
+            change(&mut self.state)
+        }
+    }
+}
+
+pub use sealed::Sidebar;
+
+pub struct SidebarState {
     host: Option<Host>,
     this: String,
     away: Option<String>,
@@ -1805,22 +1877,16 @@ pub struct Sidebar {
     here_row: Option<Spot>,
     lit: Option<Lit>,
     mode: Mode,
-    moving: Moving,
+    viewport: Viewport,
     revealed: Option<Spot>,
-    top: usize,
-    page: Page,
-    laid: Layout,
-    room: usize,
     notice: Option<String>,
     copied: Option<(Copied, Instant)>,
     image_going: Option<Destination>,
     aloud: Option<aloud::Shown>,
-    aloud_buttons: Spots<aloud::Button>,
     working: BTreeMap<u64, Menu>,
     filing: BTreeMap<u64, String>,
     filed: Option<String>,
     menus: u64,
-    wall: SystemTime,
     due: Option<SystemTime>,
 }
 
@@ -1888,26 +1954,132 @@ impl Pause {
     }
 }
 
+#[derive(Debug)]
+enum Pressed {
+    Space,
+    Row(Spot),
+    Movable(Movable),
+}
+
+impl Pressed {
+    fn spot(&self) -> Option<Spot> {
+        match self {
+            Pressed::Space => None,
+            Pressed::Row(spot) => Some(spot.clone()),
+            Pressed::Movable(movable) => Some(movable.spot()),
+        }
+    }
+
+    fn movable(&self) -> Option<&Movable> {
+        match self {
+            Pressed::Space | Pressed::Row(_) => None,
+            Pressed::Movable(movable) => Some(movable),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 enum Moving {
     #[default]
     Still,
     Down {
         at: Position,
-        lifts: Option<Movable>,
+        on: Pressed,
     },
     Lifted(Lift),
     Sweeping(Sweep),
     Swept(Sweep, Layout),
 }
 
+static EMPTY_ALOUD_BUTTONS: Spots<aloud::Button> = Spots::empty();
+
+#[derive(Debug)]
+enum Viewport {
+    Collapsed { area: Rect, top: usize },
+    Expanded { laid: Layout, moving: Moving },
+}
+
+impl Viewport {
+    fn expanded_area(&self) -> Option<Rect> {
+        match self {
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { laid, .. } => Some(laid.area),
+        }
+    }
+
+    fn laid(&self) -> Option<&Layout> {
+        match self {
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { laid, .. } => Some(laid),
+        }
+    }
+
+    fn top(&self) -> usize {
+        match self {
+            Viewport::Collapsed { top, .. } => *top,
+            Viewport::Expanded { laid, .. } => laid.top,
+        }
+    }
+
+    fn moving(&self) -> Option<&Moving> {
+        match self {
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { moving, .. } => Some(moving),
+        }
+    }
+
+    fn moving_mut(&mut self) -> Option<&mut Moving> {
+        match self {
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { moving, .. } => Some(moving),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Layout {
     area: Rect,
+    room: usize,
     top: usize,
     rows: Vec<(Spot, usize)>,
     notes_y: u16,
     notes: Vec<String>,
+    aloud_buttons: Spots<aloud::Button>,
+}
+
+#[derive(Clone, Copy)]
+struct NotesGeometry {
+    room: usize,
+    notes_from: usize,
+    notes_y: u16,
+}
+
+fn notes_geometry(area: Rect, notes_lines: usize) -> NotesGeometry {
+    let height = usize::from(area.height);
+    let room = height.saturating_sub(HEADER + notes_lines);
+    let notes_from = height.saturating_sub(notes_lines);
+    let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
+    let notes_y = area
+        .y
+        .checked_add(notes_line)
+        .expect("an area ends inside the screen");
+    NotesGeometry {
+        room,
+        notes_from,
+        notes_y,
+    }
+}
+
+struct NotesAt {
+    notes: Notes,
+    bottom: SidebarBottom,
+    buttons: Spots<aloud::Button>,
+}
+
+struct Rendered {
+    page: Page,
+    drawn: Drawn,
+    cadence: Cadence,
 }
 
 impl Layout {
@@ -2158,8 +2330,357 @@ enum Highlight {
 }
 
 impl Sidebar {
-    pub fn new(folds: Folds, news: News, agent: Kept, this: String, wall: SystemTime) -> Self {
-        Sidebar {
+    pub fn new(folds: Folds, news: News, agent: Kept, this: String, framed: Rect) -> Self {
+        Sidebar::from_state(SidebarState::new(folds, news, agent, this, framed))
+    }
+
+    pub fn place(&mut self, framed: Rect) {
+        self.edit_without_layout(|state| state.place_rows(framed_rows(framed)));
+    }
+
+    pub fn collapse(&mut self, framed: Rect) {
+        self.edit_without_layout(|state| state.collapse_rows(framed_rows(framed)));
+    }
+
+    pub fn reagent(&mut self) {
+        self.edit_without_layout(SidebarState::reagent);
+    }
+
+    #[must_use]
+    pub fn refold(&mut self, wall: SystemTime) -> bool {
+        self.edit_if(|state| state.refold(wall))
+    }
+
+    #[must_use]
+    pub fn reread(&mut self, wall: SystemTime) -> bool {
+        self.edit_if(|state| state.reread(wall))
+    }
+
+    pub fn heard(&mut self, host: Host, wall: SystemTime) {
+        self.edit(|state| state.heard(host, wall));
+    }
+
+    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>, wall: SystemTime) {
+        self.edit(|state| state.moved(ticket, kept, wall));
+    }
+
+    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, wall: SystemTime) {
+        self.edit(|state| state.unsent(ticket, order, why, wall));
+    }
+
+    pub fn unmoved(
+        &mut self,
+        on: &Machine,
+        ticket: u64,
+        order: &Reorder,
+        note: String,
+        wall: SystemTime,
+    ) {
+        self.edit(|state| state.unmoved(on, ticket, order, note, wall));
+    }
+
+    #[must_use]
+    pub fn ticked(&mut self, now: Moment, watched: bool) -> bool {
+        self.edit_if(|state| state.ticked(now, watched))
+    }
+
+    #[must_use]
+    pub fn lost(&mut self, why: String) -> bool {
+        self.edit_if(|state| state.lost(why))
+    }
+
+    pub fn focus(&mut self, keys: Keys, wall: SystemTime) {
+        self.edit(|state| state.focus(keys, wall));
+    }
+
+    pub fn holding(&self) -> Holding {
+        self.state().holding()
+    }
+
+    pub fn floating(&self) -> Option<Floating<'_>> {
+        self.state().floating()
+    }
+
+    pub fn float_note(&mut self, note: String) {
+        self.edit(|state| state.float_note(note));
+    }
+
+    pub fn close_note(&mut self) {
+        let _ = self.edit_if(SidebarState::close_note);
+    }
+
+    pub fn close_menu(&mut self) {
+        let _ = self.edit_if(SidebarState::close_menu);
+    }
+
+    pub fn drop_menu(&mut self, menu: u64) {
+        let _ = self.edit_if(|state| state.drop_menu(menu));
+    }
+
+    pub fn sit(&mut self, seat: Seat, now: SystemTime) {
+        let _ = self.edit_if(|state| state.sit(seat, now));
+    }
+
+    pub fn unseat(&mut self, now: SystemTime) {
+        let _ = self.edit_if(|state| state.unseat(now));
+    }
+
+    pub fn own_title(&self) -> Option<&str> {
+        self.state().own_title()
+    }
+
+    #[must_use]
+    pub fn view_titles(
+        &self,
+        on: &Machine,
+        worktree: WorktreeId,
+    ) -> Option<&BTreeMap<ViewId, String>> {
+        self.state().view_titles(on, worktree)
+    }
+
+    #[must_use]
+    pub fn view_titles_revision(&self) -> u64 {
+        self.state().view_titles_revision()
+    }
+
+    pub fn on(&self) -> &Machine {
+        self.state().on()
+    }
+
+    pub fn here_agent(&self) -> Option<HereAgent> {
+        self.state().here_agent()
+    }
+
+    pub fn on_header(&self) -> Option<Machine> {
+        self.state().on_header()
+    }
+
+    pub fn lit_machine(&self) -> Option<Machine> {
+        self.state().lit_machine()
+    }
+
+    pub fn listing(&self) -> Listing {
+        self.state().listing()
+    }
+
+    pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
+        self.state().reaches()
+    }
+
+    pub fn whereabouts(&self) -> Option<Here> {
+        self.state().whereabouts()
+    }
+
+    pub fn far_agent(&self) -> Option<&Destination> {
+        self.state().far_agent()
+    }
+
+    pub fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
+        self.state().sayings()
+    }
+
+    #[must_use]
+    pub fn aloud(&mut self, shown: Option<aloud::Shown>) -> bool {
+        self.edit_if(|state| state.aloud(shown))
+    }
+
+    pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
+        self.state().aloud_buttons()
+    }
+
+    pub fn notify(&mut self, notice: String) {
+        self.edit(|state| state.notify(notice));
+    }
+
+    #[must_use]
+    pub fn clear_notice(&mut self) -> bool {
+        self.edit_if(SidebarState::clear_notice)
+    }
+
+    #[must_use]
+    pub fn unsay(&mut self, notice: &str) -> bool {
+        self.edit_if(|state| state.unsay(notice))
+    }
+
+    pub fn filing(&mut self, number: u64, repository: &str) {
+        self.edit(|state| state.filing(number, repository));
+    }
+
+    pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
+        self.edit(|state| state.filed(number, repository, filed));
+    }
+
+    #[must_use]
+    pub fn image_going(&mut self, to: Option<Destination>) -> bool {
+        self.edit_if(|state| state.image_going(to))
+    }
+
+    #[cfg(test)]
+    pub fn turning(&self) -> bool {
+        self.state().turning()
+    }
+
+    #[must_use]
+    pub fn view(&self) -> SidebarView {
+        self.state().view()
+    }
+
+    pub fn key(&mut self, key: &KeyEvent, now: Moment) -> Asked {
+        self.edit(|state| state.key_from(key, now, Came::Typed))
+    }
+
+    #[must_use]
+    pub fn due(&self, now: Moment) -> Option<Instant> {
+        self.state().due(now)
+    }
+
+    pub fn number_clicked(&mut self, link: Link) -> Asked {
+        self.edit(|state| state.number_clicked(link))
+    }
+
+    pub fn copied(&mut self, copied: Copied, steady: Instant) {
+        self.edit(|state| state.copied(copied, steady));
+    }
+
+    pub fn float_menu(&mut self) {
+        self.edit(SidebarState::float_menu);
+    }
+
+    pub fn aimed_row(&self) -> Aim {
+        self.state().aimed_row()
+    }
+
+    pub fn aimed_view(&self) -> Aim {
+        self.state().aimed_view()
+    }
+
+    pub fn aimed_worktree(&self) -> Aim {
+        self.state().aimed_worktree()
+    }
+
+    pub fn act_on_row(&mut self, target: &Target, action: Action, wall: SystemTime) -> Asked {
+        self.edit(|state| state.act_on_row(target, action, wall))
+    }
+
+    pub fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+        self.edit(|state| state.act_in_menu(target, action, origin))
+    }
+
+    pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
+        self.edit(|state| state.chained(done, origin))
+    }
+
+    #[must_use]
+    pub fn paste(&mut self, text: &str, wall: SystemTime) -> Asked {
+        self.edit(|state| state.paste(text, wall))
+    }
+
+    pub fn pull_in_menu(
+        &mut self,
+        target: Target,
+        work: Work,
+        pull: Pull,
+        origin: Origin,
+    ) -> Asked {
+        self.edit(|state| state.pull_in_menu(target, work, pull, origin))
+    }
+
+    pub fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
+        self.edit(|state| state.chose(menu, choice, now))
+    }
+
+    pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
+        self.edit(|state| state.keys_clicked(keyed, key, now))
+    }
+
+    pub fn scroll_menu(&mut self, menu: u64, by: isize) {
+        let _ = self.edit_if(|state| state.scroll_menu(menu, by));
+    }
+
+    pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
+        self.edit(|state| state.prunes(menu, plan))
+    }
+
+    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
+        self.edit(|state| state.pruned(menu, pruned))
+    }
+
+    pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
+        self.edit(|state| state.pulled(menu, found))
+    }
+
+    pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
+        self.edit(|state| state.printed(menu, printed))
+    }
+
+    pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
+        self.edit(|state| state.checks(menu, checks))
+    }
+
+    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
+        self.edit(|state| state.rebased(menu, rebased))
+    }
+
+    pub fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
+        self.state().plan(on, listed, scope)
+    }
+
+    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
+        self.edit(|state| state.unclosed(on, act, ticket, unchanged));
+    }
+
+    pub fn ticket(&mut self) -> u64 {
+        self.edit_without_layout(SidebarState::ticket)
+    }
+
+    pub fn made_for(&mut self, menu: u64) -> Option<Held> {
+        self.edit(|state| state.made_for(menu))
+    }
+
+    #[must_use]
+    pub fn found(
+        &mut self,
+        menu: u64,
+        agent: agents::Harness,
+        skills: Result<Vec<Skill>, String>,
+    ) -> bool {
+        self.edit_if(|state| state.found(menu, agent, skills))
+    }
+
+    pub fn mouse(&mut self, mouse: MouseEvent, wall: SystemTime) -> Asked {
+        self.edit(|state| state.mouse(mouse, wall))
+    }
+
+    pub fn pressed(&self) -> bool {
+        self.state().pressed()
+    }
+
+    pub fn unsweep(&mut self) {
+        self.edit_without_layout(SidebarState::unsweep);
+    }
+
+    pub fn let_go(&mut self) {
+        let _ = self.edit_if(SidebarState::let_go);
+    }
+
+    #[cfg(test)]
+    pub fn scrolling(&self) -> bool {
+        self.state().scrolling()
+    }
+
+    #[must_use]
+    pub fn scroll_due(&self, steady: Instant) -> Option<Instant> {
+        self.state().scroll_due(steady)
+    }
+
+    pub fn draw(&self, buffer: &mut Buffer, framed: Rect, wall: SystemTime) -> (Drawn, Cadence) {
+        self.state().draw(buffer, framed, wall)
+    }
+}
+
+impl SidebarState {
+    fn new(folds: Folds, news: News, agent: Kept, this: String, framed: Rect) -> Self {
+        let mut state = SidebarState {
             host: None,
             this,
             away: None,
@@ -2183,52 +2704,68 @@ impl Sidebar {
             here_row: None,
             lit: None,
             mode: Mode::default(),
-            moving: Moving::default(),
+            viewport: Viewport::Collapsed {
+                area: Rect::default(),
+                top: 0,
+            },
             revealed: None,
-            top: 0,
-            page: Page::default(),
-            laid: Layout::default(),
-            room: 0,
             notice: None,
             copied: None,
             image_going: None,
             aloud: None,
-            aloud_buttons: Spots::default(),
             working: BTreeMap::new(),
             filing: BTreeMap::new(),
             filed: None,
             menus: 0,
-            wall,
             due: None,
+        };
+        state.place_rows(framed_rows(framed));
+        state
+    }
+
+    fn place_rows(&mut self, area: Rect) {
+        if matches!(&self.viewport, Viewport::Expanded { laid, .. } if laid.area == area) {
+            return;
+        }
+        self.relayout_at(area);
+    }
+
+    fn collapse_rows(&mut self, area: Rect) {
+        let top = self.viewport.top();
+        self.viewport = Viewport::Collapsed { area, top };
+    }
+
+    #[cfg(test)]
+    fn set_top(&mut self, top: usize) {
+        match &mut self.viewport {
+            Viewport::Collapsed { top: saved, .. } => *saved = top,
+            Viewport::Expanded { laid, .. } => laid.top = top,
         }
     }
 
-    pub fn reagent(&mut self) {
+    fn reagent(&mut self) {
         if let Err(why) = self.agent.reload() {
             log::say(&format!("agent: {why}"));
         }
     }
 
-    #[must_use]
-    pub fn refold(&mut self) -> bool {
+    fn refold(&mut self, wall: SystemTime) -> bool {
         if self.folds.reload() {
-            self.rebuild();
+            self.rebuild(wall);
             return true;
         }
         false
     }
 
-    #[must_use]
-    pub fn reread(&mut self) -> bool {
+    fn reread(&mut self, wall: SystemTime) -> bool {
         if self.news.reload() {
-            self.rebuild();
+            self.rebuild(wall);
             return true;
         }
         false
     }
 
-    pub fn heard(&mut self, host: Host, wall: SystemTime) {
-        self.wall = wall;
+    fn heard(&mut self, host: Host, wall: SystemTime) {
         self.shelve(&host);
         for shelf in &self.shelves {
             let Some(projects) = shelf.kept() else {
@@ -2236,7 +2773,7 @@ impl Sidebar {
             };
             let machine = &shelf.machine;
             if projects.is_empty() && self.folds.contains(Fold::Machine(machine)) {
-                self.folds.set(Fold::Machine(machine), false);
+                let _ = self.folds.set(Fold::Machine(machine), false);
             }
             let mut live = Vec::new();
             for known in projects {
@@ -2248,8 +2785,8 @@ impl Sidebar {
         }
         self.host = Some(host);
         self.away = None;
-        self.rebuild();
         self.reran();
+        self.rebuild(wall);
     }
 
     fn shelve(&mut self, host: &Host) {
@@ -2268,15 +2805,15 @@ impl Sidebar {
         }
     }
 
-    fn reshelve(&mut self) {
+    fn reshelve(&mut self, wall: SystemTime) {
         if let Some(host) = self.host.take() {
             self.shelve(&host);
             self.host = Some(host);
-            self.rebuild();
+            self.rebuild(wall);
         }
     }
 
-    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>) {
+    fn moved(&mut self, ticket: u64, kept: Option<api::Version>, wall: SystemTime) {
         let Some(at) = self
             .unheard
             .iter()
@@ -2288,16 +2825,16 @@ impl Sidebar {
             Some(wait @ Wait::Answers { .. }) => self.unheard[at].wait = wait,
             Some(wait @ Wait::Watch(_)) => {
                 self.unheard[at].wait = wait;
-                self.reshelve();
+                self.reshelve(wall);
             }
             None => {
                 self.unheard.remove(at);
-                self.reshelve();
+                self.reshelve(wall);
             }
         }
     }
 
-    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str) {
+    fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, wall: SystemTime) {
         self.notify(format!("not moved: {why}"));
         let Some(at) = self
             .unheard
@@ -2319,10 +2856,17 @@ impl Sidebar {
                 self.unheard.remove(at);
             }
         }
-        self.reshelve();
+        self.reshelve(wall);
     }
 
-    pub fn unmoved(&mut self, on: &Machine, ticket: u64, order: &Reorder, note: String) {
+    fn unmoved(
+        &mut self,
+        on: &Machine,
+        ticket: u64,
+        order: &Reorder,
+        note: String,
+        wall: SystemTime,
+    ) {
         let of = order.wanted().of();
         let mut newer = self
             .unheard
@@ -2338,32 +2882,32 @@ impl Sidebar {
             "no two unheard orders share a ticket"
         );
         if self.unheard.len() < before {
-            self.reshelve();
+            self.reshelve(wall);
         }
     }
 
-    #[must_use]
-    pub fn ticked(&mut self, now: Moment, watched: bool) -> bool {
-        self.wall = now.system;
+    fn ticked(&mut self, now: Moment, watched: bool) -> bool {
         let mut changed = self.hold(now.steady);
         changed |= self.advance_timers(now.steady);
         if self.due.is_some_and(|due| due <= now.system) {
-            self.rebuild();
+            self.rebuild(now.system);
             changed = true;
         }
         let here = self.here_key.filter(|_| watched);
         let finished = &self.finished;
-        if self.news.dwell(
+        let Dwell { rows, lost } = self.news.dwell(
             here,
             |key| finished.get(&key).copied(),
             now.system,
             now.steady,
-        ) {
-            self.rebuild();
+        );
+        if rows {
+            self.rebuild(now.system);
             changed = true;
         }
+        changed |= lost;
         let live = self.live();
-        self.news.listed(live.as_ref(), now.steady);
+        changed |= self.news.listed(live.as_ref(), now.steady);
         changed
     }
 
@@ -2443,8 +2987,7 @@ impl Sidebar {
         Some(live)
     }
 
-    #[must_use]
-    pub fn lost(&mut self, why: String) -> bool {
+    fn lost(&mut self, why: String) -> bool {
         if self.away.as_ref() == Some(&why) {
             return false;
         }
@@ -2453,7 +2996,7 @@ impl Sidebar {
         true
     }
 
-    pub fn focus(&mut self, keys: Keys) {
+    fn focus(&mut self, keys: Keys, wall: SystemTime) {
         if let Mode::Afloat { .. } | Mode::AfloatNote(_) = self.mode {
             self.end_mode();
         }
@@ -2469,12 +3012,14 @@ impl Sidebar {
             }
         } else {
             self.end_mode();
-            self.moving = Moving::Still;
+            if let Some(moving) = self.viewport.moving_mut() {
+                *moving = Moving::Still;
+            }
         }
-        self.rebuild();
+        self.rebuild(wall);
     }
 
-    pub fn holding(&self) -> Holding {
+    fn holding(&self) -> Holding {
         match (&self.mode, self.pressed()) {
             (Mode::Afloat { .. } | Mode::AfloatNote(_), _) => Holding::Afloat,
             (_, true) => Holding::Press,
@@ -2488,7 +3033,7 @@ impl Sidebar {
         }
     }
 
-    pub fn floating(&self) -> Option<Floating<'_>> {
+    fn floating(&self) -> Option<Floating<'_>> {
         match &self.mode {
             Mode::Afloat { menu, .. } => Some(Floating::Menu(menu)),
             Mode::AfloatNote(note) => Some(Floating::Note(note)),
@@ -2500,27 +3045,33 @@ impl Sidebar {
         }
     }
 
-    pub fn float_note(&mut self, note: String) {
+    fn float_note(&mut self, note: String) {
         self.end_mode();
-        self.let_go();
+        let _ = self.let_go();
         self.mode = Mode::AfloatNote(note);
     }
 
-    pub fn close_note(&mut self) {
+    fn close_note(&mut self) -> bool {
         if let Mode::AfloatNote(_) = self.mode {
             self.mode = Mode::Idle;
+            return true;
         }
+        false
     }
 
-    pub fn close_menu(&mut self) {
+    fn close_menu(&mut self) -> bool {
         let menu = self.take_open().map(|(menu, _)| menu);
+        let had = menu.is_some();
         self.keep_working(menu);
+        had
     }
 
-    pub fn drop_menu(&mut self, menu: u64) {
+    fn drop_menu(&mut self, menu: u64) -> bool {
         if self.open().is_some_and(|open| open.number() == menu) {
             self.take_open();
+            return true;
         }
+        false
     }
 
     fn drop_menu_saying(&mut self, menu: u64, notice: String) {
@@ -2674,7 +3225,7 @@ impl Sidebar {
         self.working.remove(&menu).map(|it| (it, Taken::Kept, seen))
     }
 
-    pub fn sit(&mut self, seat: Seat) {
+    fn sit(&mut self, seat: Seat, now: SystemTime) -> bool {
         let was = self
             .seat
             .take()
@@ -2683,7 +3234,7 @@ impl Sidebar {
         let (project, worktree, terminal) = (seat.project, seat.worktree(), seat.terminal());
         self.seat = Some(seat);
         if unmoved {
-            return;
+            return false;
         }
         if was.is_none() {
             self.unfold_project(project);
@@ -2692,29 +3243,33 @@ impl Sidebar {
             && was.as_ref().and_then(Seat::worktree) != Some(worktree)
         {
             let on = self.on().clone();
-            self.folds.set(Fold::Worktree(&on, worktree), false);
+            let _ = self.folds.set(Fold::Worktree(&on, worktree), false);
         }
         let moved = was.as_ref().and_then(Seat::terminal) != terminal;
         if moved && let Some(terminal) = terminal {
             self.unfold_home(project, terminal);
         }
-        self.rebuild();
+        self.rebuild(now);
+        true
     }
 
-    pub fn unseat(&mut self) {
-        if self.seat.take().is_some() {
-            self.rebuild();
+    fn unseat(&mut self, now: SystemTime) -> bool {
+        let had = self.seat.take().is_some();
+        if had {
+            self.rebuild(now);
         }
         assert!(
             self.seat.is_none(),
             "lune sits nowhere when it shows no worktree"
         );
+        had
     }
 
     fn unfold_home(&mut self, project: ProjectId, terminal: TerminalKey) {
         if let Some(place) = self.view_place(project, terminal) {
             let on = self.on().clone();
-            self.folds
+            let _ = self
+                .folds
                 .set(Fold::Worktree(&on, place.worktree.worktree), false);
         }
     }
@@ -2730,21 +3285,17 @@ impl Sidebar {
             .map(|seat| seat.project)
     }
 
-    pub fn own_title(&self) -> Option<&str> {
+    fn own_title(&self) -> Option<&str> {
         self.seat_name.as_deref()
     }
 
     #[must_use]
-    pub fn view_titles(
-        &self,
-        on: &Machine,
-        worktree: WorktreeId,
-    ) -> Option<&BTreeMap<ViewId, String>> {
+    fn view_titles(&self, on: &Machine, worktree: WorktreeId) -> Option<&BTreeMap<ViewId, String>> {
         self.view_titles.get(on)?.get(&worktree)
     }
 
     #[must_use]
-    pub fn view_titles_revision(&self) -> u64 {
+    fn view_titles_revision(&self) -> u64 {
         self.view_titles_revision
     }
 
@@ -2775,8 +3326,8 @@ impl Sidebar {
     fn unfold_project(&mut self, project: ProjectId) {
         if self.known_of(project).is_some() {
             let on = self.on().clone();
-            self.folds.set(Fold::Machine(&on), false);
-            self.folds.set(Fold::Project(&on, project), false);
+            let _ = self.folds.set(Fold::Machine(&on), false);
+            let _ = self.folds.set(Fold::Project(&on, project), false);
         }
     }
 
@@ -2784,7 +3335,7 @@ impl Sidebar {
         seated == Some(listed.project())
     }
 
-    pub fn on(&self) -> &Machine {
+    fn on(&self) -> &Machine {
         self.seat.as_ref().map_or(&Machine::Local, |seat| &seat.on)
     }
 
@@ -2794,7 +3345,7 @@ impl Sidebar {
         self.view_place(seat.project, terminal).ok_or(NO_HERE_VIEW)
     }
 
-    pub fn here_agent(&self) -> Option<HereAgent> {
+    fn here_agent(&self) -> Option<HereAgent> {
         let place = self.here_place().ok()?;
         let seen = self.seen(self.on())?;
         let seated = seen.seated();
@@ -2811,18 +3362,18 @@ impl Sidebar {
         })
     }
 
-    pub fn on_header(&self) -> Option<Machine> {
+    fn lit_machine(&self) -> Option<Machine> {
+        self.lit_spot().map(Spot::machine)
+    }
+
+    fn on_header(&self) -> Option<Machine> {
         match self.lit_spot()? {
             Spot::Machine(machine) => Some(machine.clone()),
             Spot::Local(_) | Spot::Remote(..) => None,
         }
     }
 
-    pub fn lit_machine(&self) -> Option<Machine> {
-        self.lit_spot().map(Spot::machine)
-    }
-
-    pub fn listing(&self) -> Listing {
+    fn listing(&self) -> Listing {
         let here = self.whereabouts();
         let (away, this) = (self.away.clone(), self.this.clone());
         let mut listing = Listing {
@@ -2890,7 +3441,7 @@ impl Sidebar {
         }
     }
 
-    pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
+    fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
         let host = self.host.as_ref()?;
         let here = self.whereabouts();
         let reach = |machine: &Machine, seen: Result<Seen<'_>, Away>| {
@@ -2916,7 +3467,7 @@ impl Sidebar {
         )
     }
 
-    pub fn whereabouts(&self) -> Option<Here> {
+    fn whereabouts(&self) -> Option<Here> {
         let project = self.seated_in()?;
         let on = self.on().clone();
         if let Ok(place) = self.here_place() {
@@ -2926,7 +3477,7 @@ impl Sidebar {
         Some(Here::Session { on, session })
     }
 
-    pub fn far_agent(&self) -> Option<&Destination> {
+    fn far_agent(&self) -> Option<&Destination> {
         let Machine::Remote(on) = self.on() else {
             return None;
         };
@@ -2971,7 +3522,7 @@ impl Sidebar {
         runs
     }
 
-    pub fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
+    fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
         let each = machines(self.host.as_ref()?, &self.shelves).each();
         Some(
             each.map(|(on, seen)| (on, seen.ok().map(|seen| seen.sayings.to_vec())))
@@ -2979,32 +3530,31 @@ impl Sidebar {
         )
     }
 
-    #[must_use]
-    pub fn aloud(&mut self, shown: Option<aloud::Shown>) -> bool {
+    fn aloud(&mut self, shown: Option<aloud::Shown>) -> bool {
         if self.aloud == shown {
             return false;
         }
         self.aloud = shown;
-        self.rebuild();
         true
     }
 
-    pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
-        &self.aloud_buttons
+    fn aloud_buttons(&self) -> &Spots<aloud::Button> {
+        match &self.viewport {
+            Viewport::Collapsed { .. } => &EMPTY_ALOUD_BUTTONS,
+            Viewport::Expanded { laid, .. } => &laid.aloud_buttons,
+        }
     }
 
-    pub fn notify(&mut self, notice: String) {
+    fn notify(&mut self, notice: String) {
         log::say(&notice);
         self.notice = Some(notice);
     }
 
-    #[must_use]
-    pub fn clear_notice(&mut self) -> bool {
+    fn clear_notice(&mut self) -> bool {
         self.notice.take().is_some()
     }
 
-    #[must_use]
-    pub fn unsay(&mut self, notice: &str) -> bool {
+    fn unsay(&mut self, notice: &str) -> bool {
         if self.notice.as_deref() == Some(notice) {
             self.notice = None;
             return true;
@@ -3012,11 +3562,11 @@ impl Sidebar {
         false
     }
 
-    pub fn filing(&mut self, number: u64, repository: &str) {
+    fn filing(&mut self, number: u64, repository: &str) {
         self.filing.insert(number, repository.to_owned());
     }
 
-    pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
+    fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
         self.filing.remove(&number);
         match filed {
             Ok(filed) => {
@@ -3038,8 +3588,7 @@ impl Sidebar {
         }
     }
 
-    #[must_use]
-    pub fn image_going(&mut self, to: Option<Destination>) -> bool {
+    fn image_going(&mut self, to: Option<Destination>) -> bool {
         let changed = self.image_going != to;
         self.image_going = to;
         changed
@@ -3074,17 +3623,20 @@ impl Sidebar {
     }
 
     #[cfg(test)]
-    pub fn turning(&self) -> bool {
+    fn turning(&self) -> bool {
         let menus = self.open().is_some_and(Menu::turning);
         self.row_turning() || menus || self.working_on() || !self.filing.is_empty()
     }
 
     #[cfg(test)]
     fn row_turning(&self) -> bool {
-        if self.room == 0 {
+        let Some(laid) = self.viewport.laid() else {
+            return false;
+        };
+        if laid.room == 0 {
             return false;
         }
-        let shown = self.top..self.top + self.room;
+        let shown = laid.top..laid.top + laid.room;
         let mut line = 0;
         for row in &self.rows {
             let first = line + row.gap();
@@ -3096,13 +3648,12 @@ impl Sidebar {
         false
     }
 
-    #[must_use]
-    pub fn view(&self, collapsed: bool) -> SidebarView {
+    fn view(&self) -> SidebarView {
         assert!(
             self.rows.len() <= ROWS_MAX,
             "sidebar rows stay within their upper bound"
         );
-        if collapsed {
+        let Viewport::Expanded { laid, moving } = &self.viewport else {
             return SidebarView::Collapsed {
                 away: self.away.is_some(),
                 tinted: self.image_going.is_some() || self.copied.is_some(),
@@ -3110,16 +3661,20 @@ impl Sidebar {
                 paused: self.aloud.as_ref().is_some_and(aloud::Shown::paused),
                 title: self.seat_name.clone(),
             };
-        }
-        let width = usize::from(self.laid.area.width.saturating_sub(1));
-        let height = usize::from(self.laid.area.height);
-        let (mut notes, _, _) = self.notes_at(width, height, 0);
-        let room = height.saturating_sub(HEADER + notes.lines.len());
+        };
+        let width = usize::from(laid.area.width.saturating_sub(1));
+        let height = usize::from(laid.area.height);
+        let NotesAt { mut notes, .. } = self.notes_at(width, height, 0);
+        assert_eq!(
+            laid.room,
+            height.saturating_sub(HEADER + notes.lines.len()),
+            "the sidebar's laid-out room matches its state before diffing"
+        );
         notes.lines.truncate(height);
-        let all = matches!(self.moving, Moving::Lifted(_) | Moving::Swept(..))
+        let all = matches!(moving, Moving::Lifted(_) | Moving::Swept(..))
             || matches!(self.mode, Mode::Reorder(_));
-        let top = self.top.min(self.lines().saturating_sub(1));
-        let shown = top..top + room;
+        let top = laid.top;
+        let shown = top..top + laid.room;
         let mut line = 0;
         let mut rows = Vec::new();
         for row in &self.rows {
@@ -3148,9 +3703,9 @@ impl Sidebar {
         }))
     }
 
-    fn rebuild(&mut self) {
-        if self.rebuild_with(Typos::None) == Rebuilt::Unfound {
-            let rebuilt = self.rebuild_with(Typos::Forgiven);
+    fn rebuild(&mut self, wall: SystemTime) {
+        if self.rebuild_with(Typos::None, wall) == Rebuilt::Unfound {
+            let rebuilt = self.rebuild_with(Typos::Forgiven, wall);
             assert!(
                 rebuilt == Rebuilt::Done,
                 "a search forgiving typos rebuilds even unfound"
@@ -3158,7 +3713,7 @@ impl Sidebar {
         }
     }
 
-    fn rebuild_with(&mut self, typos: Typos) -> Rebuilt {
+    fn rebuild_with(&mut self, typos: Typos, now: SystemTime) -> Rebuilt {
         let seat_listed = self.seated_in().and_then(|project| self.listed_of(project));
         if let Some(listed) = seat_listed {
             self.seat_name = Some(listed.name.to_string());
@@ -3172,7 +3727,6 @@ impl Sidebar {
         let here_key = here_view
             .as_ref()
             .and_then(|place| news_key(&self.shelves, &sits_on, place));
-        let now = self.wall;
         let mut due: Option<SystemTime> = None;
         let listed = machines(host, &self.shelves);
         let unlisted_machines = listed.left_out;
@@ -3515,14 +4069,22 @@ impl Sidebar {
         let gone = |spot: Spot| self.row_of(&spot).is_none();
         let reordered_gone = matches!(&self.mode, Mode::Reorder(movable) if gone(movable.spot()));
         let lifted_gone = matches!(
-            &self.moving,
-            Moving::Lifted(Lift { lifted: movable, .. }) if gone(movable.spot())
+            self.viewport.moving(),
+            Some(Moving::Lifted(Lift { lifted: movable, .. })) if gone(movable.spot())
+        );
+        let down_gone = matches!(
+            self.viewport.moving(),
+            Some(Moving::Down { on, .. }) if on.spot().is_some_and(gone)
         );
         if reordered_gone {
             self.mode = Mode::Idle;
         }
-        if lifted_gone {
-            self.moving = Moving::Still;
+        if let Some(moving) = self.viewport.moving_mut() {
+            if lifted_gone {
+                *moving = Moving::Still;
+            } else if down_gone && let Moving::Down { on, .. } = moving {
+                *on = Pressed::Space;
+            }
         }
         if let Some(Lit::Closing { spot, landing, .. }) = &self.lit
             && self.row_of(spot).is_none()
@@ -3703,16 +4265,16 @@ impl Sidebar {
         }
     }
 
-    fn toggle(&mut self) {
+    fn toggle(&mut self, now: SystemTime) {
         let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
         let folding = spot.folding();
         let folded = self.folded(&spot.machine(), folding);
-        self.set_fold(&spot, folding, !folded);
+        self.set_fold(&spot, folding, !folded, now);
     }
 
-    fn fold(&mut self, folded: bool) {
+    fn fold(&mut self, folded: bool, now: SystemTime) {
         let Some(spot) = self.lit_spot().cloned() else {
             return;
         };
@@ -3726,10 +4288,10 @@ impl Sidebar {
             }
             _ => None,
         };
-        self.set_fold(&spot, lifted.unwrap_or(folding), folded);
+        self.set_fold(&spot, lifted.unwrap_or(folding), folded, now);
     }
 
-    fn set_fold(&mut self, spot: &Spot, folding: Folding, folded: bool) {
+    fn set_fold(&mut self, spot: &Spot, folding: Folding, folded: bool, now: SystemTime) {
         let machine = spot.machine();
         if folding == Folding::Machine {
             let (_, _, heads) = self.machine_row(&machine);
@@ -3743,8 +4305,9 @@ impl Sidebar {
             Folding::Project(project) => (Fold::Project(&machine, project), project_of(spot)),
             Folding::Worktree(worktree) => (Fold::Worktree(&machine, worktree), spot.worktree()),
         };
-        if !self.folds.set(fold, folded) {
-            return;
+        match self.folds.set(fold, folded) {
+            FoldSet::Unchanged | FoldSet::SharingLost => return,
+            FoldSet::Changed => {}
         }
         if folded {
             match row {
@@ -3752,17 +4315,13 @@ impl Sidebar {
                 None => self.lit = None,
             }
         }
-        self.rebuild();
-    }
-
-    pub fn key(&mut self, key: &KeyEvent, now: Moment) -> Asked {
-        self.key_from(key, now, Came::Typed)
+        self.rebuild(now);
     }
 
     fn key_from(&mut self, key: &KeyEvent, now: Moment, came: Came) -> Asked {
         if self.pressed() {
             if key.code == KeyCode::Esc {
-                self.let_go();
+                let _ = self.let_go();
             }
             return Asked::Nothing;
         }
@@ -3784,14 +4343,14 @@ impl Sidebar {
             (Came::Typed, _) => ChordWait::Until(now.steady + PAUSE),
         };
         if menu::closes(key) && self.open().is_some_and(Menu::waits) {
-            self.close_menu();
+            let _ = self.close_menu();
             return Asked::Nothing;
         }
         if key.code == KeyCode::Char(menu::ALL_KEYS)
             && let Mode::Menu { menu, .. } = &self.mode
             && menu.lists()
         {
-            self.close_menu();
+            let _ = self.close_menu();
             self.pend(Pending::AllKeys(AllKeys::default()));
             return Asked::Nothing;
         }
@@ -3810,7 +4369,7 @@ impl Sidebar {
         }
         if let Some(term) = self.search() {
             let term = term.to_owned();
-            return self.search_key(key, term);
+            return self.search_key(key, term, now.system);
         }
         let pending = match pending {
             Some(Pending::Legend) => match key.code {
@@ -3829,7 +4388,7 @@ impl Sidebar {
         };
         let chord = matches!(pending, Some(Pending::First(_) | Pending::Group { .. }));
         if let Mode::Reorder(_) = self.mode
-            && let Some(asked) = self.selected_key(key)
+            && let Some(asked) = self.selected_key(key, now.system)
         {
             return asked;
         }
@@ -3838,9 +4397,9 @@ impl Sidebar {
             KeyCode::Up => self.step(-1),
             KeyCode::Home => self.end(false),
             KeyCode::End => self.end(true),
-            KeyCode::Left => self.fold(true),
-            KeyCode::Right => self.fold(false),
-            KeyCode::Enter => return self.go(),
+            KeyCode::Left => self.fold(true, now.system),
+            KeyCode::Right => self.fold(false, now.system),
+            KeyCode::Enter => return self.go(now.system),
             KeyCode::Esc if chord => {}
             KeyCode::Esc => return Asked::Leave,
             KeyCode::Char(c)
@@ -3864,10 +4423,10 @@ impl Sidebar {
                 Some(Top::First) => self.pend(Pending::First(wait)),
                 Some(Top::Group(key)) => self.pend(Pending::Group { key, wait }),
                 Some(Top::AllKeys) => self.pend(Pending::Legend),
-                Some(Top::Fold(Some(folded))) => self.fold(folded),
-                Some(Top::Fold(None)) => self.toggle(),
+                Some(Top::Fold(Some(folded))) => self.fold(folded, now.system),
+                Some(Top::Fold(None)) => self.toggle(now.system),
                 Some(Top::Menu) => return self.open_menu(None),
-                Some(Top::Command(Command::Search)) => self.find(String::new()),
+                Some(Top::Command(Command::Search)) => self.find(String::new(), now.system),
                 Some(Top::Command(Command::Unread)) => self.toggle_unread(now.system),
                 Some(Top::Command(Command::Reorder)) => self.select(),
                 Some(Top::Command(Command::Quit)) if chord => {}
@@ -3888,8 +4447,7 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    #[must_use]
-    pub fn due(&self, now: Moment) -> Option<Instant> {
+    fn due(&self, now: Moment) -> Option<Instant> {
         let shows = match &self.mode {
             Mode::Pending(
                 Pending::First(ChordWait::Until(shows))
@@ -3933,7 +4491,7 @@ impl Sidebar {
             }
             _ => return None,
         };
-        all.scroll(by);
+        all.scroll(by, self.bottom_room());
         self.pend(Pending::AllKeys(all));
         Some(Asked::Nothing)
     }
@@ -4005,24 +4563,24 @@ impl Sidebar {
         }
     }
 
-    pub fn number_clicked(&mut self, link: Link) -> Asked {
+    fn number_clicked(&mut self, link: Link) -> Asked {
         self.notice = None;
         self.unpend();
         Asked::Copy(link)
     }
 
-    pub fn copied(&mut self, copied: Copied, steady: Instant) {
+    fn copied(&mut self, copied: Copied, steady: Instant) {
         self.copied = Some((copied, steady));
     }
 
-    fn selected_key(&mut self, key: &KeyEvent) -> Option<Asked> {
+    fn selected_key(&mut self, key: &KeyEvent, wall: SystemTime) -> Option<Asked> {
         match key.code {
             KeyCode::Down => self.step(1),
             KeyCode::Up => self.step(-1),
             KeyCode::Esc => self.unselect(),
             KeyCode::Char(c) => match Top::of(c) {
                 Some(Top::Move(by)) => self.step(by),
-                Some(Top::Shift(by)) => return Some(self.shift(by)),
+                Some(Top::Shift(by)) => return Some(self.shift(by, wall)),
                 Some(Top::Command(Command::Reorder)) => self.widen(),
                 Some(Top::Command(Command::Quit)) => self.unselect(),
                 _ => {
@@ -4066,7 +4624,7 @@ impl Sidebar {
         }
     }
 
-    fn shift(&mut self, by: isize) -> Asked {
+    fn shift(&mut self, by: isize, now: SystemTime) -> Asked {
         let Some((spans, held)) = self.selected() else {
             return Asked::Nothing;
         };
@@ -4077,7 +4635,7 @@ impl Sidebar {
         if to == held.start {
             return Asked::Nothing;
         }
-        self.keep(&spans.moved(held, to))
+        self.keep(&spans.moved(held, to), now)
     }
 
     fn selected(&self) -> Option<(Spans, Range<usize>)> {
@@ -4150,7 +4708,7 @@ impl Sidebar {
         }
     }
 
-    fn keep(&mut self, spans: &Spans) -> Asked {
+    fn keep(&mut self, spans: &Spans, now: SystemTime) -> Asked {
         let (on, order) = match spans {
             Spans::Projects(machine, spans) => {
                 let kept = self.shelves.iter().find(|it| it.machine == *machine);
@@ -4226,7 +4784,7 @@ impl Sidebar {
             });
             ticket
         };
-        self.rebuild();
+        self.rebuild(now);
         Asked::Move { on, order, ticket }
     }
 
@@ -4240,7 +4798,13 @@ impl Sidebar {
             .collect()
     }
 
-    fn landing(&self, movable: &Movable, line: u16, over: bool) -> Option<(Spans, Range<usize>)> {
+    fn landing(
+        &self,
+        movable: &Movable,
+        line: u16,
+        over: bool,
+        top: usize,
+    ) -> Option<(Spans, Range<usize>)> {
         let at = self.row_of(&movable.spot())?;
         let spans = self.spans(movable);
         let rows = spans.rows();
@@ -4251,7 +4815,7 @@ impl Sidebar {
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
         let above = HEADER + lines(lifted.start..at) + self.rows[at].gap();
-        let top = (self.top + usize::from(line)) as isize - above as isize;
+        let top = (top + usize::from(line)) as isize - above as isize;
         let mut line = lines(0..rows[0].start);
         let mut gaps = Vec::with_capacity(rows.len());
         for (index, span) in rows.iter().enumerate() {
@@ -4413,7 +4977,7 @@ impl Sidebar {
         }
     }
 
-    pub fn float_menu(&mut self) {
+    fn float_menu(&mut self) {
         self.notice = None;
         let place = match self.here_place() {
             Ok(place) => Place::View(place),
@@ -4428,11 +4992,11 @@ impl Sidebar {
         };
         let agent = self.agent_for(&target);
         self.end_mode();
-        self.let_go();
+        let _ = self.let_go();
         self.put(Menu::new(self.menus, target, agent), Placed::Afloat);
     }
 
-    pub fn aimed_row(&self) -> Aim {
+    fn aimed_row(&self) -> Aim {
         match self.target() {
             Some(row) => Aim::At {
                 target: Rc::new(row),
@@ -4442,7 +5006,7 @@ impl Sidebar {
         }
     }
 
-    pub fn aimed_view(&self) -> Aim {
+    fn aimed_view(&self) -> Aim {
         let view = self
             .here_place()
             .ok()
@@ -4455,7 +5019,7 @@ impl Sidebar {
         }
     }
 
-    pub fn aimed_worktree(&self) -> Aim {
+    fn aimed_worktree(&self) -> Aim {
         match self
             .here_worktree()
             .and_then(|place| self.here_target(Place::Worktree(place)))
@@ -4472,7 +5036,7 @@ impl Sidebar {
         self.target_at(self.on(), place).map(Rc::new)
     }
 
-    pub fn act_on_row(&mut self, target: &Target, action: Action, now: SystemTime) -> Asked {
+    fn act_on_row(&mut self, target: &Target, action: Action, wall: SystemTime) -> Asked {
         self.notice = None;
         self.end_mode();
         assert!(
@@ -4481,37 +5045,43 @@ impl Sidebar {
         );
         let command = Command::of(action);
         if command == Some(Command::Search) {
-            self.find(String::new());
-            return Asked::Nothing;
-        }
-        if self.highlights(target) {
+            self.find(String::new(), wall);
+            Asked::Nothing
+        } else if self.highlights(target) {
             match command {
-                Some(Command::Unread) => self.toggle_unread(now),
-                Some(Command::Reorder) => self.select(),
+                Some(Command::Unread) => {
+                    self.toggle_unread(wall);
+                    Asked::Nothing
+                }
+                Some(Command::Reorder) => {
+                    self.select();
+                    Asked::Nothing
+                }
                 Some(Command::Search | Command::Quit) => {
                     unreachable!("Search ran above, and Quit is a menu key too")
                 }
-                None => return self.row_action(action),
+                None => self.row_action(action),
             }
         } else {
             self.notify(PALETTE_ROW_GONE.to_owned());
+            Asked::Nothing
         }
-        Asked::Nothing
     }
 
-    pub fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+    fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
         self.notice = None;
         self.end_mode();
         if Command::of(action) == Some(Command::Quit) {
-            return Asked::Quit;
+            Asked::Quit
+        } else {
+            self.menus += 1;
+            let agent = self.agent_for(target);
+            let did = Menu::acting(self.menus, target, action, agent);
+            if origin == Origin::Views {
+                let _ = self.let_go();
+            }
+            self.menu_did(Placed::of(origin), did)
         }
-        self.menus += 1;
-        let agent = self.agent_for(target);
-        let did = Menu::acting(self.menus, target, action, agent);
-        if origin == Origin::Views {
-            self.let_go();
-        }
-        self.menu_did(Placed::of(origin), did)
     }
 
     fn highlights(&self, target: &Target) -> bool {
@@ -4520,13 +5090,12 @@ impl Sidebar {
             .is_some_and(|highlighted| at(&highlighted) == at(target))
     }
 
-    pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
+    fn chained(&mut self, done: Done, origin: Origin) -> Asked {
         self.notice = None;
         self.menu_did(Placed::of(origin), Did::Closed(done))
     }
 
-    #[must_use]
-    pub fn paste(&mut self, text: &str) -> Asked {
+    fn paste(&mut self, text: &str, wall: SystemTime) -> Asked {
         if let Mode::AfloatNote(_) = self.mode {
             return Asked::Nothing;
         }
@@ -4553,7 +5122,7 @@ impl Sidebar {
         let menu_afloat = matches!(self.mode, Mode::Afloat { .. });
         if let Some((on, place)) = checked_out {
             if menu_afloat {
-                self.close_menu();
+                let _ = self.close_menu();
             } else {
                 self.end_mode();
             }
@@ -4561,7 +5130,7 @@ impl Sidebar {
                 self.open().is_none(),
                 "a paste that goes leaves no menu open"
             );
-            return self.go_to(on, Place::Worktree(place));
+            return self.go_to(on, Place::Worktree(place), wall);
         }
         let Some(target) = target else {
             if self.lit_spot().is_none() {
@@ -4572,7 +5141,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let placed = if menu_afloat {
-            self.close_menu();
+            let _ = self.close_menu();
             Placed::Afloat
         } else {
             self.end_mode();
@@ -4620,13 +5189,7 @@ impl Sidebar {
         None
     }
 
-    pub fn pull_in_menu(
-        &mut self,
-        target: Target,
-        work: Work,
-        pull: Pull,
-        origin: Origin,
-    ) -> Asked {
+    fn pull_in_menu(&mut self, target: Target, work: Work, pull: Pull, origin: Origin) -> Asked {
         if self.notice_on_its_way(&work) {
             return Asked::Nothing;
         }
@@ -4634,7 +5197,7 @@ impl Sidebar {
         self.menus += 1;
         let did = Menu::start_pull(self.menus, target, work, self.agent.harness(), pull);
         if origin == Origin::Views {
-            self.let_go();
+            let _ = self.let_go();
         }
         self.menu_did(Placed::of(origin), did)
     }
@@ -4650,17 +5213,17 @@ impl Sidebar {
         on_its_way
     }
 
-    pub fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
+    fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
         if self.open().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;
         }
         match choice {
-            Choice::Key(key) => self.key(&key, now),
+            Choice::Key(key) => self.key_from(&key, now, Came::Typed),
             Choice::Skill(name) => self.pick(&name),
         }
     }
 
-    pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
+    fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
         let there = match self.bottom() {
             Bottom::Legend | Bottom::Group(_) | Bottom::Keys(..) | Bottom::AllKeys(_) => {
                 Some(Keyed::Legend)
@@ -4683,10 +5246,12 @@ impl Sidebar {
         self.menu_did(placed, menu.pick(name))
     }
 
-    pub fn scroll_menu(&mut self, menu: u64, by: isize) {
+    fn scroll_menu(&mut self, menu: u64, by: isize) -> bool {
         if let Some(open) = self.open_mut().filter(|open| open.number() == menu) {
             open.scroll(by);
+            return true;
         }
+        false
     }
 
     fn has_keys(&self) -> bool {
@@ -4928,7 +5493,7 @@ impl Sidebar {
         self.menu_did(placed, menu.planned(plan))
     }
 
-    pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
+    fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::sweeping) else {
             return Asked::Nothing;
         };
@@ -4938,36 +5503,39 @@ impl Sidebar {
         self.menu_did_after(taken, waiting.swept(plan))
     }
 
-    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
+    fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
         let waiting = self.take_waited(menu, Menu::pruning);
         let taken = waiting.as_ref().map_or(Taken::Kept, |(_, taken)| *taken);
         match pruned {
             Ok(prunes::Pruned::Changed(plan)) => {
                 log_unasked(&plan);
                 if let Some((waiting, taken @ Taken::Open(_))) = waiting {
-                    return self.menu_did_after(taken, waiting.changed(plan));
+                    self.menu_did_after(taken, waiting.changed(plan))
+                } else {
+                    self.say_of(
+                        taken,
+                        "menu: nothing deleted: what would go changed".to_owned(),
+                    );
+                    Asked::Nothing
                 }
-                self.say_of(
-                    taken,
-                    "menu: nothing deleted: what would go changed".to_owned(),
-                );
             }
             Ok(prunes::Pruned::Went(outcomes)) => {
                 if let Some(note) = prune::note(&outcomes) {
                     self.say_of(taken, note);
                 }
+                Asked::Nothing
             }
             Err(why) => {
                 self.say_of(
                     taken,
                     format!("menu: it may have deleted some worktrees: {why}"),
                 );
+                Asked::Nothing
             }
         }
-        Asked::Nothing
     }
 
-    pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
+    fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::pulling) else {
             return Asked::Nothing;
         };
@@ -4977,21 +5545,21 @@ impl Sidebar {
         self.menu_did_after(taken, waiting.pulled(found))
     }
 
-    pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
+    fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::reading) else {
             return Asked::Nothing;
         };
         self.menu_did_after(taken, waiting.printed(printed))
     }
 
-    pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
+    fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::fetching) else {
             return Asked::Nothing;
         };
         self.menu_did_after(taken, waiting.checked(checks))
     }
 
-    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
+    fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::rebasing) else {
             return Asked::Nothing;
         };
@@ -5036,7 +5604,7 @@ impl Sidebar {
             .collect()
     }
 
-    pub fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
+    fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
@@ -5216,7 +5784,7 @@ impl Sidebar {
         Asked::Close { on, act, ticket }
     }
 
-    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
+    fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
         if let Some(Lit::Closing {
             spot,
             ticket: armed,
@@ -5236,19 +5804,18 @@ impl Sidebar {
         self.notify(format!("menu: {}", unchanged.said("not closed", &in_doubt)));
     }
 
-    pub fn ticket(&mut self) -> u64 {
+    fn ticket(&mut self) -> u64 {
         self.tickets += 1;
         self.tickets
     }
 
-    pub fn made_for(&mut self, menu: u64) -> Option<Held> {
+    fn made_for(&mut self, menu: u64) -> Option<Held> {
         let made = |it: &Menu| it.opens_pulled().then_some(());
         self.take_seen(menu, made)
             .map(|(_, taken, ())| taken.held())
     }
 
-    #[must_use]
-    pub fn found(
+    fn found(
         &mut self,
         menu: u64,
         agent: agents::Harness,
@@ -5281,25 +5848,25 @@ impl Sidebar {
         } else {
             self.news.mark_unread(key, now);
         }
-        self.rebuild();
+        self.rebuild(now);
     }
 
-    fn search_key(&mut self, key: &KeyEvent, mut term: String) -> Asked {
+    fn search_key(&mut self, key: &KeyEvent, mut term: String, wall: SystemTime) -> Asked {
         match key.code {
             KeyCode::Down => self.step(1),
             KeyCode::Up => self.step(-1),
             KeyCode::Home => self.end(false),
             KeyCode::End => self.end(true),
-            KeyCode::Enter => return self.go(),
-            KeyCode::Esc => self.close_search(),
-            KeyCode::Backspace if term.is_empty() => self.close_search(),
+            KeyCode::Enter => return self.go(wall),
+            KeyCode::Esc => self.close_search(wall),
+            KeyCode::Backspace if term.is_empty() => self.close_search(wall),
             KeyCode::Backspace => {
                 term.pop();
-                self.find(term);
+                self.find(term, wall);
             }
             KeyCode::Char(c) => {
                 term.push(c);
-                self.find(term);
+                self.find(term, wall);
             }
             _ => {}
         }
@@ -5323,44 +5890,47 @@ impl Sidebar {
         matches!(self.mode, Mode::Search(Search::Typed { .. }))
     }
 
-    fn find(&mut self, term: String) {
+    fn find(&mut self, term: String, now: SystemTime) {
         let search = if term.is_empty() {
             Search::Empty
         } else {
             Search::Typed { term, seek: true }
         };
         self.enter(Mode::Search(search));
-        self.rebuild();
+        self.rebuild(now);
     }
 
-    fn close_search(&mut self) {
+    fn close_search(&mut self, now: SystemTime) {
         if let Mode::Search(_) = self.mode {
             self.mode = Mode::Idle;
-            self.rebuild();
+            self.rebuild(now);
         }
     }
 
-    fn go(&mut self) -> Asked {
+    fn go(&mut self, now: SystemTime) -> Asked {
         let Some(spot) = self.lit_spot().cloned() else {
             return Asked::Nothing;
         };
         let Some((on, place)) = spot.placed() else {
-            self.toggle();
+            self.toggle(now);
             return Asked::Nothing;
         };
-        self.go_to(on, place)
+        self.go_to(on, place, now)
     }
 
-    fn go_to(&mut self, on: Machine, place: Place) -> Asked {
-        self.close_search();
+    fn go_to(&mut self, on: Machine, place: Place, now: SystemTime) -> Asked {
+        self.close_search(now);
         Asked::Go { on, place }
     }
 
-    pub fn mouse(&mut self, mouse: MouseEvent, framed: Rect) -> Asked {
-        self.mouse_rows(mouse, framed_rows(framed))
+    fn mouse(&mut self, mouse: MouseEvent, wall: SystemTime) -> Asked {
+        let Some(area) = self.viewport.expanded_area() else {
+            return Asked::Nothing;
+        };
+        self.mouse_in(mouse, area, wall)
     }
 
-    fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
+    fn mouse_in(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
         if matches!(
             mouse.kind,
             MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
@@ -5369,83 +5939,112 @@ impl Sidebar {
         }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.top = (self.top + 3).min(self.lines().saturating_sub(1));
+                let max = self.lines().saturating_sub(1);
+                if let Viewport::Expanded { laid, .. } = &mut self.viewport {
+                    laid.top = (laid.top + 3).min(max);
+                }
                 Asked::Nothing
             }
             MouseEventKind::ScrollUp => {
-                self.top = self.top.saturating_sub(3);
+                if let Viewport::Expanded { laid, .. } = &mut self.viewport {
+                    laid.top = laid.top.saturating_sub(3);
+                }
                 Asked::Nothing
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                self.close_menu();
-                self.unselect();
-                let row = self
+                let on = match self
                     .line_of(mouse.row, area)
-                    .and_then(|line| self.row_at(line));
-                let lifts = row.and_then(|at| self.lifting(at));
+                    .and_then(|line| self.row_at(line))
+                {
+                    None => Pressed::Space,
+                    Some(at) => match self.lifting(at) {
+                        Some(movable) => Pressed::Movable(movable),
+                        None => Pressed::Row(self.rows[at].spot()),
+                    },
+                };
+                let _ = self.close_menu();
+                self.unselect();
                 let at = Position::new(mouse.column, mouse.row);
-                self.moving = Moving::Down { at, lifts };
+                self.set_moving(Moving::Down { at, on });
                 Asked::Nothing
             }
             MouseEventKind::Down(_) => Asked::Take,
             MouseEventKind::Drag(MouseButton::Left) => self.drag(mouse, area),
-            MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area),
+            MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area, wall),
             MouseEventKind::Moved => {
-                self.let_go();
+                let _ = self.let_go();
                 Asked::Nothing
             }
             _ => Asked::Nothing,
         }
     }
 
+    fn set_moving(&mut self, next: Moving) {
+        let Viewport::Expanded { moving, .. } = &mut self.viewport else {
+            unreachable!("only an expanded sidebar holds pointer motion");
+        };
+        *moving = next;
+    }
+
     fn drag(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let line = mouse.row.saturating_sub(area.y);
         let over = (area.left()..area.right()).contains(&mouse.column);
         let pointer = Position::new(mouse.column, mouse.row);
-        let (from, lifts) = match &mut self.moving {
-            Moving::Lifted(lift) => {
+        let (from, lifts) = match self.viewport.moving_mut() {
+            Some(Moving::Lifted(lift)) => {
                 lift.line = line;
                 lift.over = over;
                 return Asked::Nothing;
             }
-            Moving::Sweeping(sweep) => {
+            Some(Moving::Sweeping(sweep)) => {
                 sweep.reach(pointer, inside(area));
                 return Asked::Nothing;
             }
-            Moving::Down { at, lifts } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
-            Moving::Swept(..) | Moving::Still => {
+            Some(Moving::Down { at, on }) => {
+                (*at, on.movable().cloned().filter(|_| mouse.row != at.y))
+            }
+            Some(Moving::Swept(..) | Moving::Still) | None => {
                 return Asked::Nothing;
             }
         };
         let typed = self.typed();
-        let lifts = lifts.filter(|lifts| !typed && self.row_of(&lifts.spot()).is_some());
+        let lifts = lifts.filter(|lifts| {
+            assert!(
+                self.row_of(&lifts.spot()).is_some(),
+                "a pressed movable stays listed"
+            );
+            !typed
+        });
         if let Some(lifted) = lifts {
-            self.moving = Moving::Lifted(Lift {
+            self.set_moving(Moving::Lifted(Lift {
                 lifted,
                 line,
                 over,
                 scrolled: None,
-            });
+            }));
             return Asked::Take;
         }
         if from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1 {
-            self.moving = Moving::Sweeping(Sweep::new(from, pointer, inside(area)));
+            self.set_moving(Moving::Sweeping(Sweep::new(from, pointer, inside(area))));
         }
         Asked::Nothing
     }
 
-    fn release(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
+    fn release(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
         let over = (area.left()..area.right()).contains(&mouse.column);
-        match std::mem::take(&mut self.moving) {
-            Moving::Down { at, .. } if over && mouse.row == at.y => self.click(at, area),
+        let Some(moving) = self.viewport.moving_mut() else {
+            return Asked::Nothing;
+        };
+        match std::mem::take(moving) {
+            Moving::Down { at, on } if over && mouse.row == at.y => self.click(at, &on, area, wall),
             Moving::Lifted(Lift {
                 lifted: movable, ..
             }) => {
                 let line = mouse.row.saturating_sub(area.y);
                 self.light(movable.spot());
                 let spans = self.spans(&movable);
-                match self.landing(&movable, line, over) {
-                    Some((landed, _)) if landed != spans => self.keep(&landed),
+                match self.landing(&movable, line, over, self.viewport.top()) {
+                    Some((landed, _)) if landed != spans => self.keep(&landed, wall),
                     _ => {
                         self.settle(None, false);
                         Asked::Nothing
@@ -5454,26 +6053,32 @@ impl Sidebar {
             }
             Moving::Sweeping(mut sweep) => {
                 sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
-                let Some(excerpt) = Excerpt::of(sweep.text(&self.page, inside(area))) else {
+                let Viewport::Expanded { laid, .. } = &self.viewport else {
+                    unreachable!("a sweeping sidebar is expanded");
+                };
+                let page = self.rendered(laid, &Moving::Still, wall).page;
+                let Some(excerpt) = Excerpt::of(sweep.text(&page, inside(area))) else {
                     return Asked::Nothing;
                 };
-                self.moving = Moving::Swept(sweep, self.laid.clone());
+                let under = laid.clone();
+                self.set_moving(Moving::Swept(sweep, under));
                 Asked::CopyText(excerpt)
             }
             kept @ Moving::Swept(..) => {
-                self.moving = kept;
+                self.set_moving(kept);
                 Asked::Nothing
             }
             Moving::Down { .. } | Moving::Still => Asked::Nothing,
         }
     }
 
-    fn click(&mut self, at: Position, area: Rect) -> Asked {
-        let Some(index) = self.line_of(at.y, area).and_then(|line| self.row_at(line)) else {
+    fn click(&mut self, at: Position, on: &Pressed, area: Rect, wall: SystemTime) -> Asked {
+        let Some(spot) = on.spot() else {
             return Asked::Take;
         };
+        let index = self.row_of(&spot).expect("a pressed row stays listed");
         let row = &self.rows[index];
-        let (spot, stops) = (row.spot(), self.stops(index));
+        let stops = self.stops(index);
         let triangle = match row {
             Row::Project { .. } => Some(2),
             Row::Worktree { .. } => Some(3),
@@ -5483,79 +6088,92 @@ impl Sidebar {
         let Some((on, place)) = spot.clone().placed() else {
             if !typed {
                 self.light(spot);
-                self.toggle();
+                self.toggle(wall);
             }
             return Asked::Take;
         };
         let on_triangle = triangle.is_some_and(|triangle| at.x.saturating_sub(area.x) <= triangle);
         if on_triangle && !typed {
             self.light(spot);
-            self.toggle();
+            self.toggle(wall);
             return Asked::Take;
         }
         if stops {
             self.light(spot);
         }
-        self.go_to(on, place)
+        self.go_to(on, place, wall)
     }
 
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
+        let laid = self.viewport.laid()?;
         let line = usize::from(y.checked_sub(area.y)?);
-        let shown = line.checked_sub(HEADER).filter(|line| *line < self.room)?;
-        Some(self.top + shown)
+        let shown = line.checked_sub(HEADER).filter(|line| *line < laid.room)?;
+        Some(laid.top + shown)
     }
 
-    pub fn pressed(&self) -> bool {
+    fn pressed(&self) -> bool {
         matches!(
-            self.moving,
-            Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_)
+            self.viewport.moving(),
+            Some(Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_))
         )
     }
 
-    pub fn unsweep(&mut self) {
-        if let Moving::Swept(..) = self.moving {
-            self.moving = Moving::Still;
+    fn unsweep(&mut self) {
+        if let Some(moving @ Moving::Swept(..)) = self.viewport.moving_mut() {
+            *moving = Moving::Still;
         }
     }
 
-    pub fn let_go(&mut self) {
-        if self.pressed() {
-            self.moving = Moving::Still;
+    fn let_go(&mut self) -> bool {
+        if !self.pressed() {
+            return false;
         }
+        if let Some(moving) = self.viewport.moving_mut() {
+            *moving = Moving::Still;
+        }
+        true
     }
 
     #[cfg(test)]
-    pub fn scrolling(&self) -> bool {
+    fn scrolling(&self) -> bool {
         self.pull() != 0
     }
 
-    #[must_use]
-    pub fn scroll_due(&self, steady: Instant) -> Option<Instant> {
+    fn scroll_due(&self, steady: Instant) -> Option<Instant> {
         if self.pull() == 0 {
             return None;
         }
-        let Moving::Lifted(lift) = &self.moving else {
+        let Some(Moving::Lifted(lift)) = self.viewport.moving() else {
             return None;
         };
         Some(lift.scrolled.map_or(steady, |then| then + SCROLL))
     }
 
     fn pull(&self) -> isize {
-        let Moving::Lifted(lift) = &self.moving else {
+        let Viewport::Expanded {
+            laid,
+            moving: Moving::Lifted(lift),
+        } = &self.viewport
+        else {
             return 0;
         };
         if !lift.over {
             return 0;
         }
+        let room = laid.room;
         let line = usize::from(lift.line);
-        let up = line <= HEADER && self.top > 0;
-        let down = line + 1 >= HEADER + self.room && self.top + self.room < self.lines();
+        let up = line <= HEADER && laid.top > 0;
+        let down = line + 1 >= HEADER + room && laid.top + room < self.lines();
         isize::from(down) - isize::from(up)
     }
 
     fn hold(&mut self, at: Instant) -> bool {
         let by = self.pull();
-        let Moving::Lifted(lift) = &mut self.moving else {
+        let Viewport::Expanded {
+            laid,
+            moving: Moving::Lifted(lift),
+        } = &mut self.viewport
+        else {
             return false;
         };
         if by == 0 {
@@ -5569,9 +6187,9 @@ impl Sidebar {
             return false;
         }
         lift.scrolled = Some(at);
-        let was = self.top;
-        self.top = self.top.saturating_add_signed(by);
-        self.top != was
+        let was = laid.top;
+        laid.top = laid.top.saturating_add_signed(by);
+        laid.top != was
     }
 
     fn lines(&self) -> usize {
@@ -5601,79 +6219,167 @@ impl Sidebar {
         row.map_or(Highlight::Off, Highlight::Resting)
     }
 
-    fn reveal(&mut self, at: usize, room: usize) {
-        let start: usize = self.rows[..at].iter().map(Row::height).sum();
-        let end = start + self.rows[at].height();
-        if start < self.top {
-            self.top = start;
-        } else if end > self.top + room {
-            self.top = end.saturating_sub(room);
-        }
-        if end - start <= room {
-            assert!(self.top <= start);
-            assert!(end <= self.top + room);
+    fn lifted_landing_at(&self, top: usize) -> Option<(Spans, Range<usize>)> {
+        match self.viewport.moving() {
+            Some(Moving::Lifted(Lift {
+                lifted, line, over, ..
+            })) => self.landing(lifted, *line, *over, top),
+            Some(Moving::Still | Moving::Down { .. } | Moving::Sweeping(_) | Moving::Swept(..))
+            | None => None,
         }
     }
 
-    pub fn draw(&mut self, buffer: &mut Buffer, framed: Rect, now: Moment) -> (Drawn, Cadence) {
-        let drawn = self.draw_rows_painted(buffer, framed_rows(framed), now);
-        self.frame(buffer, framed);
-        drawn
-    }
-
-    pub fn draw_collapsed(&mut self, buffer: &mut Buffer, framed: Rect, now: Moment) {
-        self.draw_collapsed_rows(buffer, framed_rows(framed), now);
-        self.frame(buffer, framed);
-    }
-
-    #[cfg(test)]
-    fn draw_rows(&mut self, buffer: &mut Buffer, area: Rect, now: Moment) -> Drawn {
-        self.draw_rows_painted(buffer, area, now).0
-    }
-
-    fn draw_rows_painted(
-        &mut self,
-        buffer: &mut Buffer,
+    fn layout_with(
+        &self,
         area: Rect,
-        now: Moment,
-    ) -> (Drawn, Cadence) {
-        self.drawing(now);
+        top: usize,
+        geometry: NotesGeometry,
+        landing: Option<&(Spans, Range<usize>)>,
+        notes: Notes,
+        buttons: Spots<aloud::Button>,
+    ) -> Layout {
         assert!(
             self.rows.len() <= ROWS_MAX,
             "sidebar rows stay within their upper bound"
         );
-        let wall = now.system;
+        let landed = landing.map(|(spans, _)| self.landed(&spans.rows()));
+        let count = landed.as_ref().map_or(self.rows.len(), Vec::len);
+        let mut rows = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = landed.as_ref().map_or(index, |order| order[index]);
+            let row = &self.rows[at];
+            rows.push((row.spot(), row.height()));
+        }
+        let aloud_buttons = buttons.down(geometry.notes_from).placed(inside(area));
+        Layout {
+            area,
+            room: geometry.room,
+            top,
+            rows,
+            notes_y: geometry.notes_y,
+            notes: notes.said,
+            aloud_buttons,
+        }
+    }
+
+    fn relayout(&mut self) {
+        if let Some(area) = self.viewport.expanded_area() {
+            self.relayout_at(area);
+        }
+    }
+
+    fn relayout_at(&mut self, area: Rect) {
+        assert!(
+            self.rows.len() <= ROWS_MAX,
+            "sidebar rows stay within their upper bound"
+        );
+        let width = usize::from(area.width.saturating_sub(1));
+        let height = usize::from(area.height);
+        let NotesAt { notes, buttons, .. } = self.notes_at(width, height, 0);
+        let geometry = notes_geometry(area, notes.lines.len());
+        let mut top = self.viewport.top();
+        let top_before = top;
+        let mut landing = self.lifted_landing_at(top);
+        let lifted = landing.is_some();
+        match self.highlight() {
+            Highlight::Lit(at) => {
+                if let Some(at) = at
+                    && !lifted
+                {
+                    reveal(&self.rows, &mut top, at, geometry.room);
+                }
+                self.revealed = None;
+            }
+            Highlight::Resting(at) if self.revealed != self.here_row => {
+                reveal(&self.rows, &mut top, at, geometry.room);
+                self.revealed.clone_from(&self.here_row);
+            }
+            Highlight::Resting(_) | Highlight::Off => {}
+        }
+        top = top.min(self.lines().saturating_sub(1));
+        if top != top_before && lifted {
+            landing = self.lifted_landing_at(top);
+        }
+        let laid = self.layout_with(area, top, geometry, landing.as_ref(), notes, buttons);
+        let mut moving = match &mut self.viewport {
+            Viewport::Collapsed { .. } => Moving::Still,
+            Viewport::Expanded { moving, .. } => std::mem::take(moving),
+        };
+        if matches!(&moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
+            moving = Moving::Still;
+        }
+        assert_eq!(laid.area, area, "relayout keeps the requested area");
+        assert!(
+            !matches!(&moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)),
+            "relayout clears any stale sweep"
+        );
+        self.viewport = Viewport::Expanded { laid, moving };
+    }
+
+    fn draw(&self, buffer: &mut Buffer, framed: Rect, wall: SystemTime) -> (Drawn, Cadence) {
+        let area = framed_rows(framed);
+        let drawn = match &self.viewport {
+            Viewport::Collapsed {
+                area: collapsed, ..
+            } => {
+                assert_eq!(
+                    *collapsed, area,
+                    "the sidebar is collapsed for the area it draws into"
+                );
+                self.draw_collapsed_rows(buffer, area);
+                (Drawn::Nothing, Cadence::default())
+            }
+            Viewport::Expanded { laid, moving } => {
+                assert_eq!(
+                    laid.area, area,
+                    "the sidebar is placed for the area it draws into"
+                );
+                self.draw_rows_painted(buffer, laid, moving, wall)
+            }
+        };
+        self.frame(buffer, framed);
+        drawn
+    }
+
+    #[cfg(test)]
+    fn draw_rows(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Drawn {
+        let Viewport::Expanded { laid, moving } = &self.viewport else {
+            unreachable!("an expanded sidebar is placed before draw_rows");
+        };
+        assert_eq!(
+            laid.area, area,
+            "the sidebar is placed for the area it draws into"
+        );
+        self.draw_rows_painted(buffer, laid, moving, wall).0
+    }
+
+    fn rendered(&self, laid: &Layout, moving: &Moving, wall: SystemTime) -> Rendered {
+        assert!(
+            self.rows.len() <= ROWS_MAX,
+            "sidebar rows stay within their upper bound"
+        );
+        let area = laid.area;
+        let top = laid.top;
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(wall);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width));
-        let (notes, spotted, buttons) = self.notes_at(width, height, frame);
-        let room = height.saturating_sub(HEADER + notes.lines.len());
-        self.room = room;
+        let NotesAt {
+            notes,
+            bottom: spotted,
+            buttons,
+        } = self.notes_at(width, height, frame);
+        let geometry = notes_geometry(area, notes.lines.len());
+        let room = geometry.room;
         let highlight = self.highlight();
-        let landing = match &self.moving {
+        let landing = match moving {
             Moving::Lifted(Lift {
                 lifted, line, over, ..
-            }) => self.landing(lifted, *line, *over),
-            _ => None,
+            }) => self.landing(lifted, *line, *over, top),
+            Moving::Still | Moving::Down { .. } | Moving::Sweeping(_) | Moving::Swept(..) => None,
         };
         let lifted = landing.is_some();
-        match highlight {
-            Highlight::Lit(at) => {
-                if let Some(at) = at
-                    && !lifted
-                {
-                    self.reveal(at, room);
-                }
-                self.revealed = None;
-            }
-            Highlight::Resting(at) if self.revealed != self.here_row => {
-                self.reveal(at, room);
-                self.revealed.clone_from(&self.here_row);
-            }
-            Highlight::Resting(_) | Highlight::Off => {}
-        }
         if self.host.is_none() {
             let waiting = if self.away.is_some() {
                 ""
@@ -5704,17 +6410,32 @@ impl Sidebar {
             (None, Highlight::Resting(at)) => Some((at..at + 1, self.home_row(at), RESTING)),
             (None, Highlight::Off) => None,
         };
-        let order = match &landing {
-            Some((spans, _)) => self.landed(&spans.rows()),
-            None => (0..self.rows.len()).collect::<Vec<_>>(),
-        };
+        let landed = landing
+            .as_ref()
+            .map(|(spans, _)| self.landed(&spans.rows()));
+        let count = landed.as_ref().map_or(self.rows.len(), Vec::len);
+        assert_eq!(
+            laid.rows.len(),
+            count,
+            "the sidebar's laid-out row count matches its state before drawing"
+        );
         let mut drawn: Vec<Line<'static>> = Vec::new();
         let mut numbers = Vec::new();
         let mut cuts = Vec::new();
-        let mut rows = Vec::with_capacity(order.len());
-        let mut marks = Vec::with_capacity(order.len());
-        for at in order {
+        let mut marks = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = landed.as_ref().map_or(index, |order| order[index]);
             let row = &self.rows[at];
+            let (laid_spot, laid_height) = &laid.rows[index];
+            assert!(
+                row.is_spot(laid_spot),
+                "each rendered row matches its laid-out spot"
+            );
+            assert_eq!(
+                *laid_height,
+                row.height(),
+                "each rendered row matches its laid-out height"
+            );
             let lights = |(rows, home, _): &&(Range<usize>, Option<usize>, Color)| {
                 rows.contains(&at) || *home == Some(at)
             };
@@ -5739,7 +6460,6 @@ impl Sidebar {
                 line: first + cut.line,
                 ..cut
             }));
-            rows.push((row.spot(), row.height()));
             for mut line in row_drawn {
                 if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
@@ -5747,29 +6467,45 @@ impl Sidebar {
                 drawn.push(line);
             }
         }
-        self.top = self.top.min(drawn.len().saturating_sub(1));
-        let notes_from = height.saturating_sub(notes.lines.len());
-        let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
-        let notes_y = area
-            .y
-            .checked_add(notes_line)
-            .expect("an area ends inside the screen");
-        let laid = Layout {
-            area,
-            top: self.top,
-            rows,
-            notes_y,
-            notes: notes.said,
-        };
-        lines.extend(drawn.into_iter().skip(self.top).take(room));
-        lines.resize(notes_from, Line::default());
-        let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
+        assert_eq!(
+            top,
+            top.min(drawn.len().saturating_sub(1)),
+            "the scroll offset is clamped before drawing"
+        );
+        let inside = inside(area);
+        assert_eq!(
+            laid.room, room,
+            "the sidebar's laid-out room matches its state before drawing"
+        );
+        assert_eq!(
+            laid.notes_y, geometry.notes_y,
+            "the sidebar's laid-out notes row matches its state before drawing"
+        );
+        assert_eq!(
+            laid.notes, notes.said,
+            "the sidebar's laid-out notes match its state before drawing"
+        );
+        assert_eq!(
+            laid.aloud_buttons,
+            buttons.down(geometry.notes_from).placed(inside),
+            "the sidebar's laid-out aloud buttons match its state before drawing"
+        );
+        assert!(
+            !matches!(moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
+            "a stale sweep is cleared before drawing"
+        );
+        lines.extend(drawn.into_iter().skip(top).take(room));
+        lines.resize(geometry.notes_from, Line::default());
+        let goes_on = notes
+            .goes_on
+            .iter()
+            .map(|line| geometry.notes_from + line)
+            .collect();
         let spinners = notes.spinners;
         lines.extend(notes.lines);
-        put(buffer, area, &lines, self.framing());
         let mut spots = Spots::default();
         let mut cut_spots = Spots::default();
-        let shown = self.top..self.top + room;
+        let shown = top..top + room;
         let mut cadence = Cadence::default();
         if width > 0 {
             for (line, spinning, since) in marks {
@@ -5783,7 +6519,10 @@ impl Sidebar {
                     cadence.age(since, wall);
                 }
             }
-            if spinners.iter().any(|line| notes_from + line < height) {
+            if spinners
+                .iter()
+                .any(|line| geometry.notes_from + line < height)
+            {
                 cadence.spin();
             }
         }
@@ -5794,40 +6533,51 @@ impl Sidebar {
         } in numbers
         {
             if shown.contains(&line) {
-                spots.add(HEADER + line - self.top, columns, link.clone());
+                spots.add(HEADER + line - top, columns, link.clone());
             }
         }
         for CutAt { line, column, took } in cuts {
             if shown.contains(&line) {
-                cut_spots.add(HEADER + line - self.top, column..column + 1, took);
+                cut_spots.add(HEADER + line - top, column..column + 1, took);
             }
         }
-        let inside = inside(area);
-        if matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
-            self.moving = Moving::Still;
-        }
-        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = &self.moving {
-            sweep.draw(buffer, inside);
-        }
-        self.laid = laid;
-        self.page = Page {
+        let page = Page {
             lines,
             goes_on,
             cuts: cut_spots.placed(inside),
         };
-        self.aloud_buttons = buttons.down(notes_from).placed(inside);
         let drawn = Drawn::Sidebar {
             numbers: spots.placed(inside),
-            bottom: spotted.placed(notes_from, inside),
+            bottom: spotted.placed(geometry.notes_from, inside),
         };
-        (drawn, cadence)
+        Rendered {
+            page,
+            drawn,
+            cadence,
+        }
     }
 
-    fn draw_collapsed_rows(&mut self, buffer: &mut Buffer, area: Rect, now: Moment) {
-        self.drawing(now);
-        self.room = 0;
-        self.unsweep();
-        self.aloud_buttons = Spots::default();
+    fn draw_rows_painted(
+        &self,
+        buffer: &mut Buffer,
+        laid: &Layout,
+        moving: &Moving,
+        wall: SystemTime,
+    ) -> (Drawn, Cadence) {
+        let area = laid.area;
+        let rendered = self.rendered(laid, moving, wall);
+        put(buffer, area, &rendered.page.lines, self.framing());
+        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = moving {
+            sweep.draw(buffer, inside(area));
+        }
+        (rendered.drawn, rendered.cadence)
+    }
+
+    fn draw_collapsed_rows(&self, buffer: &mut Buffer, area: Rect) {
+        assert!(
+            matches!(self.viewport, Viewport::Collapsed { area: collapsed, .. } if collapsed == area),
+            "a collapsed sidebar is collapsed for the area it draws into"
+        );
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
             Style::new().fg(ERROR)
@@ -5851,14 +6601,6 @@ impl Sidebar {
             lines.push(Line::styled(aloud::PLAY, Style::new().fg(ACCENT)));
         }
         put(buffer, area, &lines, self.framing());
-    }
-
-    fn drawing(&mut self, now: Moment) {
-        self.wall = now.system;
-        let _ = self.advance_timers(now.steady);
-        if self.due.is_some_and(|due| due <= now.system) {
-            self.rebuild();
-        }
     }
 
     fn top(&self, width: usize) -> [Line<'static>; HEADER] {
@@ -5938,12 +6680,7 @@ impl Sidebar {
         line
     }
 
-    fn notes_at(
-        &self,
-        width: usize,
-        height: usize,
-        frame: usize,
-    ) -> (Notes, SidebarBottom, Spots<aloud::Button>) {
+    fn notes_above(&self, width: usize, frame: usize) -> (Notes, Spots<aloud::Button>) {
         let mut notes = Notes::default();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -6009,6 +6746,21 @@ impl Sidebar {
             buttons = spots.down(notes.lines.len());
             notes.lines.push(line);
         }
+        (notes, buttons)
+    }
+
+    fn bottom_room(&self) -> usize {
+        let Some(area) = self.viewport.expanded_area() else {
+            return 0;
+        };
+        let width = usize::from(area.width.saturating_sub(1));
+        let height = usize::from(area.height);
+        let (notes, _) = self.notes_above(width, 0);
+        height.saturating_sub(HEADER + 1 + notes.lines.len())
+    }
+
+    fn notes_at(&self, width: usize, height: usize, frame: usize) -> NotesAt {
+        let (mut notes, buttons) = self.notes_above(width, frame);
         let room = height.saturating_sub(HEADER + 1 + notes.lines.len());
         let above = notes.lines.len();
         let (lines, spotted) = match self.bottom() {
@@ -6049,7 +6801,11 @@ impl Sidebar {
             Bottom::Nothing => (Vec::new(), SidebarBottom::Nothing),
         };
         notes.lines.extend(lines);
-        (notes, spotted, buttons)
+        NotesAt {
+            notes,
+            bottom: spotted,
+            buttons,
+        }
     }
 
     fn searching(
@@ -6148,6 +6904,20 @@ impl Sidebar {
             | Mode::Afloat { .. }
             | Mode::AfloatNote(_) => Bottom::Nothing,
         }
+    }
+}
+
+fn reveal(rows: &[Row], top: &mut usize, at: usize, room: usize) {
+    let start: usize = rows[..at].iter().map(Row::height).sum();
+    let end = start + rows[at].height();
+    if start < *top {
+        *top = start;
+    } else if end > *top + room {
+        *top = end.saturating_sub(room);
+    }
+    if end - start <= room {
+        assert!(*top <= start);
+        assert!(end <= *top + room);
     }
 }
 
@@ -7288,6 +8058,59 @@ mod tests {
     use crate::spots::Hit;
     use luned::rebases;
 
+    impl std::ops::Deref for Sidebar {
+        type Target = SidebarState;
+
+        fn deref(&self) -> &SidebarState {
+            self.state()
+        }
+    }
+
+    impl Sidebar {
+        fn light(&mut self, spot: Spot) {
+            self.edit(|state| state.light(spot));
+        }
+
+        fn step(&mut self, by: isize) {
+            self.edit(|state| state.step(by));
+        }
+
+        fn end(&mut self, last: bool) {
+            self.edit(|state| state.end(last));
+        }
+
+        fn rebuild(&mut self, wall: SystemTime) {
+            self.edit(|state| state.rebuild(wall));
+        }
+
+        fn place_rows(&mut self, area: Rect) {
+            self.edit_without_layout(|state| state.place_rows(area));
+        }
+
+        fn collapse_rows(&mut self, area: Rect) {
+            self.edit_without_layout(|state| state.collapse_rows(area));
+        }
+
+        fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
+            self.edit(|state| {
+                state.place_rows(area);
+                state.mouse_in(mouse, area, wall)
+            })
+        }
+
+        fn draw_rows(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Drawn {
+            self.state().draw_rows(buffer, area, wall)
+        }
+
+        fn draw_collapsed_rows(&self, buffer: &mut Buffer, area: Rect) {
+            self.state().draw_collapsed_rows(buffer, area);
+        }
+
+        fn set_top(&mut self, top: usize) {
+            self.edit(|state| state.set_top(top));
+        }
+    }
+
     fn directory(path: &str) -> Directory {
         Directory::parse(path.to_owned()).unwrap()
     }
@@ -7455,13 +8278,17 @@ mod tests {
         }
     }
 
+    fn test_wall() -> SystemTime {
+        moment(160_000).system
+    }
+
     fn fresh() -> Sidebar {
         Sidebar::new(
             Folds::default(),
             News::default(),
             Kept::default(),
             "mac".to_owned(),
-            SystemTime::UNIX_EPOCH,
+            Rect::new(0, 0, COLUMNS, 24),
         )
     }
 
@@ -7499,9 +8326,11 @@ mod tests {
 
     fn fold(sidebar: &mut Sidebar, name: &str) {
         let project = project_named(sidebar, name);
-        sidebar
-            .folds
-            .set(Fold::Project(&Machine::Local, project), true);
+        sidebar.edit(|state| {
+            let _ = state
+                .folds
+                .set(Fold::Project(&Machine::Local, project), true);
+        });
     }
 
     fn project_row(name: &str, id: u64) -> ProjectRow {
@@ -7571,7 +8400,7 @@ mod tests {
                     seat(&projects, &mut far.agents, &mut far.unread_files);
                 }
             }
-            self.heard(host, self.wall);
+            self.heard(host, test_wall());
         }
     }
 
@@ -7684,21 +8513,26 @@ mod tests {
     ) -> Buffer {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
-        sidebar.focus(if focused {
-            Keys::Sidebar
-        } else {
-            Keys::Terminal
-        });
-        sidebar.draw_rows(&mut buffer, area, now);
+        sidebar.place_rows(area);
+        sidebar.focus(
+            if focused {
+                Keys::Sidebar
+            } else {
+                Keys::Terminal
+            },
+            now.system,
+        );
+        sidebar.draw_rows(&mut buffer, area, now.system);
         let lit: &[Color] = if focused { &[LIT, RESTING] } else { &[RESTING] };
         in_moonlight(&buffer, &[&[Color::Reset], lit].concat());
         buffer
     }
 
-    fn collapsed(sidebar: &mut Sidebar, height: u16, now: Moment) -> Buffer {
+    fn collapsed(sidebar: &mut Sidebar, height: u16, _now: Moment) -> Buffer {
         let area = Rect::new(0, 0, COLLAPSED_ROWS, height);
         let mut buffer = Buffer::empty(area);
-        sidebar.draw_collapsed_rows(&mut buffer, area, now);
+        sidebar.collapse_rows(area);
+        sidebar.draw_collapsed_rows(&mut buffer, area);
         in_moonlight(&buffer, &[Color::Reset]);
         buffer
     }
@@ -7824,11 +8658,14 @@ mod tests {
             worktree: worktree.worktree,
             layout: SeatedLayout::Disconnected(terminal),
         };
-        sidebar.sit(Seat {
-            on: Machine::Local,
-            project,
-            at,
-        });
+        sidebar.sit(
+            Seat {
+                on: Machine::Local,
+                project,
+                at,
+            },
+            test_wall(),
+        );
     }
 
     fn seat_in(project: u64, view: Option<u32>) -> Seat {
@@ -7915,7 +8752,7 @@ mod tests {
             rows_shown(&mut sidebar),
             [" ● empty", "", " ● solo", "  ▾ fresh"]
         );
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let empty = Place::Session(listed("empty", 7));
         assert_eq!(lit_place(&sidebar), Some(empty.clone()));
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -7942,7 +8779,7 @@ mod tests {
             },
             SystemTime::UNIX_EPOCH,
         );
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let (empty, tab) = (ProjectId::of(7).unwrap(), WorktreeId::of(31).unwrap());
         let folded = |sidebar: &Sidebar| {
             let on = &Machine::Local;
@@ -8018,10 +8855,10 @@ mod tests {
             assert!(!sidebar.folds.contains(newer), "{column}");
         }
         let down = mouse(MouseEventKind::Down(MouseButton::Left), 10, 9);
-        sidebar.mouse_rows(down, area);
+        sidebar.mouse_rows(down, area, test_wall());
         let drag = mouse(MouseEventKind::Drag(MouseButton::Left), 10, 4);
         assert_eq!(
-            sidebar.mouse_rows(drag, area),
+            sidebar.mouse_rows(drag, area, test_wall()),
             Asked::Nothing,
             "the gap lifts no row"
         );
@@ -8045,7 +8882,7 @@ mod tests {
             },
             SystemTime::UNIX_EPOCH,
         );
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let worktree = WorktreeId::of(31).unwrap();
         let project = project_row("lune", 7);
         let place = Place::Worktree(WorktreePlace { project, worktree });
@@ -8078,9 +8915,9 @@ mod tests {
         let mut sidebar = two_sessions();
         let (kept, gone) = (tab_of(10, 0), tab_of(10, 1));
         for tab in [kept, gone] {
-            sidebar
-                .folds
-                .set(Fold::Worktree(&Machine::Local, tab), true);
+            sidebar.edit(|state| {
+                let _ = state.folds.set(Fold::Worktree(&Machine::Local, tab), true);
+            });
         }
         let older = session("older", 10, vec![view(1, 0, "/w/lune/main", "claude")]);
         let newer = session("newer", 20, vec![view(1, 0, "/w/b", "fish")]);
@@ -8165,7 +9002,7 @@ mod tests {
         );
         let buffer = drawn(&mut sidebar, false, 32, 13);
         assert_eq!([buffer[(10, 7)].fg, buffer[(13, 7)].fg], [ERROR, ERROR]);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let why = "it ended before it reached luned (exit status: 255)";
         let said = format!("nixos: {why}; ssh said \"ssh: Could not resolve hostname vps\"");
         for spot in [
@@ -8254,7 +9091,8 @@ mod tests {
         let area = Rect::new(0, 0, 32, 12);
         let draw = |sidebar: &mut Sidebar| {
             let mut buffer = Buffer::empty(area);
-            sidebar.draw_rows(&mut buffer, area, moment(160_000));
+            sidebar.place_rows(area);
+            sidebar.draw_rows(&mut buffer, area, test_wall());
             in_moonlight(&buffer, &[Color::Reset, LIT]);
             let start = |y: u16| (0..7).map(|x| buffer[(x, y)].symbol()).collect::<String>();
             let titled = (0..area.height)
@@ -8266,7 +9104,7 @@ mod tests {
             let word = &buffer[(1, 0)];
             (titled, lit, word.fg, word.modifier.contains(Modifier::DIM))
         };
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.key(
             &KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
             moment(160_000),
@@ -8278,9 +9116,9 @@ mod tests {
         let cursor = sidebar.lit_spot().cloned();
         let (titled, lit, fg, dim) = draw(&mut sidebar);
         assert_eq!((titled, fg, dim, lit.is_empty()), (2, ACCENT, false, false));
-        sidebar.focus(Keys::Lent);
+        sidebar.focus(Keys::Lent, test_wall());
         assert_eq!(draw(&mut sidebar), (1, lit.clone(), moonlight::MUTE, false));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         assert_eq!(draw(&mut sidebar), (2, lit, ACCENT, false));
         assert_eq!(sidebar.lit_spot().cloned(), cursor);
     }
@@ -8337,6 +9175,7 @@ mod tests {
         agents.extend((3..=103).map(|id| agent("s", id, Status::Shell, None)));
         sidebar.hear(host(vec![session("s", 10, views)], agents));
         let strip = |sidebar: &mut Sidebar, now| {
+            let _ = sidebar.ticked(now, false);
             let buffer = collapsed(sidebar, 6, now);
             let line = |y| {
                 (0..COLLAPSED_ROWS - 1)
@@ -8441,10 +9280,11 @@ mod tests {
         let open = drawn(&mut sidebar, true, COLUMNS, 10);
         assert!((0..10).any(|y| open[(0, y)].bg == LIT), "a row is lit");
         assert_eq!(edge(&open), vec![accent; 10]);
-        sidebar.focus(Keys::Lent);
+        sidebar.focus(Keys::Lent, test_wall());
         let area = Rect::new(0, 0, COLUMNS, 10);
         let mut lent = Buffer::empty(area);
-        sidebar.draw_rows(&mut lent, area, moment(160_000));
+        sidebar.place_rows(area);
+        sidebar.draw_rows(&mut lent, area, test_wall());
         assert_eq!(edge(&lent), vec![dim.clone(); 10]);
         assert_eq!(
             edge(&drawn(&mut sidebar, false, COLUMNS, 10)),
@@ -8464,8 +9304,9 @@ mod tests {
         assert_eq!(rows, Rect::new(1, 1, COLUMNS - 1, 8));
         assert_eq!(edge(rows), edge(framed));
         let mut buffer = Buffer::empty(framed);
-        sidebar.focus(Keys::Sidebar);
-        let _ = sidebar.draw(&mut buffer, framed, moment(160_000));
+        sidebar.focus(Keys::Sidebar, test_wall());
+        sidebar.place(framed);
+        let _ = sidebar.draw(&mut buffer, framed, test_wall());
         let (right, bottom) = (COLUMNS - 1, 9);
         let at = |x, y| (buffer[(x, y)].symbol().to_owned(), buffer[(x, y)].fg);
         let accent = |symbol: &str| (symbol.to_owned(), ACCENT);
@@ -8614,7 +9455,7 @@ mod tests {
     #[test]
     fn h_folds_a_project_from_its_row_and_l_or_space_unfolds_it() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let newer = Some(Place::Session(listed("newer", 20)));
         sidebar.light(Spot::Local(tab_view_of("older", 10, 1, 2)));
         type_in(&mut sidebar, "j");
@@ -8648,7 +9489,7 @@ mod tests {
     #[test]
     fn g_and_end_go_to_the_last_row_and_gg_and_home_to_the_first() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let first = Some(Place::Session(listed("older", 10)));
         let second = Some(Place::Session(listed("newer", 20)));
         let last = Some(view_of("newer", 20, 1));
@@ -8672,10 +9513,10 @@ mod tests {
         assert_eq!(lit_place(&sidebar), second);
         let area = Rect::new(0, 0, 32, 11);
         screen(&mut sidebar, true, area.width, area.height);
-        sidebar.mouse_rows(mouse(MouseEventKind::ScrollUp, 0, 0), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::ScrollUp, 0, 0), area, test_wall());
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), second);
-        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 0, 0), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 0, 0), area, test_wall());
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), first);
         sidebar.key(&g, moment(160_000));
@@ -8683,8 +9524,8 @@ mod tests {
         let folded = Some(Place::Session(listed("newer", 20)));
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), folded);
-        sidebar.focus(Keys::Terminal);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Terminal, test_wall());
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.key(&g, moment(160_000));
         assert_eq!(lit_place(&sidebar), folded);
         let esc = key(KeyCode::Esc);
@@ -8742,7 +9583,7 @@ mod tests {
         assert_eq!(sidebar.own_title(), None);
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         assert_eq!(sidebar.own_title(), Some("older"));
-        sidebar.sit(seat_in(3, None));
+        sidebar.sit(seat_in(3, None), test_wall());
         assert_eq!(sidebar.own_title(), Some("older"));
         sit(&mut sidebar, &own_view_of("young", 2, 1));
         assert_eq!(sidebar.own_title(), Some("young"));
@@ -8758,10 +9599,13 @@ mod tests {
             worktree: tab_of(1, 1),
             layout: SeatedLayout::Unlaid,
         };
-        sidebar.sit(Seat {
-            at,
-            ..seat_in(1, None)
-        });
+        sidebar.sit(
+            Seat {
+                at,
+                ..seat_in(1, None)
+            },
+            test_wall(),
+        );
         assert_eq!(
             sidebar.here_place(),
             Err(NO_HERE_VIEW),
@@ -8785,15 +9629,17 @@ mod tests {
         sit(&mut sidebar, &older(1));
         assert!(!folded(&sidebar, "older"));
         let mut sidebar = away();
-        sidebar.sit(seat_in(1, None));
+        sidebar.sit(seat_in(1, None), test_wall());
         assert!(!folded(&sidebar, "older"));
     }
 
     #[test]
     fn going_into_a_project_on_a_folded_machine_unfolds_the_machine() {
         let mut sidebar = own_two_sessions();
-        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
-        sidebar.rebuild();
+        sidebar.edit(|state| {
+            let _ = state.folds.set(Fold::Machine(&Machine::Local), true);
+        });
+        sidebar.rebuild(test_wall());
         let folded = " ▸ \u{f108} MAC                    ●1";
         assert_eq!(screen(&mut sidebar, false, 32, 5)[2], folded);
         let view = own_view_of("older", 1, 1);
@@ -8913,10 +9759,11 @@ mod tests {
 
     fn click(sidebar: &mut Sidebar, column: u16, row: u16, area: Rect) -> Asked {
         let down = mouse(MouseEventKind::Down(MouseButton::Left), column, row);
-        assert_eq!(sidebar.mouse_rows(down, area), Asked::Nothing);
+        assert_eq!(sidebar.mouse_rows(down, area, test_wall()), Asked::Nothing);
         sidebar.mouse_rows(
             mouse(MouseEventKind::Up(MouseButton::Left), column, row),
             area,
+            test_wall(),
         )
     }
 
@@ -9970,7 +10817,10 @@ mod tests {
         let mut sidebar = fresh();
         let make = in_shell(1, going("make", 159, Front::Working));
         sidebar.hear(host(vec![session("s", 10, vec![make])], Vec::new()));
-        let row = |sidebar: &mut Sidebar, now| seen_at(sidebar, false, 32, 7, now).0[6].clone();
+        let row = |sidebar: &mut Sidebar, now| {
+            let _ = sidebar.ticked(now, false);
+            seen_at(sidebar, false, 32, 7, now).0[6].clone()
+        };
         assert_eq!(
             row(&mut sidebar, moment(160_500)),
             "     \u{e795} lune/main"
@@ -10295,7 +11145,8 @@ mod tests {
         );
         let area = Rect::new(0, 0, 32, 12);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.place_rows(area);
+        let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         let columns = |y: u16, number: &str| {
             let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
             let start = cells
@@ -10328,7 +11179,7 @@ mod tests {
         assert_eq!(click(&mut sidebar, 10, 8, area), worktree(32));
         assert_eq!(click(&mut sidebar, 10, 9, area), view(2));
 
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let place = |id| {
             let worktree = WorktreeId::of(id).unwrap();
             Spot::Local(Place::Worktree(WorktreePlace {
@@ -10637,7 +11488,7 @@ mod tests {
             let asked = if let Some(code) = close {
                 sidebar.key(&KeyEvent::new(code, KeyModifiers::NONE), moment(160_000))
             } else {
-                sidebar.focus(Keys::Terminal);
+                sidebar.focus(Keys::Terminal, test_wall());
                 Asked::Nothing
             };
             let pix = tab_view_of("bipa", 10, 2, 3);
@@ -10717,11 +11568,12 @@ mod tests {
     #[test]
     fn a_click_on_a_key_under_the_search_presses_it_while_it_is_open() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "/pix");
         let area = Rect::new(0, 0, 32, 16);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.place_rows(area);
+        let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         let keys: String = (0..31).map(|x| buffer[(x, 15)].symbol()).collect();
         let at = |key: &str| Position::new(u16::try_from(keys.find(key).unwrap()).unwrap(), 15);
         let (enter, esc) = (KeyEvent::from(KeyCode::Enter), KeyEvent::from(KeyCode::Esc));
@@ -10746,14 +11598,15 @@ mod tests {
     #[test]
     fn the_search_has_no_keys_under_a_box() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "/pix");
         let enter = KeyEvent::from(KeyCode::Enter);
         let area = Rect::new(0, 0, 32, 16);
         let rule = format!("─ Search {} 2/7 ─", "─".repeat(16));
-        sidebar.focus(Keys::Lent);
+        sidebar.focus(Keys::Lent, test_wall());
         let mut buffer = Buffer::empty(area);
-        sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.place_rows(area);
+        sidebar.draw_rows(&mut buffer, area, test_wall());
         let line = |y: u16| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         assert_eq!(
             [line(14).trim_end(), line(15).trim_end()],
@@ -10761,7 +11614,7 @@ mod tests {
         );
         let clicked = sidebar.keys_clicked(Keyed::Search, &enter, moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         assert_eq!(search_shown(&mut sidebar)[1], " pix_");
     }
 
@@ -10902,7 +11755,7 @@ mod tests {
         checked_out(statuses, pulls, "/w/d", "none", None);
         let mut sidebar = fresh();
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar
     }
 
@@ -10954,7 +11807,7 @@ mod tests {
         );
         let note = u16::try_from(16 - 2).unwrap();
         assert_eq!(buffer[(1, note)].fg, NAME);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.key(&char('j'), later);
         assert_eq!(
             (sidebar.filed.as_ref(), sidebar.notice.as_ref()),
@@ -10979,6 +11832,7 @@ mod tests {
         sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('y'), now), Asked::Nothing);
+        let _ = sidebar.ticked(now + PAUSE, true);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 24, now + PAUSE);
         let rule = format!("─ Yank {}", "─".repeat(24));
         assert_eq!(lines[22..], [rule, " p  Yank the PR link".to_owned()]);
@@ -11075,11 +11929,11 @@ mod tests {
         sidebar.light(one);
         let area = Rect::new(0, 0, 32, 24);
         sidebar.key(&char('y'), now);
-        sidebar.mouse_rows(mouse(MouseEventKind::ScrollUp, 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::ScrollUp, 10, 4), area, test_wall());
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
 
         sidebar.key(&char('y'), now);
-        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 4), area, test_wall());
         assert_eq!(sidebar.key(&char('p'), now), Asked::Copy(link()));
     }
 
@@ -11121,7 +11975,7 @@ mod tests {
             assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{note}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
             assert_eq!(sidebar.copied, None);
-            sidebar.notice = None;
+            let _ = sidebar.clear_notice();
             assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing, "{note}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
         }
@@ -11134,7 +11988,7 @@ mod tests {
         checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, said)));
         let mut sidebar = fresh();
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         sidebar
     }
@@ -11145,7 +11999,8 @@ mod tests {
         let mut sidebar = pull_said("https://ghe.example/owner/repo/pull/5");
         let area = Rect::new(0, 0, 32, 24);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw_rows(&mut buffer, area, now);
+        sidebar.place_rows(area);
+        let drawn = sidebar.draw_rows(&mut buffer, area, now.system);
         let line: String = (0..31).map(|x| buffer[(x, 6)].symbol()).collect();
         assert!(line.contains("fix #5"), "{line}");
         assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
@@ -11196,7 +12051,7 @@ mod tests {
         checked_out(statuses, pulls, "/w/b", "fix", Some((State::Open, far)));
         let mut sidebar = fresh();
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let place = view_place("main", 20, 0, 1);
         let place = Place::View(place);
         sidebar.light(Spot::Remote(nixos(), place));
@@ -11246,7 +12101,7 @@ mod tests {
 
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let place = view_place("main", 20, 0, 1);
         sidebar.light(Spot::Remote(nixos(), Place::View(place)));
         assert_eq!(
@@ -11262,7 +12117,7 @@ mod tests {
             .zip(5..)
             .map(|(cwd, id)| view(id, id, cwd, "fish"));
         let mut sidebar = pulls_with(views.collect());
-        let host = sidebar.host.as_mut().unwrap();
+        let mut host = sidebar.host.clone().unwrap();
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
         let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
@@ -11280,14 +12135,14 @@ mod tests {
             "日本語の枝の名前が長い",
             Some((State::Draft, &draft)),
         );
-        let host = sidebar.host.clone().unwrap();
         sidebar.hear(host);
 
         for keys in [Keys::Terminal, Keys::Sidebar] {
-            sidebar.focus(keys);
+            sidebar.focus(keys, test_wall());
             let area = Rect::new(0, 0, 32, 32);
             let mut buffer = Buffer::empty(area);
-            let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+            sidebar.place_rows(area);
+            let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
             let columns = |y: u16, number: &str| {
                 let cells: Vec<&str> = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
                 let start = cells
@@ -11314,32 +12169,34 @@ mod tests {
     #[test]
     fn a_number_out_of_sight_takes_no_click() {
         let mut sidebar = pulls();
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         let area = Rect::new(0, 0, 32, 8);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.place_rows(area);
+        let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         assert_eq!(number_spot(&drawn, 6).len(), "#246".len());
 
-        sidebar.top = 5;
-        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.set_top(5);
+        let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         assert_eq!((0..8).flat_map(|y| number_spot(&drawn, y)).count(), 0);
 
-        sidebar.top = 0;
+        sidebar.set_top(0);
         sidebar.notify("something went wrong".to_owned());
         let short = Rect::new(0, 0, 32, 7);
-        let drawn = sidebar.draw_rows(&mut Buffer::empty(short), short, moment(160_000));
+        sidebar.place_rows(short);
+        let drawn = sidebar.draw_rows(&mut Buffer::empty(short), short, test_wall());
         assert_eq!(number_spot(&drawn, 6), [] as [u16; 0]);
-        sidebar.notice = None;
+        let _ = sidebar.clear_notice();
 
         let area = Rect::new(0, 0, 32, 24);
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 5), area, test_wall());
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 7), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 7), area, test_wall()),
             Asked::Take
         );
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         assert_eq!((0..24).flat_map(|y| number_spot(&drawn, y)).count(), 0);
     }
 
@@ -11360,7 +12217,7 @@ mod tests {
     #[test]
     fn a_click_on_a_number_copies_and_does_nothing_else() {
         let mut sidebar = pulls();
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         let here = sidebar.lit_spot().cloned();
         let now = moment(160_000);
         sidebar.notify("what went wrong before".to_owned());
@@ -11369,16 +12226,19 @@ mod tests {
         assert_eq!(sidebar.keys, Keys::Terminal);
         assert_eq!(sidebar.notice, None);
 
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(tab_view_of("s", 10, 1, 1)));
         sidebar.key(&char('y'), now);
         sidebar.number_clicked(link());
         assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing);
     }
     fn clicks(sidebar: &mut Sidebar, from: u16) -> Vec<(String, Option<Hit>)> {
+        let now = moment(160_000);
+        let _ = sidebar.ticked(now, true);
         let area = Rect::new(0, 0, 32, 20);
         let mut buffer = Buffer::empty(area);
-        let drawn = sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.place_rows(area);
+        let drawn = sidebar.draw_rows(&mut buffer, area, now.system);
         let text = |y| (0..31).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         let click = |y| (text(y).trim_end().to_owned(), drawn.at(Position::new(4, y)));
         (from..20).map(click).collect()
@@ -11395,7 +12255,7 @@ mod tests {
     #[test]
     fn a_click_on_the_legend_or_the_menu_under_it_presses_its_key() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('?'), moment(160_000));
         let clicked = clicks(&mut sidebar, 0);
@@ -11455,10 +12315,10 @@ mod tests {
     fn q_quits_with_no_row_to_act_on_and_from_the_menu_but_is_typed_in_a_search() {
         let now = moment(160_000);
         let mut unheard = fresh();
-        unheard.focus(Keys::Sidebar);
+        unheard.focus(Keys::Sidebar, test_wall());
         assert_eq!(unheard.key(&char('q'), now), Asked::Quit);
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         assert_eq!(sidebar.key(&char('q'), now), Asked::Quit);
         sidebar.key(&char('m'), now);
         assert_eq!(sidebar.key(&char('q'), now), Asked::Quit);
@@ -11470,7 +12330,7 @@ mod tests {
     fn q_closes_a_group_the_list_of_all_keys_and_a_move_as_esc_does_but_quits_from_the_legend() {
         let now = moment(160_000);
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         for opens in ["o", "y", "g", "??"] {
             for key in opens.chars() {
                 sidebar.key(&char(key), now);
@@ -11497,7 +12357,7 @@ mod tests {
     #[test]
     fn a_click_on_the_legend_once_the_menu_took_its_place_does_nothing() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('?'), moment(160_000));
         sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
@@ -11518,6 +12378,7 @@ mod tests {
     }
 
     fn shows_at(sidebar: &mut Sidebar, at: Moment, start: &str) -> bool {
+        let _ = sidebar.ticked(at, true);
         seen_at(sidebar, true, 32, 20, at)
             .0
             .iter()
@@ -11527,7 +12388,7 @@ mod tests {
     #[test]
     fn a_group_shows_once_a_pause_passes_and_never_when_typed_fast() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         let now = moment(160_000);
         sidebar.key(&char('d'), now);
@@ -11565,7 +12426,7 @@ mod tests {
         let before = shows - Duration::from_millis(1);
         for (pressed, header) in [('d', "─ Close ─"), ('g', "─ Go "), ('y', "─ Yank ")] {
             let mut sidebar = two_sessions();
-            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(Keys::Sidebar, test_wall());
             step_onto_its_first_view(&mut sidebar);
             sidebar.key(&char(pressed), now);
             assert_eq!(sidebar.due(before), Some(shows.steady), "{pressed}");
@@ -11606,7 +12467,7 @@ mod tests {
     #[test]
     fn question_mark_opens_the_legend_and_the_next_key_closes_it() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let now = moment(160_000);
         let legend = " b  Brief ▸";
         assert!(!shows_at(&mut sidebar, now, legend));
@@ -11650,7 +12511,7 @@ mod tests {
     #[test]
     fn question_mark_in_the_legend_lists_every_key_and_esc_closes_it() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let here = sidebar.lit_spot().cloned();
         let now = moment(160_000);
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
@@ -11735,12 +12596,13 @@ mod tests {
     #[test]
     fn a_list_of_keys_short_of_room_ends_in_the_key_that_lists_them_all() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let now = moment(160_000);
         let area = Rect::new(0, 0, 32, 10);
         let drawn = |sidebar: &mut Sidebar| {
             let mut buffer = Buffer::empty(area);
-            let drawn = sidebar.draw_rows(&mut buffer, area, now);
+            sidebar.place_rows(area);
+            let drawn = sidebar.draw_rows(&mut buffer, area, now.system);
             let last = (0..31).map(|x| buffer[(x, 9)].symbol()).collect::<String>();
             (last.trim_end().to_owned(), drawn.at(Position::new(4, 9)))
         };
@@ -11759,7 +12621,7 @@ mod tests {
         assert_eq!(lines[8], " ?  All keys", "{lines:#?}");
         let mut buffer = Buffer::empty(area);
         let at = sidebar
-            .draw_rows(&mut buffer, area, now)
+            .draw_rows(&mut buffer, area, now.system)
             .at(Position::new(4, 8));
         assert_eq!(at, all);
         assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
@@ -11770,7 +12632,7 @@ mod tests {
     #[test]
     fn a_press_or_a_paste_closes_the_legend_and_the_list_of_every_key() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let now = moment(160_000);
         let area = Rect::new(0, 0, 32, 20);
         for opens in [&[char('?')][..], &[char('?'), char('?')]] {
@@ -11789,7 +12651,7 @@ mod tests {
             for key in opens {
                 sidebar.key(key, now);
             }
-            let asked = sidebar.paste("https://github.com/lorenzolfm/lune/pull/5");
+            let asked = sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall());
             assert_eq!(asked, Asked::Nothing);
             assert!(sidebar.open().is_some());
             sidebar.drop_menu(sidebar.menus);
@@ -11801,11 +12663,11 @@ mod tests {
     #[test]
     fn a_link_pasted_in_a_group_s_pause_shows_its_menu_at_once() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let now = moment(160_000);
         sidebar.key(&char('d'), now);
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         let soon = now + Duration::from_millis(1);
@@ -11816,7 +12678,7 @@ mod tests {
     #[test]
     fn a_click_on_a_skill_of_the_menu_under_the_rows_starts_an_agent_on_it() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         sidebar.key(&char('m'), moment(160_000));
         let dir = directory("/w/lune/main");
@@ -11878,11 +12740,13 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("agent");
         let mut sidebar = two_sessions();
-        sidebar.agent = Kept::within(file.clone()).0;
-        if let Some(host) = &mut sidebar.host {
-            host.agents[0].harness = Some(Harness::Pi.into());
-        }
-        sidebar.focus(Keys::Sidebar);
+        sidebar.edit(|state| {
+            state.agent = Kept::within(file.clone()).0;
+            if let Some(host) = &mut state.host {
+                host.agents[0].harness = Some(Harness::Pi.into());
+            }
+        });
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         let started = |session: &str, beside, harness, spelled| {
             let command = [harness, spelled].map(str::to_owned).to_vec();
@@ -11901,23 +12765,23 @@ mod tests {
         let pi = started("older", 1, "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
 
-        sidebar.focus(Keys::Terminal);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Terminal, test_wall());
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.end(true);
         type_in(&mut sidebar, "c");
         let claude = started("newer", 1, "claude", "/tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), claude);
 
-        sidebar.focus(Keys::Terminal);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Terminal, test_wall());
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "c");
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(sidebar.key(&tab, moment(160_000)), Asked::Nothing);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "pi\n");
         let pi = started("newer", 1, "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
-        sidebar.focus(Keys::Terminal);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Terminal, test_wall());
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "c");
         let pi = started("newer", 1, "pi", "/skill:tigerstyle");
         assert_eq!(sidebar.key(&char('s'), moment(160_000)), pi);
@@ -11926,9 +12790,10 @@ mod tests {
     #[test]
     fn a_key_of_the_menu_opens_it_for_the_highlighted_row() {
         let mut sidebar = own_two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
+        let _ = sidebar.ticked(moment(160_000) + PAUSE, true);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 17, moment(160_000) + PAUSE);
         assert_eq!(
             lines[9..],
@@ -11961,7 +12826,7 @@ mod tests {
             branch,
         };
         assert_eq!(branched(&mut sidebar, "fix"), made);
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert!(sidebar.open().is_none());
     }
 
@@ -11971,7 +12836,7 @@ mod tests {
         let own = own_session("own", 1, Vec::new());
         let sessions = vec![own_session("here", 2, Vec::new()), own];
         sidebar.hear(host(sessions, Vec::new()));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let remove = |sidebar: &mut Sidebar| {
             let own = Listed::new_project("own", 1);
             sidebar.light(Spot::Local(Place::Session(own)));
@@ -11985,7 +12850,7 @@ mod tests {
         };
         let closed = |ticket| close_here(project_closed("own", 1, &[], &[]), ticket);
         assert_eq!(remove(&mut sidebar), closed(1));
-        sidebar.sit(seat_in(2, None));
+        sidebar.sit(seat_in(2, None), test_wall());
         assert_eq!(remove(&mut sidebar), closed(2));
     }
 
@@ -11998,12 +12863,12 @@ mod tests {
             own_session("newest", 2, Vec::new()),
         ];
         sidebar.hear(host(sessions, Vec::new()));
-        sidebar.sit(seat_in(1, None));
+        sidebar.sit(seat_in(1, None), test_wall());
         assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW));
-        sidebar.sit(seat_in(1, Some(1)));
+        sidebar.sit(seat_in(1, Some(1)), test_wall());
         let twin = Listed::new_project("twin", 1);
         assert_eq!(sidebar.here_place(), Ok(view_place("twin", 1, 0, 1)));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(Place::Session(twin)));
         type_in(&mut sidebar, "d");
         assert_eq!(
@@ -12027,24 +12892,26 @@ mod tests {
             own_session("newest", 2, Vec::new()),
         ];
         sidebar.hear(host(sessions, Vec::new()));
-        sidebar.sit(seat_in(1, Some(1)));
-        sidebar.unseat();
+        sidebar.sit(seat_in(1, Some(1)), test_wall());
+        sidebar.unseat(test_wall());
         assert_eq!(sidebar.seated_in(), None);
         let view = view_key(1, 1);
         sidebar.light(Spot::Local(view_of("twin", 1, 1)));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "d");
         let act = Act::View(view);
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), close_here(act, 1));
     }
 
     fn check_out_pull(sidebar: &mut Sidebar, dir: &str, number: u32) {
-        let Some(host) = &mut sidebar.host else {
-            panic!("the sidebar has heard of no host");
-        };
-        let url = format!("https://github.com/lorenzolfm/lune/pull/{number}");
-        let pull = Some((State::Open, url.as_str()));
-        checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
+        sidebar.edit(|state| {
+            let Some(host) = &mut state.host else {
+                panic!("the sidebar has heard of no host");
+            };
+            let url = format!("https://github.com/lorenzolfm/lune/pull/{number}");
+            let pull = Some((State::Open, url.as_str()));
+            checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
+        });
     }
 
     #[test]
@@ -12052,7 +12919,7 @@ mod tests {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         check_out_pull(&mut sidebar, "/w/b", 5);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let young = WorktreePlace {
             project: project_row("young", 2),
             worktree: tab_of(2, 0),
@@ -12062,7 +12929,7 @@ mod tests {
             place: Place::Worktree(young),
         };
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5\n"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5\n", test_wall()),
             there
         );
         assert!(sidebar.open().is_none());
@@ -12077,20 +12944,24 @@ mod tests {
         sidebar.key(&char('m'), moment(160_000));
         assert!(sidebar.open().is_some());
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             there
         );
         assert!(sidebar.open().is_none());
 
         let as_an_issue = "https://github.com/lorenzolfm/lune/issues/5";
         assert_eq!(
-            sidebar.paste(as_an_issue),
+            sidebar.paste(as_an_issue, test_wall()),
             there,
             "GitHub numbers issues and pulls as one"
         );
         let elsewhere = ["lorenzolfm/lune/pull/6", "lorenzolfm/zed/pull/5"];
         for elsewhere in elsewhere.map(|it| format!("https://github.com/{it}")) {
-            assert_eq!(sidebar.paste(&elsewhere), Asked::Nothing, "{elsewhere}");
+            assert_eq!(
+                sidebar.paste(&elsewhere, test_wall()),
+                Asked::Nothing,
+                "{elsewhere}"
+            );
             assert!(sidebar.open().is_some(), "{elsewhere}");
             sidebar.drop_menu(sidebar.menus);
         }
@@ -12103,8 +12974,8 @@ mod tests {
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         check_out_pull(&mut sidebar, "/w/b", 5);
         check_out_pull(&mut sidebar, "/w/c", 5);
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste(link), Asked::Nothing);
+        sidebar.focus(Keys::Sidebar, test_wall());
+        assert_eq!(sidebar.paste(link, test_wall()), Asked::Nothing);
         assert!(sidebar.open().is_some());
     }
 
@@ -12113,11 +12984,11 @@ mod tests {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         check_out_pull(&mut sidebar, "/w/b", 7);
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste("ls -la"), Asked::Nothing);
+        sidebar.focus(Keys::Sidebar, test_wall());
+        assert_eq!(sidebar.paste("ls -la", test_wall()), Asked::Nothing);
         assert!(sidebar.open().is_none());
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5\n"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5\n", test_wall()),
             Asked::Nothing
         );
         let lines = screen(&mut sidebar, true, 32, 17);
@@ -12190,7 +13061,7 @@ mod tests {
         assert_eq!(sidebar.made_for(1), Some(Held::Open));
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.made_for(1), None);
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert!(sidebar.working.is_empty());
     }
 
@@ -12201,8 +13072,8 @@ mod tests {
         let number = 1;
         let pulling = || {
             let mut sidebar = own_two_sessions();
-            sidebar.focus(Keys::Sidebar);
-            assert_eq!(sidebar.paste(page), Asked::Nothing);
+            sidebar.focus(Keys::Sidebar, test_wall());
+            assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
             let Asked::Pull { .. } = sidebar.key(&char('r'), moment(160_000)) else {
                 panic!("no job for the key");
             };
@@ -12223,7 +13094,7 @@ mod tests {
         };
 
         let mut sidebar = pulling();
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.working.len(), 1);
         let lines = screen(&mut sidebar, false, 32, 17);
@@ -12248,12 +13119,12 @@ mod tests {
         assert!(sidebar.open().is_none());
 
         let mut sidebar = own_two_sessions();
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        sidebar.focus(Keys::Sidebar, test_wall());
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         let there = || {
             let work = Readied::Link(link());
             let at = At::There(view_place("older", 1, 0, 4));
@@ -12282,9 +13153,9 @@ mod tests {
     #[test]
     fn esc_closes_a_menu_that_waits_and_what_it_started_goes_on() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
@@ -12298,7 +13169,7 @@ mod tests {
         assert!(sidebar.open().is_none());
         assert!(sidebar.working.contains_key(&number));
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "m");
         assert!(sidebar.open().is_some());
         sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(161_000));
@@ -12310,23 +13181,23 @@ mod tests {
     fn a_link_pasted_again_while_its_worktree_goes_on_makes_nothing_of_its_own() {
         let page = "https://github.com/lorenzolfm/lune/pull/5";
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        sidebar.focus(Keys::Sidebar, test_wall());
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
         let number = sidebar.open().map_or(0, Menu::number);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         assert_eq!(sidebar.open().map(Menu::number), Some(number));
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert!(sidebar.working.contains_key(&number));
-        sidebar.notice = None;
-        sidebar.focus(Keys::Terminal);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        let _ = sidebar.clear_notice();
+        sidebar.focus(Keys::Terminal, test_wall());
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         assert!(sidebar.open().is_none());
         assert_eq!(sidebar.notice.as_deref(), Some("#5 is on its way"));
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/issues/6"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/issues/6", test_wall()),
             Asked::Nothing
         );
         assert!(sidebar.open().is_some());
@@ -12336,9 +13207,9 @@ mod tests {
     fn a_link_pasted_again_before_a_key_opens_its_menu_again() {
         let page = "https://github.com/lorenzolfm/lune/pull/5";
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        sidebar.focus(Keys::Sidebar, test_wall());
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
         assert_eq!(sidebar.notice, None);
         assert!(sidebar.working.is_empty());
@@ -12348,12 +13219,12 @@ mod tests {
     fn a_pull_picked_in_the_palette_asks_as_its_key_in_the_pasted_menu_does() {
         let page = "https://github.com/lorenzolfm/lune/pull/5";
         let mut pasted = own_two_sessions();
-        pasted.focus(Keys::Sidebar);
-        assert_eq!(pasted.paste(page), Asked::Nothing);
+        pasted.focus(Keys::Sidebar, test_wall());
+        assert_eq!(pasted.paste(page, test_wall()), Asked::Nothing);
         let keyed = pasted.key(&char('r'), moment(160_000));
         assert!(matches!(keyed, Asked::Pull { .. }), "{keyed:?}");
         let mut picked = own_two_sessions();
-        picked.focus(Keys::Sidebar);
+        picked.focus(Keys::Sidebar, test_wall());
         let target = picked.target().expect("a row is highlighted");
         let work = Work::parse(page, None).expect("a pull request's link");
         let pull = |sidebar: &mut Sidebar| {
@@ -12368,8 +13239,8 @@ mod tests {
     fn a_menu_that_waits_goes_on_when_another_takes_its_place() {
         let waiting = || {
             let mut sidebar = own_two_sessions();
-            sidebar.focus(Keys::Sidebar);
-            let asked = sidebar.paste("https://github.com/lorenzolfm/lune/pull/5");
+            sidebar.focus(Keys::Sidebar, test_wall());
+            let asked = sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall());
             assert_eq!(asked, Asked::Nothing);
             let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
                 panic!("no job for the key");
@@ -12378,7 +13249,7 @@ mod tests {
         };
         let mut sidebar = waiting();
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/issues/6"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/issues/6", test_wall()),
             Asked::Nothing
         );
         assert_eq!(sidebar.open().map(Menu::number), Some(2));
@@ -12394,9 +13265,9 @@ mod tests {
     #[test]
     fn a_kept_menu_s_last_answer_leaves_the_open_menu_alone() {
         let mut sidebar = own_two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
@@ -12404,7 +13275,7 @@ mod tests {
         };
         sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(161_000));
         let page = "https://github.com/lorenzolfm/lune/issues/6";
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(162_000)) else {
             panic!("no job for the key");
         };
@@ -12443,7 +13314,7 @@ mod tests {
     #[test]
     fn a_md_file_s_path_pasted_opens_the_menu_for_it() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         for text in [
             "notes.txt",
@@ -12452,7 +13323,7 @@ mod tests {
             "github.com/o/r/blob/main/README.md",
             ".md",
         ] {
-            assert_eq!(sidebar.paste(text), Asked::Nothing);
+            assert_eq!(sidebar.paste(text, test_wall()), Asked::Nothing);
             assert!(sidebar.open().is_none(), "{text:?}");
         }
         let Some(Target::View(on, row)) = sidebar.target() else {
@@ -12460,7 +13331,7 @@ mod tests {
         };
         let from = row.cwd.at().map(|folder| folder.dir.clone());
         assert_eq!(
-            sidebar.paste("  docs/plans/sync-rework.md\n"),
+            sidebar.paste("  docs/plans/sync-rework.md\n", test_wall()),
             Asked::Nothing
         );
         let lines = screen(&mut sidebar, true, 39, 17);
@@ -12484,9 +13355,9 @@ mod tests {
         assert_eq!(Some(work), Work::parse("docs/plans/sync-rework.md", from));
 
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(Place::Session(listed("older", 10))));
-        assert_eq!(sidebar.paste("/w/plan.md"), Asked::Nothing);
+        assert_eq!(sidebar.paste("/w/plan.md", test_wall()), Asked::Nothing);
         let Asked::Pull { work, .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
@@ -12498,8 +13369,8 @@ mod tests {
         let page = "https://github.com/lorenzolfm/lune/issues/5";
         let pressed = |key: char, branch: Option<&str>, moved_off: bool| {
             let mut sidebar = own_two_sessions();
-            sidebar.focus(Keys::Sidebar);
-            assert_eq!(sidebar.paste(page), Asked::Nothing);
+            sidebar.focus(Keys::Sidebar, test_wall());
+            assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
             let number = sidebar.open().map_or(0, Menu::number);
             let Asked::Pull { wanted, .. } = sidebar.key(&char(key), moment(160_000)) else {
                 panic!("no job for the key");
@@ -12522,7 +13393,7 @@ mod tests {
                     ready,
                 }),
             );
-            (matches!(asked, Asked::Make { .. }), sidebar.notice)
+            (matches!(asked, Asked::Make { .. }), sidebar.notice.clone())
         };
         let on_dev_docs = "#5's worktree is on dev-docs, not issue-5";
         assert_eq!(
@@ -12544,12 +13415,12 @@ mod tests {
         let page = "https://github.com/lorenzolfm/lune/issues/5";
         for floats in [false, true] {
             let mut sidebar = two_sessions();
-            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(Keys::Sidebar, test_wall());
             if floats {
                 sit(&mut sidebar, &view_of("older", 10, 1));
                 float_a_menu(&mut sidebar);
             }
-            assert_eq!(sidebar.paste(page), Asked::Nothing);
+            assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
             let number = sidebar.open().map_or(0, Menu::number);
             let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
                 panic!("no job for the key");
@@ -12590,10 +13461,11 @@ mod tests {
         let claude = view(1, 0, "/w/lune/main", "claude");
         let agents = vec![agent("s", 1, Status::Idle, None)];
         sidebar.hear(host(vec![session("s", 10, vec![claude])], agents));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "j");
         assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 1)));
         assert_eq!(sidebar.key(&char('n'), moment(160_000)), Asked::Nothing);
+        let _ = sidebar.ticked(moment(160_000) + PAUSE, true);
         let (lines, _) = seen_at(&mut sidebar, true, 32, 13, moment(160_000) + PAUSE);
         assert_eq!(lines[5], "─ New ───────────── lune/main ─", "{lines:?}");
         let (project, beside) = (listed("s", 10).project(), view_key(10, 1));
@@ -12614,7 +13486,7 @@ mod tests {
         let failed = in_shell(1, ended("cargo test", Some(101), 3000));
         let busy = in_shell(2, going("make", 100, Front::Working));
         sidebar.hear(host(vec![session("s", 10, vec![failed, busy])], Vec::new()));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "j");
         assert_eq!(lit_place(&sidebar), Some(view_of("s", 10, 1)));
         type_in(&mut sidebar, "c");
@@ -12694,14 +13566,14 @@ mod tests {
         let mut sidebar = fresh();
         let failed = in_shell(1, ended("cargo test", Some(101), 3000));
         sidebar.hear(host(vec![own_session("s", 1, vec![failed])], Vec::new()));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "Gc");
         let asked = sidebar.key(&char('f'), moment(160_000));
         let project = own_listed("s", 1);
         let printed = matches!(&asked, Asked::Printed { session, .. } if *session == project);
         assert!(printed, "{asked:?}");
         let number = sidebar.open().map_or(0, Menu::number);
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert_eq!(sidebar.working.len(), 1);
         let lines = screen(&mut sidebar, false, 40, 17);
         let notes: String = lines[14..].join(" ");
@@ -12728,13 +13600,13 @@ mod tests {
         let page = "https://github.com/lorenzolfm/lune/pull/5";
         let left = |at| {
             let mut sidebar = two_sessions();
-            sidebar.focus(Keys::Sidebar);
-            assert_eq!(sidebar.paste(page), Asked::Nothing);
+            sidebar.focus(Keys::Sidebar, test_wall());
+            assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
             let number = sidebar.open().map_or(0, Menu::number);
             let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
                 panic!("no job for the key");
             };
-            sidebar.focus(Keys::Terminal);
+            sidebar.focus(Keys::Terminal, test_wall());
             let work = Readied::Link(Link::parse(page).unwrap());
             let folder = directory("/w/lune/feat");
             let ready = Ready {
@@ -12766,13 +13638,13 @@ mod tests {
     fn a_kept_menu_that_starts_no_agent_on_a_worktree_moved_off_says_so() {
         let page = "https://github.com/lorenzolfm/lune/issues/5";
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
-        assert_eq!(sidebar.paste(page), Asked::Nothing);
+        sidebar.focus(Keys::Sidebar, test_wall());
+        assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         let number = sidebar.open().map_or(0, Menu::number);
         let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
             panic!("no job for the key");
         };
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         let at = At::Unopened;
         let branch = Said::new("dev-docs".to_owned());
         let (folder, work) = ("/w/lune/issue-5", Readied::Link(Link::parse(page).unwrap()));
@@ -12829,7 +13701,7 @@ mod tests {
             stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
-        sidebar.sit(seat_in(1, None));
+        sidebar.sit(seat_in(1, None), test_wall());
         sidebar.float_menu();
         assert!(matches!(
             sidebar.floating(),
@@ -12838,20 +13710,21 @@ mod tests {
         sidebar.close_note();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
 
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "hhjj");
         assert!(folded(&sidebar, "older"));
         assert_eq!(lit_place(&sidebar), Some(own_view_of("young", 2, 1)));
         let standing = |sidebar: &mut Sidebar| {
             let area = Rect::new(0, 0, 32, 14);
             let mut buffer = Buffer::empty(area);
-            sidebar.draw_rows(&mut buffer, area, moment(160_000));
+            sidebar.place_rows(area);
+            sidebar.draw_rows(&mut buffer, area, test_wall());
             let row = |y| (0..32).map(|x| buffer[(x, y)].symbol()).collect::<String>();
             (0..14).map(row).collect::<Vec<_>>()
         };
-        sidebar.focus(Keys::Lent);
+        sidebar.focus(Keys::Lent, test_wall());
         let lent = standing(&mut sidebar);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         float_a_menu(&mut sidebar);
         assert_eq!(standing(&mut sidebar), lent);
         let target = floating_menu(&sidebar).map(Menu::target).cloned();
@@ -12883,7 +13756,7 @@ mod tests {
         };
         assert_eq!(branched(&mut sidebar, "feat"), made);
         assert!(sidebar.floating().is_none());
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
 
         float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "c");
@@ -12898,7 +13771,7 @@ mod tests {
             opens,
         };
         assert_eq!(sidebar.key(&char('t'), moment(160_000)), view);
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert!(sidebar.open().is_none());
     }
 
@@ -12915,11 +13788,14 @@ mod tests {
             },
         };
         let project = older.worktree.project.id();
-        sidebar.sit(Seat {
-            on: Machine::Local,
-            project,
-            at,
-        });
+        sidebar.sit(
+            Seat {
+                on: Machine::Local,
+                project,
+                at,
+            },
+            test_wall(),
+        );
         float_a_menu(&mut sidebar);
         let expected = Asked::Arrange {
             asking: Held::Open,
@@ -12978,29 +13854,38 @@ mod tests {
                 layout,
             },
         };
-        sidebar.sit(seat_with(SeatedLayout::Live {
-            arranged: Arranged::Panes,
-            version: Some(version(11)),
-            terminal: Some(older.view.key()),
-        }));
+        sidebar.sit(
+            seat_with(SeatedLayout::Live {
+                arranged: Arranged::Panes,
+                version: Some(version(11)),
+                terminal: Some(older.view.key()),
+            }),
+            test_wall(),
+        );
         assert_eq!(
             arranged_of(&sidebar),
             Some(Arranged::Panes),
             "newer show beats older watch"
         );
 
-        sidebar.sit(seat_with(SeatedLayout::Live {
-            arranged: Arranged::Panes,
-            version: Some(version(9)),
-            terminal: Some(older.view.key()),
-        }));
+        sidebar.sit(
+            seat_with(SeatedLayout::Live {
+                arranged: Arranged::Panes,
+                version: Some(version(9)),
+                terminal: Some(older.view.key()),
+            }),
+            test_wall(),
+        );
         assert_eq!(
             arranged_of(&sidebar),
             Some(Arranged::Tabs),
             "newer watch beats stale show"
         );
 
-        sidebar.sit(seat_with(SeatedLayout::Disconnected(older.view.key())));
+        sidebar.sit(
+            seat_with(SeatedLayout::Disconnected(older.view.key())),
+            test_wall(),
+        );
         assert_eq!(
             arranged_of(&sidebar),
             Some(Arranged::Tabs),
@@ -13107,13 +13992,13 @@ mod tests {
 
         float_a_menu(&mut sidebar);
         type_in(&mut sidebar, "nw");
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert_eq!(
             (floated(&sidebar).as_deref(), sidebar.notice.as_deref()),
             (None, Some(wrong))
         );
 
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "nw");
         assert_eq!(
             (floated(&sidebar).as_deref(), sidebar.notice.as_deref()),
@@ -13172,7 +14057,7 @@ mod tests {
         );
         sidebar.close_menu();
 
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let Aim::At { target, .. } = sidebar.aimed_row() else {
             panic!("in the sidebar, it aims at the highlighted row");
         };
@@ -13201,9 +14086,9 @@ mod tests {
     #[test]
     fn a_sidebar_key_from_the_palette_runs_on_the_row_it_named_and_on_no_other() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let bipa = Spot::Local(Place::Session(listed("bipa", 10)));
-        sidebar.lit = None;
+        sidebar.edit(|state| state.lit = None);
         assert_eq!(sidebar.aimed_row(), Aim::Unplaced(PALETTE_NO_ROW));
         sidebar.light(bipa.clone());
         let Aim::At { target, .. } = sidebar.aimed_row() else {
@@ -13236,7 +14121,7 @@ mod tests {
     fn a_floating_menu_ends_the_search_under_it_and_holds_the_keys_until_it_closes() {
         let mut sidebar = two_sessions();
         sit(&mut sidebar, &view_of("older", 10, 1));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "/old");
         assert_eq!(sidebar.holding(), Holding::Search);
         float_a_menu(&mut sidebar);
@@ -13253,7 +14138,7 @@ mod tests {
             "Esc gives the keys back"
         );
         float_a_menu(&mut sidebar);
-        sidebar.focus(Keys::Lent);
+        sidebar.focus(Keys::Lent, test_wall());
         assert!(
             sidebar.floating().is_none(),
             "a box over the sidebar closes the menu"
@@ -13284,7 +14169,7 @@ mod tests {
             stands: Some(api::git_status::Stands::Checkout(checkout)),
         }];
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         let older = || SessionName::parse("older").unwrap();
         let fold = Note {
@@ -13346,7 +14231,7 @@ mod tests {
         let views = || vec![session("work", 10, vec![view(1, 0, "/w/a", "claude")])];
         let fold = in_own(agent("work", 1, Status::Idle, Some("fold")), 10, 1);
         sidebar.hear(host(views(), vec![fold]));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(view_of("work", 10, 1)));
         type_in(&mut sidebar, "b");
         let restarted = |key: api::TerminalKey| api::TerminalKey {
@@ -13411,7 +14296,7 @@ mod tests {
             session("alone", 20, vec![view(3, 0, "/w/c", "pi")]),
         ];
         sidebar.hear(host(sessions, vec![pi, claude, alone]));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let note = "brief: lune reads only Claude Code's and Antigravity's transcripts so far";
 
         for (place, key) in [
@@ -13460,7 +14345,7 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(two_each());
         let on = || Machine::Remote(nixos());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "b");
         let name = |name: &str| SessionName::parse(name).unwrap();
         let sessions = vec![
@@ -13493,7 +14378,7 @@ mod tests {
     fn the_brief_s_keys_brief_you_on_another_machine_s_agents() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let on = || Machine::Remote(nixos());
         let main = || SessionName::parse("main").unwrap();
         let fix = Note {
@@ -13583,7 +14468,7 @@ mod tests {
         let away = (away, "luned: gone", "luned does not answer");
         for (untold, note, why) in [away, (unreadable, unread, unplaced.as_str())] {
             let mut sidebar = two_sessions();
-            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(Keys::Sidebar, test_wall());
             untold(&mut sidebar);
             sidebar.end(true);
             type_in(&mut sidebar, "d");
@@ -13602,7 +14487,7 @@ mod tests {
     fn a_close_asks_first_where_an_agent_s_session_file_does_not_read() {
         for (view, asks) in [(1, true), (7, false)] {
             let mut sidebar = two_sessions();
-            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(Keys::Sidebar, test_wall());
             let host = sidebar
                 .host
                 .clone()
@@ -13668,7 +14553,7 @@ mod tests {
                 project: project_row("twin", 1),
                 worktree,
             };
-            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(Keys::Sidebar, test_wall());
             sidebar.light(Spot::Local(Place::Worktree(place)));
             type_in(&mut sidebar, "d");
             let went = sidebar.key(&char('d'), moment(160_000));
@@ -13719,7 +14604,7 @@ mod tests {
 
     fn on_nvim() -> Sidebar {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.step(2);
         assert_eq!(lit_place(&sidebar), Some(tab_view_of("older", 10, 1, 2)));
         sidebar
@@ -13825,7 +14710,7 @@ mod tests {
     fn on_the_last_row() -> Sidebar {
         let mut sidebar = fresh();
         sidebar.hear(last_with(&[1, 2]));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.step(9);
         assert_eq!(lit_place(&sidebar), Some(tab_view_of("last", 2, 1, 2)));
         sidebar
@@ -13870,7 +14755,7 @@ mod tests {
     fn a_project_s_close_lands_on_another_project_of_its_name() {
         let mut sidebar = fresh();
         sidebar.hear(twins(true));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(Place::Session(Listed::new_project("twin", 1))));
         type_in(&mut sidebar, "d");
         assert_eq!(
@@ -13896,7 +14781,7 @@ mod tests {
     fn a_close_that_ends_an_agent_at_work_asks_and_looks_again() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
         assert_eq!(bottom(&mut sidebar), " <y> Yes <BS> Back <ESC> Close");
@@ -13946,11 +14831,15 @@ mod tests {
     #[test]
     fn v_selects_worktrees_that_shifted_j_and_k_move() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "jvjjk");
         let (_, lit) = drawn_rows(&mut sidebar);
         assert_eq!(lit, [1, 2, 3, 4]);
-        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 4), Rect::new(0, 0, 32, 26));
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Moved, 10, 4),
+            Rect::new(0, 0, 32, 26),
+            test_wall(),
+        );
         let shifted = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
         let seen = vec![tab_of(10, 0), tab_of(10, 1), tab_of(10, 2)];
         let wanted = vec![tab_of(10, 2), tab_of(10, 0), tab_of(10, 1)];
@@ -13981,7 +14870,7 @@ mod tests {
     #[test]
     fn a_folded_project_is_selected_from_its_row() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "Ghhv");
         let asked = sidebar.key(&char('K'), moment(160_000));
         let order = projects(&[10, 20, 30], &[10, 30, 20]);
@@ -14013,9 +14902,13 @@ mod tests {
         };
         let (bipa, notes) = (row(" ● bipa"), row(" ● notes"));
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, notes), area);
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Down(left), 10, notes),
+            area,
+            test_wall(),
+        );
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 20), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 20), area, test_wall()),
             Asked::Take
         );
         let (rows, lit) = drawn_rows(&mut sidebar);
@@ -14028,7 +14921,7 @@ mod tests {
             ticket: 1,
         };
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 20), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 20), area, test_wall()),
             asked
         );
 
@@ -14038,8 +14931,16 @@ mod tests {
             .position(|line| line.starts_with(" ● notes"))
             .unwrap();
         let notes = u16::try_from(notes).unwrap();
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, notes), area);
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, bipa), area);
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Down(left), 10, notes),
+            area,
+            test_wall(),
+        );
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Drag(left), 10, bipa),
+            area,
+            test_wall(),
+        );
         let order = projects(&[10, 30, 20], &[20, 10, 30]);
         let asked = Asked::Move {
             on: Machine::Local,
@@ -14047,7 +14948,7 @@ mod tests {
             ticket: 1,
         };
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, bipa), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, bipa), area, test_wall()),
             asked
         );
     }
@@ -14059,12 +14960,14 @@ mod tests {
         for (onto, wanted) in [(" ▸ bipa", [20, 10, 30]), (" ▸ zed", [10, 30, 20])] {
             let mut sidebar = searched();
             for id in [10, 20, 30] {
-                sidebar.folds.set(
-                    Fold::Project(&Machine::Local, ProjectId::of(id).unwrap()),
-                    true,
-                );
+                sidebar.edit(|state| {
+                    let _ = state.folds.set(
+                        Fold::Project(&Machine::Local, ProjectId::of(id).unwrap()),
+                        true,
+                    );
+                });
             }
-            sidebar.rebuild();
+            sidebar.rebuild(test_wall());
             let lines = screen(&mut sidebar, true, area.width, area.height);
             let row = |name: &str| {
                 let at = lines
@@ -14074,15 +14977,19 @@ mod tests {
                 u16::try_from(at).unwrap()
             };
             let (notes, to) = (row(" ▸ notes"), row(onto));
-            sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, notes), area);
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, to), area);
+            sidebar.mouse_rows(
+                mouse(MouseEventKind::Down(left), 10, notes),
+                area,
+                test_wall(),
+            );
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, to), area, test_wall());
             let order = projects(&[10, 20, 30], &wanted);
             let asked = Asked::Move {
                 on: Machine::Local,
                 order,
                 ticket: 1,
             };
-            let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, to), area);
+            let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, to), area, test_wall());
             assert_eq!(up, asked, "{onto}");
         }
     }
@@ -14094,17 +15001,17 @@ mod tests {
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
         let lift_notes = |sidebar: &mut Sidebar| {
-            sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 5), area);
+            sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area, test_wall());
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 5), area, test_wall());
             assert_ne!(drawn_rows(sidebar).0, listed);
         };
         lift_notes(&mut sidebar);
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 40, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 40, 5), area, test_wall());
         assert_eq!(
             drawn_rows(&mut sidebar),
             (listed.clone(), (8..11).collect())
         );
-        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 40, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 40, 5), area, test_wall());
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_notes(&mut sidebar);
@@ -14116,15 +15023,15 @@ mod tests {
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         lift_notes(&mut sidebar);
-        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 5), area);
-        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 10, 5), area, test_wall());
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 5), area, test_wall());
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
     #[test]
     fn a_row_reordered_by_v_or_dragged_holds_the_keys_until_it_lands() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         assert_eq!(sidebar.holding(), Holding::Nothing);
         sidebar.light(Spot::Local(Place::Session(listed("bipa", 10))));
         type_in(&mut sidebar, "v");
@@ -14135,26 +15042,26 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area, test_wall());
         assert_eq!(sidebar.holding(), Holding::Press, "the press");
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 5), area, test_wall());
         assert_ne!(drawn_rows(&mut sidebar).0, listed, "a row is lifted");
         assert_eq!(sidebar.holding(), Holding::Press, "the drag");
-        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 5), area, test_wall());
         assert_eq!(sidebar.holding(), Holding::Nothing, "the row landed");
     }
 
     #[test]
     fn the_left_button_down_has_the_keys() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let area = Rect::new(0, 0, 32, 26);
         drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area, test_wall());
         type_in(&mut sidebar, "vn");
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 4), area);
-        let asked = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 4), area, test_wall());
+        let asked = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 4), area, test_wall());
         let order = projects(&[10, 20, 30], &[20, 10, 30]);
         assert_eq!(
             asked,
@@ -14166,13 +15073,13 @@ mod tests {
         );
         assert!(sidebar.open().is_none());
 
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 6), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 6), area, test_wall());
         assert_eq!(
             sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(160_000)),
             Asked::Nothing
         );
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 6), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 6), area, test_wall()),
             Asked::Nothing
         );
     }
@@ -14180,24 +15087,25 @@ mod tests {
     #[test]
     fn a_search_typed_lifts_no_session() {
         let mut sidebar = searched();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "/z");
         let area = Rect::new(0, 0, 32, 22);
         let (listed, _) = drawn_rows(&mut sidebar);
         assert_eq!(listed[0], " ● zed");
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 4), area, test_wall());
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 6), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 6), area, test_wall()),
             Asked::Nothing
         );
-        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 6), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, 6), area, test_wall());
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
     }
 
     fn framed(sidebar: &mut Sidebar, area: Rect) -> Buffer {
         let mut buffer = Buffer::empty(area);
-        sidebar.draw_rows(&mut buffer, area, moment(160_000));
+        sidebar.place_rows(area);
+        sidebar.draw_rows(&mut buffer, area, test_wall());
         buffer
     }
 
@@ -14213,8 +15121,16 @@ mod tests {
 
     fn dragged(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) {
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), from.0, from.1), area);
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), to.0, to.1), area);
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Down(left), from.0, from.1),
+            area,
+            test_wall(),
+        );
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Drag(left), to.0, to.1),
+            area,
+            test_wall(),
+        );
     }
 
     fn swept(sidebar: &mut Sidebar, area: Rect, from: (u16, u16), to: (u16, u16)) -> Asked {
@@ -14222,6 +15138,7 @@ mod tests {
         sidebar.mouse_rows(
             mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1),
             area,
+            test_wall(),
         )
     }
 
@@ -14245,16 +15162,20 @@ mod tests {
         );
         assert_eq!(swept(&mut sidebar, area, (13, 6), (9, 6)), copied("p-i-x"));
         dragged(&mut sidebar, area, (7, 6), (9, 6));
-        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), 13, 6), area);
+        let up = sidebar.mouse_rows(
+            mouse(MouseEventKind::Up(MouseButton::Left), 13, 6),
+            area,
+            test_wall(),
+        );
         assert_eq!(up, copied("a-p-i-x"));
         assert_eq!(swept(&mut sidebar, area, (3, 0), (6, 0)), copied("lune"));
         assert_eq!(sidebar.lit_spot().cloned(), here);
 
         dragged(&mut sidebar, area, (9, 6), (11, 6));
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 40, 8), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 40, 8), area, test_wall());
         assert!(sidebar.pressed());
-        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 40, 8), area);
+        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 40, 8), area, test_wall());
         assert_eq!(up, copied("p-i-x\n  ▾ Tab #2\n       dda-bank-slip"));
         assert!(!sidebar.pressed());
 
@@ -14280,22 +15201,26 @@ mod tests {
         let area = Rect::new(0, 0, 32, 26);
         let (listed, _) = drawn_rows(&mut sidebar);
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 3, 4), area);
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 6, 4), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 3, 4), area, test_wall());
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 6, 4), area, test_wall());
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 7, 5), area),
+            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 7, 5), area, test_wall()),
             Asked::Nothing
         );
-        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 7, 5), area);
+        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 7, 5), area, test_wall());
         assert_eq!(up, copied("bipa\n  ▾ Tab"));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
         assert_eq!(swept(&mut sidebar, area, (3, 4), (6, 4)), copied("bipa"));
         assert_eq!(drawn_rows(&mut sidebar).0, listed);
 
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 12), area, test_wall());
         let drag = |sidebar: &mut Sidebar, row| {
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 11, row), area)
+            sidebar.mouse_rows(
+                mouse(MouseEventKind::Drag(left), 11, row),
+                area,
+                test_wall(),
+            )
         };
         assert_eq!(drag(&mut sidebar, 12), Asked::Nothing);
         assert_eq!(drag(&mut sidebar, 13), Asked::Take);
@@ -14310,11 +15235,15 @@ mod tests {
         let cells = [(7, 6), (8, 6), (9, 6)];
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
 
-        let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
+        let up = sidebar.mouse_rows(
+            mouse(MouseEventKind::Up(MouseButton::Left), 9, 6),
+            area,
+            test_wall(),
+        );
         assert_eq!(up, copied("a-p"));
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
-        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 20, 13), area);
-        sidebar.hear(searched().host.unwrap());
+        sidebar.mouse_rows(mouse(MouseEventKind::Moved, 20, 13), area, test_wall());
+        sidebar.hear(searched().host.clone().unwrap());
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
         sidebar.hear(first_view_is(1, "a-p-i-y"));
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
@@ -14339,14 +15268,14 @@ mod tests {
             host(vec![session("bipa", 10, views)], Vec::new())
         };
         let branch_too = || {
-            let mut listed = searched().host.unwrap();
+            let mut listed = searched().host.clone().unwrap();
             let (statuses, pulls) = (&mut listed.git_statuses, &mut listed.pull_requests);
             checked_out(statuses, pulls, "/w/a", "main", None);
             listed
         };
         let moves: [&dyn Fn(&mut Sidebar); 7] = [
             &|sidebar| {
-                sidebar.mouse_rows(mouse(MouseEventKind::ScrollDown, 7, 5), area);
+                sidebar.mouse_rows(mouse(MouseEventKind::ScrollDown, 7, 5), area, test_wall());
             },
             &|sidebar| {
                 sidebar.hear(more_rows());
@@ -14364,7 +15293,8 @@ mod tests {
                 framed(sidebar, Rect::new(0, 0, 28, 26));
             },
             &|sidebar| {
-                sidebar.draw_collapsed_rows(&mut Buffer::empty(area), area, moment(160_000));
+                sidebar.collapse_rows(area);
+                sidebar.draw_collapsed_rows(&mut Buffer::empty(area), area);
             },
         ];
         for (case, moved) in moves.iter().enumerate() {
@@ -14393,7 +15323,7 @@ mod tests {
         let gone = now + COPIED_SHOWS;
         let _ = sidebar.ticked(gone, true);
         assert_eq!(reversed(&framed(&mut sidebar, area)), cells);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.key(&char('?'), gone);
         assert_eq!(
             reversed(&framed(&mut sidebar, area)),
@@ -14423,7 +15353,7 @@ mod tests {
                 sidebar.key(&esc, moment(160_000));
             },
             &|sidebar| {
-                sidebar.mouse_rows(mouse(MouseEventKind::Moved, 9, 6), area);
+                sidebar.mouse_rows(mouse(MouseEventKind::Moved, 9, 6), area, test_wall());
             },
         ];
         for (case, let_go) in lets_go.iter().enumerate() {
@@ -14435,7 +15365,11 @@ mod tests {
             assert!(!sidebar.pressed(), "case {case}");
             assert_eq!(sidebar.notice.as_deref(), Some("a note"), "case {case}");
             assert_eq!(reversed(&framed(&mut sidebar, area)), [], "case {case}");
-            let up = sidebar.mouse_rows(mouse(MouseEventKind::Up(MouseButton::Left), 9, 6), area);
+            let up = sidebar.mouse_rows(
+                mouse(MouseEventKind::Up(MouseButton::Left), 9, 6),
+                area,
+                test_wall(),
+            );
             assert_eq!(up, Asked::Nothing, "case {case}");
         }
     }
@@ -14464,7 +15398,7 @@ mod tests {
         checked_out(statuses, pulls, "/w/a", long, Some((State::Open, LINK)));
         local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
         let mut sidebar = fresh();
-        sidebar.this = long.to_owned();
+        sidebar.edit(|state| state.this = long.to_owned());
         sidebar.hear(local);
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
@@ -14486,7 +15420,7 @@ mod tests {
         }
         assert_eq!(swept(&mut sidebar, area, (7, 7), (11, 7)), copied("a-tex"));
 
-        sidebar.mouse_rows(mouse(MouseEventKind::ScrollDown, 7, 5), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::ScrollDown, 7, 5), area, test_wall());
         framed(&mut sidebar, area);
         assert_eq!(swept(&mut sidebar, area, (7, 4), (22, 4)), copied(long));
     }
@@ -14525,8 +15459,8 @@ mod tests {
         let first = |sidebar: &mut Sidebar| screen(sidebar, true, 32, 7)[HEADER].clone();
         assert_eq!(first(&mut sidebar), " ▾ \u{f108} MAC");
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 4), area);
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 6), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, 4), area, test_wall());
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 6), area, test_wall());
         let tick = |sidebar: &mut Sidebar, millis: u64| {
             let _ = sidebar.ticked(moment(160_000 + millis), true);
             first(sidebar)
@@ -14538,7 +15472,7 @@ mod tests {
             firsts.push(tick(&mut sidebar, millis));
         }
         let end = sidebar.scrolling();
-        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 3), area);
+        sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, 3), area, test_wall());
         let lifted = [
             "",
             "",
@@ -14643,7 +15577,7 @@ mod tests {
     fn a_machine_folds_its_projects_away_and_unfolds_them() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let nixos_machine = Machine::Remote(nixos());
         let header = Spot::Machine(nixos_machine.clone());
         let project = Spot::Remote(nixos(), Place::Session(listed("main", 20)));
@@ -14706,10 +15640,12 @@ mod tests {
                 .map(|machine| sidebar.folds.contains(Fold::Machine(&machine)))
         };
         sidebar.hear(machines());
-        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
-        sidebar
-            .folds
-            .set(Fold::Machine(&Machine::Remote(nixos())), true);
+        sidebar.edit(|state| {
+            let _ = state.folds.set(Fold::Machine(&Machine::Local), true);
+            let _ = state
+                .folds
+                .set(Fold::Machine(&Machine::Remote(nixos())), true);
+        });
         sidebar.hear(machines());
         assert_eq!(folded(&sidebar), [true, true]);
         let none = up(Vec::new(), Vec::new());
@@ -14727,7 +15663,9 @@ mod tests {
     #[test]
     fn a_machine_s_fold_no_lune_saw_go_goes_on_the_first_listing() {
         let mut sidebar = fresh();
-        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
+        sidebar.edit(|state| {
+            let _ = state.folds.set(Fold::Machine(&Machine::Local), true);
+        });
         sidebar.hear(host(Vec::new(), Vec::new()));
         assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
         sidebar.hear(host(vec![session("x", 10, Vec::new())], Vec::new()));
@@ -14739,7 +15677,7 @@ mod tests {
     fn h_folds_a_view_s_worktree_then_its_project_and_l_unfolds() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let machine = Machine::Remote(nixos());
         let (main, tab) = (ProjectId::of(20).unwrap(), tab_of(20, 0));
         let fix = view_of("main", 20, 1);
@@ -14788,7 +15726,7 @@ mod tests {
         there.git_statuses.push(status.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let place = view_place("main", 20, 0, 1);
         let spot = Spot::Remote(nixos(), Place::View(place));
         sidebar.light(spot.clone());
@@ -14861,7 +15799,7 @@ mod tests {
         there.git_statuses.push(status.to_api("/w/b"));
         let mut sidebar = fresh();
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let place = view_place("main", 20, 0, 1);
         let place = Place::View(place);
         sidebar.light(Spot::Remote(nixos(), place));
@@ -14928,7 +15866,7 @@ mod tests {
         sidebar.key(&char('d'), now);
         let number = sidebar.open().expect("the menu").number();
         sidebar.key(&char('m'), now);
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert_eq!(sidebar.prunes(number, Ok(plan)), Asked::Nothing);
         assert!(sidebar.working.is_empty());
         let note = "menu: nothing deleted: the menu closed before you said yes; d m asks again";
@@ -14962,31 +15900,33 @@ mod tests {
         });
         let mut sidebar = fresh();
         sidebar.hear(host.clone());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(view_of("main", 10, 1)));
         let far = Asked::Go {
             on: Machine::Remote(nixos()),
             place: there.clone(),
         };
-        assert_eq!(sidebar.paste(link), far);
+        assert_eq!(sidebar.paste(link, test_wall()), far);
 
         host.pull_requests = pulled("/w/a");
         sidebar.hear(host);
         sidebar.light(Spot::Local(view_of("main", 10, 1)));
         assert_eq!(
-            sidebar.paste(link),
+            sidebar.paste(link, test_wall()),
             Asked::Go {
                 on: Machine::Local,
                 place: here
             }
         );
         sidebar.light(Spot::Remote(nixos(), view_of("main", 20, 1)));
-        assert_eq!(sidebar.paste(link), far);
+        assert_eq!(sidebar.paste(link, test_wall()), far);
     }
 
     #[test]
     fn another_machine_s_rows_go_there_and_open_there() {
         let mut sidebar = fresh();
+        let area = Rect::new(0, 0, 32, 26);
+        sidebar.place_rows(area);
         let mut host = machines();
         host.remotes[0] = remote(
             "nixos",
@@ -14996,7 +15936,7 @@ mod tests {
             ),
         );
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "Gkk");
         let fix = view_of("main", 20, 1);
         let there = Asked::Go {
@@ -15037,7 +15977,6 @@ mod tests {
         assert_eq!(sidebar.key(&char('v'), moment(160_000)), asked);
         assert!(sidebar.open().is_none());
 
-        let area = Rect::new(0, 0, 32, 26);
         let lines = screen(&mut sidebar, true, area.width, area.height);
         assert_eq!(lines[11], "  •✓ \u{ec82} fix                  1m");
         assert_eq!(click(&mut sidebar, 10, 11, area), there);
@@ -15047,7 +15986,7 @@ mod tests {
         assert_eq!(lines[11], "   ✓ \u{ec82} fix                  1m");
 
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         let pasted = sidebar.open().map(Menu::target);
@@ -15070,10 +16009,10 @@ mod tests {
         let work = || session("work", 20, vec![view(3, 0, "/w/b", "fish")]);
         host.remotes[0] = remote("nixos", up(vec![work()], Vec::new()));
         sidebar.hear(host.clone());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Remote(nixos(), Place::Session(listed("work", 20))));
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         let number = sidebar.open().map_or(0, Menu::number);
@@ -15149,7 +16088,7 @@ mod tests {
         let work = own_session("work", 1, vec![view(3, 0, "/w/b", "fish")]);
         host.remotes[0] = remote("nixos", up(vec![work], Vec::new()));
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(view_of("main", 10, 1)));
         sidebar.key(&char('h'), moment(160_000));
         let place = WorktreePlace {
@@ -15164,7 +16103,7 @@ mod tests {
         let nixos = Machine::Remote(nixos());
         let vps = Machine::Remote("me@vps".parse().unwrap());
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         let number = sidebar.open().map_or(0, Menu::number);
@@ -15223,10 +16162,10 @@ mod tests {
     fn a_link_pasted_on_a_machine_luned_does_not_reach_finds_nothing() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Machine(Machine::Remote("me@vps".parse().unwrap())));
         assert_eq!(
-            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
+            sidebar.paste("https://github.com/lorenzolfm/lune/pull/5", test_wall()),
             Asked::Nothing
         );
         assert!(sidebar.open().is_some());
@@ -15244,7 +16183,7 @@ mod tests {
         let agents = vec![agent("main", 1, Status::Waiting, Some("fix"))];
         host.remotes[0] = remote("nixos", up(vec![session("main", 20, views)], agents));
         sidebar.hear(host);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Remote(nixos(), view_of("main", 20, 1)));
         type_in(&mut sidebar, "d");
         assert_eq!(sidebar.key(&char('d'), moment(160_000)), Asked::Nothing);
@@ -15294,7 +16233,7 @@ mod tests {
             let mut sidebar = fresh();
             let mut host = machines();
             sidebar.hear(host.clone());
-            sidebar.focus(Keys::Sidebar);
+            sidebar.focus(Keys::Sidebar, test_wall());
             let (project, worktree) = (project_row("main", 20), tab_of(20, 0));
             let place = WorktreePlace { project, worktree };
             sidebar.light(Spot::Remote(nixos(), Place::Worktree(place)));
@@ -15371,7 +16310,7 @@ mod tests {
             worktree,
             layout: SeatedLayout::Unlaid,
         };
-        sidebar.sit(Seat { on, project, at });
+        sidebar.sit(Seat { on, project, at }, test_wall());
         let project = ProjectRow::of(there);
         let place = WorktreePlace {
             project,
@@ -15387,7 +16326,7 @@ mod tests {
     fn n_w_on_a_worktree_makes_a_branch_s_in_its_project_on_its_machine() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let tab = |id| WorktreePlace {
             project: project_row("main", id),
             worktree: tab_of(id, 0),
@@ -15426,7 +16365,7 @@ mod tests {
             },
             SystemTime::UNIX_EPOCH,
         );
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let worktree = WorktreeId::of(31).unwrap();
         let place = WorktreePlace {
             project: project_row("notes", 8),
@@ -15477,17 +16416,17 @@ mod tests {
     fn what_is_pasted_in_the_box_for_a_machine_goes_in_it() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         type_in(&mut sidebar, "nm");
-        assert_eq!(sidebar.paste("me@vps\n"), Asked::Nothing);
+        assert_eq!(sidebar.paste("me@vps\n", test_wall()), Asked::Nothing);
         assert_eq!(
             sidebar.key(&enter, moment(160_000)),
             Asked::Ssh("me@vps".parse().unwrap())
         );
         let link = "https://github.com/lorenzolfm/lune/pull/5";
         type_in(&mut sidebar, "nm");
-        assert_eq!(sidebar.paste(link), Asked::Nothing);
+        assert_eq!(sidebar.paste(link, test_wall()), Asked::Nothing);
         assert_eq!(
             sidebar.key(&enter, moment(160_000)),
             Asked::Ssh(link.parse().unwrap())
@@ -15498,7 +16437,7 @@ mod tests {
     fn an_unreached_machine_says_why_in_the_notes_while_highlighted() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "Gk");
         let why = " me@vps: it ended before it reached luned (exit status: 255); ssh said \"ssh: \
                    Could not resolve hostname vps\"";
@@ -15507,7 +16446,7 @@ mod tests {
         type_in(&mut sidebar, "j");
         assert!(!says(&mut sidebar));
         type_in(&mut sidebar, "k");
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         assert!(!screen(&mut sidebar, false, 128, 24).contains(&why.to_owned()));
     }
 
@@ -15519,7 +16458,7 @@ mod tests {
         sidebar.hear(host);
         let lines = screen(&mut sidebar, false, 32, 14);
         assert_eq!(lines[12], " ▸ \u{f108} ME@MAC · this machine", "{lines:?}");
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Machine(Machine::Remote("me@mac".parse().unwrap())));
         let said = format!("me@mac: {}", luned::THIS_MACHINE);
         assert_eq!(sidebar.unreached(), Some(said));
@@ -15553,7 +16492,7 @@ mod tests {
     fn the_menu_adds_a_machine_from_any_row_and_forgets_one_from_its_row() {
         let mut sidebar = fresh();
         sidebar.hear(machines());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "nm-x");
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(sidebar.key(&enter, moment(160_000)), Asked::Nothing);
@@ -15595,7 +16534,7 @@ mod tests {
     fn j_and_k_move_a_project_among_its_machine_s_by_luned() {
         let mut sidebar = fresh();
         sidebar.hear(two_each());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let shift = |sidebar: &mut Sidebar, c: char| sidebar.key(&char(c), moment(160_000));
         sidebar.light(Spot::Local(Place::Session(listed("main", 10))));
         type_in(&mut sidebar, "v");
@@ -15636,7 +16575,7 @@ mod tests {
     #[test]
     fn j_and_k_move_a_worktree_among_its_project_s_by_luned() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         let first = WorktreePlace {
             project: project_row("older", 10),
             worktree: tab_of(10, 0),
@@ -15700,7 +16639,7 @@ mod tests {
         let mut sidebar = searched();
         let heard = sidebar.host.clone().expect("heard");
         sidebar.hear(in_order(&heard, &[10, 20, 30], 1));
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar.light(Spot::Local(Place::Session(listed("bipa", 10))));
         type_in(&mut sidebar, "v");
         (sidebar, heard)
@@ -15740,8 +16679,8 @@ mod tests {
             "on its way still"
         );
 
-        sidebar.moved(1, Some(version(2)));
-        sidebar.moved(1, Some(version(3)));
+        sidebar.moved(1, Some(version(2)), test_wall());
+        sidebar.moved(1, Some(version(3)), test_wall());
         sidebar.hear(in_order(&heard, &[20, 10, 30], 2));
         assert_eq!(
             projects_shown(&mut sidebar),
@@ -15760,7 +16699,7 @@ mod tests {
             shift(&mut sidebar, 'J'),
             moved(&[10, 20, 30], &[20, 10, 30], 2)
         );
-        sidebar.moved(2, Some(version(5)));
+        sidebar.moved(2, Some(version(5)), test_wall());
         sidebar.hear(in_order(&heard, &[10, 20, 30], 6));
         let back = "moved back elsewhere before Watch showed it";
         assert_eq!(
@@ -15803,7 +16742,7 @@ mod tests {
         );
 
         for seq in 2..6 {
-            sidebar.moved(1, Some(version(seq)));
+            sidebar.moved(1, Some(version(seq)), test_wall());
         }
         sidebar.hear(in_order(&heard, &[20, 10, 30], 4));
         assert_eq!(
@@ -15825,7 +16764,7 @@ mod tests {
         let (mut sidebar, heard) = bipa_selected();
         let shift = |sidebar: &mut Sidebar| sidebar.key(&char('J'), moment(160_000));
         shift(&mut sidebar);
-        sidebar.moved(1, Some(version(9)));
+        sidebar.moved(1, Some(version(9)), test_wall());
         let mut restarted = in_order(&heard, &[10, 20, 30], 1);
         kept_of(&mut restarted).version = Some(api::Version { pid: 8, seq: 1 });
         sidebar.hear(restarted);
@@ -15836,7 +16775,7 @@ mod tests {
         );
 
         assert_eq!(shift(&mut sidebar), moved(&[10, 20, 30], &[20, 10, 30], 2));
-        sidebar.moved(2, None);
+        sidebar.moved(2, None, test_wall());
         assert_eq!(
             projects_shown(&mut sidebar),
             ["bipa", "notes", "zed"],
@@ -15854,13 +16793,13 @@ mod tests {
         let stale = format!("not moved: {}", "they changed since");
         let refused = |sidebar: &mut Sidebar, ticket| {
             let order = projects(&[10, 20, 30], &[20, 10, 30]);
-            sidebar.unmoved(&Machine::Local, ticket, &order, stale.clone());
+            sidebar.unmoved(&Machine::Local, ticket, &order, stale.clone(), test_wall());
         };
         refused(&mut sidebar, 1);
         assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
         assert_eq!(sidebar.notice, Some(stale.clone()));
 
-        sidebar.notice = None;
+        let _ = sidebar.clear_notice();
         assert_eq!(shift(&mut sidebar), moved(&[10, 20, 30], &[20, 10, 30], 2));
         refused(&mut sidebar, 1);
         assert_eq!(
@@ -15874,14 +16813,14 @@ mod tests {
         );
         let elsewhere = Machine::Remote(nixos());
         let order = projects(&[20, 40], &[40, 20]);
-        sidebar.unmoved(&elsewhere, 1, &order, stale.clone());
+        sidebar.unmoved(&elsewhere, 1, &order, stale.clone(), test_wall());
         assert_eq!(
             sidebar.notice,
             Some(stale.clone()),
             "another machine's refusal says so"
         );
 
-        sidebar.notice = None;
+        let _ = sidebar.clear_notice();
         refused(&mut sidebar, 2);
         assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
         assert_eq!(sidebar.notice, Some(stale));
@@ -15892,9 +16831,14 @@ mod tests {
         let (mut sidebar, heard) = bipa_selected();
         let shift = |sidebar: &mut Sidebar| sidebar.key(&char('J'), moment(160_000));
         shift(&mut sidebar);
-        sidebar.moved(1, Some(version(2)));
+        sidebar.moved(1, Some(version(2)), test_wall());
         assert_eq!(shift(&mut sidebar), moved(&[20, 10, 30], &[20, 30, 10], 1));
-        sidebar.unsent(1, &projects(&[20, 10, 30], &[20, 30, 10]), "full");
+        sidebar.unsent(
+            1,
+            &projects(&[20, 10, 30], &[20, 30, 10]),
+            "full",
+            test_wall(),
+        );
         assert_eq!(sidebar.notice, Some("not moved: full".to_owned()));
         assert_eq!(
             projects_shown(&mut sidebar),
@@ -15910,7 +16854,12 @@ mod tests {
         sidebar.hear(in_order(&heard, &[20, 10, 30], 2));
 
         assert_eq!(shift(&mut sidebar), moved(&[20, 10, 30], &[20, 30, 10], 2));
-        sidebar.unsent(2, &projects(&[20, 10, 30], &[20, 30, 10]), "full");
+        sidebar.unsent(
+            2,
+            &projects(&[20, 10, 30], &[20, 30, 10]),
+            "full",
+            test_wall(),
+        );
         assert_eq!(projects_shown(&mut sidebar), ["notes", "bipa", "zed"]);
         assert_eq!(
             shift(&mut sidebar),
@@ -15936,14 +16885,14 @@ mod tests {
         assert_eq!(sidebar.notice, Some(held));
         assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
 
-        sidebar.moved(1, Some(version(1)));
+        sidebar.moved(1, Some(version(1)), test_wall());
         assert!(matches!(
             shift(&mut sidebar, 'J'),
             Asked::Move { ticket: 1, .. }
         ));
         let last = u64::try_from(MOVES_MAX).unwrap() + 1;
         for seq in 2..=last {
-            sidebar.moved(1, Some(version(seq)));
+            sidebar.moved(1, Some(version(seq)), test_wall());
         }
         sidebar.hear(in_order(&heard, &[20, 10, 30], last - 1));
         assert_eq!(
@@ -15980,9 +16929,17 @@ mod tests {
         };
         let (dev, first) = (row(" ● dev"), row(" ▾ \u{f108} NIXOS") + 2);
         let left = MouseButton::Left;
-        sidebar.mouse_rows(mouse(MouseEventKind::Down(left), 10, dev), area);
+        sidebar.mouse_rows(
+            mouse(MouseEventKind::Down(left), 10, dev),
+            area,
+            test_wall(),
+        );
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Drag(left), 10, first), area),
+            sidebar.mouse_rows(
+                mouse(MouseEventKind::Drag(left), 10, first),
+                area,
+                test_wall()
+            ),
             Asked::Take
         );
         let order = projects(&[20, 40], &[40, 20]);
@@ -15992,7 +16949,11 @@ mod tests {
             ticket: 1,
         };
         assert_eq!(
-            sidebar.mouse_rows(mouse(MouseEventKind::Up(left), 10, first), area),
+            sidebar.mouse_rows(
+                mouse(MouseEventKind::Up(left), 10, first),
+                area,
+                test_wall()
+            ),
             asked
         );
     }
@@ -16002,13 +16963,16 @@ mod tests {
         let mut sidebar = fresh();
         sidebar.hear(machines());
         let main = ProjectId::of(20).unwrap();
-        sidebar
-            .folds
-            .set(Fold::Machine(&Machine::Remote(nixos())), true);
-        sidebar
-            .folds
-            .set(Fold::Project(&Machine::Remote(nixos()), main), true);
-        sidebar.focus(Keys::Sidebar);
+        sidebar.edit(|state| {
+            let _ = state
+                .folds
+                .set(Fold::Machine(&Machine::Remote(nixos())), true);
+            let _ = state
+                .folds
+                .set(Fold::Project(&Machine::Remote(nixos()), main), true);
+            state.rebuild(test_wall());
+        });
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "/fix");
         let lines = screen(&mut sidebar, true, 32, 26);
         assert_eq!(
@@ -16050,10 +17014,8 @@ mod tests {
 
     #[test]
     fn this_machine_cuts_its_long_name_to_say_no_projects_and_another_keeps_its_name() {
-        let mut sidebar = Sidebar {
-            this: "Mac-1763578123456".to_owned(),
-            ..fresh()
-        };
+        let mut sidebar = fresh();
+        sidebar.edit(|state| state.this = "Mac-1763578123456".to_owned());
         let remotes = ["lorenzo@nixos", "me@vps-frankfurt"].map(|it| remote(it, down(100)));
         sidebar.hear(Host {
             remotes: remotes.to_vec(),
@@ -16096,9 +17058,9 @@ mod tests {
             empty, " ▸ \u{f108} MAC · no projects",
             "a machine with none is one row"
         );
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         type_in(&mut sidebar, "Gu");
-        sidebar.focus(Keys::Terminal);
+        sidebar.focus(Keys::Terminal, test_wall());
         tick(&mut sidebar, 140_000);
         tick(&mut sidebar, 155_000);
         assert_eq!(row(&mut sidebar), seen);
@@ -16203,7 +17165,8 @@ mod tests {
             ] {
                 let mut buffer = Buffer::empty(Rect::new(0, 0, area.right(), area.bottom()));
                 let _ = sidebar.aloud(reading(paused));
-                let _ = sidebar.draw(&mut buffer, area, moment(0));
+                sidebar.place(area);
+                let _ = sidebar.draw(&mut buffer, area, moment(0).system);
                 assert_eq!(at(&buffer, other), None);
                 let toggle = at(&buffer, toggle).expect("the button shows");
                 let stop = at(&buffer, aloud::STOP).expect("the button shows");
@@ -16220,7 +17183,8 @@ mod tests {
                 );
             }
             let mut buffer = Buffer::empty(area);
-            sidebar.draw_collapsed(&mut buffer, area, moment(0));
+            sidebar.collapse(area);
+            let _ = sidebar.draw(&mut buffer, area, test_wall());
             assert_eq!(sidebar.aloud_buttons(), &Spots::default());
         }
     }
@@ -16232,7 +17196,8 @@ mod tests {
             let mut sidebar = fresh();
             let _ = sidebar.aloud(Some(shown));
             let mut buffer = Buffer::empty(area);
-            sidebar.draw_collapsed_rows(&mut buffer, area, moment(0));
+            sidebar.collapse_rows(area);
+            sidebar.draw_collapsed_rows(&mut buffer, area);
             buffer
                 .content()
                 .iter()
@@ -16255,7 +17220,7 @@ mod tests {
     fn two_to_move() -> Sidebar {
         let mut sidebar = fresh();
         sidebar.hear(two_to_move_host());
-        sidebar.focus(Keys::Sidebar);
+        sidebar.focus(Keys::Sidebar, test_wall());
         sidebar
     }
 
@@ -16376,7 +17341,8 @@ mod tests {
         let paint = |sidebar: &mut Sidebar, height: u16| {
             let area = Rect::new(0, 0, 32, height);
             let mut buffer = Buffer::empty(area);
-            sidebar.draw(&mut buffer, area, drawn).1
+            sidebar.place(area);
+            sidebar.draw(&mut buffer, area, drawn.system).1
         };
         assert_eq!(paint(&mut sidebar, 9).wait(drawn, drawn), Some(SPIN));
         assert!(sidebar.turning());
@@ -16388,7 +17354,7 @@ mod tests {
         assert!(!sidebar.turning());
 
         fold(&mut sidebar, "s");
-        sidebar.rebuild();
+        sidebar.rebuild(test_wall());
         assert_eq!(
             paint(&mut sidebar, 7).wait(drawn, drawn),
             Some(SPIN),
@@ -16433,8 +17399,8 @@ mod tests {
         assert!(sidebar.ticked(now + COPIED_SHOWS, true));
         assert!(!sidebar.ticked(now + COPIED_SHOWS + Duration::from_secs(1), true));
 
-        sidebar.focus(Keys::Sidebar);
         let pressed = moment(180_000);
+        sidebar.focus(Keys::Sidebar, pressed.system);
         let _ = seen_at(&mut sidebar, true, 32, 12, pressed);
         sidebar.key(&char('g'), pressed);
         assert_eq!(sidebar.due(pressed), Some(pressed.steady + PAUSE));
@@ -16446,16 +17412,17 @@ mod tests {
     #[test]
     fn monotonic_ui_timers_survive_backward_wall_clock_steps() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
         let t0 = moment(200_000);
+        sidebar.focus(Keys::Sidebar, t0.system);
         let area = Rect::new(0, 0, 32, 14);
         let mut buffer = Buffer::empty(area);
-        let _ = sidebar.draw(&mut buffer, area, t0);
+        sidebar.place(area);
+        let _ = sidebar.draw(&mut buffer, area, t0.system);
 
         sidebar.key(&char('g'), t0);
         let shown_at = t0 + PAUSE;
         assert!(sidebar.ticked(shown_at, true));
-        let _ = sidebar.draw(&mut buffer, area, shown_at);
+        let _ = sidebar.draw(&mut buffer, area, shown_at.system);
         assert!(matches!(
             sidebar.mode,
             Mode::Pending(Pending::First(ChordWait::Shown))
@@ -16498,33 +17465,30 @@ mod tests {
     #[test]
     fn sidebar_view_tracks_drawn_notes_and_ignores_unshown_chord_state() {
         let mut sidebar = two_sessions();
-        sidebar.focus(Keys::Sidebar);
         let t0 = moment(160_000);
+        sidebar.focus(Keys::Sidebar, t0.system);
         let area = Rect::new(0, 0, 32, 14);
         let mut buffer = Buffer::empty(area);
-        let _ = sidebar.draw(&mut buffer, area, t0);
+        sidebar.place(area);
+        let _ = sidebar.draw(&mut buffer, area, t0.system);
 
-        let before = sidebar.view(false);
+        let before = sidebar.view();
         sidebar.copied(
             Copied::text(&Excerpt::of("copied".to_owned()).unwrap()),
             t0.steady,
         );
-        assert_ne!(
-            sidebar.view(false),
-            before,
-            "SidebarView reflects copied toast"
-        );
-        sidebar.copied = None;
-        assert_eq!(sidebar.view(false), before);
+        assert_ne!(sidebar.view(), before, "SidebarView reflects copied toast");
+        sidebar.edit(|state| state.copied = None);
+        assert_eq!(sidebar.view(), before);
 
         sidebar.key(&char('g'), t0);
-        let waiting_view = sidebar.view(false);
+        let waiting_view = sidebar.view();
         assert!(matches!(sidebar.bottom(), Bottom::Nothing));
 
         let shown_at = t0 + PAUSE;
         assert!(sidebar.ticked(shown_at, true));
         assert_ne!(
-            sidebar.view(false),
+            sidebar.view(),
             waiting_view,
             "SidebarView changes once the chord hint becomes shown"
         );
@@ -16581,5 +17545,452 @@ mod tests {
             Some(steady_now + COPIED_SHOWS),
             "overflowing shell deadline does not suppress other timers"
         );
+    }
+
+    #[test]
+    fn input_between_resize_and_draw_uses_the_resized_layout_and_draw_takes_shared_self() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        sidebar.focus(Keys::Sidebar, wall);
+        let tall = Rect::new(0, 0, 32, 16);
+        sidebar.place(tall);
+        let _ = sidebar.aloud(Some(aloud::Shown::Reading {
+            whose: aloud::Whose::Selection,
+            text: "reading aloud".to_owned(),
+            paused: false,
+        }));
+        let tall_stop = Position::new(tall.right() - 3, tall.bottom() - 2);
+        assert_eq!(
+            sidebar.aloud_buttons().at(tall_stop).copied(),
+            Some(aloud::Button::Stop),
+            "aloud buttons update immediately on place before any draw"
+        );
+
+        for _ in 0..4 {
+            sidebar.key(&char('j'), moment(160_000));
+        }
+        assert_eq!(sidebar.viewport.top(), 0);
+
+        let short = Rect::new(0, 0, 32, 8);
+        sidebar.place(short);
+        let short_stop = Position::new(short.right() - 3, short.bottom() - 2);
+        assert_eq!(
+            sidebar.aloud_buttons().at(tall_stop).copied(),
+            None,
+            "old button spot is gone before any draw"
+        );
+        assert_eq!(
+            sidebar.aloud_buttons().at(short_stop).copied(),
+            Some(aloud::Button::Stop),
+            "new button spot is ready before any draw"
+        );
+        assert!(
+            sidebar.viewport.top() > 0,
+            "resizing smaller reveals the lit row immediately before any draw"
+        );
+        let top_before_draw = sidebar.viewport.top();
+        let expected_lit = sidebar.lit_spot().cloned();
+        let rows = framed_rows(short);
+        let lit_row = sidebar.lit_index().unwrap();
+        let lit_line: usize = sidebar.rows[..lit_row].iter().map(Row::height).sum();
+        let lit_y = rows.y + u16::try_from(HEADER + lit_line - sidebar.viewport.top()).unwrap();
+
+        let draw_shared =
+            |sidebar: &Sidebar, buffer: &mut Buffer| sidebar.draw(buffer, short, wall);
+        let mut buffer = Buffer::empty(short);
+        let _ = draw_shared(&sidebar, &mut buffer);
+        assert_eq!(sidebar.viewport.top(), top_before_draw);
+        assert_eq!(sidebar.lit_spot().cloned(), expected_lit);
+
+        let left = MouseButton::Left;
+        sidebar.mouse(mouse(MouseEventKind::Down(left), 10, lit_y), wall);
+        let asked = sidebar.mouse(mouse(MouseEventKind::Up(left), 10, lit_y), wall);
+        assert_eq!(
+            asked,
+            Asked::Go {
+                on: Machine::Local,
+                place: lit_place(&sidebar).unwrap(),
+            }
+        );
+
+        let narrow = Rect::new(0, 0, COLLAPSED, 8);
+        sidebar.collapse(narrow);
+        assert_eq!(sidebar.aloud_buttons(), &Spots::default());
+        let draw_collapsed_shared =
+            |sidebar: &Sidebar, buffer: &mut Buffer| sidebar.draw(buffer, narrow, wall);
+        let mut collapsed_buffer = Buffer::empty(narrow);
+        let _ = draw_collapsed_shared(&sidebar, &mut collapsed_buffer);
+    }
+
+    #[test]
+    fn event_rebuilds_use_their_own_wall_time_without_a_prior_draw_or_tick() {
+        let mut sidebar = fresh();
+        let make = in_shell(1, going("make", 159, Front::Working));
+        sidebar.heard(
+            host(vec![session("s", 10, vec![make])], Vec::new()),
+            moment(160_000).system,
+        );
+        assert_eq!(sidebar.counts.busy, 0);
+        assert!(sidebar.due.is_some());
+
+        let later = moment(162_000);
+        sidebar.focus(Keys::Sidebar, later.system);
+        assert_eq!(
+            sidebar.counts.busy, 1,
+            "focus rebuild uses the event's wall time rather than stale or epoch time"
+        );
+        assert_eq!(sidebar.due, None);
+    }
+
+    #[test]
+    fn clicking_an_open_menu_closes_it_without_activating_or_lifting_hidden_rows() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 32, 16);
+        let rows_area = framed_rows(framed);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+        step_onto_its_first_view(&mut sidebar);
+
+        assert_eq!(sidebar.key(&char('m'), now), Asked::Nothing);
+        assert!(sidebar.open().is_some());
+        let menu_top = sidebar.viewport.laid().unwrap().notes_y;
+        assert!(
+            usize::from(menu_top - rows_area.y) < HEADER + sidebar.lines(),
+            "the open menu covers rows underneath it"
+        );
+
+        let left = MouseButton::Left;
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 5, menu_top), wall),
+            Asked::Nothing
+        );
+        assert!(sidebar.open().is_none());
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Drag(left), 5, menu_top + 2), wall),
+            Asked::Nothing
+        );
+        assert!(
+            !matches!(sidebar.viewport.moving(), Some(Moving::Lifted(_))),
+            "dragging from a row that was covered by the open menu does not lift a hidden row"
+        );
+        let _ = sidebar.mouse(mouse(MouseEventKind::Up(left), 5, menu_top + 2), wall);
+
+        assert_eq!(sidebar.key(&char('m'), now), Asked::Nothing);
+        assert!(sidebar.open().is_some());
+        let menu_top = sidebar.viewport.laid().unwrap().notes_y;
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 5, menu_top), wall),
+            Asked::Nothing
+        );
+        assert!(sidebar.open().is_none());
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Up(left), 5, menu_top), wall),
+            Asked::Take,
+            "clicking on the open menu closes it without activating the hidden row underneath"
+        );
+    }
+
+    #[test]
+    fn collapse_clears_active_mouse_drag_and_allows_draw_collapsed() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let framed = Rect::new(0, 0, 32, 16);
+        let rows_area = framed_rows(framed);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+
+        let project_row = sidebar
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Project { .. }))
+            .unwrap();
+        let project_line: usize = sidebar.rows[..project_row]
+            .iter()
+            .map(Row::height)
+            .sum::<usize>()
+            + sidebar.rows[project_row].gap();
+        let y = rows_area.y + u16::try_from(HEADER + project_line).unwrap();
+        let left = MouseButton::Left;
+
+        let narrow = Rect::new(0, 0, COLLAPSED, 16);
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, y), wall),
+            Asked::Nothing
+        );
+        assert!(matches!(
+            sidebar.viewport.moving(),
+            Some(Moving::Down { .. })
+        ));
+        sidebar.collapse(narrow);
+        assert!(sidebar.viewport.moving().is_none());
+
+        sidebar.place(framed);
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, y), wall),
+            Asked::Nothing
+        );
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, y + 2), wall),
+            Asked::Take
+        );
+        assert!(matches!(sidebar.viewport.moving(), Some(Moving::Lifted(_))));
+
+        sidebar.collapse(narrow);
+        assert!(matches!(sidebar.viewport, Viewport::Collapsed { .. }));
+        assert!(sidebar.viewport.moving().is_none());
+
+        let mut buffer = Buffer::empty(narrow);
+        let _ = sidebar.draw(&mut buffer, narrow, wall);
+    }
+
+    #[test]
+    fn all_keys_scrolls_from_relayout_without_a_prior_draw() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 33, 22);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        for _ in 0..200 {
+            assert_eq!(sidebar.key(&char('j'), now), Asked::Nothing);
+        }
+        assert_eq!(sidebar.key(&char('k'), now), Asked::Nothing);
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, wall);
+        let rows_area = framed_rows(framed);
+        let second_to_last: String = (rows_area.x..rows_area.right() - 1)
+            .map(|x| buffer[(x, rows_area.bottom() - 2)].symbol())
+            .collect();
+        assert_eq!(second_to_last.trim_end(), " Alt u        Read aloud, pause");
+    }
+
+    #[test]
+    fn idle_tick_leaves_layout_clean_and_returns_false() {
+        let mut sidebar = two_sessions();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 32, 16);
+        sidebar.focus(Keys::Sidebar, now.system);
+        sidebar.place(framed);
+
+        assert!(!sidebar.ticked(now + Duration::from_millis(50), false));
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, now.system);
+    }
+
+    #[test]
+    fn clicking_a_row_does_not_activate_a_different_row_when_rows_shift_before_release() {
+        let wall = test_wall();
+        let framed = Rect::new(0, 0, 32, 16);
+        let rows_area = framed_rows(framed);
+        let left = MouseButton::Left;
+
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+        let older_view = Spot::Local(view_of("older", 10, 1));
+        let view_index = sidebar.row_of(&older_view).unwrap();
+        let view_line: usize = sidebar.rows[..view_index].iter().map(Row::height).sum();
+        let view_y = rows_area.y + u16::try_from(HEADER + view_line).unwrap();
+
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, view_y), wall),
+            Asked::Nothing
+        );
+        sidebar.hear(host(
+            vec![session(
+                "newer",
+                20,
+                vec![view(1, 0, "/w/b", "fish"), view(2, 0, "/w/c", "fish")],
+            )],
+            Vec::new(),
+        ));
+        assert!(
+            sidebar
+                .line_of(view_y, rows_area)
+                .and_then(|line| sidebar.row_at(line))
+                .is_some(),
+            "another row shifted into the pressed line"
+        );
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Up(left), 10, view_y), wall),
+            Asked::Take,
+            "releasing after the pressed row disappears never activates the shifted row"
+        );
+
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+        let newer_spot = Spot::Local(Place::Session(listed("newer", 20)));
+        let newer_index = sidebar.row_of(&newer_spot).unwrap();
+        let newer_line: usize = sidebar.rows[..newer_index]
+            .iter()
+            .map(Row::height)
+            .sum::<usize>()
+            + sidebar.rows[newer_index].gap();
+        let newer_y = rows_area.y + u16::try_from(HEADER + newer_line).unwrap();
+
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, newer_y), wall),
+            Asked::Nothing
+        );
+        sidebar.hear(host(
+            vec![
+                session("alpha", 5, vec![view(1, 0, "/w/a", "fish")]),
+                session(
+                    "older",
+                    10,
+                    vec![
+                        view(2, 1, "/w/c", "nvim src/main.rs"),
+                        view(1, 0, "/w/lune/main", "claude"),
+                    ],
+                ),
+                session("newer", 20, vec![view(1, 0, "/w/b", "fish")]),
+            ],
+            Vec::new(),
+        ));
+        let shifted_at = sidebar
+            .line_of(newer_y, rows_area)
+            .and_then(|line| sidebar.row_at(line))
+            .map(|at| sidebar.rows[at].spot());
+        assert_ne!(shifted_at, Some(newer_spot));
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Up(left), 10, newer_y), wall),
+            go_here(Place::Session(listed("newer", 20))),
+            "releasing activates the pressed row rather than the row that shifted under the pointer"
+        );
+    }
+
+    #[test]
+    fn all_keys_scroll_uses_post_clear_bottom_room_when_a_notice_clears() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 33, 22);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        for _ in 0..200 {
+            assert_eq!(sidebar.key(&char('j'), now), Asked::Nothing);
+        }
+        sidebar.notify("a long error note ".repeat(8));
+        assert_eq!(sidebar.key(&char('j'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('k'), now), Asked::Nothing);
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, wall);
+        let rows_area = framed_rows(framed);
+        let second_to_last: String = (rows_area.x..rows_area.right() - 1)
+            .map(|x| buffer[(x, rows_area.bottom() - 2)].symbol())
+            .collect();
+        assert_eq!(second_to_last.trim_end(), " Alt u        Read aloud, pause");
+    }
+
+    #[test]
+    fn sidebar_view_tracks_viewport_and_draw_handles_collapsed_and_expanded() {
+        let wall = test_wall();
+        let framed = Rect::new(0, 0, COLUMNS, 16);
+        let mut sidebar = Sidebar::new(
+            Folds::default(),
+            News::default(),
+            Kept::default(),
+            "mac".to_owned(),
+            framed,
+        );
+        sidebar.hear(with_nvim());
+        assert!(matches!(sidebar.view(), SidebarView::Expanded(_)));
+
+        let mut expanded_buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut expanded_buffer, framed, wall);
+
+        let narrow = Rect::new(0, 0, COLLAPSED, 16);
+        sidebar.collapse(narrow);
+        assert!(matches!(sidebar.view(), SidebarView::Collapsed { .. }));
+        let mut collapsed_buffer = Buffer::empty(narrow);
+        let (drawn, cadence) = sidebar.draw(&mut collapsed_buffer, narrow, wall);
+        assert!(matches!(drawn, Drawn::Nothing));
+        assert_eq!(cadence, Cadence::default());
+
+        let taller = Rect::new(0, 0, COLLAPSED, 20);
+        sidebar.collapse(taller);
+        let mut taller_buffer = Buffer::empty(taller);
+        let _ = sidebar.draw(&mut taller_buffer, taller, wall);
+
+        sidebar.place(framed);
+        assert!(matches!(sidebar.view(), SidebarView::Expanded(_)));
+        let _ = sidebar.draw(&mut expanded_buffer, framed, wall);
+    }
+
+    #[test]
+    fn set_fold_relayouts_when_fold_folder_is_lost_on_an_unchanged_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = crate::state::Folder::at(dir.path().to_owned());
+        let folds = Folds::shared(&folder);
+        let framed = Rect::new(0, 0, 32, 16);
+        let wall = test_wall();
+        let now = moment(160_000);
+        let mut sidebar = Sidebar::new(
+            folds,
+            News::default(),
+            Kept::default(),
+            "mac".to_owned(),
+            framed,
+        );
+        sidebar.hear(with_nvim());
+        sidebar.focus(Keys::Sidebar, wall);
+
+        let sessions = dir.path().join("folded");
+        std::fs::remove_dir_all(&sessions).unwrap();
+        std::fs::write(&sessions, "blocked").unwrap();
+
+        assert_eq!(sidebar.key(&char('l'), now), Asked::Nothing);
+        assert!(sidebar.folds.lost().is_some());
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, wall);
+    }
+
+    #[test]
+    fn ticked_relayouts_when_news_loses_sharing_without_row_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("lune");
+        let news = News::within(&runtime);
+        assert_eq!(news.lost(), None);
+        let framed = Rect::new(0, 0, 32, 16);
+        let start = moment(160_000);
+        let mut sidebar = Sidebar::new(
+            Folds::default(),
+            news,
+            Kept::default(),
+            "mac".to_owned(),
+            framed,
+        );
+        sidebar.hear(host(
+            vec![own_session("s", 1, vec![view(1, 0, "/w/a", "fish")])],
+            Vec::new(),
+        ));
+        sit(&mut sidebar, &own_view_of("s", 1, 1));
+        assert!(!sidebar.ticked(start, true));
+
+        let stayed = runtime.join("stayed");
+        std::fs::remove_dir_all(&stayed).unwrap();
+        std::fs::write(&stayed, "blocked").unwrap();
+
+        let after_dwell = start + Duration::from_secs(2);
+        assert!(
+            sidebar.ticked(after_dwell, true),
+            "losing news sharing on a row-neutral dwell reports changed"
+        );
+        assert!(sidebar.news.lost().is_some());
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, after_dwell.system);
     }
 }
