@@ -13,7 +13,7 @@ use lune_protocol::watch::{HostVersion, LocalVersion, WatchedAfter};
 use lune_waits::{Began, Span, eventually};
 use luned::api::daemon_server::{Daemon, DaemonServer};
 use luned::api::{
-    self, AnswerRequest, AskRequest, AskResponse, ClientWaiter, FileIssueRequest,
+    self, AnswerRequest, AskRequest, AskResponse, AskReviewRequest, ClientWaiter, FileIssueRequest,
     FileIssueResponse, InfoResponse, IssueRepositoriesRequest, IssueRepositoriesResponse,
     KeepChecksRequest, KeepChecksResponse, KeepImageRequest, KeepImageResponse, KeepPrintedRequest,
     KeepPrintedResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
@@ -851,6 +851,15 @@ impl Daemon for StandIn {
 
     async fn ask(&self, _: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
         Err(Status::unimplemented("a stand-in runs no agent"))
+    }
+
+    type AskReviewStream = tokio_stream::Empty<Result<AskResponse, Status>>;
+
+    async fn ask_review(
+        &self,
+        _: Request<AskReviewRequest>,
+    ) -> Result<Response<Self::AskReviewStream>, Status> {
+        Err(Status::unimplemented("a stand-in runs no review agent"))
     }
 
     type PasteStream = tokio_stream::Empty<Result<PasteResponse, Status>>;

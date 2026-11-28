@@ -3399,7 +3399,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         pane.key(&KeyEvent::from(KeyCode::Char('j')));
         pane.key(&KeyEvent::from(KeyCode::Char('j')));
         let action = pane.key(&KeyEvent::from(KeyCode::Char('e')));
-        assert!(matches!(action, ReviewAction::Explain(ref ex) if ex.path == "src/lib.rs"));
+        assert!(matches!(action, ReviewAction::Explain(ref ex) if ex.path() == "src/lib.rs"));
 
         let kind = |kind| KeyEvent::new_with_kind(KeyCode::Char(CLOSE), KeyModifiers::NONE, kind);
         let (d, held) = (kind(KeyEventKind::Press), kind(KeyEventKind::Repeat));

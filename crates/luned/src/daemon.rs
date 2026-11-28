@@ -41,19 +41,19 @@ use crate::api::list_repositories_response::Repository;
 use crate::api::list_skills_response::Skill;
 use crate::api::make_worktree_response::Landed;
 use crate::api::{
-    self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
-    FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse, IssueRepositoriesRequest,
-    IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
-    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse,
-    ListContentsRequest, ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse,
-    ListResumeRequest, ListResumeResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
-    ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse,
-    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, ReadDiffRequest, ReadDiffResponse,
-    RebaseRequest, RebaseResponse, ReloadResumeRequest, ReloadResumeResponse, SayRequest,
-    ShowRequest, ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest,
-    WaitingResponse,
+    self, AnswerRequest, AskRequest, AskResponse, AskReviewRequest, ChangeProjectsRequest,
+    ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
+    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
+    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+    ListAgentsResponse, ListContentsRequest, ListContentsResponse, ListRepositoriesRequest,
+    ListRepositoriesResponse, ListResumeRequest, ListResumeResponse, ListSkillsRequest,
+    ListSkillsResponse, ListWorkRequest, ListWorkResponse, MakeWorktreeRequest,
+    MakeWorktreeResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
+    PrunesResponse, ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse,
+    ReloadResumeRequest, ReloadResumeResponse, SayRequest, ShowRequest, ShowResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
-use crate::asks::{Asked, Step};
+use crate::asks::{AskMode, Asked, ReviewAsk, SessionModes, Step};
 use crate::checks::{Failing, Log};
 use crate::core::{self, AllSnapshot, Command, LocalSnapshot, Wakes, WatchDecision};
 use crate::directory::Directory;
@@ -193,7 +193,8 @@ pub async fn serve(
     detached: bool,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
-    let devices_file = if projects.is_ok() {
+    let projects_kept = projects.is_ok();
+    let devices_file = if projects_kept {
         let devices_file = tailnet::in_own_home()
             .and_then(|()| state::path(devices::FILE).map_err(|unset| unset.to_string()));
         if let Err(why) = &devices_file {
@@ -203,6 +204,7 @@ pub async fn serve(
     } else {
         None
     };
+    let ask_sessions = Arc::new(SessionModes::open(projects_kept));
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
@@ -283,6 +285,7 @@ pub async fn serve(
         bridges,
         layouts,
         listings,
+        ask_sessions,
     });
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
@@ -630,6 +633,7 @@ struct Host {
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
     listings: Arc<work::Listings>,
+    ask_sessions: Arc<SessionModes>,
 }
 
 #[tonic::async_trait]
@@ -941,7 +945,39 @@ impl Daemon for Host {
             let steps = daemon.ask(asked.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(steps)));
         }
-        let steps = talked(move |wanted, hear| asked.talk(wanted, hear));
+        let mode = asked.mode();
+        if let Some(session) = asked.resumed() {
+            self.ask_sessions
+                .check_resume(session, mode)
+                .map_err(Status::failed_precondition)?;
+        }
+        let sessions = Arc::clone(&self.ask_sessions);
+        let steps = talked(sessions, mode, move |wanted, hear| asked.talk(wanted, hear));
+        Ok(Response::new(Box::pin(steps)))
+    }
+
+    type AskReviewStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
+
+    async fn ask_review(
+        &self,
+        request: Request<AskReviewRequest>,
+    ) -> Result<Response<Self::AskReviewStream>, Status> {
+        let (on, asked) =
+            ReviewAsk::of_api(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            let steps = daemon.ask_review(asked.to_api(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(steps)));
+        }
+        if let Some(session) = asked.resumed() {
+            self.ask_sessions
+                .check_resume(session, AskMode::Review)
+                .map_err(Status::failed_precondition)?;
+        }
+        let sessions = Arc::clone(&self.ask_sessions);
+        let asked = Asked::from(asked);
+        let steps = talked(sessions, AskMode::Review, move |wanted, hear| {
+            asked.talk(wanted, hear)
+        });
         Ok(Response::new(Box::pin(steps)))
     }
 
@@ -1544,7 +1580,11 @@ fn unready(why: Unready) -> Status {
     }
 }
 
-fn talked<T>(talk: T) -> ReceiverStream<Result<AskResponse, Status>>
+fn talked<T>(
+    sessions: Arc<SessionModes>,
+    mode: AskMode,
+    talk: T,
+) -> ReceiverStream<Result<AskResponse, Status>>
 where
     T: FnOnce(&program::Wanted, &dyn Fn(Step)) -> Option<Result<(), String>> + Send + 'static,
 {
@@ -1569,6 +1609,9 @@ where
     let failed = heard.clone();
     let talking = task::spawn_blocking(move || {
         let hear = |step: Step| {
+            if let Step::Session(session) = &step {
+                sessions.record(session.clone(), mode);
+            }
             let _ = heard.blocking_send(Ok(step.answer()));
         };
         if let Some(Err(why)) = talk(&wanted, &hear) {
@@ -1963,7 +2006,7 @@ mod tests {
     use crate::api::{
         self, LocalVersion, Version, WatchChangesRequest, WatchLocalChangesRequest, WatchRequest,
     };
-    use crate::asks::Step;
+    use crate::asks::{AskMode, SessionModes, Step};
     use crate::core::{self, Wakes};
     use crate::remote::Standing;
 
@@ -2064,10 +2107,14 @@ mod tests {
             .build()
             .unwrap();
         let ended: Vec<_> = runtime.block_on(async {
-            let steps = talked(|_, hear| {
-                hear(Step::Said("Looking.".to_owned()));
-                panic!("the runner of the turn fails");
-            });
+            let steps = talked(
+                Arc::new(SessionModes::in_memory()),
+                AskMode::General,
+                |_, hear| {
+                    hear(Step::Said("Looking.".to_owned()));
+                    panic!("the runner of the turn fails");
+                },
+            );
             steps.collect().await
         });
         let [Ok(heard), Err(failed)] = ended.as_slice() else {
@@ -2093,6 +2140,7 @@ mod tests {
                 bridges: Arc::default(),
                 layouts,
                 listings: Arc::default(),
+                ask_sessions: Arc::new(SessionModes::in_memory()),
             }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
