@@ -78,9 +78,9 @@ use crate::sayings::ToSay;
 use crate::statuses::ReportedAgent;
 use crate::transcripts::{self, Reading, SessionId};
 use crate::{
-    agy, changes, checks, claude, client, devices, eza, fetches, flows, git, github, keeps, log,
-    owns, pi, printed, program, projects, release, remote, repositories, skills, state, tailnet,
-    topics, watch, work,
+    agy, changes, checks, claude, claude_status, client, devices, eza, fetches, flows, git, github,
+    keeps, log, owns, pi, printed, program, projects, release, remote, repositories, skills, state,
+    tailnet, topics, watch, work,
 };
 
 mod over_tailnet;
@@ -439,9 +439,9 @@ fn follow(
     claude_folder: Option<PathBuf>,
     agy_folder: Option<PathBuf>,
 ) -> io::Result<()> {
-    match claude_folder {
-        Some(folder) => {
-            let mut files = claude::SessionFiles::new(&folder);
+    match &claude_folder {
+        Some(claude_dir) => {
+            let mut files = claude::SessionFiles::new(claude_dir);
             let dir = files.dir().to_owned();
             let core = core.clone();
             let read = move || files.scan();
@@ -461,6 +461,31 @@ fn follow(
         }
         None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
+    let any = |_: &Path| true;
+    let mode = RecursiveMode::NonRecursive;
+    let mut claude_status_files = claude_status::StatusFiles::new(folder, claude_folder);
+    let dir = claude_status_files.dir().to_owned();
+    let read = move || claude_status_files.scan();
+    let tell = {
+        let core = core.clone();
+        move |found| core.send(Command::ClaudeTelemetry(found)).is_ok()
+    };
+    let claude_status_pids = |entries: &Vec<claude_status::ClaudeTelemetry>| {
+        entries
+            .iter()
+            .map(|entry| entry.agent.pid().get())
+            .collect()
+    };
+    watch::watch_ending(
+        "claude-status",
+        dir,
+        mode,
+        any,
+        SWEEP,
+        read,
+        claude_status_pids,
+        tell,
+    )?;
     let mut files = pi::AgentFiles::new(folder, pi::folder());
     let dir = files.dir().to_owned();
     let read = move || files.scan();
@@ -468,8 +493,6 @@ fn follow(
         let core = core.clone();
         move |found| core.send(Command::PiAgents(found)).is_ok()
     };
-    let any = |_: &Path| true;
-    let mode = RecursiveMode::NonRecursive;
     let pids = |agents: &Vec<ReportedAgent>| {
         agents
             .iter()

@@ -269,3 +269,55 @@ fn transcript_ends_returns_antigravity_transcripts() {
         typed.lines
     );
 }
+
+#[test]
+fn an_agy_agent_reports_live_telemetry_over_grpc() {
+    let (host, _daemon) = with_agy();
+    let cmd = title_command(&host).unwrap();
+    let mut agy = Agy::start(host.vars(), &cmd);
+    let pid = agy.process.pid();
+
+    agy.sends(&json!({
+        "cwd": "/home/you/work",
+        "conversation_id": "9c696c75-660f-4097-934f-e1cc290e4bd1",
+        "agent_state": "working",
+        "model": {
+            "id": "claude-opus-4-6-thinking",
+            "display_name": "Opus 4.6",
+            "effort": "high"
+        },
+        "context_window": {
+            "context_window_size": 1_000_000,
+            "used_percentage": 24.5
+        },
+        "quota": {
+            "claude": {
+                "remaining_fraction": 0.40,
+                "reset_in_seconds": 7200
+            }
+        }
+    }));
+    let agent = eventually("agy telemetry arrives", || {
+        host.agents()
+            .into_iter()
+            .find(|agent| agent.pid == pid && agent.parsed_telemetry().is_some())
+    });
+    let telemetry = agent.parsed_telemetry().unwrap();
+    assert_eq!(
+        telemetry
+            .model()
+            .map(lune_protocol::telemetry::TelemetryText::as_str),
+        Some("Opus 4.6")
+    );
+    assert_eq!(
+        telemetry
+            .effort()
+            .map(lune_protocol::telemetry::TelemetryText::as_str),
+        Some("high")
+    );
+    assert_eq!(telemetry.context().unwrap().used_permille.get(), 245);
+    let windows = telemetry.usage().unwrap().windows();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].label.as_str(), "claude");
+    assert_eq!(windows[0].used_permille.get(), 600);
+}

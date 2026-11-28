@@ -6,6 +6,7 @@ use lune_protocol::PROGRAM_STATUS_RECORDS_MAX;
 pub use lune_protocol::agent_status::BlockedReason;
 use lune_protocol::program_status::{ChildId, Message, Progress, Title};
 use lune_protocol::said::Said;
+use lune_protocol::telemetry::AgentTelemetry;
 
 use crate::agent::{Agent, SeenAgent, Sighting};
 use crate::api;
@@ -242,6 +243,12 @@ impl ReportedAgent {
             report: Report::new(reads, id, update),
             proof,
         }
+    }
+
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: Option<AgentTelemetry>) -> Self {
+        self.seen.telemetry = telemetry;
+        self
     }
 
     #[must_use]

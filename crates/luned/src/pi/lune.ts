@@ -303,9 +303,23 @@ type Phase =
   | { readonly kind: "resting"; readonly resting: RestingReport }
   | { readonly kind: "running"; readonly outcome: RestingReport };
 
+type TelemetryContext = {
+  readonly usedPercent?: number;
+  readonly windowTokens?: number;
+  readonly usedTokens?: number;
+};
+
+type TelemetrySnapshot = {
+  readonly model?: string;
+  readonly effort?: string;
+  readonly context?: TelemetryContext;
+  readonly costUsd?: number;
+};
+
 type Snapshot = {
   readonly phase: Phase;
   readonly promptOpen: boolean;
+  readonly telemetry?: TelemetrySnapshot;
 };
 
 type DiskState =
@@ -351,6 +365,7 @@ type OutboundFile = OutboundReport & {
   readonly procStart?: string;
   readonly phase: PersistedPhase;
   readonly promptOpen: boolean;
+  readonly telemetry?: TelemetrySnapshot;
 };
 
 type RestoredSnapshot =
@@ -372,7 +387,23 @@ type StopOutcome = "error" | "aborted" | "done";
 type Context = {
   cwd: string;
   mode?: string;
-  sessionManager: { getSessionId(): string };
+  model?: {
+    readonly id?: string;
+    readonly name?: string;
+    readonly provider?: string;
+    readonly contextWindow?: number;
+  };
+  sessionManager: {
+    getSessionId(): string;
+    getEntries?: () => readonly unknown[];
+  };
+  getContextUsage?: () =>
+    | {
+        readonly tokens: number | null;
+        readonly contextWindow: number;
+        readonly percent: number | null;
+      }
+    | undefined;
   isIdle?: () => boolean;
 };
 
@@ -384,8 +415,17 @@ type PiEvents = {
       readonly role?: string;
       readonly stopReason?: string;
       readonly errorMessage?: string;
+      readonly usage?: {
+        readonly cost?: {
+          readonly total?: number;
+        };
+      };
     };
   };
+  turn_end: Record<string, never>;
+  model_select: Record<string, never>;
+  thinking_level_select: Record<string, never>;
+  session_compact: Record<string, never>;
   agent_settled: { readonly aborted?: boolean };
   ui_prompt_start: Record<string, never>;
   ui_prompt_end: Record<string, never>;
@@ -394,6 +434,7 @@ type PiEvents = {
 
 type Pi = {
   on<K extends keyof PiEvents>(event: K, handler: (event: PiEvents[K], ctx: Context) => void): void;
+  getThinkingLevel?: () => string;
 };
 
 function fileOfThisProcess(): string | undefined {
@@ -498,6 +539,7 @@ function serializeOutbound(
     ...(started !== undefined ? { procStart: started } : {}),
     phase: serializePhase(snapshot.phase),
     promptOpen: snapshot.promptOpen,
+    ...(snapshot.telemetry !== undefined ? { telemetry: snapshot.telemetry } : {}),
   };
 }
 
@@ -588,8 +630,112 @@ function samePhase(a: Phase, b: Phase): boolean {
   return false;
 }
 
+function sameTelemetryContext(
+  a: TelemetryContext | undefined,
+  b: TelemetryContext | undefined,
+): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined) return false;
+  return (
+    a.usedPercent === b.usedPercent &&
+    a.windowTokens === b.windowTokens &&
+    a.usedTokens === b.usedTokens
+  );
+}
+
+function sameTelemetry(
+  a: TelemetrySnapshot | undefined,
+  b: TelemetrySnapshot | undefined,
+): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined) return false;
+  return (
+    a.model === b.model &&
+    a.effort === b.effort &&
+    a.costUsd === b.costUsd &&
+    sameTelemetryContext(a.context, b.context)
+  );
+}
+
 function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
-  return a.promptOpen === b.promptOpen && samePhase(a.phase, b.phase);
+  return (
+    a.promptOpen === b.promptOpen &&
+    samePhase(a.phase, b.phase) &&
+    sameTelemetry(a.telemetry, b.telemetry)
+  );
+}
+
+const SESSION_ENTRIES_MAX = 4096;
+
+function nonEmptyTrimmed(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function finiteNonNegative(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
+  return raw;
+}
+
+function readSessionCost(ctx: Context): number | undefined {
+  const entries = quietly(() => ctx.sessionManager.getEntries?.());
+  if (!Array.isArray(entries)) return undefined;
+  let total = 0;
+  let found = false;
+  const count = Math.min(entries.length, SESSION_ENTRIES_MAX);
+  for (let i = 0; i < count; i += 1) {
+    const entry = entries[i];
+    if (!isRecord(entry) || entry["type"] !== "message") continue;
+    const message = entry["message"];
+    if (!isRecord(message) || message["role"] !== "assistant") continue;
+    const usage = message["usage"];
+    if (!isRecord(usage)) continue;
+    const cost = usage["cost"];
+    if (!isRecord(cost)) continue;
+    const amount = finiteNonNegative(cost["total"]);
+    if (amount !== undefined) {
+      total += amount;
+      found = true;
+    }
+  }
+  return found ? total : undefined;
+}
+
+function readTelemetry(
+  pi: Pi,
+  ctx: Context,
+  costUsd: number | undefined,
+): TelemetrySnapshot | undefined {
+  const model = nonEmptyTrimmed(ctx.model?.name) ?? nonEmptyTrimmed(ctx.model?.id);
+  const effort = nonEmptyTrimmed(quietly(() => pi.getThinkingLevel?.()))?.toLowerCase();
+  const rawContext = quietly(() => ctx.getContextUsage?.());
+  const windowTokens = finiteNonNegative(rawContext?.contextWindow ?? ctx.model?.contextWindow);
+  const usedTokens = finiteNonNegative(rawContext?.tokens);
+  const usedPercent = finiteNonNegative(rawContext?.percent);
+  let context: TelemetryContext | undefined;
+  if (
+    usedPercent !== undefined ||
+    (usedTokens !== undefined && windowTokens !== undefined && windowTokens > 0)
+  ) {
+    context = {
+      ...(usedPercent !== undefined ? { usedPercent } : {}),
+      ...(windowTokens !== undefined && windowTokens > 0
+        ? { windowTokens: Math.floor(windowTokens) }
+        : {}),
+      ...(usedTokens !== undefined ? { usedTokens: Math.floor(usedTokens) } : {}),
+    };
+  }
+  const cost = finiteNonNegative(costUsd);
+  if (model === undefined && effort === undefined && context === undefined && cost === undefined) {
+    return undefined;
+  }
+  return {
+    ...(model !== undefined ? { model } : {}),
+    ...(effort !== undefined ? { effort } : {}),
+    ...(context !== undefined ? { context } : {}),
+    ...(cost !== undefined ? { costUsd: cost } : {}),
+  };
 }
 
 function currentReport(phase: Phase, promptOpen: boolean): Report {
@@ -685,6 +831,7 @@ export default function (pi: Pi): void {
   const started = quietly(procStart);
   const keptFlags = parsePiLaunchFlags(process.argv.slice(2));
   let reportedResume: { readonly sessionId: string; readonly cwd: string } | undefined;
+  let sessionCostUsd: number | undefined;
   let lifecycle: Lifecycle = {
     kind: "active",
     phase: { kind: "resting", resting: { status: "stopped" } },
@@ -728,7 +875,12 @@ export default function (pi: Pi): void {
     const identity = parseIdentity(ctx);
     if (identity === undefined) return;
     syncResume(identity);
-    const next: Snapshot = { phase: state.phase, promptOpen: state.promptOpen };
+    const telemetry = readTelemetry(pi, ctx, sessionCostUsd);
+    const next: Snapshot = {
+      phase: state.phase,
+      promptOpen: state.promptOpen,
+      ...(telemetry !== undefined ? { telemetry } : {}),
+    };
     if (
       state.disk.kind === "synced" &&
       sameIdentity(state.disk.identity, identity) &&
@@ -774,6 +926,7 @@ export default function (pi: Pi): void {
 
   pi.on("session_start", (event, ctx) => {
     if (lifecycle.kind !== "active") return;
+    sessionCostUsd = readSessionCost(ctx);
     const restored =
       event.reason === "reload" ? quietly(() => snapshotInFile(ctx, started)) : undefined;
     if (restored === undefined) {
@@ -815,11 +968,22 @@ export default function (pi: Pi): void {
   });
 
   pi.on("message_end", (event, ctx) => {
-    if (lifecycle.kind !== "active" || lifecycle.phase.kind !== "running") return;
+    if (lifecycle.kind !== "active") return;
     const message = event.message;
     if (!message || message.role !== "assistant") return;
+    const messageCost = finiteNonNegative(message.usage?.cost?.total);
+    if (messageCost !== undefined) {
+      sessionCostUsd = (sessionCostUsd ?? 0) + messageCost;
+    }
+    if (lifecycle.phase.kind !== "running") {
+      sync(lifecycle, ctx);
+      return;
+    }
     const stop = parseStopReason(message.stopReason);
-    if (stop === undefined) return;
+    if (stop === undefined) {
+      sync(lifecycle, ctx);
+      return;
+    }
     switch (stop) {
       case "error":
         lifecycle.phase = { kind: "running", outcome: errorReport(message.errorMessage) };
@@ -833,6 +997,26 @@ export default function (pi: Pi): void {
       default:
         assertNever(stop);
     }
+    sync(lifecycle, ctx);
+  });
+
+  pi.on("turn_end", (_event, ctx) => {
+    if (lifecycle.kind !== "active") return;
+    sync(lifecycle, ctx);
+  });
+
+  pi.on("model_select", (_event, ctx) => {
+    if (lifecycle.kind !== "active") return;
+    sync(lifecycle, ctx);
+  });
+
+  pi.on("thinking_level_select", (_event, ctx) => {
+    if (lifecycle.kind !== "active") return;
+    sync(lifecycle, ctx);
+  });
+
+  pi.on("session_compact", (_event, ctx) => {
+    if (lifecycle.kind !== "active") return;
     sync(lifecycle, ctx);
   });
 

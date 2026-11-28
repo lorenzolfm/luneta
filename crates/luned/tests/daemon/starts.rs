@@ -256,10 +256,9 @@ impl Window {
 }
 
 pub fn in_sidebar(line: &str) -> String {
-    line.chars()
-        .skip_while(|it| *it == '│')
-        .take_while(|it| *it != '│')
-        .collect()
+    line.strip_prefix('│')
+        .and_then(|rest| rest.split_once('│'))
+        .map_or_else(String::new, |(inside, _)| inside.to_owned())
 }
 
 fn is_worktree_row(sidebar: &str) -> bool {

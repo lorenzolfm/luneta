@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, ErrorKind};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -9,6 +10,10 @@ use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::program_status::Message;
 use lune_protocol::said::Said;
+use lune_protocol::telemetry::{
+    AgentTelemetry, AgentUsage, ContextWindow, TelemetryText, UsedPermille, cost_usd_to_micro_usd,
+    strip_effort_suffix,
+};
 use serde::Deserialize;
 
 use crate::agent::{
@@ -56,6 +61,62 @@ struct RawFile {
     mode: Option<String>,
     phase: Option<RawPhase>,
     prompt_open: Option<bool>,
+    telemetry: Option<RawTelemetry>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTelemetry {
+    model: Option<String>,
+    effort: Option<String>,
+    context: Option<RawTelemetryContext>,
+    cost_usd: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTelemetryContext {
+    used_percent: Option<f64>,
+    window_tokens: Option<u64>,
+    used_tokens: Option<u64>,
+}
+
+impl RawTelemetry {
+    fn parse(&self) -> Option<AgentTelemetry> {
+        let effort = self
+            .effort
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .and_then(|text| TelemetryText::parse(&text));
+        let model = self
+            .model
+            .as_deref()
+            .map(|raw| match effort.as_ref() {
+                Some(effort) => strip_effort_suffix(raw.trim(), effort.as_str()),
+                None => raw.trim(),
+            })
+            .and_then(TelemetryText::parse);
+        let context = self.context.as_ref().and_then(parse_context);
+        let usage = self
+            .cost_usd
+            .and_then(cost_usd_to_micro_usd)
+            .and_then(|micro_usd| AgentUsage::new(Vec::new(), Some(micro_usd)));
+        AgentTelemetry::new(model, effort, context, usage)
+    }
+}
+
+fn parse_context(raw: &RawTelemetryContext) -> Option<ContextWindow> {
+    let window_tokens = raw.window_tokens.and_then(NonZeroU64::new);
+    let used_tokens = raw.used_tokens;
+    let used_permille = raw
+        .used_percent
+        .and_then(UsedPermille::of_percent)
+        .or_else(|| Some(UsedPermille::of_ratio(used_tokens?, window_tokens?)))?;
+    Some(ContextWindow {
+        used_permille,
+        window_tokens,
+        used_tokens,
+    })
 }
 
 #[derive(Deserialize)]
@@ -153,6 +214,7 @@ struct File {
     status_since: SystemTime,
     proc_start: Option<process::Start>,
     entrypoint: Option<Said>,
+    telemetry: Option<AgentTelemetry>,
 }
 
 impl File {
@@ -190,6 +252,7 @@ impl File {
             })
             .transpose()?;
         let entrypoint = raw.mode.and_then(|mode| Said::new(mode.trim().to_owned()));
+        let telemetry = raw.telemetry.as_ref().and_then(RawTelemetry::parse);
         Ok(File {
             session_id: raw.session_id,
             cwd: raw.cwd,
@@ -197,6 +260,7 @@ impl File {
             status_since: moment(raw.status_since),
             proc_start,
             entrypoint,
+            telemetry,
         })
     }
 }
@@ -390,7 +454,7 @@ fn reported(id: AgentId, file: File, process: Process, proof: Proof) -> Reported
         entrypoint: file.entrypoint,
         terminal: process.terminal,
     };
-    ReportedAgent::new(READS, id, sighting, update, proof)
+    ReportedAgent::new(READS, id, sighting, update, proof).with_telemetry(file.telemetry)
 }
 
 #[cfg(test)]
@@ -399,6 +463,7 @@ mod tests {
 
     use lune_protocol::program_status::Message;
     use lune_protocol::said::Said;
+    use lune_protocol::telemetry::TelemetryText;
 
     use super::{DATED_LATE, File, PiStatus, RawFile, RawPhase, RawResting, dated_since};
     use crate::Directory;
@@ -471,6 +536,7 @@ mod tests {
             mode: Some("tui".to_owned()),
             phase: None,
             prompt_open: None,
+            telemetry: None,
         };
         assert!(File::parse(base("stopped", Some("42"))).is_ok());
         assert!(File::parse(base("stopped", Some(""))).is_err());
@@ -510,5 +576,43 @@ mod tests {
         });
         bad_outcome.prompt_open = Some(false);
         assert!(File::parse(bad_outcome).is_err());
+    }
+
+    #[test]
+    fn pi_file_parses_telemetry_model_effort_context_and_cost() {
+        let raw: RawFile = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "cwd": "/w",
+            "status": "busy",
+            "statusSince": 1000,
+            "telemetry": {
+                "model": "Opus 4.7 (high)",
+                "effort": "HIGH",
+                "context": {
+                    "usedPercent": 1.9,
+                    "windowTokens": 1_000_000,
+                    "usedTokens": 19_000
+                },
+                "costUsd": 0.26
+            }
+        }))
+        .unwrap();
+        let file = File::parse(raw).unwrap();
+        let telemetry = file.telemetry.expect("telemetry is parsed");
+        assert_eq!(
+            telemetry.model().map(TelemetryText::as_str),
+            Some("Opus 4.7")
+        );
+        assert_eq!(telemetry.effort().map(TelemetryText::as_str), Some("high"));
+        let context = telemetry.context().expect("context is present");
+        assert_eq!(context.used_permille.get(), 19);
+        assert_eq!(
+            context.window_tokens.map(std::num::NonZeroU64::get),
+            Some(1_000_000)
+        );
+        assert_eq!(context.used_tokens, Some(19_000));
+        let usage = telemetry.usage().expect("usage is present");
+        assert_eq!(usage.windows(), []);
+        assert_eq!(usage.session_cost_micro_usd(), Some(260_000));
     }
 }

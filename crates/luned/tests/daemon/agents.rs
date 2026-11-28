@@ -58,6 +58,10 @@ impl Host {
         fs::read_to_string(log).unwrap_or_default()
     }
 
+    pub fn claude_folder(&self) -> PathBuf {
+        self.home.path().join(".claude")
+    }
+
     pub fn pi_folder(&self) -> PathBuf {
         self.home.path().join(".pi/agent")
     }
@@ -679,4 +683,99 @@ fn a_folder_the_daemon_cannot_read_it_says_so_once() {
     fs::set_permissions(host.sessions(), Permissions::from_mode(0o755)).unwrap();
 
     assert_eq!(host.agents(), [] as [Agent; 0]);
+}
+
+#[test]
+fn a_claude_statusline_hook_reports_telemetry_and_effort_over_grpc() {
+    let host = Host::new();
+    let settings_path = host.claude_folder().join("settings.json");
+    fs::write(
+        &settings_path,
+        json!({
+            "effortLevel": "medium",
+            "modelSettings": {
+                "claude-opus-4-7[1m]": { "effortLevel": "high" }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let _daemon = start(host.vars()).unwrap();
+
+    let status_cmd = eventually("luned wires claude statusLine in settings.json", || {
+        let text = fs::read_to_string(&settings_path).ok()?;
+        let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+        value["statusLine"]["command"]
+            .as_str()
+            .filter(|cmd| cmd.contains("lune-statusline.sh"))
+            .map(str::to_owned)
+    });
+
+    let runner = r#"
+import { execSync } from "node:child_process";
+const [, cmd, payload] = process.argv;
+execSync(cmd, { input: payload, encoding: "utf8" });
+setTimeout(() => {}, 60000);
+"#;
+    let payload = json!({
+        "session_id": "claude-telemetry-1",
+        "model": {
+            "id": "claude-opus-4-7[1m]",
+            "display_name": "Opus 4.7 (1M context)"
+        },
+        "context_window": {
+            "context_window_size": 1_000_000,
+            "used_percentage": 18.4,
+            "current_usage": {
+                "input_tokens": 120_000,
+                "cache_read_input_tokens": 64_000
+            }
+        },
+        "rate_limits": {
+            "five_hour": { "used_percentage": 35.0, "resets_at": 1_800_000_000u64 },
+            "seven_day": { "used_percentage": 63.0, "resets_at": 1_800_200_000u64 }
+        },
+        "cost": { "total_cost_usd": 0.48 }
+    })
+    .to_string();
+    let mut command = host.vars().command("node");
+    command
+        .args(["--input-type=module", "--eval", runner])
+        .arg(&status_cmd)
+        .arg(&payload)
+        .env("LUNE_MUX_TERMINAL", "7")
+        .env("LUNE_MUX_TERMINAL_MADE", MADE_NANOS.to_string());
+    let fake_claude = Running::spawn(&mut command);
+    host.write(
+        fake_claude.pid(),
+        &file_for("claude-telemetry-1", &fake_claude, "busy"),
+    );
+
+    let agent = eventually("claude telemetry arrives on the agent", || {
+        let found = host.agent("claude-telemetry-1")?;
+        found.parsed_telemetry().is_some().then_some(found)
+    });
+    let telemetry = agent.parsed_telemetry().unwrap();
+    assert_eq!(
+        telemetry
+            .model()
+            .map(lune_protocol::telemetry::TelemetryText::as_str),
+        Some("Opus 4.7")
+    );
+    assert_eq!(
+        telemetry
+            .effort()
+            .map(lune_protocol::telemetry::TelemetryText::as_str),
+        Some("high")
+    );
+    let context = telemetry.context().unwrap();
+    assert_eq!(context.used_permille.get(), 184);
+    assert_eq!(context.used_tokens, Some(184_000));
+    let usage = telemetry.usage().unwrap();
+    assert_eq!(usage.windows().len(), 2);
+    assert_eq!(usage.windows()[0].label.as_str(), "5h");
+    assert_eq!(usage.windows()[0].used_permille.get(), 350);
+    assert_eq!(usage.windows()[1].label.as_str(), "7d");
+    assert_eq!(usage.windows()[1].used_permille.get(), 630);
+    assert_eq!(usage.session_cost_micro_usd(), Some(480_000));
 }
