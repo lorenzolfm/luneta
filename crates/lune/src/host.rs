@@ -356,6 +356,7 @@ fn is_chord(chord: Chord) -> bool {
         || chord == COLLAPSE
         || stepped(chord).is_some()
         || resized(chord).is_some()
+        || revives(chord)
 }
 
 #[derive(Clone, Copy, Debug)]
