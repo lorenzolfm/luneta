@@ -1402,6 +1402,7 @@ mod tests {
                 state: State::Merged,
                 checks: None,
                 stale: false,
+                conflicting: false,
             },
             base_name: "main".to_owned(),
             head_name: "origin-branch".to_owned(),
@@ -1412,6 +1413,7 @@ mod tests {
                 owner: "o".to_owned(),
                 name: "n".to_owned(),
             }),
+            mergeability_unknown: false,
         }
     }
 

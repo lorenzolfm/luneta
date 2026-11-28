@@ -8,6 +8,7 @@ pub struct PullRequest {
     pub state: State,
     pub checks: Option<Checks>,
     pub stale: bool,
+    pub conflicting: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +118,14 @@ impl PullRequest {
     }
 
     #[must_use]
+    pub fn has_conflicts(&self) -> bool {
+        match self.state {
+            State::Open | State::Draft => self.conflicting,
+            State::Merged | State::Closed => false,
+        }
+    }
+
+    #[must_use]
     pub fn to_api(&self, dir: &str) -> v1::PullRequest {
         let state = match self.state {
             State::Open => v1::PullRequestState::Open,
@@ -140,6 +149,7 @@ impl PullRequest {
                 },
             ),
             stale: self.stale,
+            conflicting: self.conflicting,
         }
     }
 
@@ -169,6 +179,7 @@ impl PullRequest {
             state,
             checks,
             stale: pull_request.stale,
+            conflicting: pull_request.conflicting,
         })
     }
 }
@@ -187,12 +198,17 @@ mod tests {
         });
         for state in [State::Open, State::Draft, State::Merged, State::Closed] {
             let none = Some(Checks::default());
-            for (checks, stale) in [(checks, false), (None, false), (none, true)] {
+            for (checks, stale, conflicting) in [
+                (checks, false, false),
+                (None, false, true),
+                (none, true, true),
+            ] {
                 let pull_request = PullRequest {
                     page: page.clone(),
                     state,
                     checks,
                     stale,
+                    conflicting,
                 };
                 let api = pull_request.to_api("/w/repo");
                 assert_eq!(PullRequest::of_api(&api), Some(pull_request));
@@ -210,13 +226,14 @@ mod tests {
         ];
         for (url, state) in unread {
             let (dir, url) = ("/w/repo".to_owned(), url.to_owned());
-            let (checks, stale) = (None, false);
+            let (checks, stale, conflicting) = (None, false, false);
             let pull_request = v1::PullRequest {
                 dir,
                 state,
                 url,
                 checks,
                 stale,
+                conflicting,
             };
             assert_eq!(PullRequest::of_api(&pull_request), None, "{pull_request:?}");
         }
@@ -280,6 +297,7 @@ mod tests {
                 state,
                 checks,
                 stale: false,
+                conflicting: false,
             }
             .verdict()
         };
@@ -288,5 +306,26 @@ mod tests {
         assert_eq!(verdict(State::Merged, failed), None);
         assert_eq!(verdict(State::Closed, failed), None);
         assert_eq!(verdict(State::Open, None), None);
+    }
+
+    #[test]
+    fn only_an_open_pull_request_says_it_has_conflicts() {
+        let page = PullPage::parse("https://github.com/owner/repo/pull/126").unwrap();
+        let conflicts = |state, conflicting| {
+            PullRequest {
+                page: page.clone(),
+                state,
+                checks: None,
+                stale: false,
+                conflicting,
+            }
+            .has_conflicts()
+        };
+        assert!(conflicts(State::Open, true));
+        assert!(conflicts(State::Draft, true));
+        assert!(!conflicts(State::Open, false));
+        assert!(!conflicts(State::Draft, false));
+        assert!(!conflicts(State::Merged, true));
+        assert!(!conflicts(State::Closed, true));
     }
 }

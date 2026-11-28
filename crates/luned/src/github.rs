@@ -37,7 +37,7 @@ pub struct Found {
 
 const VIEWED: &str = concat!(
     "state,isDraft,url,baseRefName,headRefName,headRefOid,author,headRepository,",
-    "headRepositoryOwner,statusCheckRollup",
+    "headRepositoryOwner,statusCheckRollup,mergeable",
 );
 
 #[derive(Deserialize)]
@@ -54,6 +54,8 @@ struct Viewed {
     head_repository_owner: Option<Owner>,
     #[serde(default)]
     status_check_rollup: Option<serde_json::Value>,
+    #[serde(default)]
+    mergeable: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +79,7 @@ pub struct Pulled {
     pub head: String,
     pub author: Option<String>,
     pub head_repository: Option<RepositoryName>,
+    pub mergeability_unknown: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,12 +143,16 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         }
         _ => None,
     };
+    let open = matches!(state, State::Open | State::Draft);
+    let conflicting = open && viewed.mergeable.as_deref() == Some("CONFLICTING");
+    let mergeability_unknown = open && viewed.mergeable.as_deref() == Some("UNKNOWN");
     Ok(Pulled {
         pull_request: PullRequest {
             page,
             state,
             checks: checks::rolled_up(viewed.status_check_rollup),
             stale: false,
+            conflicting,
         },
         base_name: viewed.base_ref_name,
         head_name: viewed.head_ref_name,
@@ -155,6 +162,7 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
             .map(|author| author.login)
             .filter(|login| !login.is_empty()),
         head_repository,
+        mergeability_unknown,
     })
 }
 
@@ -471,6 +479,7 @@ pub struct Rests {
 struct Said {
     at: Instant,
     found: Option<PullRequest>,
+    mergeability_unknown: bool,
 }
 
 struct Asked {
@@ -530,23 +539,40 @@ fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> A
         Some(was) => (was.said, was.failed, Some(was.rest)),
         None => (None, 0, None),
     };
-    let of = |found: Option<Pulled>| found.map(|found| found.pull_request);
-    let fresh = |found: Option<PullRequest>, trouble| {
+    let of = |found: Option<Pulled>| match found {
+        Some(found) => (Some(found.pull_request), found.mergeability_unknown),
+        None => (None, false),
+    };
+    let fresh = |found: Option<PullRequest>, mergeability_unknown: bool, trouble| {
         let change = |was| checks_changed(was, found.as_ref(), failed, now);
         if let Some(change) = before.as_ref().and_then(change) {
             log::say(&change);
         }
-        let new = before.as_ref().is_none_or(|was| was.found != found);
-        (Some(Said { at: now, found }), trouble, 0, new)
+        let new = before.as_ref().is_none_or(|was| {
+            was.found != found || was.mergeability_unknown != mergeability_unknown
+        });
+        (
+            Some(Said {
+                at: now,
+                found,
+                mergeability_unknown,
+            }),
+            trouble,
+            0,
+            new,
+        )
     };
     let (said, trouble, failed, new) = match said {
-        Ok(Answer::Stayed(found)) => fresh(of(found), None),
+        Ok(Answer::Stayed(found)) => {
+            let (found, unknown) = of(found);
+            fresh(found, unknown, None)
+        }
         Ok(Answer::Moved) => (before, None, failed, false),
         Ok(Answer::Partly { own, why }) => {
-            let own = of(own);
+            let (own, unknown) = of(own);
             let was = before.as_ref().and_then(|was| was.found.clone());
             if standing(was, own.clone()) == own {
-                fresh(own, Some(why))
+                fresh(own, unknown, Some(why))
             } else {
                 (before, Some(why), failed.saturating_add(1), false)
             }
@@ -554,7 +580,8 @@ fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> A
         Err(why) => (before, Some(why), failed.saturating_add(1), false),
     };
     let found = said.as_ref().and_then(|said| said.found.as_ref());
-    let pending = found.is_some_and(|found| found.verdict() == Some(Verdict::Pending));
+    let pending = found.is_some_and(|found| found.verdict() == Some(Verdict::Pending))
+        || said.as_ref().is_some_and(|said| said.mergeability_unknown);
     let rest = match rested {
         _ if !pending => rests.settled,
         Some(rested) if !new => rested
@@ -775,6 +802,7 @@ mod tests {
             state,
             checks,
             stale: false,
+            conflicting: false,
         }
     }
 
@@ -786,6 +814,7 @@ mod tests {
             head: "abc".to_owned(),
             author: None,
             head_repository: None,
+            mergeability_unknown: false,
         }
     }
 
@@ -808,6 +837,7 @@ mod tests {
             said: Some(Said {
                 at,
                 found: Some(found.clone()),
+                mergeability_unknown: false,
             }),
             failed: 1,
             trouble: None,
@@ -905,6 +935,7 @@ mod tests {
         let said = |found| Said {
             at: at.checked_sub(Duration::from_secs(62)).unwrap(),
             found,
+            mergeability_unknown: false,
         };
         let changed = |was: &PullRequest, now: &PullRequest, failed| {
             checks_changed(&said(Some(was.clone())), Some(now), failed, at)
@@ -1036,6 +1067,7 @@ mod tests {
                 state: State::Open,
                 checks: Some(Checks::default()),
                 stale: false,
+                conflicting: false,
             })
         );
         let page = format!(r#"{head},"url":"https://github.com/owner/repo/pull/1""#);
@@ -1046,6 +1078,39 @@ mod tests {
         assert_eq!(state(&merged), Ok(State::Merged));
         let closed = viewed(r#""isDraft":true,"state":"CLOSED""#);
         assert_eq!(state(&closed), Ok(State::Closed));
+
+        let mergeable = |fields: &str| {
+            let parsed = parse(viewed(fields).as_bytes()).unwrap();
+            (parsed.pull_request.conflicting, parsed.mergeability_unknown)
+        };
+        assert_eq!(
+            mergeable(r#""isDraft":false,"state":"OPEN","mergeable":"CONFLICTING""#),
+            (true, false)
+        );
+        assert_eq!(
+            mergeable(r#""isDraft":true,"state":"OPEN","mergeable":"CONFLICTING""#),
+            (true, false)
+        );
+        assert_eq!(
+            mergeable(r#""isDraft":false,"state":"OPEN","mergeable":"MERGEABLE""#),
+            (false, false)
+        );
+        assert_eq!(
+            mergeable(r#""isDraft":false,"state":"OPEN","mergeable":"UNKNOWN""#),
+            (false, true)
+        );
+        assert_eq!(
+            mergeable(r#""isDraft":false,"state":"MERGED","mergeable":"CONFLICTING""#),
+            (false, false)
+        );
+        assert_eq!(
+            mergeable(r#""isDraft":false,"state":"MERGED","mergeable":"UNKNOWN""#),
+            (false, false)
+        );
+        assert_eq!(
+            mergeable(r#""isDraft":false,"state":"CLOSED","mergeable":"CONFLICTING""#),
+            (false, false)
+        );
         let unread = [
             viewed(r#""isDraft":false,"state":"QUEUED""#),
             viewed(r#""state":"OPEN""#),
@@ -1059,5 +1124,46 @@ mod tests {
         for said in unread {
             assert!(read(&said).is_err(), "{said:?}");
         }
+    }
+
+    #[test]
+    fn unknown_mergeability_is_asked_about_again_soon_and_backs_off() {
+        let rests = Rests {
+            pending: Duration::from_secs(15),
+            settled: Duration::from_mins(2),
+        };
+        let stayed = |conflicting, mergeability_unknown| {
+            let pull_request = PullRequest {
+                conflicting,
+                ..pull(
+                    "owner/repo",
+                    7,
+                    State::Open,
+                    Some(Checks {
+                        pending: 0,
+                        failed: 0,
+                        passed: 1,
+                    }),
+                )
+            };
+            Ok(Answer::Stayed(Some(Pulled {
+                mergeability_unknown,
+                ..pulled(pull_request)
+            })))
+        };
+        let mut asked = answered(None, stayed(false, false), rests);
+        let mut rested = vec![asked.rest];
+        for said in [
+            stayed(false, true),
+            stayed(false, true),
+            stayed(false, true),
+            stayed(true, false),
+        ] {
+            asked = answered(Some(asked), said, rests);
+            rested.push(asked.rest);
+        }
+        let secs = Duration::from_secs;
+        assert_eq!(rested, [120, 15, 30, 60, 120].map(secs));
+        assert!(asked.found().is_some_and(|found| found.conflicting));
     }
 }

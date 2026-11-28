@@ -4364,6 +4364,7 @@ mod tests {
             state,
             checks,
             stale: false,
+            conflicting: false,
         }
     }
 

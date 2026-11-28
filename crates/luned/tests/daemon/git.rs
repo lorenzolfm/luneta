@@ -979,12 +979,15 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
         "context": "ci", "state": "PENDING" }]);
     let main = json!({
         "number": 7, "state": "OPEN", "isDraft": false, "url": page(7),
-        "statusCheckRollup": rollup,
+        "statusCheckRollup": rollup, "mergeable": "CONFLICTING",
     });
     host.gh.open("main", &main);
     host.gh.open(
         "fold",
-        &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page(8) }),
+        &json!({
+            "number": 8, "state": "OPEN", "isDraft": true, "url": page(8),
+            "mergeable": "MERGEABLE",
+        }),
     );
     let spelled = |dir: &Path| dir.display().to_string();
     let (top, src, beside) = (spelled(&tree), spelled(&twin), spelled(&other));
@@ -992,14 +995,19 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     for dir in [&top, &src, &beside] {
         watched(&host, dir);
     }
-    let found = || -> BTreeMap<String, (u32, PullRequestState, String)> {
+    let found = || -> BTreeMap<String, (u32, PullRequestState, String, bool)> {
         let pull_requests = host.host().pull_requests.into_iter();
         pull_requests
-            .map(|it| (it.dir.clone(), (number(&it), it.state(), it.url)))
+            .map(|it| {
+                (
+                    it.dir.clone(),
+                    (number(&it), it.state(), it.url, it.conflicting),
+                )
+            })
             .collect()
     };
 
-    let open = (7, PullRequestState::Open, page(7));
+    let open = (7, PullRequestState::Open, page(7), true);
     let all = eventually("gh finds main's pull request in all three", || {
         let found = found();
         (found.len() == 3).then_some(found)
@@ -1021,7 +1029,7 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     assert_eq!(checks, vec![failing; 3]);
 
     assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
-    let draft = (8, PullRequestState::Draft, page(8));
+    let draft = (8, PullRequestState::Draft, page(8), false);
     eventually("gh finds fold's pull request in tree", || {
         (found().get(&top) == Some(&draft)).then_some(())
     });

@@ -843,6 +843,7 @@ struct Numbered {
     number: Number,
     colour: Color,
     checks: Option<Verdict>,
+    conflicting: bool,
     stale: bool,
 }
 
@@ -6402,6 +6403,7 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         State::Closed => return None,
     };
     let checks = pull_request.verdict();
+    let conflicting = pull_request.has_conflicts();
     let number = pull_request.number();
     let link = Link::parse(pull_request.page.url());
     let number = link.map_or(Number::Unlinked(number), |link| {
@@ -6411,6 +6413,7 @@ fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
         number,
         colour,
         checks,
+        conflicting,
         stale: pull_request.stale,
     })
 }
@@ -6423,6 +6426,15 @@ fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
     };
     let colour = if stale { moonlight::MUTE } else { colour };
     Span::styled(mark, Style::new().fg(colour))
+}
+
+fn conflict_mark(stale: bool) -> Span<'static> {
+    let colour = if stale {
+        moonlight::MUTE
+    } else {
+        moonlight::RED
+    };
+    Span::styled("≠", Style::new().fg(colour))
 }
 
 fn glyphs(changes: &Changes, stashes: u32, upstream: Option<Upstream>) -> String {
@@ -7017,6 +7029,9 @@ impl<'a> Beside<'a> {
                     .checks
                     .map(|checks| verdict_mark(checks, numbered.stale)),
             );
+            if numbered.conflicting {
+                spans.push(conflict_mark(numbered.stale));
+            }
         }
         let status = if keeps.status() {
             checkout.status.clone()
@@ -9790,6 +9805,7 @@ mod tests {
                 state,
                 checks: None,
                 stale: false,
+                conflicting: false,
             };
             host.pull_requests.push(pull_request.to_api(dir));
         }
@@ -9857,6 +9873,7 @@ mod tests {
                     state,
                     checks: None,
                     stale: false,
+                    conflicting: false,
                 };
                 host.pull_requests.push(pull_request.to_api(dir));
             }
@@ -9949,6 +9966,7 @@ mod tests {
                 state,
                 checks,
                 stale,
+                conflicting: false,
             };
             host.pull_requests.push(pull_request.to_api(dir));
         }
@@ -9986,6 +10004,125 @@ mod tests {
     }
 
     #[test]
+    fn an_open_pull_request_shows_when_it_has_merge_conflicts() {
+        use lune_protocol::github::Checks;
+
+        let checks = |pending, failed, passed| {
+            Some(Checks {
+                pending,
+                failed,
+                passed,
+            })
+        };
+        let checkouts = [
+            (
+                "/w/a",
+                "main",
+                126,
+                State::Open,
+                checks(0, 0, 3),
+                true,
+                false,
+            ),
+            ("/w/b", "fail", 7, State::Open, checks(0, 1, 0), true, false),
+            (
+                "/w/c",
+                "wait",
+                4321,
+                State::Open,
+                checks(1, 0, 2),
+                true,
+                false,
+            ),
+            ("/w/d", "draft", 8, State::Draft, None, true, false),
+            (
+                "/w/e",
+                "clean",
+                9,
+                State::Open,
+                checks(0, 0, 3),
+                false,
+                false,
+            ),
+            (
+                "/w/f",
+                "gone",
+                10,
+                State::Merged,
+                checks(0, 0, 1),
+                true,
+                false,
+            ),
+            ("/w/g", "late", 11, State::Open, checks(0, 0, 2), true, true),
+        ];
+        let views = checkouts
+            .iter()
+            .zip(1..)
+            .map(|((cwd, ..), id)| view(id, id, cwd, "fish"));
+        let mut host = host(vec![session("s", 10, views.collect())], Vec::new());
+        for (dir, branch, number, state, checks, conflicting, stale) in checkouts {
+            let name = Said::new(branch.to_owned()).expect("a branch's name");
+            let head = Head::Branch {
+                name,
+                upstream: None,
+                changed: None,
+            };
+            let status = GitStatus::Checkout {
+                repository: None,
+                head,
+                changes: Changes::default(),
+                stashes: 0,
+            };
+            host.git_statuses.push(status.to_api(dir));
+            let page = owner_s_page(number);
+            let pull_request = PullRequest {
+                page,
+                state,
+                checks,
+                stale,
+                conflicting,
+            };
+            host.pull_requests.push(pull_request.to_api(dir));
+        }
+        let mut sidebar = fresh();
+        sidebar.hear(host);
+
+        let buffer = drawn(&mut sidebar, false, 32, 25);
+        let line = |y: u16| {
+            let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
+            line.trim_end().to_owned()
+        };
+        let branches: Vec<String> = [6, 9, 12, 15, 18, 21, 24].into_iter().map(line).collect();
+        assert_eq!(
+            branches,
+            [
+                "       main #126✓≠",
+                "       fail #7✗≠",
+                "       wait #4321●≠",
+                "       draft #8≠",
+                "       clean #9✓",
+                "       gone #10",
+                "       late #11✓≠",
+            ]
+        );
+        let mark = |y: u16, mark: &str| {
+            let x = (0..32)
+                .find(|x| buffer[(*x, y)].symbol() == mark)
+                .expect("the mark");
+            buffer[(x, y)].fg
+        };
+        assert_eq!(mark(6, "✓"), moonlight::GREEN);
+        assert_eq!(mark(6, "≠"), moonlight::RED);
+        assert_eq!(mark(9, "✗"), moonlight::RED);
+        assert_eq!(mark(9, "≠"), moonlight::RED);
+        assert_eq!(mark(12, "●"), moonlight::YELLOW);
+        assert_eq!(mark(12, "≠"), moonlight::RED);
+        assert_eq!(mark(15, "≠"), moonlight::RED);
+        assert_eq!(mark(24, "✓"), moonlight::MUTE);
+        assert_eq!(mark(24, "≠"), moonlight::MUTE);
+    }
+
+    #[test]
     fn a_worktree_named_after_its_branch_takes_one_line_folded_or_not() {
         let mut sidebar = fresh();
         let branched = worktree_of(31, "issue-489", "/w/issue-489", &[1]);
@@ -10019,6 +10156,7 @@ mod tests {
             state,
             checks,
             stale: false,
+            conflicting: false,
         };
         host.pull_requests.push(pull_request.to_api("/w/issue-489"));
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
@@ -10601,6 +10739,7 @@ mod tests {
                 state,
                 checks: None,
                 stale: false,
+                conflicting: false,
             };
             pull_requests.push(pull_request.to_api(dir));
         }

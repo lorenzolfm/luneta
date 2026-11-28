@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
+use lune_protocol::github::PullRequest;
 use lune_protocol::made::Made;
 
 use crate::api::project::clone;
@@ -123,6 +124,7 @@ pub struct Worktree {
     pub folder: String,
     pub branch: Option<String>,
     pub seen: Seen,
+    pub conflicting: bool,
     pub views: Vec<View>,
 }
 
@@ -213,6 +215,7 @@ struct Seat<'a> {
     on: Option<&'a str>,
     agents: &'a [api::Agent],
     git_statuses: &'a [api::GitStatus],
+    pull_requests: &'a [api::PullRequest],
     projects: Option<&'a api::Projects>,
 }
 
@@ -223,21 +226,28 @@ impl Model {
             on: None,
             agents: &host.agents,
             git_statuses: &host.git_statuses,
+            pull_requests: &host.pull_requests,
             projects: host.projects.as_ref(),
         };
         let mut seats = Vec::with_capacity(host.remotes.len());
         for remote in &host.remotes {
             let on = remote.destination.as_str();
-            let seat = |agents, git_statuses, projects| Seat {
+            let seat = |agents, git_statuses, pull_requests, projects| Seat {
                 on: Some(on),
                 agents,
                 git_statuses,
+                pull_requests,
                 projects,
             };
             match &remote.reached {
                 Some(remote::Reached::Here(())) => {}
                 Some(remote::Reached::Host(far)) => {
-                    let seat = seat(&far.agents, &far.git_statuses, far.projects.as_ref());
+                    let seat = seat(
+                        &far.agents,
+                        &far.git_statuses,
+                        &far.pull_requests,
+                        far.projects.as_ref(),
+                    );
                     seats.push((on, seat, Reached::Reached));
                 }
                 Some(remote::Reached::Unreached(unreached)) => {
@@ -245,11 +255,11 @@ impl Model {
                         .since
                         .and_then(|since| SystemTime::try_from(since).ok());
                     let why = unreached.why.clone();
-                    let seat = seat(&[], &[], unreached.projects.as_ref());
+                    let seat = seat(&[], &[], &[], unreached.projects.as_ref());
                     seats.push((on, seat, Reached::Unreached { why, since }));
                 }
                 Some(remote::Reached::Reaching(())) | None => {
-                    seats.push((on, seat(&[], &[], None), Reached::Reaching));
+                    seats.push((on, seat(&[], &[], &[], None), Reached::Reaching));
                 }
             }
         }
@@ -302,12 +312,18 @@ fn held_of(seat: &Seat<'_>) -> Held {
             _ => None,
         })
         .collect();
+    let conflicts: HashSet<&str> = seat
+        .pull_requests
+        .iter()
+        .filter(|pull| PullRequest::of_api(pull).is_some_and(|pull| pull.has_conflicts()))
+        .map(|pull| pull.dir.as_str())
+        .collect();
     match seat.projects.and_then(|projects| projects.held.as_ref()) {
         Some(projects::Held::Kept(kept)) => {
             let projects = kept
                 .projects
                 .iter()
-                .map(|it| project_of(seat.on, it, &branches))
+                .map(|it| project_of(seat.on, it, &branches, &conflicts))
                 .collect();
             Held::Kept { projects }
         }
@@ -316,16 +332,21 @@ fn held_of(seat: &Seat<'_>) -> Held {
     }
 }
 
-fn project_of(on: Option<&str>, project: &api::Project, branches: &HashMap<&str, &str>) -> Project {
+fn project_of(
+    on: Option<&str>,
+    project: &api::Project,
+    branches: &HashMap<&str, &str>,
+    conflicts: &HashSet<&str>,
+) -> Project {
     let holds = match &project.holds {
         Some(project::Holds::Folder(worktree)) => Holds::Folder {
-            worktree: worktree_of(on, worktree, branches),
+            worktree: worktree_of(on, worktree, branches, conflicts),
         },
         Some(project::Holds::Clone(clone)) => {
             let worktrees = clone
                 .worktrees
                 .iter()
-                .map(|it| worktree_of(on, it, branches))
+                .map(|it| worktree_of(on, it, branches, conflicts))
                 .collect();
             let unopened = match &clone.listing {
                 Some(clone::Listing::Unopened(unopened)) => Unopened::Listed {
@@ -354,6 +375,7 @@ fn worktree_of(
     on: Option<&str>,
     worktree: &api::Worktree,
     branches: &HashMap<&str, &str>,
+    conflicts: &HashSet<&str>,
 ) -> Worktree {
     let seen = match worktree.seen {
         Some(worktree::Seen::Missing(())) => Seen::Missing,
@@ -368,6 +390,8 @@ fn worktree_of(
         },
         None => Seen::Untold,
     };
+    let conflicting = !matches!(seen, Seen::Missing | Seen::NoBranch | Seen::Merged)
+        && conflicts.contains(worktree.folder.as_str());
     Worktree {
         id: worktree.id,
         name: worktree.name.clone(),
@@ -377,6 +401,7 @@ fn worktree_of(
             .get(worktree.folder.as_str())
             .map(|&branch| branch.to_owned()),
         seen,
+        conflicting,
         views: worktree
             .terminals
             .iter()
@@ -688,6 +713,60 @@ mod tests {
         assert_eq!(
             projects[0].holds.worktrees()[0].branch.as_deref(),
             Some("issue-723")
+        );
+    }
+
+    #[test]
+    fn a_worktree_says_when_its_open_pull_request_has_merge_conflicts() {
+        let pull = |dir: &str, state: api::PullRequestState, conflicting| api::PullRequest {
+            dir: dir.to_owned(),
+            state: state.into(),
+            url: "https://github.com/o/r/pull/1".to_owned(),
+            checks: None,
+            stale: false,
+            conflicting,
+        };
+        let worktree = |id, name: &str, seen| api::Worktree {
+            seen: Some(seen),
+            ..worktree_with(id, name, u32::try_from(id).unwrap())
+        };
+        let stage = |stage: api::Stage| worktree::Seen::Stage(stage.into());
+        let worktrees = vec![
+            worktree(1, "open", stage(api::Stage::PullRequestOpen)),
+            worktree(2, "draft", stage(api::Stage::ChecksFailing)),
+            worktree(3, "clean", stage(api::Stage::PullRequestOpen)),
+            worktree(4, "merged", stage(api::Stage::Merged)),
+            worktree(5, "gone", worktree::Seen::Missing(())),
+        ];
+        let host = api::Host {
+            pull_requests: vec![
+                pull("/w/lune/open", api::PullRequestState::Open, true),
+                pull("/w/lune/draft", api::PullRequestState::Draft, true),
+                pull("/w/lune/clean", api::PullRequestState::Open, false),
+                pull("/w/lune/merged", api::PullRequestState::Merged, true),
+                pull("/w/lune/gone", api::PullRequestState::Open, true),
+            ],
+            projects: Some(kept(vec![clone_of(worktrees)])),
+            ..api::Host::default()
+        };
+        let Held::Kept { projects } = &Model::of(&host).here else {
+            panic!("the projects are kept");
+        };
+        let conflicts: Vec<(&str, bool)> = projects[0]
+            .holds
+            .worktrees()
+            .iter()
+            .map(|worktree| (worktree.name.as_str(), worktree.conflicting))
+            .collect();
+        assert_eq!(
+            conflicts,
+            [
+                ("open", true),
+                ("draft", true),
+                ("clean", false),
+                ("merged", false),
+                ("gone", false)
+            ]
         );
     }
 

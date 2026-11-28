@@ -125,6 +125,7 @@ pub struct Pull {
     pub draft: bool,
     pub branch: String,
     pub author: Option<String>,
+    pub conflicting: bool,
 }
 
 impl Listed {
@@ -169,6 +170,7 @@ impl Pull {
             draft,
             branch,
             author,
+            conflicting,
         } = said;
         Pull {
             number,
@@ -176,6 +178,7 @@ impl Pull {
             draft,
             branch,
             author,
+            conflicting,
         }
     }
 }
@@ -595,5 +598,39 @@ mod tests {
             Rebased::of(Some(unsaid)),
             Err(Unanswered::InDoubt { .. })
         ));
+    }
+
+    #[test]
+    fn listed_pulls_carry_whether_they_have_merge_conflicts() {
+        let work = list_work_response::Work {
+            issues: Some(list_work_response::work::Issues::Off(())),
+            pulls: vec![list_work_response::Pull {
+                number: 12,
+                title: "Fix".to_owned(),
+                draft: false,
+                branch: "fix".to_owned(),
+                author: None,
+                conflicting: true,
+            }],
+            more_pulls: false,
+        };
+        let said = api::ListWorkResponse {
+            listed: Some(list_work_response::Listed::Work(work)),
+        };
+        assert_eq!(
+            Listed::of(Some(said)),
+            Ok(Listed::Work {
+                issues: Issues::Off,
+                pulls: vec![Pull {
+                    number: 12,
+                    title: "Fix".to_owned(),
+                    draft: false,
+                    branch: "fix".to_owned(),
+                    author: None,
+                    conflicting: true,
+                }],
+                more_pulls: false,
+            })
+        );
     }
 }

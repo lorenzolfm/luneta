@@ -44,7 +44,7 @@ const ISSUE_FIELDS: &str = "number,title,labels";
 
 const PULLS: [&str; 4] = ["pr", "list", "--state", "open"];
 
-const PULL_FIELDS: &str = "number,title,isDraft,headRefName,author";
+const PULL_FIELDS: &str = "number,title,isDraft,headRefName,author,mergeable";
 
 const REPOSITORY: [&str; 4] = ["repo", "view", "--json", "hasIssuesEnabled"];
 
@@ -77,6 +77,7 @@ pub struct Pull {
     pub draft: bool,
     pub branch: String,
     pub author: Option<String>,
+    pub conflicting: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +206,7 @@ impl Work {
             draft: pull.draft,
             branch: pull.branch.clone(),
             author: pull.author.clone(),
+            conflicting: pull.conflicting,
         });
         SaidWork {
             issues: Some(issues),
@@ -246,6 +248,7 @@ impl Work {
                  draft,
                  branch,
                  author,
+                 conflicting,
              }| {
                 Ok(Pull {
                     number: number(at)?,
@@ -253,6 +256,7 @@ impl Work {
                     draft,
                     branch,
                     author,
+                    conflicting,
                 })
             },
         );
@@ -439,6 +443,8 @@ struct ListedPull {
     is_draft: bool,
     head_ref_name: String,
     author: Option<Author>,
+    #[serde(default)]
+    mergeable: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -507,6 +513,7 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
             draft: pull.is_draft,
             branch: cut(pull.head_ref_name, NAME_BYTES_MAX),
             author: author.filter(|login| !login.is_empty()),
+            conflicting: pull.mergeable.as_deref() == Some("CONFLICTING"),
         })
     });
     let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
@@ -613,12 +620,13 @@ mod tests {
 
     #[test]
     fn work_goes_over_the_wire_and_back_as_it_was() {
-        let pull = |number: u32, author: Option<&str>| Pull {
+        let pull = |number: u32, author: Option<&str>, conflicting| Pull {
             number: NonZeroU32::new(number).unwrap(),
             title: "Say view, not pane".to_owned(),
             draft: true,
             branch: "issue-511".to_owned(),
             author: author.map(str::to_owned),
+            conflicting,
         };
         let labelled = Issue {
             labels: vec!["enhancement".to_owned()],
@@ -627,7 +635,7 @@ mod tests {
         let open = Issues::Open(vec![labelled, issue(498, "Menu")]);
         let work = Work::new(
             open,
-            vec![pull(524, None), pull(526, Some("o"))],
+            vec![pull(524, None, false), pull(526, Some("o"), true)],
             More::default(),
         );
         let work = Listed::Work(work.unwrap());
@@ -639,8 +647,9 @@ mod tests {
         };
         let full = Listed::Work(Work::new(many, vec![], more).unwrap());
         assert_eq!(Listed::of(full.answer()), Ok(full));
-        let off =
-            Listed::Work(Work::new(Issues::Off, vec![pull(524, None)], More::default()).unwrap());
+        let off = Listed::Work(
+            Work::new(Issues::Off, vec![pull(524, None, false)], More::default()).unwrap(),
+        );
         assert_eq!(
             Listed::of(off.answer()),
             Ok(off),
@@ -719,6 +728,7 @@ mod tests {
             draft: false,
             branch: branch.to_owned(),
             author: author.map(str::to_owned),
+            conflicting: false,
         };
         let long = "b".repeat(NAME_BYTES_MAX + 1);
         let refused = [

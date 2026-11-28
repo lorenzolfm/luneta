@@ -450,6 +450,7 @@ message PullRequest {
   string url = 3;
   Checks checks = 4;
   bool stale = 5;
+  bool conflicting = 6;
 }
 
 message Checks {
@@ -1035,6 +1036,7 @@ message ListWorkResponse {
     bool draft = 3;
     string branch = 4;
     optional string author = 5;
+    bool conflicting = 6;
   }
 }
 

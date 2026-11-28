@@ -110,7 +110,11 @@ private struct WorktreeHeader: View {
         HStack {
             VStack(alignment: .leading) {
                 Text(worktree.name)
-                let caption = [worktree.branch, worktree.seen.words].compactMap { $0 }
+                let caption = [
+                    worktree.branch,
+                    worktree.seen.words,
+                    worktree.conflicting ? "merge conflicts" : nil,
+                ].compactMap { $0 }
                 if !caption.isEmpty {
                     Text(caption.joined(separator: " · ")).font(.caption2).textCase(nil)
                 }

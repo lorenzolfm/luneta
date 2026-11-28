@@ -39,6 +39,8 @@ const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
 
 const ISSUES_OFF: &str = "   the repository has its issues turned off on GitHub";
 
+const CONFLICTS: &str = "conflicts";
+
 const ASK_ROWS_MIN: u16 = 4;
 
 #[derive(Debug)]
@@ -512,7 +514,7 @@ impl Home {
                 (here, marked),
                 (&numbered(pull.number), number_width),
                 &pull.title,
-                &side,
+                (pull.conflicting, &side),
             ));
         }
         lines.push(Line::default());
@@ -541,7 +543,7 @@ impl Home {
                 (here, marked),
                 (&numbered(issue.number), number_width),
                 &issue.title,
-                &side,
+                (false, &side),
             ));
         }
         (lines, at)
@@ -631,7 +633,7 @@ fn row(
     (here, marked): (bool, bool),
     (number, number_width): (&str, usize),
     title: &str,
-    side: &str,
+    (conflicting, side): (bool, &str),
 ) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let margin = if here {
@@ -650,10 +652,15 @@ fn row(
     );
     let lead = margin.width() + mark.width() + number.width();
     let room = width.saturating_sub(lead + 1);
-    let side_room = if side.is_empty() {
+    let side_text = match (conflicting, side.is_empty()) {
+        (true, true) => CONFLICTS.to_owned(),
+        (true, false) => format!("{CONFLICTS} · {side}"),
+        (false, _) => side.to_owned(),
+    };
+    let side_room = if side_text.is_empty() {
         0
     } else {
-        (side.width() + 2).min(room / 3)
+        (side_text.width() + 2).min(room / 3)
     };
     let title_room = room.saturating_sub(side_room);
     let title = sidebar::cut(title, title_room);
@@ -668,7 +675,20 @@ fn row(
     let mut spans = vec![margin, mark, number, Span::styled(title, title_style)];
     if side_room > 2 {
         spans.push(Span::raw(" ".repeat(gap + 2)));
-        spans.push(Span::styled(sidebar::cut(side, side_room - 2), dim));
+        let shown = sidebar::cut(&side_text, side_room - 2);
+        let red = Style::new().fg(moonlight::RED);
+        if conflicting {
+            if let Some(rest) = shown.strip_prefix(CONFLICTS) {
+                spans.push(Span::styled(CONFLICTS, red));
+                if !rest.is_empty() {
+                    spans.push(Span::styled(rest.to_owned(), dim));
+                }
+            } else {
+                spans.push(Span::styled(shown, red));
+            }
+        } else {
+            spans.push(Span::styled(shown, dim));
+        }
     }
     Line::from(spans)
 }
@@ -697,6 +717,7 @@ mod tests {
             draft: *draft,
             branch: (*branch).to_owned(),
             author: None,
+            conflicting: false,
         });
         Listed::Work(
             Work::new(
@@ -918,6 +939,7 @@ mod tests {
             draft: false,
             branch: "issue-511".to_owned(),
             author: None,
+            conflicting: false,
         };
         home.listed(
             Ok(Listed::Work(
@@ -1096,6 +1118,61 @@ mod tests {
             shown(&home, 60, 14).contains(
                 &"│ › _                                                      │".to_owned()
             )
+        );
+    }
+
+    #[test]
+    fn a_conflicting_pull_request_shows_conflicts_in_red_ahead_of_its_branch() {
+        let (mut home, now) = (home(), Instant::now());
+        let pulls = vec![
+            Pull {
+                number: number(524),
+                title: "Fix merge".to_owned(),
+                draft: false,
+                branch: "issue-511".to_owned(),
+                author: None,
+                conflicting: true,
+            },
+            Pull {
+                number: number(526),
+                title: "Clean change".to_owned(),
+                draft: false,
+                branch: "issue-520".to_owned(),
+                author: None,
+                conflicting: false,
+            },
+        ];
+        home.listed(
+            Ok(Listed::Work(
+                Work::new(Issues::Open(vec![]), pulls, More::default()).unwrap(),
+            )),
+            now,
+        );
+        let area = Rect::new(0, 0, 90, 10);
+        let mut buffer = Buffer::empty(area);
+        home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+        let line = |y: u16| {
+            let text: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            text.trim_end().to_owned()
+        };
+        assert!(line(3).ends_with("conflicts · issue-511"), "{}", line(3));
+        assert!(
+            line(4).ends_with("issue-520") && !line(4).contains("conflicts"),
+            "{}",
+            line(4)
+        );
+        let cells: Vec<&str> = (0..area.width).map(|x| buffer[(x, 3)].symbol()).collect();
+        let start = cells
+            .windows("conflicts".len())
+            .position(|it| it.concat() == "conflicts");
+        let start = u16::try_from(start.expect("conflicts")).unwrap();
+        assert_eq!(buffer[(start, 3)].fg, moonlight::RED);
+        let dot = start + u16::try_from("conflicts".len()).unwrap();
+        assert_eq!(buffer[(dot, 3)].fg, ratatui::style::Color::Reset);
+        assert!(
+            shown(&home, 60, 10)[3].ends_with("conflicts · i…"),
+            "{:?}",
+            shown(&home, 60, 10)
         );
     }
 }

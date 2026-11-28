@@ -4197,6 +4197,7 @@ mod tests {
             state,
             checks: None,
             stale: false,
+            conflicting: false,
         });
         Target::View(
             Machine::Local,
