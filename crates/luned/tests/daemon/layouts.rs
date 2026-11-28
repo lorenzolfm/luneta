@@ -4330,3 +4330,208 @@ fn revive_view_reopens_terminals_that_ended_in_mux() {
                 .is_some()
     });
 }
+
+#[test]
+fn revive_view_persists_panes_arrangement_when_reopening_empty_plain_folder() {
+    let owned = Owned::new();
+    let folder = work_folder(&owned);
+    let worktree = worktree(&owned.host, project(&owned.host, &folder, None), &folder);
+    let mut shown = Shown::new(&owned, worktree, 100, 30);
+
+    let only_view = shown.open_panes();
+    shown.ask(Event::Close(only_view));
+    shown.until(
+        "plain folder layout empties after closing last view",
+        |laid| laid.views.is_empty(),
+    );
+
+    let (made, revived) = revive_view(&owned.host).unwrap();
+    assert_eq!(made, Made::Found(worktree));
+    assert_ne!(revived, only_view);
+
+    let projects_file = owned.host.home.path().join(".local/state/lune/projects");
+    let persisted = fs::read_to_string(&projects_file).unwrap();
+    let parsed = lune_domain::projects::parse(
+        &persisted,
+        &mut |_| unreachable!("current projects file needs no migration"),
+        &mut || unreachable!("current projects file needs no new ids"),
+    )
+    .unwrap();
+    let (_, persisted_worktree) = parsed
+        .projects
+        .find(WorktreeId::of(worktree).unwrap())
+        .unwrap();
+    assert_eq!(
+        persisted_worktree.layout().arranged(),
+        Some(lune_domain::projects::Arranged::Panes),
+        "reviving into an empty plain folder persists panes immediately"
+    );
+
+    shown.until("revived view opens tiled in panes", |laid| {
+        focused_of(laid) == Some(revived)
+            && matches!(laid.shown, Some(show_response::laid::Shown::Tiled(_)))
+    });
+}
+
+#[test]
+fn revive_view_skips_unregistered_clone_directory_left_on_disk() {
+    let owned = Owned::new();
+    let (_, main_worktree, two_worktree) = two_in_a_clone(&owned, "revive-stale-wt");
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let clone = home.join("revive-stale-wt");
+    let two_dir = clone.join("two");
+
+    let mut shown_main = Shown::new(&owned, main_worktree, 100, 30);
+    shown_main.ask(Event::Welcome(()));
+    let main_welcome = shown_main
+        .until("welcome opened in main", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Welcome(()))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Welcome(()))).then_some(v.id))
+        .unwrap();
+    shown_main.ask(Event::Close(main_welcome));
+    shown_main.until("welcome closed in main", |laid| {
+        !laid.views.iter().any(|v| v.id == main_welcome)
+    });
+
+    let mut shown_two = Shown::new(&owned, two_worktree, 100, 30);
+    let only_two = shown_two.terminals()[0];
+    shown_two.ask(Event::Close(only_two));
+    assert_eq!(shown_two.until_left(), two_worktree);
+    eventually("closed clone worktree leaves host", || {
+        watched_worktree(&owned, two_worktree)
+            .is_none()
+            .then_some(())
+    });
+
+    git(
+        &clone.join(".bare"),
+        &["worktree", "remove", "--force", two_dir.to_str().unwrap()],
+    );
+    fs::create_dir(&two_dir).unwrap();
+
+    let (made, revived_welcome) = revive_view(&owned.host).unwrap();
+    assert_eq!(
+        made,
+        Made::Found(main_worktree),
+        "leftover directory that is no longer a git worktree is skipped"
+    );
+    shown_main.until(
+        "main welcome revives after skipping unregistered clone folder",
+        |laid| {
+            focused_of(laid) == Some(revived_welcome)
+                && laid
+                    .views
+                    .iter()
+                    .any(|v| v.id == revived_welcome && matches!(v.found, Some(Found::Welcome(()))))
+        },
+    );
+}
+
+#[test]
+fn revive_view_skips_corrupted_clone_bare_repo() {
+    let owned = Owned::new();
+    let kept_folder = owned.host.home.path().join("kept-plain-bare");
+    fs::create_dir(&kept_folder).unwrap();
+    let kept_worktree = worktree(
+        &owned.host,
+        project(&owned.host, &kept_folder, None),
+        &kept_folder,
+    );
+    let mut shown_kept = Shown::new(&owned, kept_worktree, 80, 24);
+    shown_kept.ask(Event::Welcome(()));
+    let kept_welcome = shown_kept
+        .until("welcome opened in kept plain project", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Welcome(()))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Welcome(()))).then_some(v.id))
+        .unwrap();
+    shown_kept.ask(Event::Close(kept_welcome));
+    shown_kept.until("welcome closed in kept plain project", |laid| {
+        !laid.views.iter().any(|v| v.id == kept_welcome)
+    });
+
+    let (_, _, two_worktree) = two_in_a_clone(&owned, "revive-corrupt-bare");
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let bare = home.join("revive-corrupt-bare").join(".bare");
+
+    let mut shown_two = Shown::new(&owned, two_worktree, 100, 30);
+    let only_two = shown_two.terminals()[0];
+    shown_two.ask(Event::Close(only_two));
+    assert_eq!(shown_two.until_left(), two_worktree);
+    eventually("closed clone worktree leaves host", || {
+        watched_worktree(&owned, two_worktree)
+            .is_none()
+            .then_some(())
+    });
+
+    fs::remove_dir_all(&bare).unwrap();
+    fs::create_dir(&bare).unwrap();
+
+    let (made, revived_welcome) = revive_view(&owned.host).unwrap();
+    assert_eq!(
+        made,
+        Made::Found(kept_worktree),
+        "corrupted .bare directory is skipped instead of jamming revive history"
+    );
+    shown_kept.until(
+        "earlier welcome view revives after skipping corrupted clone",
+        |laid| {
+            focused_of(laid) == Some(revived_welcome)
+                && laid
+                    .views
+                    .iter()
+                    .any(|v| v.id == revived_welcome && matches!(v.found, Some(Found::Welcome(()))))
+        },
+    );
+}
+
+#[test]
+fn revive_view_reports_refusal_and_requeues_when_spawn_fails_and_rolls_back() {
+    let owned = Owned::new();
+    let folder = work_folder(&owned);
+    let worktree = worktree(&owned.host, project(&owned.host, &folder, None), &folder);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let only_view = shown.open();
+    shown.ask(Event::Close(only_view));
+    shown.until("plain folder layout empties", |laid| laid.views.is_empty());
+
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o600)).unwrap();
+    let failed = revive_view(&owned.host);
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let status = failed.expect_err("non-searchable directory prevents terminal spawn");
+    assert_eq!(
+        status.code(),
+        Code::InvalidArgument,
+        "cleanly rolled-back revive spawn failure reports a refusal, not InDoubt: {status}"
+    );
+    assert!(
+        watched(&owned, worktree).is_empty(),
+        "rolled-back terminal does not remain in the layout"
+    );
+
+    let (made, revived) = revive_view(&owned.host).unwrap();
+    assert_eq!(made, Made::Found(worktree));
+    assert_ne!(revived, only_view);
+    shown.until(
+        "requeued terminal revives once directory is accessible",
+        |laid| {
+            focused_of(laid) == Some(revived)
+                && laid
+                    .views
+                    .iter()
+                    .find(|v| v.id == revived)
+                    .and_then(key)
+                    .is_some()
+        },
+    );
+}
