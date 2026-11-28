@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use clap::{ArgGroup, Args, ValueEnum};
-use lune_domain::agent::Harness;
+use lune_domain::agent::{FlowHarness, Harness};
 use lune_domain::flows::SESSION_ID_BYTES_MAX;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
@@ -101,12 +101,17 @@ pub enum StepHarness {
 
 impl StepHarness {
     #[must_use]
-    pub const fn into_harness(self) -> Harness {
+    pub const fn flow(self) -> FlowHarness {
         match self {
-            StepHarness::Claude => Harness::ClaudeCode,
-            StepHarness::Pi => Harness::Pi,
-            StepHarness::Agy => Harness::Antigravity,
+            StepHarness::Claude => FlowHarness::ClaudeCode,
+            StepHarness::Pi => FlowHarness::Pi,
+            StepHarness::Agy => FlowHarness::Antigravity,
         }
+    }
+
+    #[must_use]
+    pub const fn into_harness(self) -> Harness {
+        self.flow().harness()
     }
 }
 
@@ -1240,6 +1245,16 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    #[test]
+    fn the_word_luned_starts_a_step_with_names_the_harness_the_flow_runs_on() {
+        for flow in FlowHarness::ALL {
+            let word = flow.program();
+            let told = StepHarness::from_str(word, false);
+            assert_eq!(told.map(StepHarness::flow), Ok(flow), "--harness {word}");
+        }
+        assert!(StepHarness::from_str(Harness::Codex.program(), false).is_err());
+    }
 
     #[test]
     fn build_command_matches_each_harness_cli_contract() {

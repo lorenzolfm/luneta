@@ -1495,37 +1495,44 @@ enum PiTools {
 }
 
 #[derive(Debug)]
-enum PiOutcome {
+enum Outcome {
     Last(String),
     Failed(String),
+}
+
+impl Outcome {
+    const fn unsaid() -> Outcome {
+        Outcome::Last(String::new())
+    }
+
+    fn ended(&mut self) -> Read {
+        Read::Ended(match mem::replace(self, Outcome::unsaid()) {
+            Outcome::Last(last) => Ok(last),
+            Outcome::Failed(why) => Err(why),
+        })
+    }
 }
 
 #[derive(Debug)]
 enum Reader {
     Claude,
-    Pi { tools: PiTools, outcome: PiOutcome },
+    Pi { tools: PiTools, outcome: Outcome },
     Agy { said: String, tools: BTreeSet<u64> },
-    Codex { outcome: CodexOutcome },
-}
-
-#[derive(Debug)]
-enum CodexOutcome {
-    Last(String),
-    Failed(String),
+    Codex { outcome: Outcome },
 }
 
 impl Reader {
     const fn pi_gated() -> Reader {
         Reader::Pi {
             tools: PiTools::AwaitingGate,
-            outcome: PiOutcome::Last(String::new()),
+            outcome: Outcome::unsaid(),
         }
     }
 
     const fn pi_review() -> Reader {
         Reader::Pi {
             tools: PiTools::Forbidden,
-            outcome: PiOutcome::Last(String::new()),
+            outcome: Outcome::unsaid(),
         }
     }
 
@@ -1538,7 +1545,7 @@ impl Reader {
 
     const fn codex() -> Reader {
         Reader::Codex {
-            outcome: CodexOutcome::Last(String::new()),
+            outcome: Outcome::unsaid(),
         }
     }
 
@@ -1595,7 +1602,7 @@ fn result_mentions_denied(result: &Value) -> bool {
         .any(|text| text.contains(DENIED))
 }
 
-fn read_pi(tools: &mut PiTools, outcome: &mut PiOutcome, record: &Value) -> Vec<Read> {
+fn read_pi(tools: &mut PiTools, outcome: &mut Outcome, record: &Value) -> Vec<Read> {
     match record["type"].as_str() {
         Some("session") => session(&record["id"], Harness::Pi),
         Some("entry_appended") => {
@@ -1643,34 +1650,28 @@ fn read_pi(tools: &mut PiTools, outcome: &mut PiOutcome, record: &Value) -> Vec<
                 .map(str::trim);
             let texts: Vec<&str> = texts.filter(|text| !text.is_empty()).collect();
             if let Some("error" | "aborted") = message["stopReason"].as_str() {
-                *outcome = PiOutcome::Failed(why(message["errorMessage"].as_str()));
+                *outcome = Outcome::Failed(why(message["errorMessage"].as_str()));
             } else {
                 let last = match texts.last() {
                     Some(text) => (*text).to_owned(),
-                    None => match mem::replace(outcome, PiOutcome::Last(String::new())) {
-                        PiOutcome::Last(prev) => prev,
-                        PiOutcome::Failed(_) => String::new(),
+                    None => match mem::replace(outcome, Outcome::unsaid()) {
+                        Outcome::Last(prev) => prev,
+                        Outcome::Failed(_) => String::new(),
                     },
                 };
-                *outcome = PiOutcome::Last(last);
+                *outcome = Outcome::Last(last);
             }
             texts
                 .into_iter()
                 .map(|text| Read::Step(Step::Said(text.to_owned())))
                 .collect()
         }
-        Some("agent_settled") => {
-            let ended = match mem::replace(outcome, PiOutcome::Last(String::new())) {
-                PiOutcome::Failed(why) => Err(why),
-                PiOutcome::Last(last) => Ok(last),
-            };
-            vec![Read::Ended(ended)]
-        }
+        Some("agent_settled") => vec![outcome.ended()],
         _ => Vec::new(),
     }
 }
 
-fn read_codex(outcome: &mut CodexOutcome, record: &Value) -> Vec<Read> {
+fn read_codex(outcome: &mut Outcome, record: &Value) -> Vec<Read> {
     let item = &record["item"];
     match (record["type"].as_str(), item["type"].as_str()) {
         (Some("thread.started"), _) => session(&record["thread_id"], Harness::Codex),
@@ -1686,24 +1687,18 @@ fn read_codex(outcome: &mut CodexOutcome, record: &Value) -> Vec<Read> {
             if text.is_empty() {
                 return Vec::new();
             }
-            *outcome = CodexOutcome::Last(text.to_owned());
+            *outcome = Outcome::Last(text.to_owned());
             vec![Read::Step(Step::Said(text.to_owned()))]
         }
         (Some("error"), _) => {
-            *outcome = CodexOutcome::Failed(why(record["message"].as_str()));
+            *outcome = Outcome::Failed(why(record["message"].as_str()));
             Vec::new()
         }
         (Some("turn.failed"), _) => {
-            *outcome = CodexOutcome::Last(String::new());
+            *outcome = Outcome::unsaid();
             vec![Read::Ended(Err(why(record["error"]["message"].as_str())))]
         }
-        (Some("turn.completed"), _) => {
-            let ended = match mem::replace(outcome, CodexOutcome::Last(String::new())) {
-                CodexOutcome::Last(last) => Ok(last),
-                CodexOutcome::Failed(why) => Err(why),
-            };
-            vec![Read::Ended(ended)]
-        }
+        (Some("turn.completed"), _) => vec![outcome.ended()],
         _ => Vec::new(),
     }
 }

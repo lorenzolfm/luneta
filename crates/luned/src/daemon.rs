@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{FlowHarness, Harness};
 use lune_domain::flows::FlowEntry;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Dir, ProjectId, WorktreeId};
@@ -485,7 +485,11 @@ fn follow(
         move |found| core.send(Command::AgyAgents(found)).is_ok()
     };
     watch::watch_ending("agy", dir, mode, any, SWEEP, read, pids, tell)?;
-    codex::follow(core.clone(), codex::folder(), SWEEP)
+    let Some(codex_folder) = codex::folder() else {
+        log::say("neither CODEX_HOME nor HOME names a folder, to find Codex's threads in");
+        return Ok(());
+    };
+    codex::follow(core.clone(), codex_folder, SWEEP)
 }
 
 async fn stand(
@@ -1573,6 +1577,7 @@ impl Daemon for Host {
                 })
                 .await;
         }
+        let flow_harness = FlowHarness::of(parsed_harness).map_err(Status::failed_precondition)?;
         let layouts = self.layouts.clone();
         let flows = self.flows.clone();
         let started = task::spawn_blocking(move || {
@@ -1584,7 +1589,7 @@ impl Daemon for Host {
                 dir: dir.as_str().to_owned(),
                 flow_name,
                 mode: parsed_mode,
-                harness: parsed_harness,
+                harness: flow_harness,
                 entry: parsed_entry,
                 answer,
             })

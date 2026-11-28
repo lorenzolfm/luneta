@@ -344,11 +344,16 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
             flow,
             interactive,
         } => {
-            let options = ship.then(|| start::ShipOptions {
-                flow: flow.clone(),
-                interactive: *interactive,
-            });
-            start::run(what, options.as_ref(), folder)
+            let shipped = ship
+                .then(|| start::ShipOptions::on_the_agent_picked(flow.clone(), *interactive))
+                .transpose();
+            match shipped {
+                Ok(options) => start::run(what, options.as_ref(), folder),
+                Err(why) => {
+                    eprintln!("lune: {why}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Command::Flow {
             action,

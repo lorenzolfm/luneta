@@ -206,14 +206,14 @@ fn inside_each() -> Inside {
 
 pub struct Threads {
     locks: Option<PathBuf>,
-    codex: Option<PathBuf>,
+    codex: PathBuf,
     index: Index,
     troubles: Troubles,
 }
 
 impl Threads {
     #[must_use]
-    pub fn new(codex: Option<PathBuf>) -> Threads {
+    pub fn new(codex: PathBuf) -> Threads {
         Threads {
             locks: None,
             codex,
@@ -224,11 +224,10 @@ impl Threads {
 
     fn locks(&mut self) -> Option<PathBuf> {
         if self.locks.is_none() {
-            let codex = self.codex.as_deref()?;
-            match locks_in(codex) {
+            match locks_in(&self.codex) {
                 Ok(locks) => self.locks = locks,
                 Err(error) => {
-                    let locks = codex.join(LOCKS);
+                    let locks = self.codex.join(LOCKS);
                     self.troubles
                         .say(format!("{} is unread: {error}", locks.display()));
                 }
@@ -319,27 +318,21 @@ impl Threads {
     }
 
     fn names(&mut self) -> &HashMap<String, Said> {
-        if let Some(codex) = self.codex.as_deref() {
-            match index_since(codex, self.index.stamp) {
-                Ok(Some(index)) => self.index = index,
-                Ok(None) => {}
-                Err(error) => {
-                    let index = codex.join(NAMES);
-                    self.troubles
-                        .say(format!("{} is unread: {error}", index.display()));
-                    self.index = Index::default();
-                }
+        match index_since(&self.codex, self.index.stamp) {
+            Ok(Some(index)) => self.index = index,
+            Ok(None) => {}
+            Err(error) => {
+                let index = self.codex.join(NAMES);
+                self.troubles
+                    .say(format!("{} is unread: {error}", index.display()));
+                self.index = Index::default();
             }
         }
         &self.index.names
     }
 }
 
-pub fn follow(
-    core: SyncSender<Command>,
-    codex: Option<PathBuf>,
-    sweep: Duration,
-) -> io::Result<()> {
+pub fn follow(core: SyncSender<Command>, codex: PathBuf, sweep: Duration) -> io::Result<()> {
     assert!(
         !sweep.is_zero(),
         "a sweep that takes no time asks the core without a rest"
@@ -602,7 +595,7 @@ mod tests {
     fn a_codex_that_holds_a_writer_lock_runs_that_thread_under_its_last_name() {
         let home = tempfile::tempdir().unwrap();
         let codex = home.path().canonicalize().unwrap();
-        let mut threads = Threads::new(Some(codex.clone()));
+        let mut threads = Threads::new(codex.clone());
         let me = agent(Harness::Codex);
         assert_eq!(
             threads.held_by(std::slice::from_ref(&me)),
@@ -665,7 +658,7 @@ mod tests {
             ..agent(Harness::Codex)
         };
         let id = AgentId::new(wrapped.pid, process::start(shell.id()).unwrap());
-        let mut threads = Threads::new(Some(codex));
+        let mut threads = Threads::new(codex);
         let found = lune_waits::eventually("the wrapped codex holds its lock", || {
             let now = threads.held_by(std::slice::from_ref(&wrapped));
             now.get(&id)

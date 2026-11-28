@@ -127,7 +127,9 @@ impl Harness {
     #[must_use]
     pub const fn flows(self) -> Flows {
         match self {
-            Harness::ClaudeCode | Harness::Pi | Harness::Antigravity => Flows::Runs,
+            Harness::ClaudeCode => Flows::Runs(FlowHarness::ClaudeCode),
+            Harness::Pi => Flows::Runs(FlowHarness::Pi),
+            Harness::Antigravity => Flows::Runs(FlowHarness::Antigravity),
             Harness::Codex => CODEX_FLOWS,
         }
     }
@@ -217,23 +219,63 @@ impl Step {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlowHarness {
+    ClaudeCode,
+    Pi,
+    Antigravity,
+}
+
+impl FlowHarness {
+    pub const ALL: [FlowHarness; 3] = [
+        FlowHarness::ClaudeCode,
+        FlowHarness::Pi,
+        FlowHarness::Antigravity,
+    ];
+
+    pub fn of(harness: Harness) -> Result<FlowHarness, String> {
+        harness
+            .flows()
+            .runs()
+            .map_err(|why| format!("no flow runs on {}: {why}", harness.program()))
+    }
+
+    #[must_use]
+    pub const fn harness(self) -> Harness {
+        match self {
+            FlowHarness::ClaudeCode => Harness::ClaudeCode,
+            FlowHarness::Pi => Harness::Pi,
+            FlowHarness::Antigravity => Harness::Antigravity,
+        }
+    }
+
+    #[must_use]
+    pub const fn program(self) -> &'static str {
+        self.harness().program()
+    }
+
+    const fn is(self, other: FlowHarness) -> bool {
+        self as u8 == other as u8
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flows {
-    Runs,
+    Runs(FlowHarness),
     No { why: &'static str },
 }
 
 impl Flows {
-    pub const fn runs(self) -> Result<(), &'static str> {
+    pub const fn runs(self) -> Result<FlowHarness, &'static str> {
         match self {
-            Flows::Runs => Ok(()),
+            Flows::Runs(harness) => Ok(harness),
             Flows::No { why } => Err(why),
         }
     }
 
     const fn gap_explained(self) -> bool {
         match self {
-            Flows::Runs => true,
+            Flows::Runs(_) => true,
             Flows::No { why } => !why.trim_ascii().is_empty(),
         }
     }
@@ -676,6 +718,27 @@ const fn every_flow_gap_explained() -> bool {
     true
 }
 
+const fn every_flow_harness_is_its_own() -> bool {
+    let mut index = 0;
+    while index < Harness::ALL.len() {
+        if let Flows::Runs(flow) = Harness::ALL[index].flows()
+            && !flow.harness().is(Harness::ALL[index])
+        {
+            return false;
+        }
+        index += 1;
+    }
+    let mut index = 0;
+    while index < FlowHarness::ALL.len() {
+        let flow = FlowHarness::ALL[index];
+        if !matches!(flow.harness().flows(), Flows::Runs(runs) if runs.is(flow)) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 const fn every_topic_gap_explained() -> bool {
     let mut index = 0;
     while index < Harness::ALL.len() {
@@ -769,6 +832,11 @@ const _: () = assert!(
 const _: () = assert!(
     every_flow_gap_explained(),
     "each harness that runs no flow says why in Flows::No"
+);
+
+const _: () = assert!(
+    every_flow_harness_is_its_own(),
+    "the harness a flow runs on is the one that says it runs flows, and each of them is listed"
 );
 
 const _: () = assert!(
@@ -869,6 +937,28 @@ mod tests {
         assert!(!Dialogs::Under("").names_a_record());
         assert!(!Dialogs::Under("start/up").names_a_record());
         assert!(!Dialogs::Under("start up").names_a_record());
+    }
+
+    #[test]
+    fn a_flow_runs_on_each_harness_whose_steps_lune_runs_and_on_no_other() {
+        for harness in Harness::ALL {
+            match harness.flows() {
+                Flows::Runs(flow) => {
+                    assert_eq!(flow.harness(), harness);
+                    assert_eq!(flow.program(), harness.program());
+                    assert_eq!(FlowHarness::of(harness), Ok(flow));
+                }
+                Flows::No { why } => {
+                    let refused = format!("no flow runs on {}: {why}", harness.program());
+                    assert_eq!(FlowHarness::of(harness), Err(refused));
+                }
+            }
+        }
+        assert_eq!(
+            FlowHarness::ALL.map(FlowHarness::harness),
+            [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity]
+        );
+        assert!(FlowHarness::of(Harness::Codex).is_err());
     }
 
     #[test]

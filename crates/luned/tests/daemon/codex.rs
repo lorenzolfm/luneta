@@ -3,9 +3,10 @@ use std::path::Path;
 
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
 use lune_waits::eventually;
-use luned::api::{Agent, Harness, StatusRung};
+use luned::api::{self, Agent, Harness, StatusRung};
+use tonic::Code;
 
-use crate::host::script;
+use crate::host::{Host, LUNED, PATIENT, script, start_as};
 use crate::own::Owned;
 
 const THREAD: &str = "01a222f4-cde9-75d3-9267-061cca269c80";
@@ -157,4 +158,49 @@ fn a_codex_resumed_on_a_thread_runs_it_before_it_writes_and_the_lock_says_what_i
         || codex_in(&owned).filter(|agent| agent.session_id.as_deref() == Some(NEWER_THREAD)),
     );
     fs::write(step(2), "").unwrap();
+}
+
+#[test]
+fn luned_starts_no_flow_on_codex_and_says_why() {
+    let owned = Owned::new();
+    let refused = |harness: Harness| {
+        let folder = luned::folder::open(&owned.host.folder()).unwrap().unwrap();
+        let request = api::StartFlowRequest {
+            on: None,
+            worktree: 1,
+            flow_name: None,
+            mode: api::FlowMode::Unattended.into(),
+            harness: harness.into(),
+            entry: Some(api::start_flow_request::Entry::PullRequest(())),
+        };
+        owned.block_on(async move {
+            let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
+            daemon.start_flow(request).await.unwrap_err()
+        })
+    };
+    let on_codex = refused(Harness::Codex);
+    assert_eq!(on_codex.code(), Code::FailedPrecondition);
+    let why = on_codex.message();
+    assert!(why.starts_with("no flow runs on codex: "), "{why}");
+
+    let on_claude = refused(Harness::ClaudeCode);
+    let why = on_claude.message();
+    assert!(
+        !why.contains("no flow runs on"),
+        "a harness that runs flows is refused only for the worktree luned does not keep: {why}"
+    );
+}
+
+#[test]
+fn luned_follows_no_codex_and_says_so_when_no_folder_of_codex_s_is_named_from_the_root() {
+    let host = Host::new();
+    let mut luned = host.vars().command(LUNED);
+    luned.env("CODEX_HOME", "codex");
+    let _daemon = start_as(luned).unwrap();
+    let log = host.home.path().join(".local/state/lune/lune.log");
+    let unfollowed = "neither CODEX_HOME nor HOME names a folder, to find Codex's threads in";
+    eventually("luned says it follows no Codex", || {
+        let said = fs::read_to_string(&log).unwrap_or_default();
+        said.contains(unfollowed).then_some(())
+    });
 }

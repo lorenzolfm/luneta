@@ -3,13 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::ValueEnum;
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows;
 use lune_domain::projects::WorktreeId;
 use luned::api::{
     self, ControlFlowRequest, FlowControl, FlowSummary, ListFlowsRequest, ListFlowsResponse,
 };
 
-use crate::agents::{Harness, Kept};
+use crate::agents::Kept;
 use crate::daemon;
 use crate::machines::Machine;
 use crate::reach::{self, Luned};
@@ -134,12 +135,16 @@ pub fn start_on(
     folder: &Path,
     worktree: WorktreeId,
     mode: flows::FlowMode,
-    harness: Harness,
+    harness: FlowHarness,
     flow_name: Option<String>,
     prompt: Option<String>,
 ) -> Result<Option<FlowSummary>, String> {
     let request = flows::start_request(worktree, mode, harness, flow_name, prompt);
     Luned::at(folder, &Machine::Local, reach::ANSWER)?.start_flow(request)
+}
+
+pub fn picked() -> Result<FlowHarness, String> {
+    FlowHarness::of(Kept::shared(&state::Folder::of_user()).0.harness())
 }
 
 fn list(tasks: &tokio::runtime::Handle, daemon: &luned::Shared) -> Result<(), String> {
@@ -198,10 +203,10 @@ fn start(
     args: &Args,
 ) -> Result<(), String> {
     let worktree = resolve_worktree(folder, args.dir.as_deref())?;
-    let harness = args.harness.map_or_else(
-        || Kept::shared(&state::Folder::of_user()).0.harness(),
-        StepHarness::into_harness,
-    );
+    let harness = match args.harness {
+        Some(named) => named.flow(),
+        None => picked()?,
+    };
     let mode = if args.interactive {
         flows::FlowMode::Interactive
     } else {
