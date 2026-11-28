@@ -1,6 +1,6 @@
 use std::io;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 pub use lune_domain::agent::Harness;
 use serde_json::{Value, json};
@@ -179,14 +179,15 @@ pub fn codex_once() -> Command {
 }
 
 #[must_use]
-pub fn codex_failure(stderr: &[u8]) -> Option<String> {
+pub fn codex_failure(stderr: &[u8], status: ExitStatus) -> String {
+    assert!(!status.success(), "a run that succeeded has no failure");
     let said = String::from_utf8_lossy(stderr);
     let errors = said
         .lines()
         .rev()
         .filter_map(|line| line.trim().strip_prefix(CODEX_ERROR));
     let last = errors.map(str::trim).find(|why| !why.is_empty());
-    last.map(str::to_owned)
+    last.map_or_else(|| status.to_string(), str::to_owned)
 }
 
 pub fn agy_stream_result(stdout: &[u8]) -> Result<Value, AgyStreamError> {
@@ -487,19 +488,23 @@ mod tests {
     }
 
     #[test]
-    fn a_codex_run_that_failed_says_why_on_its_last_error_line() {
+    fn a_codex_run_that_failed_says_why_on_its_last_error_line_or_by_its_exit_status() {
+        use std::os::unix::process::ExitStatusExt as _;
+
         let stderr = "OpenAI Codex v0.172.0\n--------\nworkdir: /w\nmodel: x\n--------\nuser\nSay hi\n\
             warning: Model metadata for `x` not found.\n\
             ERROR: stream disconnected\n\
             hook: Stop\n\
             ERROR: The 'x' model is not supported when using Codex with a ChatGPT account.\n\
             ERROR:   \n";
+        let failed = ExitStatus::from_raw(1 << 8);
         assert_eq!(
-            codex_failure(stderr.as_bytes()).as_deref(),
-            Some("The 'x' model is not supported when using Codex with a ChatGPT account.")
+            codex_failure(stderr.as_bytes(), failed),
+            "The 'x' model is not supported when using Codex with a ChatGPT account."
         );
-        assert_eq!(codex_failure(b"OpenAI Codex v0.172.0\n--------\n"), None);
-        assert_eq!(codex_failure(b""), None);
+        let banner = b"OpenAI Codex v0.172.0\n--------\n";
+        assert_eq!(codex_failure(banner, failed), "exit status: 1");
+        assert_eq!(codex_failure(b"", failed), "exit status: 1");
     }
 
     #[test]

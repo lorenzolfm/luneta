@@ -570,7 +570,7 @@ fn wrote(harness: Harness, ran: io::Result<Ran>) -> Result<String, String> {
             }
         },
         Ok(Ran::Ended { status, stderr, .. }) if harness == Harness::Codex && !status.success() => {
-            let why = headless::codex_failure(&stderr).unwrap_or_else(|| status.to_string());
+            let why = headless::codex_failure(&stderr, status);
             Err(format!("brief: {program} failed: {why}"))
         }
         Ok(Ran::Ended { status, stdout, .. }) if status.success() => {

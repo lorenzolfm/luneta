@@ -413,8 +413,7 @@ impl Filing {
                     program::saying(&message).map_err(|error| untold(self.harness, &error))?;
                 let ended = self.ran(&mut codex, stdin)?;
                 if !ended.status.success() {
-                    let why = headless::codex_failure(&ended.stderr)
-                        .unwrap_or_else(|| ended.status.to_string());
+                    let why = headless::codex_failure(&ended.stderr, ended.status);
                     return Err(format!("codex wrote no issue: {why}"));
                 }
                 let said = String::from_utf8_lossy(&ended.stdout);

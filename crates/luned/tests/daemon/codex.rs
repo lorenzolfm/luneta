@@ -24,7 +24,7 @@ fn said(state: &str) -> String {
 }
 
 fn held_until(step: &Path) -> String {
-    format!("while [ ! -f '{}' ]; do :; done\n", step.display())
+    format!("while [ ! -f '{}' ]; do sleep 0.02; done\n", step.display())
 }
 
 #[test]
