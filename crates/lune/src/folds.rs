@@ -75,6 +75,13 @@ fn spelled(destination: &Destination) -> String {
     spelled
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FoldSet {
+    Unchanged,
+    Changed,
+    SharingLost,
+}
+
 #[derive(Default)]
 pub struct Folds {
     sessions: BTreeSet<String>,
@@ -143,7 +150,7 @@ impl Folds {
         self.names(kept).contains(&name)
     }
 
-    pub fn set(&mut self, fold: Fold, folded: bool) -> bool {
+    pub fn set(&mut self, fold: Fold, folded: bool) -> FoldSet {
         let (kept, name) = fold.file();
         self.set_file(kept, name, folded)
     }
@@ -157,12 +164,13 @@ impl Folds {
         let folded = |(kept, name): &&(Kept, String)| self.names(*kept).contains(name);
         let gone: Vec<(Kept, String)> = heard.difference(&named).filter(folded).cloned().collect();
         for (kept, name) in &gone {
-            self.set_file(*kept, name.clone(), false);
+            let _ = self.set_file(*kept, name.clone(), false);
         }
         !gone.is_empty()
     }
 
-    fn set_file(&mut self, kept: Kept, name: String, folded: bool) -> bool {
+    fn set_file(&mut self, kept: Kept, name: String, folded: bool) -> FoldSet {
+        let mut lost = false;
         if let Sharing::Folders { sessions, machines } = &self.sharing {
             let dir = match kept {
                 Kept::Sessions => sessions,
@@ -179,16 +187,24 @@ impl Folds {
             };
             if let Err(error) = written {
                 self.sharing = Sharing::Lost(format!("{}: {error}", path.display()));
+                lost = true;
             }
         }
         let names = match kept {
             Kept::Sessions => &mut self.sessions,
             Kept::Machines => &mut self.machines,
         };
-        if folded {
+        let changed = if folded {
             names.insert(name)
         } else {
             names.remove(&name)
+        };
+        if changed {
+            FoldSet::Changed
+        } else if lost {
+            FoldSet::SharingLost
+        } else {
+            FoldSet::Unchanged
         }
     }
 
@@ -257,19 +273,19 @@ mod tests {
         let mut here = within(&root);
         let mut there = within(&root);
 
-        assert!(here.set(project(1), true));
-        assert!(here.set(worktree(2), true));
+        assert_eq!(here.set(project(1), true), FoldSet::Changed);
+        assert_eq!(here.set(worktree(2), true), FoldSet::Changed);
         assert!(there.reload());
         assert!(there.contains(project(1)) && there.contains(worktree(2)));
         assert!(within(&root).contains(project(1)));
 
-        assert!(there.set(project(1), false));
+        assert_eq!(there.set(project(1), false), FoldSet::Changed);
         assert!(here.reload());
         assert!(!here.contains(project(1)) && here.contains(worktree(2)));
         assert!(!here.reload());
 
-        assert!(!here.set(project(1), false));
-        assert!(here.set(project(3), true));
+        assert_eq!(here.set(project(1), false), FoldSet::Unchanged);
+        assert_eq!(here.set(project(3), true), FoldSet::Changed);
         there.reload();
         assert!(there.contains(project(3)));
         assert_eq!((here.lost(), there.lost()), (None, None));
@@ -283,8 +299,11 @@ mod tests {
         let (vps, dot) = (Machine::Remote(odd), Machine::Remote(".".parse().unwrap()));
         let seven = ProjectId::of(7).unwrap();
 
-        assert!(here.set(Fold::Project(&vps, seven), true));
-        assert!(here.set(Fold::Worktree(&dot, WorktreeId::of(7).unwrap()), true));
+        assert_eq!(here.set(Fold::Project(&vps, seven), true), FoldSet::Changed);
+        assert_eq!(
+            here.set(Fold::Worktree(&dot, WorktreeId::of(7).unwrap()), true),
+            FoldSet::Changed
+        );
         let next = within(scratch.path());
         assert!(next.contains(Fold::Project(&vps, seven)));
         assert!(!next.contains(project(7)));
@@ -300,9 +319,12 @@ mod tests {
         let mut here = within(scratch.path());
         let vps = Machine::Remote("me@vps:22".parse().unwrap());
 
-        assert!(here.set(Fold::Machine(&Machine::Local), true));
-        assert!(here.set(Fold::Machine(&vps), true));
-        assert!(here.set(Fold::Machine(&vps), false));
+        assert_eq!(
+            here.set(Fold::Machine(&Machine::Local), true),
+            FoldSet::Changed
+        );
+        assert_eq!(here.set(Fold::Machine(&vps), true), FoldSet::Changed);
+        assert_eq!(here.set(Fold::Machine(&vps), false), FoldSet::Changed);
         let next = within(scratch.path());
         assert!(next.contains(Fold::Machine(&Machine::Local)));
         assert!(!next.contains(Fold::Machine(&vps)));
@@ -318,7 +340,7 @@ mod tests {
         let vps = Machine::Remote("vps".parse().unwrap());
         let far = Fold::Project(&vps, ProjectId::of(5).unwrap());
         for fold in [project(1), worktree(2), project(3), far] {
-            here.set(fold, true);
+            let _ = here.set(fold, true);
         }
         assert!(!here.listed(&Machine::Local, &[project(1), worktree(2)]));
         assert!(
@@ -346,8 +368,20 @@ mod tests {
                 .lost()
                 .is_some_and(|lost| lost.contains("not a folder"))
         );
-        assert!(folds.set(project(1), true));
+        assert_eq!(folds.set(project(1), true), FoldSet::Changed);
         assert!(folds.contains(project(1)));
+    }
+
+    #[test]
+    fn losing_the_fold_folder_on_an_unchanged_fold_reports_sharing_lost() {
+        let scratch = tempfile::tempdir().unwrap();
+        let root = scratch.path().join("lune");
+        let mut folds = within(&root);
+        assert_eq!(folds.set(project(1), true), FoldSet::Changed);
+        fs::remove_dir_all(root.join("folded")).unwrap();
+        assert_eq!(folds.set(project(1), true), FoldSet::SharingLost);
+        assert!(folds.lost().is_some());
+        assert_eq!(folds.set(project(1), true), FoldSet::Unchanged);
     }
 
     #[test]

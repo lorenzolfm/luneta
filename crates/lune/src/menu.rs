@@ -1,9 +1,10 @@
-use std::cell::Cell;
 use std::collections::BTreeSet;
-use std::num::NonZeroU32;
+use std::fmt;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{
     self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId,
@@ -25,7 +26,6 @@ use crate::actions::{
     self, Action, Command, Key, MENU_GROUPS, Noun, OPEN, Pasted, REVIEW, ROW_GROUPS, YANK,
 };
 use crate::agents::{self, Harness, Picked};
-use crate::brief;
 use crate::cadence::Cadence;
 use crate::checks::{self, Failing, PullPage};
 use crate::close::{Act, Plan, Scope};
@@ -424,7 +424,7 @@ impl Keys {
     }
 }
 
-fn bare(key: &KeyEvent) -> bool {
+pub(crate) fn bare(key: &KeyEvent) -> bool {
     key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
 }
 
@@ -805,7 +805,7 @@ pub struct ProjectTarget {
 enum Offer<'t> {
     SearchSkills(&'t ViewRow),
     Skill(&'t ViewRow, &'static str),
-    Last(&'t ViewRow, Last),
+    Last(&'t ViewRow, TerminalKey, &'t Ran, Last),
     FixChecks(&'t ViewRow),
     NewView(&'t ViewRow),
     NewWelcome(&'t ViewRow),
@@ -821,7 +821,7 @@ enum Offer<'t> {
     ForgetMachine(&'t Destination),
     DeleteMerged(Directory),
     Rebase(Rebases<'t>),
-    Brief(brief::Scope),
+    Brief(Briefed),
     Ask,
     FileIssue(Repository),
     Quit,
@@ -837,11 +837,20 @@ pub struct WorktreeRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewKind {
+    Terminal {
+        key: TerminalKey,
+        id: Option<ViewId>,
+        ran: Ran,
+    },
+    Browser(ViewId),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewRow {
-    pub place: ViewPlace,
-    pub terminal: Option<ViewId>,
+    pub worktree: WorktreePlace,
+    pub kind: ViewKind,
     pub cwd: Cwd,
-    pub ran: Ran,
     pub arranged: Option<Arranged>,
 }
 
@@ -897,6 +906,13 @@ pub struct Ended {
     pub at: SystemTime,
 }
 
+fn view_named(view: ViewKey) -> String {
+    match view {
+        ViewKey::Terminal(key) => format!("view {}", key.id),
+        ViewKey::Browser(_) => "the browser view".to_owned(),
+    }
+}
+
 impl Target {
     pub fn machine(&self) -> &Machine {
         match self {
@@ -912,7 +928,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(Place::Session(target.project.listed().clone())),
             Target::Worktree(_, row) => Some(Place::Worktree(row.place.clone())),
-            Target::View(_, row) => Some(Place::View(row.place.clone())),
+            Target::View(_, row) => Some(Place::View(row.place())),
             Target::Machine(_) => None,
         }
     }
@@ -941,14 +957,20 @@ impl Target {
             (Action::Review | Action::IllegalStates | Action::TigerStyle, Target::View(_, row)) => {
                 Offer::Skill(row, action.skill()?)
             }
-            (Action::FixLast, Target::View(_, row)) => Offer::Last(row, Last::Fix),
-            (Action::ExplainLast, Target::View(_, row)) => Offer::Last(row, Last::Explain),
+            (Action::FixLast, Target::View(_, row)) => match &row.kind {
+                ViewKind::Terminal { key, ran, .. } => Offer::Last(row, *key, ran, Last::Fix),
+                ViewKind::Browser(_) => return None,
+            },
+            (Action::ExplainLast, Target::View(_, row)) => match &row.kind {
+                ViewKind::Terminal { key, ran, .. } => Offer::Last(row, *key, ran, Last::Explain),
+                ViewKind::Browser(_) => return None,
+            },
             (Action::FixChecks, Target::View(_, row)) => Offer::FixChecks(row),
             (Action::NewView, Target::View(_, row)) => Offer::NewView(row),
             (Action::NewWelcome, Target::View(_, row)) => Offer::NewWelcome(row),
             (Action::NewBrowser, Target::View(_, row)) => Offer::NewBrowser(BrowserPlace::View {
-                session: row.place.listed().clone(),
-                view: row.place.view(),
+                session: row.listed().clone(),
+                view: row.view(),
             }),
             (Action::NewBrowser, Target::Worktree(_, row)) => {
                 Offer::NewBrowser(BrowserPlace::Worktree(row.place.worktree))
@@ -967,11 +989,11 @@ impl Target {
                 Target::View(
                     _,
                     ViewRow {
-                        terminal: Some(terminal),
+                        kind: ViewKind::Terminal { id: Some(id), .. },
                         ..
                     },
                 ),
-            ) => Offer::Rename(Renames::Terminal(*terminal)),
+            ) => Offer::Rename(Renames::Terminal(*id)),
             (Action::RenameWorktree, Target::Worktree(_, row)) => {
                 Offer::Rename(Renames::Worktree(row.place.worktree))
             }
@@ -1002,9 +1024,15 @@ impl Target {
             (Action::Rebase, Target::Worktree(_, row)) if row.repository.is_some() => {
                 Offer::Rebase(Rebases::Worktree(row, row.branch.as_ref()?))
             }
-            (Action::BriefEvery, _) => Offer::Brief(brief::Scope::Every),
-            (Action::BriefThis, _) => Offer::Brief(brief::Scope::Session),
-            (Action::BriefHighlighted, _) => Offer::Brief(brief::Scope::Highlighted),
+            (Action::BriefEvery, _) => Offer::Brief(Briefed::Every),
+            (Action::BriefHighlighted, Target::View(machine, row)) => match &row.kind {
+                ViewKind::Terminal { key, .. } => {
+                    let session = row.listed().name().session().clone();
+                    Offer::Brief(Briefed::Agent(machine.clone(), session, *key))
+                }
+                ViewKind::Browser(_) => return None,
+            },
+            (Action::BriefThis | Action::BriefHighlighted, _) => Offer::Brief(self.brief_session()),
             (Action::Ask, _) => Offer::Ask,
             (Action::FileIssue, _) => Offer::FileIssue(self.repository()?),
             (Action::Quit, _) => Offer::Quit,
@@ -1017,7 +1045,7 @@ impl Target {
         match self {
             Target::Project(_, target) => Some(target.project.clone()),
             Target::Worktree(_, row) => Some(row.place.project.clone()),
-            Target::View(_, row) => Some(row.place.worktree().project.clone()),
+            Target::View(_, row) => Some(row.worktree.project.clone()),
             Target::Machine(_) => None,
         }
     }
@@ -1076,29 +1104,18 @@ impl Target {
         }
     }
 
-    fn brief(&self, scope: brief::Scope) -> Briefed {
-        match (self, scope) {
-            (_, brief::Scope::Every) => Briefed::Every,
-            (Target::Machine(machine), brief::Scope::Session | brief::Scope::Highlighted) => {
-                Briefed::Machine(machine.clone())
-            }
-            (Target::View(machine, row), brief::Scope::Highlighted) => {
-                let session = row.place.listed().name().session().clone();
-                Briefed::Agent(machine.clone(), session, row.place.view())
-            }
-            (
-                Target::Worktree(machine, WorktreeRow { place, .. }),
-                brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(
+    fn brief_session(&self) -> Briefed {
+        match self {
+            Target::Machine(machine) => Briefed::Machine(machine.clone()),
+            Target::Worktree(machine, WorktreeRow { place, .. }) => Briefed::Session(
                 machine.clone(),
                 place.project.listed().name().session().clone(),
             ),
-            (
-                Target::Project(machine, ProjectTarget { project, .. }),
-                brief::Scope::Session | brief::Scope::Highlighted,
-            ) => Briefed::Session(machine.clone(), project.listed().name().session().clone()),
-            (Target::View(machine, ViewRow { place, .. }), brief::Scope::Session) => {
-                Briefed::Session(machine.clone(), place.listed().name().session().clone())
+            Target::Project(machine, ProjectTarget { project, .. }) => {
+                Briefed::Session(machine.clone(), project.listed().name().session().clone())
+            }
+            Target::View(machine, row) => {
+                Briefed::Session(machine.clone(), row.listed().name().session().clone())
             }
         }
     }
@@ -1142,11 +1159,12 @@ fn typed_path(path: &[char]) -> String {
         .join(" ")
 }
 
-fn started(keys: &Keys, row: &ViewRow, skill: &str) -> Result<Wants, String> {
+fn started(keys: &Keys, on: &Machine, row: &ViewRow, skill: &str) -> Result<Done, String> {
     let Beside { session, view, .. } = row.beside()?;
     let argv = agents::on_skill(keys.agent.harness(), skill, None);
     let opens = Opens::Command(argv.map_err(|why| format!("menu: {skill}: {why}"))?);
-    Ok(Wants::Open {
+    Ok(Done::Open {
+        on: on.clone(),
         session,
         view,
         opens,
@@ -1217,12 +1235,30 @@ impl Rebases<'_> {
 }
 
 impl ViewRow {
+    #[must_use]
+    pub fn listed(&self) -> &Listed {
+        self.worktree.project.listed()
+    }
+
+    #[must_use]
+    pub fn view(&self) -> ViewKey {
+        match &self.kind {
+            ViewKind::Terminal { key, .. } => ViewKey::Terminal(*key),
+            ViewKind::Browser(id) => ViewKey::Browser(*id),
+        }
+    }
+
+    #[must_use]
+    pub fn place(&self) -> ViewPlace {
+        ViewPlace::of(&self.worktree, self.view())
+    }
+
     fn folder(&self) -> Result<&Folder, String> {
-        let view = self.place.view();
+        let view = view_named(self.view());
         match &self.cwd {
             Cwd::At(folder) => Ok(folder),
             Cwd::Unsaid => Err(format!(
-                "menu: lune does not know yet where view {view} works; try again in a moment"
+                "menu: lune does not know yet where {view} works; try again in a moment"
             )),
         }
     }
@@ -1230,35 +1266,35 @@ impl ViewRow {
     fn beside(&self) -> Result<Beside, String> {
         let cwd = self.folder()?.dir.clone();
         Ok(Beside {
-            session: self.place.listed().clone(),
-            view: self.place.view(),
+            session: self.listed().clone(),
+            view: self.view(),
             cwd,
         })
     }
 
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
-        let (beside, view) = (self.beside()?, self.place.view());
+        let (beside, view) = (self.beside()?, view_named(self.view()));
         let pull_request = self
             .cwd
             .at()
             .and_then(|folder| folder.pull_request.as_ref());
         let Some(PullRequest { page, state, .. }) = pull_request else {
             return Err(format!(
-                "menu: gh has found no pull request of view {view}'s branch"
+                "menu: gh has found no pull request of {view}'s branch"
             ));
         };
         let number = page.number();
         match state {
-            State::Open | State::Draft => Ok((beside, page.clone())),
+            State::Open { .. } => Ok((beside, page.clone())),
             State::Merged => Err(format!("menu: #{number} is merged")),
             State::Closed => Err(format!("menu: #{number} is closed")),
         }
     }
 
-    fn ended(&self) -> Result<(Beside, Ended), String> {
+    fn ended(&self, terminal: TerminalKey, ran: &Ran) -> Result<(Beside, Ended), String> {
         let beside = self.beside()?;
-        let view = beside.view;
-        match &self.ran {
+        let view = terminal.id;
+        match ran {
             Ran::Ended(ended) => Ok((beside, ended.clone())),
             Ran::Going(Some(command)) => Err(format!(
                 "menu: view {view} runs `{}` still, and what it prints is not over",
@@ -1328,15 +1364,10 @@ pub enum Wants {
         dir: Directory,
         branch: Said,
     },
-    Open {
-        session: Listed,
-        view: ViewKey,
-        opens: Opens,
-    },
     Pull(Work, Wanted),
     Printed {
         session: Listed,
-        view: ViewKey,
+        terminal: TerminalKey,
         ended: Ended,
     },
     Checks {
@@ -1361,6 +1392,12 @@ pub enum Done {
     Ssh(Destination),
     Forget(Destination),
     Worktree(Machine, ProjectId, Branch),
+    Open {
+        on: Machine,
+        session: Listed,
+        view: ViewKey,
+        opens: Opens,
+    },
     Welcome {
         on: Machine,
         session: Listed,
@@ -1397,7 +1434,7 @@ pub enum Briefed {
     Every,
     Machine(Machine),
     Session(Machine, SessionName),
-    Agent(Machine, SessionName, ViewKey),
+    Agent(Machine, SessionName, TerminalKey),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1406,13 +1443,51 @@ pub enum Choice {
     Skill(Name),
 }
 
-pub struct Menu {
-    number: u64,
-    target: Target,
-    stage: Stage,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MenuId(NonZeroU64);
+
+impl MenuId {
+    #[must_use]
+    pub(crate) fn first() -> MenuId {
+        MenuId(NonZeroU64::MIN)
+    }
+
+    #[must_use]
+    pub(crate) fn next(self) -> MenuId {
+        MenuId(self.0.checked_add(1).expect("menu ids do not wrap"))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn of(id: u64) -> MenuId {
+        MenuId(NonZeroU64::new(id).expect("test menu id is non-zero"))
+    }
 }
 
-enum Stage {
+impl fmt::Display for MenuId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+pub enum Menu {
+    Interactive(InteractiveMenu),
+    Waiting(WaitingMenu),
+}
+
+pub struct InteractiveMenu {
+    number: MenuId,
+    target: Target,
+    stage: InteractiveStage,
+}
+
+pub struct WaitingMenu {
+    number: MenuId,
+    target: Target,
+    stage: WaitingStage,
+}
+
+enum InteractiveStage {
     Choosing(Keys),
     Planning {
         keys: Keys,
@@ -1425,22 +1500,31 @@ enum Stage {
         plan: Plan,
         asks: String,
     },
-    Sweeping {
-        keys: Keys,
-        dir: Directory,
-    },
     Swept {
         keys: Keys,
         dir: Directory,
         plan: prunes::Plan,
     },
+    PullChoosing {
+        work: Work,
+        agent: Harness,
+        wrong: Option<String>,
+    },
+    Typing {
+        keys: Keys,
+        chain: Chain,
+    },
+}
+
+enum WaitingStage {
+    Sweeping {
+        keys: Keys,
+        dir: Directory,
+    },
     Pruning {
         keys: Keys,
         dir: Directory,
         count: usize,
-    },
-    Opening {
-        keys: Keys,
     },
     Reading {
         keys: Keys,
@@ -1458,257 +1542,150 @@ enum Stage {
         resolves: Resolves,
         branch: Said,
     },
-    Pull {
+    Pulling {
         work: Work,
         agent: Harness,
-        step: Step,
+        pull: Pull,
     },
-    Typing {
-        keys: Keys,
-        chain: Chain,
+    OpeningPulled {
+        work: Work,
     },
-}
-
-enum Step {
-    Choosing { wrong: Option<String> },
-    Waiting(Wait),
-}
-
-enum Wait {
-    Pulling(Pull),
-    Opening,
-    Unopened,
-}
-
-impl Wait {
-    fn doing(&self, work: &Work) -> String {
-        match self {
-            Wait::Pulling(pull) => match pull.wanted(Asks::of(work)) {
-                Wanted::AtHead => format!("Syncing {}…", work.tab()),
-                Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
-            },
-            Wait::Opening | Wait::Unopened => format!("Opening {}…", work.tab()),
-        }
-    }
 }
 
 impl Menu {
-    pub fn open(number: u64, target: Target, key: Option<char>, agent: Picked) -> Option<Did> {
+    pub fn open(number: MenuId, target: Target, key: Option<char>, agent: Picked) -> Option<Did> {
         let keys = Keys::new(&target, agent);
         if key.is_some_and(|key| keys.root.iter().all(|entry| entry.key() != key)) {
             return None;
         }
-        let menu = Menu {
+        let menu = InteractiveMenu {
             number,
             target,
-            stage: Stage::Choosing(keys),
+            stage: InteractiveStage::Choosing(keys),
         };
         Some(match key {
             Some(key) => menu.key(&KeyEvent::from(KeyCode::Char(key))),
-            None => Did::Stays(menu, Wants::Nothing),
+            None => Did::Stays(Menu::Interactive(menu), Wants::Nothing),
         })
     }
 
-    pub fn new(number: u64, target: Target, agent: Picked) -> Menu {
-        let keys = Keys::new(&target, agent);
-        Menu {
-            number,
-            target,
-            stage: Stage::Choosing(keys),
-        }
-    }
-
-    pub fn acting(number: u64, target: &Target, action: Action, agent: Picked) -> Did {
+    pub fn acting(number: MenuId, target: &Target, action: Action, agent: Picked) -> Did {
         let offer = target
             .offer(action)
             .expect("the palette lists only actions its target fits");
-        Menu::act(number, target, Keys::new(target, agent), offer)
+        InteractiveMenu::act(number, target, Keys::new(target, agent), offer)
     }
 
-    pub fn pull(number: u64, target: Target, work: Work, agent: Harness) -> Menu {
-        let step = Step::Choosing { wrong: None };
-        Menu {
-            number,
-            target,
-            stage: Stage::Pull { work, agent, step },
+    #[must_use]
+    pub fn number(&self) -> MenuId {
+        match self {
+            Menu::Interactive(menu) => menu.number(),
+            Menu::Waiting(menu) => menu.number(),
         }
     }
 
-    pub fn start_pull(number: u64, target: Target, work: Work, agent: Harness, pull: Pull) -> Did {
-        let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
-        let stage = Stage::Pull {
-            work,
-            agent,
-            step: Step::Waiting(Wait::Pulling(pull)),
-        };
-        Did::Stays(
-            Menu {
-                number,
-                target,
-                stage,
-            },
-            wants,
-        )
+    #[must_use]
+    pub fn target(&self) -> &Target {
+        match self {
+            Menu::Interactive(menu) => menu.target(),
+            Menu::Waiting(menu) => menu.target(),
+        }
     }
 
-    pub fn number(&self) -> u64 {
+    #[must_use]
+    pub fn lines(
+        &self,
+        width: usize,
+        room: usize,
+        frame: SpinnerFrame,
+    ) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
+        match self {
+            Menu::Interactive(menu) => menu.lines(width, room, frame),
+            Menu::Waiting(menu) => menu.lines(width, room, frame),
+        }
+    }
+}
+
+impl InteractiveMenu {
+    #[must_use]
+    pub fn new(number: MenuId, target: Target, agent: Picked) -> InteractiveMenu {
+        let keys = Keys::new(&target, agent);
+        InteractiveMenu {
+            number,
+            target,
+            stage: InteractiveStage::Choosing(keys),
+        }
+    }
+
+    #[must_use]
+    pub fn pull(number: MenuId, target: Target, work: Work, agent: Harness) -> InteractiveMenu {
+        InteractiveMenu {
+            number,
+            target,
+            stage: InteractiveStage::PullChoosing {
+                work,
+                agent,
+                wrong: None,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn number(&self) -> MenuId {
         self.number
     }
 
+    #[must_use]
     pub fn target(&self) -> &Target {
         &self.target
     }
 
-    pub fn sweeping(&self) -> bool {
-        matches!(self.stage, Stage::Sweeping { .. })
-    }
-
-    pub fn pruning(&self) -> bool {
-        matches!(self.stage, Stage::Pruning { .. })
-    }
-
-    pub fn reading(&self) -> bool {
-        matches!(self.stage, Stage::Reading { .. })
-    }
-
-    pub fn fetching(&self) -> bool {
-        matches!(self.stage, Stage::Fetching { .. })
-    }
-
-    pub fn rebasing(&self) -> bool {
-        matches!(self.stage, Stage::Rebasing { .. })
-    }
-
-    pub fn pulling(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Pull {
-                step: Step::Waiting(Wait::Pulling(_)),
-                ..
-            }
-        )
-    }
-
-    pub fn waits(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Sweeping { .. }
-                | Stage::Pruning { .. }
-                | Stage::Reading { .. }
-                | Stage::Fetching { .. }
-                | Stage::Rebasing { .. }
-                | Stage::Opening { .. }
-                | Stage::Pull {
-                    step: Step::Waiting(_),
-                    ..
-                }
-        )
-    }
-
-    pub fn doing(&self) -> Option<String> {
-        match &self.stage {
-            Stage::Sweeping { .. } => Some(sweeping(self.target.repository_name())),
-            Stage::Pruning { count, .. } => Some(pruning(*count)),
-            Stage::Reading { ended, .. } => Some(reading(ended)),
-            Stage::Fetching { page, .. } => Some(fetching(page.number())),
-            Stage::Rebasing { branch, .. } => Some(rebasing(branch)),
-            Stage::Pull {
-                work,
-                step: Step::Waiting(wait),
-                ..
-            } => Some(wait.doing(work)),
-            Stage::Choosing(_)
-            | Stage::Planning { .. }
-            | Stage::Asking { .. }
-            | Stage::Swept { .. }
-            | Stage::Opening { .. }
-            | Stage::Pull {
-                step: Step::Choosing { .. },
-                ..
-            }
-            | Stage::Typing { .. } => None,
-        }
-    }
-
-    pub fn opens_pulled(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Pull {
-                step: Step::Waiting(Wait::Unopened),
-                ..
-            }
-        )
-    }
-
-    pub fn making(&self) -> Option<&Work> {
-        match &self.stage {
-            Stage::Pull {
-                work,
-                step: Step::Waiting(Wait::Pulling(_)),
-                ..
-            } => Some(work),
-            Stage::Pull {
-                step: Step::Choosing { .. } | Step::Waiting(Wait::Opening | Wait::Unopened),
-                ..
-            }
-            | Stage::Choosing(_)
-            | Stage::Planning { .. }
-            | Stage::Asking { .. }
-            | Stage::Sweeping { .. }
-            | Stage::Swept { .. }
-            | Stage::Pruning { .. }
-            | Stage::Opening { .. }
-            | Stage::Reading { .. }
-            | Stage::Fetching { .. }
-            | Stage::Rebasing { .. }
-            | Stage::Typing { .. } => None,
-        }
-    }
-
+    #[must_use]
     pub fn left(&self) -> Option<String> {
         match &self.stage {
-            Stage::Pull {
+            InteractiveStage::PullChoosing {
                 work,
-                step: Step::Choosing { wrong: Some(wrong) },
+                wrong: Some(wrong),
                 ..
             } => Some(format!("menu: {wrong} once {} is pasted again", work.tab())),
-            Stage::Swept { .. } => Some(
+            InteractiveStage::Swept { .. } => Some(
                 "menu: nothing deleted: the menu closed before you said yes; d m asks again"
                     .to_owned(),
             ),
-            Stage::Pull {
-                step: Step::Choosing { wrong: None } | Step::Waiting(_),
-                ..
-            }
-            | Stage::Choosing(_)
-            | Stage::Planning { .. }
-            | Stage::Asking { .. }
-            | Stage::Sweeping { .. }
-            | Stage::Pruning { .. }
-            | Stage::Opening { .. }
-            | Stage::Reading { .. }
-            | Stage::Fetching { .. }
-            | Stage::Rebasing { .. }
-            | Stage::Typing { .. } => None,
+            InteractiveStage::PullChoosing { wrong: None, .. }
+            | InteractiveStage::Choosing(_)
+            | InteractiveStage::Planning { .. }
+            | InteractiveStage::Asking { .. }
+            | InteractiveStage::Typing { .. } => None,
         }
     }
 
     pub fn paste(&mut self, text: &str) -> bool {
-        let Stage::Typing { chain, .. } = &mut self.stage else {
+        let InteractiveStage::Typing { chain, .. } = &mut self.stage else {
             return false;
         };
         chain.paste(text);
         true
     }
 
-    fn act(number: u64, target: &Target, mut keys: Keys, offer: Offer<'_>) -> Did {
-        let stays = |stage: Stage, wants: Wants| {
+    fn act(number: MenuId, target: &Target, mut keys: Keys, offer: Offer<'_>) -> Did {
+        let stays = |stage: InteractiveStage, wants: Wants| {
             Did::Stays(
-                Menu {
+                Menu::Interactive(InteractiveMenu {
                     number,
                     target: target.clone(),
                     stage,
-                },
+                }),
+                wants,
+            )
+        };
+        let pending = |stage: WaitingStage, wants: Wants| {
+            Did::Stays(
+                Menu::Waiting(WaitingMenu {
+                    number,
+                    target: target.clone(),
+                    stage,
+                }),
                 wants,
             )
         };
@@ -1721,7 +1698,7 @@ impl Menu {
             };
             let close = Close { session, scope };
             stays(
-                Stage::Planning {
+                InteractiveStage::Planning {
                     keys,
                     close,
                     agreed: None,
@@ -1738,24 +1715,24 @@ impl Menu {
                         dir,
                         agent: keys.agent.harness(),
                     };
-                    stays(Stage::Choosing(keys), wants)
+                    stays(InteractiveStage::Choosing(keys), wants)
                 }
                 Err(reason) => wrong(reason),
             },
-            Offer::Skill(row, skill) => match started(&keys, row, skill) {
-                Ok(wants) => stays(Stage::Opening { keys }, wants),
+            Offer::Skill(row, skill) => match started(&keys, target.machine(), row, skill) {
+                Ok(done) => Did::Closed(done),
                 Err(reason) => wrong(reason),
             },
-            Offer::Last(row, last) => match row.ended() {
+            Offer::Last(row, terminal, ran, last) => match row.ended(terminal, ran) {
                 Ok((beside, ended)) => {
-                    let (session, view) = (beside.session.clone(), beside.view);
+                    let session = beside.session.clone();
                     let wants = Wants::Printed {
                         session,
-                        view,
+                        terminal,
                         ended: ended.clone(),
                     };
-                    stays(
-                        Stage::Reading {
+                    pending(
+                        WaitingStage::Reading {
                             keys,
                             last,
                             beside,
@@ -1769,38 +1746,32 @@ impl Menu {
             Offer::FixChecks(row) => match row.pulled() {
                 Ok((beside, page)) => {
                     let wants = Wants::Checks { page: page.clone() };
-                    stays(Stage::Fetching { keys, beside, page }, wants)
+                    pending(WaitingStage::Fetching { keys, beside, page }, wants)
                 }
                 Err(reason) => wrong(reason),
             },
             Offer::NewView(row) => match row.beside() {
-                Ok(Beside { session, view, .. }) => {
-                    let opens = Opens::Shell;
-                    let stage = Stage::Opening { keys };
-                    stays(
-                        stage,
-                        Wants::Open {
-                            session,
-                            view,
-                            opens,
-                        },
-                    )
-                }
+                Ok(Beside { session, view, .. }) => Did::Closed(Done::Open {
+                    on: target.machine().clone(),
+                    session,
+                    view,
+                    opens: Opens::Shell,
+                }),
                 Err(reason) => wrong(reason),
             },
             Offer::NewWelcome(row) => {
                 let on = target.machine().clone();
-                let (session, view) = (row.place.listed().clone(), row.place.view());
+                let (session, view) = (row.listed().clone(), row.view());
                 Did::Closed(Done::Welcome { on, session, view })
             }
             Offer::NewReview(row) => {
                 let on = target.machine().clone();
-                let (session, view) = (row.place.listed().clone(), row.place.view());
+                let (session, view) = (row.listed().clone(), row.view());
                 Did::Closed(Done::Review { on, session, view })
             }
             Offer::Arrange(row, arranged) => {
                 let on = target.machine().clone();
-                let (session, view) = (row.place.listed().clone(), row.place.view());
+                let (session, view) = (row.listed().clone(), row.view());
                 Did::Closed(Done::Arrange {
                     on,
                     session,
@@ -1810,15 +1781,16 @@ impl Menu {
             }
             Offer::NewWorktree(project) => {
                 let chain = chained.expect("a new worktree is typed in a chain");
-                stays(Stage::Typing { keys, chain }, Wants::Cloned(project))
+                stays(
+                    InteractiveStage::Typing { keys, chain },
+                    Wants::Cloned(project),
+                )
             }
             Offer::NewMachine | Offer::Rename(_) | Offer::NewBrowser(_) => {
                 let chain = chained.expect("a machine, name or browser is typed in a chain");
-                stays(Stage::Typing { keys, chain }, Wants::Nothing)
+                stays(InteractiveStage::Typing { keys, chain }, Wants::Nothing)
             }
-            Offer::CloseView(row) => {
-                closing(keys, row.place.listed(), Scope::View(row.place.view()))
-            }
+            Offer::CloseView(row) => closing(keys, row.listed(), Scope::View(row.view())),
             Offer::CloseWorktree(row) => {
                 let scope = Scope::Worktree(row.place.worktree);
                 closing(keys, row.place.project.listed(), scope)
@@ -1827,7 +1799,7 @@ impl Menu {
             Offer::ForgetMachine(destination) => Did::Closed(Done::Forget(destination.clone())),
             Offer::DeleteMerged(dir) => {
                 let wants = Wants::Prunes { dir: dir.clone() };
-                stays(Stage::Sweeping { keys, dir }, wants)
+                pending(WaitingStage::Sweeping { keys, dir }, wants)
             }
             Offer::Rebase(rebases) => {
                 let (resolves, dir, branch) = rebases.asked();
@@ -1835,8 +1807,8 @@ impl Menu {
                     dir,
                     branch: branch.clone(),
                 };
-                stays(
-                    Stage::Rebasing {
+                pending(
+                    WaitingStage::Rebasing {
                         keys,
                         resolves,
                         branch,
@@ -1844,7 +1816,7 @@ impl Menu {
                     wants,
                 )
             }
-            Offer::Brief(scope) => Did::Closed(Done::Brief(target.brief(scope))),
+            Offer::Brief(briefed) => Did::Closed(Done::Brief(briefed)),
             Offer::Ask => Did::Closed(Done::Ask(target.clone())),
             Offer::FileIssue(repository) => Did::Closed(Done::Issue(repository)),
             Offer::Quit => Did::Closed(Done::Quit),
@@ -1852,23 +1824,33 @@ impl Menu {
     }
 
     pub fn key(self, key: &KeyEvent) -> Did {
-        let Menu {
+        let InteractiveMenu {
             number,
             target,
             stage,
         } = self;
-        let stays = |stage: Stage, wants: Wants| {
+        let stays = |stage: InteractiveStage, wants: Wants| {
             Did::Stays(
-                Menu {
+                Menu::Interactive(InteractiveMenu {
                     number,
                     target: target.clone(),
                     stage,
-                },
+                }),
+                wants,
+            )
+        };
+        let pending = |stage: WaitingStage, wants: Wants| {
+            Did::Stays(
+                Menu::Waiting(WaitingMenu {
+                    number,
+                    target: target.clone(),
+                    stage,
+                }),
                 wants,
             )
         };
         match stage {
-            Stage::Choosing(mut keys) => match (keys.key(key), &target) {
+            InteractiveStage::Choosing(mut keys) => match (keys.key(key), &target) {
                 (Pressed::Close, _) => Did::Closed(Done::Nothing),
                 (Pressed::Switched(agent), _) if let Some(search) = &mut keys.search => {
                     search.refind();
@@ -1876,92 +1858,91 @@ impl Menu {
                         dir: search.dir().clone(),
                         agent,
                     };
-                    stays(Stage::Choosing(keys), wants)
+                    stays(InteractiveStage::Choosing(keys), wants)
                 }
-                (Pressed::Switched(agent), _) => stays(Stage::Choosing(keys), Wants::Keep(agent)),
+                (Pressed::Switched(agent), _) => {
+                    stays(InteractiveStage::Choosing(keys), Wants::Keep(agent))
+                }
                 (Pressed::Moved | Pressed::Nothing, _) => {
-                    stays(Stage::Choosing(keys), Wants::Nothing)
+                    stays(InteractiveStage::Choosing(keys), Wants::Nothing)
                 }
-                (Pressed::Start(skill), Target::View(_, row)) => {
-                    match started(&keys, row, &skill) {
-                        Ok(wants) => stays(Stage::Opening { keys }, wants),
+                (Pressed::Start(skill), Target::View(on, row)) => {
+                    match started(&keys, on, row, &skill) {
+                        Ok(done) => Did::Closed(done),
                         Err(reason) => Did::Closed(Done::Wrong(reason)),
                     }
                 }
-                (Pressed::Start(_), _) => stays(Stage::Choosing(keys), Wants::Nothing),
+                (Pressed::Start(_), _) => stays(InteractiveStage::Choosing(keys), Wants::Nothing),
                 (Pressed::Act(action), _) => match target.offer(action) {
-                    Some(offer) => Menu::act(number, &target, keys, offer),
-                    None => stays(Stage::Choosing(keys), Wants::Nothing),
+                    Some(offer) => InteractiveMenu::act(number, &target, keys, offer),
+                    None => stays(InteractiveStage::Choosing(keys), Wants::Nothing),
                 },
             },
-            Stage::Typing { keys, chain } => match chain.key(key, target.machine()) {
+            InteractiveStage::Typing { keys, chain } => match chain.key(key, target.machine()) {
                 Chained::Close => Did::Closed(Done::Nothing),
-                Chained::Back => stays(Stage::Choosing(keys), Wants::Nothing),
-                Chained::Typing(chain) => stays(Stage::Typing { keys, chain }, Wants::Nothing),
+                Chained::Back => stays(InteractiveStage::Choosing(keys), Wants::Nothing),
+                Chained::Typing(chain) => {
+                    stays(InteractiveStage::Typing { keys, chain }, Wants::Nothing)
+                }
                 Chained::Done(done) => Did::Closed(done),
             },
-            Stage::Planning { .. }
-            | Stage::Sweeping { .. }
-            | Stage::Pruning { .. }
-            | Stage::Opening { .. }
-            | Stage::Reading { .. }
-            | Stage::Fetching { .. }
-            | Stage::Rebasing { .. }
-            | Stage::Pull { .. }
+            InteractiveStage::Planning { .. } | InteractiveStage::PullChoosing { .. }
                 if closes(key) =>
             {
                 Did::Closed(Done::Nothing)
             }
-            Stage::Pull {
-                step: Step::Choosing { .. },
-                ..
-            } if key.code == KeyCode::Backspace && bare(key) => Did::Closed(Done::Nothing),
-            Stage::Pull {
-                work,
-                agent,
-                step: step @ Step::Choosing { .. },
-            } if key.code == KeyCode::Tab && bare(key) => {
-                let agent = agents::next(agent);
-                stays(Stage::Pull { work, agent, step }, Wants::Keep(agent))
+            InteractiveStage::PullChoosing { .. }
+                if key.code == KeyCode::Backspace && bare(key) =>
+            {
+                Did::Closed(Done::Nothing)
             }
-            Stage::Pull {
-                work,
-                agent,
-                step: step @ Step::Choosing { .. },
-            } => match Pull::pressed(key, &work) {
-                Some(pull) => Menu::start_pull(number, target.clone(), work, agent, pull),
-                None => stays(Stage::Pull { work, agent, step }, Wants::Nothing),
-            },
-            stage @ (Stage::Planning { .. }
-            | Stage::Sweeping { .. }
-            | Stage::Pruning { .. }
-            | Stage::Opening { .. }
-            | Stage::Reading { .. }
-            | Stage::Fetching { .. }
-            | Stage::Rebasing { .. }
-            | Stage::Pull { .. }) => stays(stage, Wants::Nothing),
-            Stage::Swept { keys, dir, plan } => match answer(key, yes_key(Action::DeleteMerged)) {
-                Answer::Yes if !plan.goes.is_empty() => {
-                    let wants = Wants::Prune {
-                        dir: dir.clone(),
-                        agreed: plan.deletes(),
-                    };
-                    stays(
-                        Stage::Pruning {
-                            keys,
-                            dir,
-                            count: plan.goes.len(),
-                        },
-                        wants,
-                    )
+            InteractiveStage::PullChoosing { work, agent, wrong }
+                if key.code == KeyCode::Tab && bare(key) =>
+            {
+                let agent = agents::next(agent);
+                stays(
+                    InteractiveStage::PullChoosing { work, agent, wrong },
+                    Wants::Keep(agent),
+                )
+            }
+            InteractiveStage::PullChoosing { work, agent, wrong } => {
+                match Pull::pressed(key, &work) {
+                    Some(pull) => {
+                        let (waiting, wants) =
+                            WaitingMenu::start_pull(number, target.clone(), work, agent, pull);
+                        Did::Stays(Menu::Waiting(waiting), wants)
+                    }
+                    None => stays(
+                        InteractiveStage::PullChoosing { work, agent, wrong },
+                        Wants::Nothing,
+                    ),
                 }
-                Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
-                Answer::Close => Did::Closed(Done::Nothing),
-                Answer::Yes | Answer::Nothing => {
-                    stays(Stage::Swept { keys, dir, plan }, Wants::Nothing)
+            }
+            stage @ InteractiveStage::Planning { .. } => stays(stage, Wants::Nothing),
+            InteractiveStage::Swept { keys, dir, plan } => {
+                match answer(key, yes_key(Action::DeleteMerged)) {
+                    Answer::Yes if !plan.goes.is_empty() => {
+                        let wants = Wants::Prune {
+                            dir: dir.clone(),
+                            agreed: plan.deletes(),
+                        };
+                        pending(
+                            WaitingStage::Pruning {
+                                keys,
+                                dir,
+                                count: plan.goes.len(),
+                            },
+                            wants,
+                        )
+                    }
+                    Answer::Back => stays(InteractiveStage::Choosing(keys), Wants::Nothing),
+                    Answer::Close => Did::Closed(Done::Nothing),
+                    Answer::Yes | Answer::Nothing => {
+                        stays(InteractiveStage::Swept { keys, dir, plan }, Wants::Nothing)
+                    }
                 }
-            },
-            Stage::Asking {
+            }
+            InteractiveStage::Asking {
                 keys,
                 close,
                 plan,
@@ -1974,7 +1955,7 @@ impl Menu {
                         scope: close.scope,
                     };
                     stays(
-                        Stage::Planning {
+                        InteractiveStage::Planning {
                             keys,
                             close,
                             agreed: Some(plan),
@@ -1982,10 +1963,10 @@ impl Menu {
                         wants,
                     )
                 }
-                Answer::Back => stays(Stage::Choosing(keys), Wants::Nothing),
+                Answer::Back => stays(InteractiveStage::Choosing(keys), Wants::Nothing),
                 Answer::Close => Did::Closed(Done::Nothing),
                 Answer::Nothing => stays(
-                    Stage::Asking {
+                    InteractiveStage::Asking {
                         keys,
                         close,
                         plan,
@@ -1998,23 +1979,23 @@ impl Menu {
     }
 
     pub fn planned(self, plan: Result<Plan, String>) -> Did {
-        let Menu {
+        let InteractiveMenu {
             number,
             target,
             stage,
         } = self;
-        let Stage::Planning {
+        let InteractiveStage::Planning {
             keys,
             close,
             agreed,
         } = stage
         else {
             return Did::Stays(
-                Menu {
+                Menu::Interactive(InteractiveMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
@@ -2028,37 +2009,357 @@ impl Menu {
             plan.question()
         };
         if let Some(asks) = asks {
-            let stage = Stage::Asking {
+            let stage = InteractiveStage::Asking {
                 keys,
                 close,
                 plan,
                 asks,
             };
             return Did::Stays(
-                Menu {
+                Menu::Interactive(InteractiveMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         }
-        Did::Closed(Done::Act(target.machine().clone(), plan.act))
+        Did::Closed(Done::Act(target.machine().clone(), plan.into_act()))
+    }
+
+    pub fn reran(&mut self, ran: Ran) {
+        if let Target::View(
+            _,
+            ViewRow {
+                kind: ViewKind::Terminal { ran: current, .. },
+                ..
+            },
+        ) = &mut self.target
+        {
+            *current = ran;
+        }
+    }
+
+    pub fn found(&mut self, agent: Harness, skills: Result<Vec<crate::skills::Skill>, String>) {
+        if let InteractiveStage::Choosing(keys) = &mut self.stage
+            && keys.agent.harness() == agent
+            && let Some(search) = &mut keys.search
+        {
+            search.fill(skills);
+        }
+    }
+
+    pub fn pick(mut self, name: &Name) -> Did {
+        if let InteractiveStage::Choosing(keys) = &mut self.stage
+            && let Some(search) = &mut keys.search
+            && search.select(name)
+        {
+            return self.key(&KeyEvent::from(KeyCode::Enter));
+        }
+        Did::Stays(Menu::Interactive(self), Wants::Nothing)
+    }
+
+    pub fn scroll(&mut self, by: isize) {
+        if let InteractiveStage::Choosing(keys) = &mut self.stage
+            && let Some(search) = &mut keys.search
+        {
+            search.move_by(by);
+        }
+    }
+
+    #[must_use]
+    pub fn lines(
+        &self,
+        width: usize,
+        room: usize,
+        frame: SpinnerFrame,
+    ) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
+        render_lines(
+            self.lists(),
+            width,
+            room,
+            self.shown(width, room.saturating_sub(2), frame),
+        )
+    }
+
+    #[must_use]
+    pub fn lists(&self) -> bool {
+        matches!(&self.stage, InteractiveStage::Choosing(keys) if keys.search.is_none())
+    }
+
+    pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> (Drawn, Cadence) {
+        let frame = sidebar::frame(wall);
+        render_draw(
+            self.number,
+            self.searching(),
+            buffer,
+            over,
+            |width, body| self.shown(width, body, frame),
+        )
+    }
+
+    fn searching(&self) -> bool {
+        match &self.stage {
+            InteractiveStage::Choosing(keys) | InteractiveStage::Planning { keys, .. } => {
+                keys.search.is_some()
+            }
+            InteractiveStage::Typing { .. } => true,
+            InteractiveStage::Asking { .. }
+            | InteractiveStage::Swept { .. }
+            | InteractiveStage::PullChoosing { .. } => false,
+        }
+    }
+
+    fn shown(&self, width: usize, body_room: usize, _frame: SpinnerFrame) -> Shown {
+        let inner = width.saturating_sub(1);
+        let right = self
+            .target
+            .cwd()
+            .map_or_default(|cwd| sidebar::short_cwd(cwd.as_str()));
+        let mut spots = Spots::default();
+        let (title, right, body, (footer, keys)) = match &self.stage {
+            InteractiveStage::PullChoosing { work, agent, wrong } => {
+                let entry = |(_, pasted): (Pull, Pasted)| Entry::Act {
+                    key: pasted.key(),
+                    action: pasted.action(),
+                };
+                let entries = Pull::offered(work).map(entry);
+                spots = entry_spots(&entries, width).map(Choice::Key);
+                let mut body: Vec<_> = entries
+                    .iter()
+                    .map(|entry| entry_line(entry, inner))
+                    .collect();
+                spots.add(
+                    body.len(),
+                    0..width,
+                    Choice::Key(KeyEvent::from(KeyCode::Tab)),
+                );
+                body.push(agent_line(Picked::ByYou(*agent), inner));
+                if let Some(wrong) = wrong {
+                    body.extend(wrap(wrong, width, Style::new().fg(moonlight::RED)));
+                }
+                (
+                    work.tab(),
+                    whence(work),
+                    body,
+                    keyed(width, &[(Hint::Esc, "Close")]),
+                )
+            }
+            InteractiveStage::Choosing(keys) | InteractiveStage::Planning { keys, .. } => {
+                let choosing = matches!(self.stage, InteractiveStage::Choosing(_));
+                return shown_keys(keys, choosing, right, width, body_room);
+            }
+            InteractiveStage::Asking { keys, asks, .. } => (
+                title(keys),
+                right,
+                wrap(asks, width, Style::new().fg(NAME)),
+                keyed(
+                    width,
+                    &[
+                        (Hint::Char('y'), "Yes"),
+                        (Hint::Backspace, "Back"),
+                        (Hint::Esc, "Close"),
+                    ],
+                ),
+            ),
+            InteractiveStage::Swept { keys, plan, .. } => {
+                let back = [(Hint::Backspace, "Back"), (Hint::Esc, "Close")];
+                let yes = [(Hint::Char('y'), "Yes"), back[0], back[1]];
+                let hints: &[(Hint, &str)] = if plan.goes.is_empty() { &back } else { &yes };
+                let body = swept_lines(plan, width, body_room);
+                (
+                    title(keys),
+                    plan.repository_name().to_owned(),
+                    body,
+                    keyed(width, hints),
+                )
+            }
+            InteractiveStage::Typing { chain, .. } => {
+                let typed = sidebar::tail(&format!("{}_", chain.typed()), width.saturating_sub(2));
+                let mut body = vec![Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(typed, Style::new().fg(ACCENT)),
+                ])];
+                body.extend(chain_says(chain, width));
+                let keys = [(Hint::Enter, chain.enter()), (Hint::Esc, "Back")];
+                (
+                    chain.title().to_owned(),
+                    String::new(),
+                    body,
+                    keyed(width, &keys),
+                )
+            }
+        };
+        Shown {
+            title,
+            right,
+            body,
+            spinner: None,
+            spots,
+            footer,
+            keys,
+        }
+    }
+}
+
+impl WaitingMenu {
+    #[must_use]
+    pub fn start_pull(
+        number: MenuId,
+        target: Target,
+        work: Work,
+        agent: Harness,
+        pull: Pull,
+    ) -> (WaitingMenu, Wants) {
+        let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
+        let stage = WaitingStage::Pulling { work, agent, pull };
+        (
+            WaitingMenu {
+                number,
+                target,
+                stage,
+            },
+            wants,
+        )
+    }
+
+    #[must_use]
+    pub fn number(&self) -> MenuId {
+        self.number
+    }
+
+    #[must_use]
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
+
+    #[must_use]
+    pub fn sweeping(&self) -> bool {
+        matches!(self.stage, WaitingStage::Sweeping { .. })
+    }
+
+    #[must_use]
+    pub fn pruning(&self) -> bool {
+        matches!(self.stage, WaitingStage::Pruning { .. })
+    }
+
+    #[must_use]
+    pub fn reading(&self) -> bool {
+        matches!(self.stage, WaitingStage::Reading { .. })
+    }
+
+    #[must_use]
+    pub fn reading_view(&self) -> Option<(&Machine, &Listed, ViewKey)> {
+        match &self.stage {
+            WaitingStage::Reading { beside, .. } => {
+                Some((self.target.machine(), &beside.session, beside.view))
+            }
+            WaitingStage::Sweeping { .. }
+            | WaitingStage::Pruning { .. }
+            | WaitingStage::Fetching { .. }
+            | WaitingStage::Rebasing { .. }
+            | WaitingStage::Pulling { .. }
+            | WaitingStage::OpeningPulled { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn fetching(&self) -> bool {
+        matches!(self.stage, WaitingStage::Fetching { .. })
+    }
+
+    #[must_use]
+    pub fn rebasing(&self) -> bool {
+        matches!(self.stage, WaitingStage::Rebasing { .. })
+    }
+
+    #[must_use]
+    pub fn pulling(&self) -> bool {
+        matches!(self.stage, WaitingStage::Pulling { .. })
+    }
+
+    #[must_use]
+    pub fn opens_pulled(&self) -> bool {
+        matches!(self.stage, WaitingStage::OpeningPulled { .. })
+    }
+
+    #[must_use]
+    pub fn making(&self) -> Option<&Work> {
+        match &self.stage {
+            WaitingStage::Pulling { work, .. } => Some(work),
+            WaitingStage::Sweeping { .. }
+            | WaitingStage::Pruning { .. }
+            | WaitingStage::Reading { .. }
+            | WaitingStage::Fetching { .. }
+            | WaitingStage::Rebasing { .. }
+            | WaitingStage::OpeningPulled { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn doing(&self) -> String {
+        match &self.stage {
+            WaitingStage::Sweeping { .. } => sweeping(self.target.repository_name()),
+            WaitingStage::Pruning { count, .. } => pruning(*count),
+            WaitingStage::Reading { ended, .. } => reading(ended),
+            WaitingStage::Fetching { page, .. } => fetching(page.number()),
+            WaitingStage::Rebasing { branch, .. } => rebasing(branch),
+            WaitingStage::Pulling { work, pull, .. } => match pull.wanted(Asks::of(work)) {
+                Wanted::AtHead => format!("Syncing {}…", work.tab()),
+                Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
+            },
+            WaitingStage::OpeningPulled { work, .. } => format!("Opening {}…", work.tab()),
+        }
+    }
+
+    #[must_use]
+    pub fn quiet(&self) -> bool {
+        matches!(self.stage, WaitingStage::Reading { .. })
+    }
+
+    #[must_use]
+    pub fn turning(&self) -> bool {
+        !matches!(self.stage, WaitingStage::Reading { .. })
+    }
+
+    #[must_use]
+    pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
+        let WaitingStage::Pulling {
+            work,
+            pull: Pull::Worktree,
+            ..
+        } = &self.stage
+        else {
+            return None;
+        };
+        let Ready {
+            moved_off: true,
+            branch,
+            ..
+        } = &found.as_ref().ok()?.ready
+        else {
+            return None;
+        };
+        Some(format!(
+            "{}'s worktree is {}",
+            work.tab(),
+            work.off_branch(branch.as_deref())
+        ))
     }
 
     pub fn swept(self, plan: Result<prunes::Plan, String>) -> Did {
-        let Menu {
+        let WaitingMenu {
             number,
             target,
             stage,
         } = self;
-        let Stage::Sweeping { keys, dir } = stage else {
+        let WaitingStage::Sweeping { keys, dir } = stage else {
             return Did::Stays(
-                Menu {
+                Menu::Waiting(WaitingMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
@@ -2067,59 +2368,54 @@ impl Menu {
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: nothing deleted: {why}"))),
         };
         Did::Stays(
-            Menu {
+            Menu::Interactive(InteractiveMenu {
                 number,
                 target,
-                stage: Stage::Swept { keys, dir, plan },
-            },
+                stage: InteractiveStage::Swept { keys, dir, plan },
+            }),
             Wants::Nothing,
         )
     }
 
     pub fn changed(self, plan: prunes::Plan) -> Did {
-        let Menu {
+        let WaitingMenu {
             number,
             target,
             stage,
         } = self;
-        let Stage::Pruning { keys, dir, .. } = stage else {
+        let WaitingStage::Pruning { keys, dir, .. } = stage else {
             return Did::Stays(
-                Menu {
+                Menu::Waiting(WaitingMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
         Did::Stays(
-            Menu {
+            Menu::Interactive(InteractiveMenu {
                 number,
                 target,
-                stage: Stage::Swept { keys, dir, plan },
-            },
+                stage: InteractiveStage::Swept { keys, dir, plan },
+            }),
             Wants::Nothing,
         )
     }
 
     pub fn pulled(self, found: Result<Found, String>) -> Did {
-        let Menu {
+        let WaitingMenu {
             number,
             target,
             stage,
         } = self;
-        let Stage::Pull {
-            work,
-            agent,
-            step: Step::Waiting(Wait::Pulling(pull)),
-        } = stage
-        else {
+        let WaitingStage::Pulling { work, agent, pull } = stage else {
             return Did::Stays(
-                Menu {
+                Menu::Waiting(WaitingMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
@@ -2142,17 +2438,13 @@ impl Menu {
             let wrong = Some(format!(
                 "{folder} is {off}, so no agent starts there; w opens it"
             ));
-            let stage = Stage::Pull {
-                work,
-                agent,
-                step: Step::Choosing { wrong },
-            };
+            let stage = InteractiveStage::PullChoosing { work, agent, wrong };
             return Did::Stays(
-                Menu {
+                Menu::Interactive(InteractiveMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         }
@@ -2172,102 +2464,39 @@ impl Menu {
             Err(why) => return unstarted(&work, &why),
         };
         match (at, argv) {
-            (At::There(place), None) => Did::Closed(Done::Go(on, Place::View(place))),
-            (At::There(place), Some(argv)) => {
-                let (session, view) = (place.listed().clone(), place.view());
-                let folder = Folder {
-                    dir: folder,
-                    branch,
-                    repository: None,
-                    pull_request: None,
-                };
-                let row = ViewRow {
-                    place,
-                    terminal: None,
-                    cwd: Cwd::At(folder),
-                    ran: Ran::Unhooked,
-                    arranged: None,
-                };
-                let target = Target::View(on, row);
-                let stage = Stage::Pull {
-                    work,
-                    agent,
-                    step: Step::Waiting(Wait::Opening),
-                };
-                let wants = Wants::Open {
-                    session,
-                    view,
-                    opens: Opens::Command(argv),
-                };
-                Did::Stays(
-                    Menu {
-                        number,
-                        target,
-                        stage,
-                    },
-                    wants,
-                )
-            }
+            (At::There(place), None) => Did::Closed(Done::Go(on, Place::View(place.view_place()))),
+            (At::There(place), Some(argv)) => Did::Closed(Done::Open {
+                on,
+                session: place.listed().clone(),
+                view: ViewKey::Terminal(place.terminal()),
+                opens: Opens::Command(argv),
+            }),
             (At::Unopened, argv) => {
                 let wants = Wants::Make {
                     cwd: folder,
                     name: work.tab(),
                     agent: argv,
                 };
-                let stage = Stage::Pull {
-                    work,
-                    agent,
-                    step: Step::Waiting(Wait::Unopened),
-                };
+                let stage = WaitingStage::OpeningPulled { work };
                 Did::Stays(
-                    Menu {
+                    Menu::Waiting(WaitingMenu {
                         number,
                         target: Target::Machine(on),
                         stage,
-                    },
+                    }),
                     wants,
                 )
             }
         }
     }
 
-    pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
-        let Stage::Pull {
-            work,
-            step: Step::Waiting(Wait::Pulling(Pull::Worktree)),
-            ..
-        } = &self.stage
-        else {
-            return None;
-        };
-        let Ready {
-            moved_off: true,
-            branch,
-            ..
-        } = &found.as_ref().ok()?.ready
-        else {
-            return None;
-        };
-        Some(format!(
-            "{}'s worktree is {}",
-            work.tab(),
-            work.off_branch(branch.as_deref())
-        ))
-    }
-
-    pub fn reran(&mut self, ran: Ran) {
-        if let Target::View(_, row) = &mut self.target {
-            row.ran = ran;
-        }
-    }
-
-    pub fn printed(self, printed: Result<Printed, String>) -> Did {
-        let Menu {
+    pub fn printed(self, printed: Result<Printed, String>, current: &Ran) -> Did {
+        let WaitingMenu {
             number,
             target,
             stage,
         } = self;
-        let Stage::Reading {
+        let WaitingStage::Reading {
             keys,
             last,
             beside: Beside { session, view, .. },
@@ -2275,11 +2504,11 @@ impl Menu {
         } = stage
         else {
             return Did::Stays(
-                Menu {
+                Menu::Waiting(WaitingMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
@@ -2291,8 +2520,7 @@ impl Menu {
                 )));
             }
         };
-        let still = |row: &ViewRow| matches!(&row.ran, Ran::Ended(now) if *now == ended);
-        if !matches!(&target, Target::View(_, row) if still(row)) {
+        if !matches!(current, Ran::Ended(now) if *now == ended) {
             return Did::Closed(Done::Wrong(format!(
                 "menu: view {view}'s shell went on as lune read what `{}` printed; ask again",
                 ended.command.as_str()
@@ -2304,40 +2532,32 @@ impl Menu {
             Ok(argv) => Opens::Command(argv),
             Err(why) => return unstarted(format!("what view {view} printed"), &why),
         };
-        let stage = Stage::Opening { keys };
-        let wants = Wants::Open {
+        Did::Closed(Done::Open {
+            on: target.machine().clone(),
             session,
             view,
             opens,
-        };
-        Did::Stays(
-            Menu {
-                number,
-                target,
-                stage,
-            },
-            wants,
-        )
+        })
     }
 
     pub fn checked(self, checks: Result<Failing, String>) -> Did {
-        let Menu {
+        let WaitingMenu {
             number: menu,
             target,
             stage,
         } = self;
-        let Stage::Fetching {
+        let WaitingStage::Fetching {
             keys,
             beside: Beside { session, view, .. },
             page,
         } = stage
         else {
             return Did::Stays(
-                Menu {
+                Menu::Waiting(WaitingMenu {
                     number: menu,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
@@ -2364,40 +2584,32 @@ impl Menu {
             Ok(argv) => Opens::Command(argv),
             Err(why) => return unstarted(format!("the checks of #{number}"), &why),
         };
-        let stage = Stage::Opening { keys };
-        let wants = Wants::Open {
+        Did::Closed(Done::Open {
+            on: target.machine().clone(),
             session,
             view,
             opens,
-        };
-        Did::Stays(
-            Menu {
-                number: menu,
-                target,
-                stage,
-            },
-            wants,
-        )
+        })
     }
 
     pub fn rebased(self, rebased: Result<Rebased, Unrebased>) -> Did {
-        let Menu {
+        let WaitingMenu {
             number,
             target,
             stage,
         } = self;
-        let Stage::Rebasing {
+        let WaitingStage::Rebasing {
             keys,
             resolves,
             branch,
         } = stage
         else {
             return Did::Stays(
-                Menu {
+                Menu::Waiting(WaitingMenu {
                     number,
                     target,
                     stage,
-                },
+                }),
                 Wants::Nothing,
             );
         };
@@ -2419,177 +2631,71 @@ impl Menu {
             Ok(argv) => argv,
             Err(why) => return unstarted(branch.as_str(), &why),
         };
+        let on = target.machine().clone();
         match resolves {
-            Resolves::Beside(Beside { session, view, .. }) => {
-                let stage = Stage::Opening { keys };
-                let opens = Opens::Command(command);
-                let wants = Wants::Open {
-                    session,
-                    view,
-                    opens,
-                };
-                Did::Stays(
-                    Menu {
-                        number,
-                        target,
-                        stage,
-                    },
-                    wants,
-                )
-            }
-            Resolves::In(worktree) => {
-                let on = target.machine().clone();
-                Did::Closed(Done::OpenIn {
-                    on,
-                    worktree,
-                    command,
-                })
-            }
+            Resolves::Beside(Beside { session, view, .. }) => Did::Closed(Done::Open {
+                on,
+                session,
+                view,
+                opens: Opens::Command(command),
+            }),
+            Resolves::In(worktree) => Did::Closed(Done::OpenIn {
+                on,
+                worktree,
+                command,
+            }),
         }
     }
 
-    pub fn found(&mut self, agent: Harness, skills: Result<Vec<crate::skills::Skill>, String>) {
-        if let Stage::Choosing(keys) = &mut self.stage
-            && keys.agent.harness() == agent
-            && let Some(search) = &mut keys.search
-        {
-            search.fill(skills);
-        }
-    }
-
-    pub fn pick(mut self, name: &Name) -> Did {
-        if let Stage::Choosing(keys) = &mut self.stage
-            && let Some(search) = &mut keys.search
-            && search.select(name)
-        {
-            return self.key(&KeyEvent::from(KeyCode::Enter));
-        }
-        Did::Stays(self, Wants::Nothing)
-    }
-
-    pub fn scroll(&mut self, by: isize) {
-        if let Stage::Choosing(keys) = &mut self.stage
-            && let Some(search) = &mut keys.search
-        {
-            search.move_by(by);
-        }
-    }
-
+    #[must_use]
     pub fn lines(
         &self,
         width: usize,
         room: usize,
         frame: SpinnerFrame,
     ) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
-        let body = room.saturating_sub(2);
-        let mut shown = self.shown(width, body, frame);
-        if self.lists() && shown.body.len() > body && body > 0 {
-            shown.body.truncate(body - 1);
-            shown.spots = shown.spots.first(body - 1);
-            let all = Choice::Key(KeyEvent::from(KeyCode::Char(ALL_KEYS)));
-            shown.spots.add(body - 1, 0..width, all);
-            shown.body.push(all_keys_line(width.saturating_sub(1)));
-        }
-        shown.lines(width, room)
-    }
-
-    pub fn quiet(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Planning { .. } | Stage::Opening { .. } | Stage::Reading { .. }
+        render_lines(
+            false,
+            width,
+            room,
+            self.shown(width, room.saturating_sub(2), frame),
         )
-    }
-
-    pub fn lists(&self) -> bool {
-        matches!(&self.stage, Stage::Choosing(keys) if keys.search.is_none())
     }
 
     pub fn draw(&self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> (Drawn, Cadence) {
         let frame = sidebar::frame(wall);
-        let shown = |width, body_room| self.shown(width, body_room, frame);
-        let mut cadence = Cadence::default();
-        let Some((area, spots, spins)) = float(buffer, over, self.searching(), shown) else {
-            return (Drawn::Nothing, cadence);
-        };
-        if spins {
-            cadence.spin();
-        }
-        (
-            Drawn::Menu {
-                number: self.number,
-                area,
-                spots,
-            },
-            cadence,
-        )
-    }
-
-    pub fn turning(&self) -> bool {
-        matches!(
-            self.stage,
-            Stage::Pull {
-                step: Step::Waiting(_),
-                ..
-            } | Stage::Sweeping { .. }
-                | Stage::Fetching { .. }
-                | Stage::Rebasing { .. }
-                | Stage::Pruning { .. }
+        render_draw(
+            self.number,
+            self.searching(),
+            buffer,
+            over,
+            |width, body| self.shown(width, body, frame),
         )
     }
 
     fn searching(&self) -> bool {
         match &self.stage {
-            Stage::Choosing(keys)
-            | Stage::Planning { keys, .. }
-            | Stage::Opening { keys, .. }
-            | Stage::Reading { keys, .. } => keys.search.is_some(),
-            Stage::Typing { .. } => true,
-            Stage::Asking { .. }
-            | Stage::Sweeping { .. }
-            | Stage::Swept { .. }
-            | Stage::Pruning { .. }
-            | Stage::Fetching { .. }
-            | Stage::Rebasing { .. }
-            | Stage::Pull { .. } => false,
+            WaitingStage::Reading { keys, .. } => keys.search.is_some(),
+            WaitingStage::Sweeping { .. }
+            | WaitingStage::Pruning { .. }
+            | WaitingStage::Fetching { .. }
+            | WaitingStage::Rebasing { .. }
+            | WaitingStage::Pulling { .. }
+            | WaitingStage::OpeningPulled { .. } => false,
         }
     }
 
     fn shown(&self, width: usize, body_room: usize, frame: SpinnerFrame) -> Shown {
-        let inner = width.saturating_sub(1);
         let right = self
             .target
             .cwd()
             .map_or_default(|cwd| sidebar::short_cwd(cwd.as_str()));
-        let mut spots = Spots::default();
         let (title, right, body, (footer, keys)) = match &self.stage {
-            Stage::Pull { work, agent, step } => {
-                let body = match step {
-                    Step::Choosing { wrong } => {
-                        let entry = |(_, pasted): (Pull, Pasted)| Entry::Act {
-                            key: pasted.key(),
-                            action: pasted.action(),
-                        };
-                        let entries = Pull::offered(work).map(entry);
-                        spots = entry_spots(&entries, width).map(Choice::Key);
-                        let mut body: Vec<_> = entries
-                            .iter()
-                            .map(|entry| entry_line(entry, inner))
-                            .collect();
-                        spots.add(
-                            body.len(),
-                            0..width,
-                            Choice::Key(KeyEvent::from(KeyCode::Tab)),
-                        );
-                        body.push(agent_line(Picked::ByYou(*agent), inner));
-                        if let Some(wrong) = wrong {
-                            body.extend(wrap(wrong, width, Style::new().fg(moonlight::RED)));
-                        }
-                        body
-                    }
-                    Step::Waiting(wait) => {
-                        waiting(&wait.doing(work), width, Style::new().fg(NAME), frame)
-                    }
-                };
+            WaitingStage::Reading { keys, .. } => {
+                return shown_keys(keys, false, right, width, body_room);
+            }
+            WaitingStage::Pulling { work, .. } | WaitingStage::OpeningPulled { work, .. } => {
+                let body = waiting(&self.doing(), width, Style::new().fg(NAME), frame);
                 (
                     work.tab(),
                     whence(work),
@@ -2597,71 +2703,9 @@ impl Menu {
                     keyed(width, &[(Hint::Esc, "Close")]),
                 )
             }
-            Stage::Choosing(keys)
-            | Stage::Planning { keys, .. }
-            | Stage::Opening { keys, .. }
-            | Stage::Reading { keys, .. } => {
-                let choosing = matches!(self.stage, Stage::Choosing(_));
-                let tab = Choice::Key(KeyEvent::from(KeyCode::Tab));
-                if let Some(search) = &keys.search {
-                    let moves = [
-                        (Hint::Moves, "Move"),
-                        (Hint::Enter, "Start"),
-                        (Hint::Esc, "Back"),
-                    ];
-                    let listing = body_room.checked_sub(1).filter(|room| *room > 1);
-                    let (mut body, skills) =
-                        search_lines(search, width, listing.unwrap_or(body_room));
-                    if choosing {
-                        spots = skills;
-                    }
-                    if listing.is_some() {
-                        if choosing {
-                            spots.add(body.len(), 0..width, tab);
-                        }
-                        body.push(agent_line(keys.agent, inner));
-                    }
-                    (SEARCH_TITLE.to_owned(), right, body, keyed(width, &moves))
-                } else {
-                    let back: &[(Hint, &str)] = if keys.open.is_empty() {
-                        &[(Hint::Esc, "Close")]
-                    } else {
-                        &[(Hint::Backspace, "Back"), (Hint::Esc, "Close")]
-                    };
-                    let entries = keys.entries();
-                    let mut body: Vec<_> = entries
-                        .iter()
-                        .map(|entry| entry_line(entry, inner))
-                        .collect();
-                    if choosing {
-                        spots = entry_spots(entries, width).map(Choice::Key);
-                    }
-                    if keys.starts() {
-                        if choosing {
-                            spots.add(body.len(), 0..width, tab);
-                        }
-                        body.push(agent_line(keys.agent, inner));
-                    }
-                    (title(keys), right, body, keyed(width, back))
-                }
-            }
-            Stage::Asking { keys, asks, .. } => (
-                title(keys),
-                right,
-                wrap(asks, width, Style::new().fg(NAME)),
-                keyed(
-                    width,
-                    &[
-                        (Hint::Char('y'), "Yes"),
-                        (Hint::Backspace, "Back"),
-                        (Hint::Esc, "Close"),
-                    ],
-                ),
-            ),
-            Stage::Sweeping { keys, .. } => {
+            WaitingStage::Sweeping { keys, .. } | WaitingStage::Pruning { keys, .. } => {
                 let repository = self.target.repository_name();
-                let doing = sweeping(repository);
-                let body = waiting(&doing, width, Style::new().fg(NAME), frame);
+                let body = waiting(&self.doing(), width, Style::new().fg(NAME), frame);
                 (
                     title(keys),
                     repository.to_owned(),
@@ -2669,61 +2713,13 @@ impl Menu {
                     keyed(width, &[(Hint::Esc, "Close")]),
                 )
             }
-            Stage::Fetching { keys, page, .. } => {
-                let doing = fetching(page.number());
-                let body = waiting(&doing, width, Style::new().fg(NAME), frame);
+            WaitingStage::Fetching { keys, .. } | WaitingStage::Rebasing { keys, .. } => {
+                let body = waiting(&self.doing(), width, Style::new().fg(NAME), frame);
                 (
                     title(keys),
                     right,
                     body,
                     keyed(width, &[(Hint::Esc, "Close")]),
-                )
-            }
-            Stage::Rebasing { keys, branch, .. } => {
-                let body = waiting(&rebasing(branch), width, Style::new().fg(NAME), frame);
-                (
-                    title(keys),
-                    right,
-                    body,
-                    keyed(width, &[(Hint::Esc, "Close")]),
-                )
-            }
-            Stage::Pruning { keys, count, .. } => {
-                let doing = pruning(*count);
-                let body = waiting(&doing, width, Style::new().fg(NAME), frame);
-                let repository = self.target.repository_name().to_owned();
-                (
-                    title(keys),
-                    repository,
-                    body,
-                    keyed(width, &[(Hint::Esc, "Close")]),
-                )
-            }
-            Stage::Swept { keys, plan, .. } => {
-                let back = [(Hint::Backspace, "Back"), (Hint::Esc, "Close")];
-                let yes = [(Hint::Char('y'), "Yes"), back[0], back[1]];
-                let hints: &[(Hint, &str)] = if plan.goes.is_empty() { &back } else { &yes };
-                let body = swept_lines(plan, width, body_room);
-                (
-                    title(keys),
-                    plan.repository_name().to_owned(),
-                    body,
-                    keyed(width, hints),
-                )
-            }
-            Stage::Typing { chain, .. } => {
-                let typed = sidebar::tail(&format!("{}_", chain.typed()), width.saturating_sub(2));
-                let mut body = vec![Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(typed, Style::new().fg(ACCENT)),
-                ])];
-                body.extend(chain_says(chain, width));
-                let keys = [(Hint::Enter, chain.enter()), (Hint::Esc, "Back")];
-                (
-                    chain.title().to_owned(),
-                    String::new(),
-                    body,
-                    keyed(width, &keys),
                 )
             }
         };
@@ -2733,10 +2729,106 @@ impl Menu {
             right,
             body,
             spinner,
-            spots,
+            spots: Spots::default(),
             footer,
             keys,
         }
+    }
+}
+
+fn render_lines(
+    lists: bool,
+    width: usize,
+    room: usize,
+    mut shown: Shown,
+) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
+    let body = room.saturating_sub(2);
+    if lists && shown.body.len() > body && body > 0 {
+        shown.body.truncate(body - 1);
+        shown.spots = shown.spots.first(body - 1);
+        let all = Choice::Key(KeyEvent::from(KeyCode::Char(ALL_KEYS)));
+        shown.spots.add(body - 1, 0..width, all);
+        shown.body.push(all_keys_line(width.saturating_sub(1)));
+    }
+    shown.lines(width, room)
+}
+
+fn render_draw(
+    number: MenuId,
+    widest: bool,
+    buffer: &mut Buffer,
+    over: Rect,
+    shown: impl Fn(usize, usize) -> Shown,
+) -> (Drawn, Cadence) {
+    let mut cadence = Cadence::default();
+    let Some((area, spots, spins)) = float(buffer, over, widest, shown) else {
+        return (Drawn::Nothing, cadence);
+    };
+    if spins {
+        cadence.spin();
+    }
+    (
+        Drawn::Menu {
+            number,
+            area,
+            spots,
+        },
+        cadence,
+    )
+}
+
+fn shown_keys(keys: &Keys, choosing: bool, right: String, width: usize, body_room: usize) -> Shown {
+    let inner = width.saturating_sub(1);
+    let mut spots = Spots::default();
+    let tab = Choice::Key(KeyEvent::from(KeyCode::Tab));
+    let (title, body, (footer, footer_keys)) = if let Some(search) = &keys.search {
+        let moves = [
+            (Hint::Moves, "Move"),
+            (Hint::Enter, "Start"),
+            (Hint::Esc, "Back"),
+        ];
+        let listing = body_room.checked_sub(1).filter(|room| *room > 1);
+        let (mut body, skills) = search_lines(search, width, listing.unwrap_or(body_room));
+        if choosing {
+            spots = skills;
+        }
+        if listing.is_some() {
+            if choosing {
+                spots.add(body.len(), 0..width, tab);
+            }
+            body.push(agent_line(keys.agent, inner));
+        }
+        (SEARCH_TITLE.to_owned(), body, keyed(width, &moves))
+    } else {
+        let back: &[(Hint, &str)] = if keys.open.is_empty() {
+            &[(Hint::Esc, "Close")]
+        } else {
+            &[(Hint::Backspace, "Back"), (Hint::Esc, "Close")]
+        };
+        let entries = keys.entries();
+        let mut body: Vec<_> = entries
+            .iter()
+            .map(|entry| entry_line(entry, inner))
+            .collect();
+        if choosing {
+            spots = entry_spots(entries, width).map(Choice::Key);
+        }
+        if keys.starts() {
+            if choosing {
+                spots.add(body.len(), 0..width, tab);
+            }
+            body.push(agent_line(keys.agent, inner));
+        }
+        (title(keys), body, keyed(width, back))
+    };
+    Shown {
+        title,
+        right,
+        body,
+        spinner: None,
+        spots,
+        footer,
+        keys: footer_keys,
     }
 }
 
@@ -3178,7 +3270,6 @@ fn fitted(
 #[derive(Debug, Default)]
 pub struct AllKeys {
     first: usize,
-    room: Cell<usize>,
 }
 
 struct KeysRow {
@@ -3238,15 +3329,15 @@ impl AllKeys {
         rows
     }
 
-    pub fn scroll(&mut self, by: isize) {
-        let last = AllKeys::rows(0).len().saturating_sub(self.room.get());
+    pub fn scroll(&mut self, by: isize, room: usize) {
+        let body = room.saturating_sub(2);
+        let last = AllKeys::rows(0).len().saturating_sub(body);
         self.first = self.first.min(last).saturating_add_signed(by).min(last);
     }
 
     pub fn lines(&self, width: usize, room: usize) -> (Vec<Line<'static>>, Spots<KeyEvent>) {
         let rows = AllKeys::rows(width);
         let body = room.saturating_sub(2);
-        self.room.set(body);
         let first = self.first.min(rows.len().saturating_sub(body));
         let shown = rows.len().min(first + body);
         let right = if rows.len() > body {
@@ -3584,17 +3675,29 @@ mod tests {
     }
 
     fn row_in(folder: Folder) -> ViewRow {
+        let place = ViewPlace::new_in("lune", 1, 1, 4);
         ViewRow {
-            place: ViewPlace::new_in("lune", 1, 1, 4),
-            terminal: None,
+            worktree: place.worktree().clone(),
+            kind: ViewKind::Terminal {
+                key: at(4),
+                id: None,
+                ran: Ran::Unhooked,
+            },
             cwd: Cwd::At(folder),
-            ran: Ran::Unhooked,
             arranged: Some(Arranged::Tabs),
         }
     }
 
     fn row() -> ViewRow {
         row_in(folder())
+    }
+
+    fn row_ran(ran: Ran) -> ViewRow {
+        let mut row = row();
+        if let ViewKind::Terminal { ran: current, .. } = &mut row.kind {
+            *current = ran;
+        }
+        row
     }
 
     fn view_row() -> Target {
@@ -3612,8 +3715,12 @@ mod tests {
     fn own_row() -> ViewRow {
         let place = ViewPlace::new_in("lune", 3, 1, 4);
         ViewRow {
-            place,
-            terminal: Some(terminal()),
+            worktree: place.worktree().clone(),
+            kind: ViewKind::Terminal {
+                key: at(4),
+                id: Some(terminal()),
+                ran: Ran::Unhooked,
+            },
             ..row()
         }
     }
@@ -3662,8 +3769,13 @@ mod tests {
         KeyEvent::from(KeyCode::Char(key))
     }
 
-    fn beside_row(command: Vec<String>) -> Wants {
-        Wants::Open {
+    fn id() -> MenuId {
+        MenuId::of(1)
+    }
+
+    fn beside_row(command: Vec<String>) -> Done {
+        Done::Open {
+            on: Machine::Local,
             session: listed(),
             view: ViewKey::terminal(4),
             opens: agent(command),
@@ -3671,12 +3783,25 @@ mod tests {
     }
 
     fn opened(target: Target, key: Option<char>) -> Did {
-        Menu::open(1, target, key, PICKED).expect("a key of the menu")
+        Menu::open(id(), target, key, PICKED).expect("a key of the menu")
     }
 
-    fn stays(did: Did) -> (Menu, Wants) {
+    fn stays(did: Did) -> (InteractiveMenu, Wants) {
         match did {
-            Did::Stays(menu, wants) => (menu, wants),
+            Did::Stays(Menu::Interactive(menu), wants) => (menu, wants),
+            Did::Stays(Menu::Waiting(_), wants) => {
+                panic!("the menu is waiting, wanting {wants:?}")
+            }
+            Did::Closed(done) => panic!("the menu closed, leaving {done:?}"),
+        }
+    }
+
+    fn waits(did: Did) -> (WaitingMenu, Wants) {
+        match did {
+            Did::Stays(Menu::Waiting(menu), wants) => (menu, wants),
+            Did::Stays(Menu::Interactive(_), wants) => {
+                panic!("the menu stayed interactive, wanting {wants:?}")
+            }
             Did::Closed(done) => panic!("the menu closed, leaving {done:?}"),
         }
     }
@@ -3728,19 +3853,19 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        let (menu, wants) = stays(menu.key(&char('v')));
+        let done = closed(menu.key(&char('v')));
         let opens = Opens::Shell;
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(
-            wants,
-            Wants::Open {
+            done,
+            Done::Open {
+                on: Machine::Local,
                 session,
                 view,
                 opens
             }
         );
-        let (menu, wants) = stays(menu.key(&char('v')));
-        assert_eq!(wants, Wants::Nothing);
+        let (menu, _) = stays(opened(own_view(), Some('n')));
         assert_eq!(
             closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
             Done::Nothing
@@ -3800,7 +3925,7 @@ mod tests {
                 .chars()
                 .fold(asked(own_view()), |menu, c| stays(menu.key(&char(c))).0);
             let (menu, _) = stays(menu.key(&enter));
-            let Stage::Typing {
+            let InteractiveStage::Typing {
                 chain: Chain {
                     wrong: Some(wrong), ..
                 },
@@ -3819,7 +3944,7 @@ mod tests {
         );
         let back = stays(menu.key(&KeyEvent::from(KeyCode::Esc))).0;
         assert!(
-            matches!(back.stage, Stage::Choosing(_)),
+            matches!(back.stage, InteractiveStage::Choosing(_)),
             "Esc goes back to the keys"
         );
     }
@@ -3855,12 +3980,12 @@ mod tests {
             closed(menu.key(&KeyEvent::from(KeyCode::Backspace))),
             Done::Nothing
         );
-        assert!(Menu::open(1, view_row(), Some('x'), PICKED).is_none());
+        assert!(Menu::open(id(), view_row(), Some('x'), PICKED).is_none());
     }
 
     #[test]
     fn an_own_session_s_view_opens_its_agents_beside_it() {
-        let (_, wants) = stays(stays(opened(own_view(), Some('c'))).0.key(&char('t')));
+        let done = closed(stays(opened(own_view(), Some('c'))).0.key(&char('t')));
         let opens = agent(
             ["claude", "/thermo-nuclear-review"]
                 .map(str::to_owned)
@@ -3868,8 +3993,9 @@ mod tests {
         );
         let (session, view) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(
-            wants,
-            Wants::Open {
+            done,
+            Done::Open {
+                on: Machine::Local,
                 session,
                 view,
                 opens
@@ -3973,7 +4099,7 @@ mod tests {
             closed(opened(on(panes), Some('t'))),
             arrange(Arranged::Tabs)
         );
-        let unoffered = |arranged, key| Menu::open(1, on(arranged), Some(key), PICKED).is_none();
+        let unoffered = |arranged, key| Menu::open(id(), on(arranged), Some(key), PICKED).is_none();
         assert!(unoffered(tabs, 't'), "nothing that changes nothing");
         assert!(unoffered(panes, 's'), "nothing that changes nothing");
         assert!(unoffered(None, 't'), "neither, unknown how it is shown");
@@ -4023,9 +4149,9 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        let (_, wants) = stays(menu.key(&char('t')));
+        let done = closed(menu.key(&char('t')));
         let command = ["claude", "/thermo-nuclear-review"].map(str::to_owned);
-        assert_eq!(wants, beside_row(command.to_vec()));
+        assert_eq!(done, beside_row(command.to_vec()));
 
         let (menu, _) = stays(opened(view_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
@@ -4038,17 +4164,18 @@ mod tests {
                 " \u{f03ff} pi  <TAB> another agent",
             ]
         );
-        let (_, wants) = stays(menu.key(&char('t')));
+        let done = closed(menu.key(&char('t')));
         let command = ["pi", "/skill:thermo-nuclear-review"].map(str::to_owned);
-        assert_eq!(wants, beside_row(command.to_vec()));
+        assert_eq!(done, beside_row(command.to_vec()));
     }
 
     #[test]
     fn the_agent_line_says_where_the_view_s_agent_picked_the_harness() {
         let pi = Picked::ByView(Harness::Pi);
-        let (menu, _) = stays(Menu::open(1, view_row(), Some('c'), pi).unwrap());
-        let line =
-            |menu: &Menu, width| text(&menu.lines(width, 10, SpinnerFrame::REST).0)[7].clone();
+        let (menu, _) = stays(Menu::open(id(), view_row(), Some('c'), pi).unwrap());
+        let line = |menu: &InteractiveMenu, width| {
+            text(&menu.lines(width, 10, SpinnerFrame::REST).0)[7].clone()
+        };
         assert_eq!(
             line(&menu, 38),
             " \u{f03ff} pi, the view's  <TAB> another agent"
@@ -4084,22 +4211,15 @@ mod tests {
     }
 
     fn ended_row() -> Target {
-        Target::View(
-            Machine::Local,
-            ViewRow {
-                ran: Ran::Ended(cargo_test()),
-                ..row()
-            },
-        )
+        Target::View(Machine::Local, row_ran(Ran::Ended(cargo_test())))
     }
 
     #[test]
     fn a_key_for_the_last_command_holds_to_the_run_it_was_pressed_on() {
         let went = |ran: Ran| {
             let (menu, _) = stays(opened(ended_row(), Some('c')));
-            let (mut menu, _) = stays(menu.key(&char('f')));
-            menu.reran(ran);
-            closed(menu.printed(Ok(Printed::Nothing)))
+            let (menu, _) = waits(menu.key(&char('f')));
+            closed(menu.printed(Ok(Printed::Nothing), &ran))
         };
         let why = "menu: view 4's shell went on as lune read what `cargo test` printed; ask again";
         let again = Ended {
@@ -4115,20 +4235,16 @@ mod tests {
             assert_eq!(went(ran), Done::Wrong(why.to_owned()));
         }
 
-        let busy = ViewRow {
-            ran: Ran::Going(Some(said("cargo test"))),
-            ..row()
-        };
+        let busy = row_ran(Ran::Going(Some(said("cargo test"))));
         let busy = Target::View(Machine::Local, busy);
         let (mut menu, _) = stays(opened(busy, Some('c')));
         menu.reran(Ran::Ended(cargo_test()));
-        let (_, wants) = stays(menu.key(&char('f')));
-        let view = ViewKey::terminal(4);
+        let (_, wants) = waits(menu.key(&char('f')));
         assert_eq!(
             wants,
             Wants::Printed {
                 session: listed(),
-                view,
+                terminal: at(4),
                 ended: cargo_test()
             }
         );
@@ -4136,20 +4252,18 @@ mod tests {
 
     #[test]
     fn a_key_for_the_last_command_starts_an_agent_on_what_it_printed() {
+        let current = Ran::Ended(cargo_test());
         let (menu, _) = stays(opened(ended_row(), Some('c')));
-        let (menu, wants) = stays(menu.key(&char('e')));
-        let view = ViewKey::terminal(4);
+        let (menu, wants) = waits(menu.key(&char('e')));
         assert_eq!(
             wants,
             Wants::Printed {
                 session: listed(),
-                view,
+                terminal: at(4),
                 ended: cargo_test()
             }
         );
         assert!(menu.reading());
-        let (menu, wants) = stays(menu.key(&char('e')));
-        assert_eq!(wants, Wants::Nothing);
         let file = "/run/lune/printed/1.txt".to_owned();
         let kept = Kept {
             file,
@@ -4157,37 +4271,37 @@ mod tests {
             left_out: 0,
         };
         let printed = Printed::After(kept);
-        let (_, wants) = stays(menu.printed(Ok(printed)));
+        let done = closed(menu.printed(Ok(printed), &current));
         let prompt = "Explain this. In my shell, `cargo test` ended with exit status 101. What it \
                       printed is in /run/lune/printed/1.txt.";
         let read = "Read(//run/lune/printed/1.txt)";
         let command = ["claude", "--allowedTools", read, "--", prompt];
         let command = command.map(str::to_owned).to_vec();
-        assert_eq!(wants, beside_row(command));
+        assert_eq!(done, beside_row(command));
 
         let pi = Picked::ByView(Harness::Pi);
-        let (menu, _) = stays(Menu::open(1, ended_row(), Some('c'), pi).unwrap());
-        let (menu, _) = stays(menu.key(&char('e')));
+        let (menu, _) = stays(Menu::open(id(), ended_row(), Some('c'), pi).unwrap());
+        let (menu, _) = waits(menu.key(&char('e')));
         let kept = Kept {
             file: "/run/lune/printed/1.txt".to_owned(),
             lines: 3,
             left_out: 0,
         };
-        let (_, wants) = stays(menu.printed(Ok(Printed::After(kept))));
+        let done = closed(menu.printed(Ok(Printed::After(kept)), &current));
         let command = vec!["pi".to_owned(), "--".to_owned(), prompt.to_owned()];
-        assert_eq!(wants, beside_row(command));
+        assert_eq!(done, beside_row(command));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
-        let (menu, _) = stays(menu.key(&char('f')));
-        let (_, wants) = stays(menu.printed(Ok(Printed::Nothing)));
+        let (menu, _) = waits(menu.key(&char('f')));
+        let done = closed(menu.printed(Ok(Printed::Nothing), &current));
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), "--".to_owned(), prompt.to_owned()];
-        assert_eq!(wants, beside_row(command));
+        assert_eq!(done, beside_row(command));
 
         let (menu, _) = stays(opened(ended_row(), Some('c')));
-        let (menu, _) = stays(menu.key(&char('f')));
-        let done = closed(menu.printed(Err("lune-mux: no such terminal".to_owned())));
+        let (menu, _) = waits(menu.key(&char('f')));
+        let done = closed(menu.printed(Err("lune-mux: no such terminal".to_owned()), &current));
         let why = "menu: what view 4 printed: lune-mux: no such terminal";
         assert_eq!(done, Done::Wrong(why.to_owned()));
     }
@@ -4196,7 +4310,6 @@ mod tests {
         let pull_request = Some(PullRequest {
             page: PullPage::parse(PULL).unwrap(),
             state,
-            checks: None,
             stale: false,
         });
         Target::View(
@@ -4206,6 +4319,14 @@ mod tests {
                 ..folder()
             }),
         )
+    }
+
+    fn open_state(draft: bool) -> State {
+        State::Open {
+            draft,
+            checks: None,
+            mergeability: None,
+        }
     }
 
     const PULL: &str = "https://github.com/owner/lune/pull/328";
@@ -4235,8 +4356,8 @@ mod tests {
 
     #[test]
     fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
-        let (menu, _) = stays(opened(pull_row(State::Draft), Some('c')));
-        let (menu, wants) = stays(menu.key(&char('c')));
+        let (menu, _) = stays(opened(pull_row(open_state(true)), Some('c')));
+        let (menu, wants) = waits(menu.key(&char('c')));
         assert_eq!(
             wants,
             Wants::Checks {
@@ -4249,18 +4370,16 @@ mod tests {
             body.iter()
                 .any(|line| line.ends_with("Asking gh about the checks of #328…"))
         );
-        let (menu, wants) = stays(menu.key(&char('c')));
-        assert_eq!(wants, Wants::Nothing);
-        let (_, wants) = stays(menu.checked(Ok(failing(2, 0))));
+        let done = closed(menu.checked(Ok(failing(2, 0))));
         let prompt = checks::prompt(&PullPage::parse(PULL).unwrap(), &failing(2, 0));
         let read = "Read(//run/lune/checks/1.log)";
         let command = ["claude", "--allowedTools", read, "--", &prompt];
         let command = command.map(str::to_owned).to_vec();
-        assert_eq!(wants, beside_row(command));
+        assert_eq!(done, beside_row(command));
 
         let fetched = |checks: Result<Failing, String>| {
-            let (menu, _) = stays(opened(pull_row(State::Open), Some('c')));
-            let (menu, _) = stays(menu.key(&char('c')));
+            let (menu, _) = stays(opened(pull_row(open_state(false)), Some('c')));
+            let (menu, _) = waits(menu.key(&char('c')));
             closed(menu.checked(checks))
         };
         let wrong = |why: &str| Done::Wrong(why.to_owned());
@@ -4298,9 +4417,9 @@ mod tests {
         })
     }
 
-    fn rebasing(target: Target) -> Menu {
+    fn rebasing(target: Target) -> WaitingMenu {
         let (menu, _) = stays(opened(target, Some(GIT)));
-        let (menu, wants) = stays(menu.key(&char('r')));
+        let (menu, wants) = waits(menu.key(&char('r')));
         assert_eq!(
             wants,
             Wants::Rebase {
@@ -4308,7 +4427,7 @@ mod tests {
                 branch: said("feat/menu")
             }
         );
-        assert!(menu.rebasing() && menu.waits());
+        assert!(menu.rebasing());
         menu
     }
 
@@ -4320,8 +4439,6 @@ mod tests {
             body.iter()
                 .any(|line| line.ends_with("Rebasing feat/menu onto upstream…"))
         );
-        let (menu, wants) = stays(menu.key(&char('r')));
-        assert_eq!(wants, Wants::Nothing);
         let clean = "menu: feat/menu is rebased onto origin/main, 2 commits on top";
         let done = closed(menu.rebased(Ok(rebased(Came::Clean { ahead: 2 }))));
         assert_eq!(done, Done::Said(clean.to_owned()));
@@ -4361,9 +4478,8 @@ mod tests {
         let prompt = rebases::prompt("feat/menu", "origin/main", &stopped);
         let command = vec!["claude".to_owned(), "--".to_owned(), prompt];
 
-        let (menu, wants) = stays(rebasing(view_row()).rebased(Ok(rebased(on_conflicts()))));
-        assert_eq!(wants, beside_row(command.clone()));
-        assert!(menu.waits());
+        let done = closed(rebasing(view_row()).rebased(Ok(rebased(on_conflicts()))));
+        assert_eq!(done, beside_row(command.clone()));
 
         let worktree_row = worktree_on(Machine::Local);
         let done = closed(rebasing(worktree_row).rebased(Ok(rebased(on_conflicts()))));
@@ -4395,13 +4511,13 @@ mod tests {
             Target::Machine(Machine::Local),
         ] {
             assert!(
-                Menu::open(1, target.clone(), Some(GIT), PICKED).is_none(),
+                Menu::open(id(), target.clone(), Some(GIT), PICKED).is_none(),
                 "{target:?}"
             );
         }
         let far = Machine::Remote("me@vps".parse().unwrap());
-        let (_, wants) = stays(rebasing(worktree_on(far)).key(&char('x')));
-        assert_eq!(wants, Wants::Nothing);
+        let menu = rebasing(worktree_on(far.clone()));
+        assert_eq!(menu.target().machine(), &far);
     }
 
     #[test]
@@ -4440,7 +4556,7 @@ mod tests {
                 done => panic!("it did {done:?}"),
             }
         };
-        let ran = |ran| Target::View(Machine::Local, ViewRow { ran, ..row() });
+        let ran = |ran| Target::View(Machine::Local, row_ran(ran));
         assert_eq!(
             refused(ran(Ran::Going(Some(said("make"))))),
             "menu: view 4 runs `make` still, and what it prints is not over"
@@ -4481,7 +4597,7 @@ mod tests {
     #[test]
     fn a_opens_the_ask_box_for_the_row_the_menu_is_for() {
         for row in [view_row(), session_row()] {
-            let did = Menu::open(1, row.clone(), Some('a'), PICKED).expect("the menu has `a`");
+            let did = Menu::open(id(), row.clone(), Some('a'), PICKED).expect("the menu has `a`");
             assert_eq!(closed(did), Done::Ask(row.clone()));
             let (menu, _) = stays(opened(row.clone(), None));
             assert_eq!(closed(menu.key(&char('a'))), Done::Ask(row));
@@ -4500,7 +4616,7 @@ mod tests {
                 home,
                 name,
             };
-            let did = Menu::open(1, row.clone(), Some('i'), PICKED).expect("the menu has `i`");
+            let did = Menu::open(id(), row.clone(), Some('i'), PICKED).expect("the menu has `i`");
             assert_eq!(closed(did), Done::Issue(repository.clone()));
             let (menu, _) = stays(opened(row, None));
             assert_eq!(closed(menu.key(&char('i'))), Done::Issue(repository));
@@ -4524,7 +4640,7 @@ mod tests {
             nowhere,
         ] {
             assert!(
-                Menu::open(1, row.clone(), Some('i'), PICKED).is_none(),
+                Menu::open(id(), row.clone(), Some('i'), PICKED).is_none(),
                 "{row:?}"
             );
             let (menu, _) = stays(opened(row.clone(), None));
@@ -4553,7 +4669,7 @@ mod tests {
             (
                 view_row(),
                 'h',
-                Briefed::Agent(Machine::Local, lune(), ViewKey::terminal(4)),
+                Briefed::Agent(Machine::Local, lune(), at(4)),
             ),
             (session_row(), 'h', Briefed::Session(Machine::Local, lune())),
         ] {
@@ -4631,7 +4747,7 @@ mod tests {
         );
         let long = "x".repeat(projects::NAME_CHARS_MAX + 1);
         let (menu, _) = stays(renamed(worktree_on(Machine::Local), &long));
-        let Stage::Typing {
+        let InteractiveStage::Typing {
             chain:
                 Chain {
                     typed,
@@ -4646,7 +4762,7 @@ mod tests {
         assert_eq!(*typed, long);
         assert!(wrong.contains("longer than 64 characters"), "{wrong}");
         let (menu, _) = stays(renamed(session_row(), "api/v2"));
-        let Stage::Typing {
+        let InteractiveStage::Typing {
             chain: Chain {
                 wrong: Some(wrong), ..
             },
@@ -4669,7 +4785,7 @@ mod tests {
         );
         for target in [view_row(), local_header(), remote_header()] {
             assert!(
-                Menu::open(1, target.clone(), Some('r'), PICKED).is_none(),
+                Menu::open(id(), target.clone(), Some('r'), PICKED).is_none(),
                 "{target:?}"
             );
         }
@@ -4710,7 +4826,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(
             title(match &menu.stage {
-                Stage::Choosing(keys) => keys,
+                InteractiveStage::Choosing(keys) => keys,
                 _ => panic!("back to the keys"),
             }),
             "New"
@@ -4742,7 +4858,7 @@ mod tests {
                 " <ESC> - Close",
             ]
         );
-        let (_, wants) = stays(stays(opened(view.clone(), Some('c'))).0.key(&char('t')));
+        let done = closed(stays(opened(view.clone(), Some('c'))).0.key(&char('t')));
         let opens = agent(
             ["claude", "/thermo-nuclear-review"]
                 .map(str::to_owned)
@@ -4750,8 +4866,9 @@ mod tests {
         );
         let (session, at) = (project().listed().clone(), ViewKey::terminal(4));
         assert_eq!(
-            wants,
-            Wants::Open {
+            done,
+            Done::Open {
+                on: vps(),
                 session,
                 view: at,
                 opens
@@ -4794,7 +4911,7 @@ mod tests {
 
         let name = || project().listed().name().session().clone();
         for (row, highlighted) in [
-            (view, Briefed::Agent(vps(), name(), ViewKey::terminal(4))),
+            (view, Briefed::Agent(vps(), name(), self::at(4))),
             (project_on(vps()), Briefed::Session(vps(), name())),
         ] {
             for (key, briefed) in [
@@ -4846,7 +4963,7 @@ mod tests {
                 " <BS> - Back, <ESC> - Close",
             ]
         );
-        let (menu, wants) = stays(menu.key(&char('m')));
+        let (menu, wants) = waits(menu.key(&char('m')));
         assert_eq!(wants, Wants::Prunes { dir: main_dir() });
         assert!(menu.sweeping() && menu.turning());
 
@@ -4871,9 +4988,8 @@ mod tests {
             remote_header(),
         ] {
             let (menu, _) = stays(opened(target.clone(), Some('d')));
-            let (menu, wants) = stays(menu.key(&char('m')));
+            let (_, wants) = stays(menu.key(&char('m')));
             assert_eq!(wants, Wants::Nothing, "{target:?}");
-            assert!(!menu.sweeping(), "{target:?}");
         }
     }
 
@@ -4891,10 +5007,9 @@ mod tests {
             why: "it has a view".to_owned(),
         });
         let (menu, _) = stays(opened(view_row(), Some('d')));
-        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = waits(menu.key(&char('m')));
         let (menu, wants) = stays(menu.swept(Ok(plan)));
         assert_eq!(wants, Wants::Nothing);
-        assert!(!menu.turning());
         assert_eq!(
             text(&menu.lines(33, 20, SpinnerFrame::REST).0),
             [
@@ -4921,7 +5036,7 @@ mod tests {
             ]
         );
         let (menu, _) = stays(opened(view_row(), Some('d')));
-        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = waits(menu.key(&char('m')));
         let mut plan = merged_plan(&[]);
         for name in ["k1", "k2", "k3"] {
             plan.kept.push(prunes::Kept {
@@ -4948,13 +5063,13 @@ mod tests {
     fn the_list_goes_ahead_on_yes_with_what_it_listed_alone() {
         let (one, two) = (("one", 1, 5), ("two", 2, 5));
         let (menu, _) = stays(opened(view_row(), Some('d')));
-        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = waits(menu.key(&char('m')));
         for key in ['y', 'm'] {
             let (asked, _) = stays(opened(view_row(), Some('d')));
-            let (asked, _) = stays(asked.key(&char('m')));
+            let (asked, _) = waits(asked.key(&char('m')));
             let (asked, wants) = stays(asked.swept(Ok(merged_plan(&[one, two]))));
             assert_eq!(wants, Wants::Nothing);
-            let (asked, wants) = stays(asked.key(&char(key)));
+            let (asked, wants) = waits(asked.key(&char(key)));
             let agreed = merged_plan(&[two, one]).deletes();
             assert_eq!(
                 wants,
@@ -4975,14 +5090,13 @@ mod tests {
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one, two]))));
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
-        let (menu, _) = stays(menu.key(&char('y')));
+        let (menu, _) = waits(menu.key(&char('y')));
         let (menu, wants) = stays(menu.changed(merged_plan(&[one])));
         assert_eq!(
             wants,
             Wants::Nothing,
             "it deleted what changed since you read it"
         );
-        assert!(!menu.pruning());
         assert_eq!(
             text(&menu.lines(40, 9, SpinnerFrame::REST).0)[1],
             " Delete 1 merged worktree?"
@@ -4992,14 +5106,14 @@ mod tests {
             text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1],
             " d  close the view"
         );
-        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = waits(menu.key(&char('m')));
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
         let (menu, _) = stays(menu.key(&char('n')));
         assert_eq!(
             text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1],
             " d  close the view"
         );
-        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = waits(menu.key(&char('m')));
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
         assert_eq!(
             closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
@@ -5011,7 +5125,7 @@ mod tests {
     fn the_list_asks_of_the_branches_that_go_on_a_remote_too() {
         let asked = |plan: prunes::Plan| {
             let (menu, _) = stays(opened(view_row(), Some('d')));
-            let (menu, _) = stays(menu.key(&char('m')));
+            let (menu, _) = waits(menu.key(&char('m')));
             let (menu, _) = stays(menu.swept(Ok(plan)));
             text(&menu.lines(33, 20, SpinnerFrame::REST).0)[1..3].to_vec()
         };
@@ -5038,9 +5152,7 @@ mod tests {
     #[test]
     fn nothing_to_delete_asks_nothing() {
         let (menu, _) = stays(opened(view_row(), Some('d')));
-        let (menu, _) = stays(menu.key(&char('m')));
-        let (waiting, wants) = stays(menu.key(&char('y')));
-        assert_eq!(wants, Wants::Nothing);
+        let (waiting, _) = waits(menu.key(&char('m')));
         assert!(waiting.sweeping());
         let (listed, _) = stays(waiting.swept(Ok(merged_plan(&[]))));
         assert_eq!(
@@ -5054,21 +5166,17 @@ mod tests {
         );
         let (listed, wants) = stays(listed.key(&char('y')));
         assert_eq!(wants, Wants::Nothing);
-        assert!(!listed.sweeping());
+        assert_eq!(
+            closed(listed.key(&KeyEvent::from(KeyCode::Esc))),
+            Done::Nothing
+        );
 
         let (menu, _) = stays(opened(view_row(), Some('d')));
-        let (menu, _) = stays(menu.key(&char('m')));
+        let (menu, _) = waits(menu.key(&char('m')));
         let wrong = closed(menu.swept(Err("luned does not answer".to_owned())));
         assert_eq!(
             wrong,
             Done::Wrong("menu: nothing deleted: luned does not answer".to_owned())
-        );
-
-        let (menu, _) = stays(opened(view_row(), Some('d')));
-        let (menu, _) = stays(menu.key(&char('m')));
-        assert_eq!(
-            closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
-            Done::Nothing
         );
     }
 
@@ -5175,7 +5283,7 @@ mod tests {
             at(local_header(), Some('n')),
             [" m  new machine…", " <BS> - Back, <ESC> - Close",]
         );
-        assert!(Menu::open(1, local_header(), Some('d'), PICKED).is_none());
+        assert!(Menu::open(id(), local_header(), Some('d'), PICKED).is_none());
 
         let press = |target: &Target, group: Option<char>, key: char| {
             let (menu, _) = stays(opened(target.clone(), group));
@@ -5189,7 +5297,7 @@ mod tests {
         let new = || ("─ New ─────────────────────────".to_owned(), Wants::Nothing);
         for target in [session_row(), local_header(), remote_header()] {
             for group in ['/', 'c'] {
-                let menu = Menu::open(1, target.clone(), Some(group), PICKED);
+                let menu = Menu::open(id(), target.clone(), Some(group), PICKED);
                 assert!(menu.is_none(), "{group}");
                 assert_eq!(press(&target, None, group), first(), "{group}");
             }
@@ -5256,12 +5364,12 @@ mod tests {
                 " /tigerstyle  tigerstyle it".to_owned(),
             ]
         );
-        let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
+        let done = closed(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(CLAUDE, "tigerstyle", None)
             .unwrap()
             .words()
             .to_vec();
-        assert_eq!(wants, beside_row(command));
+        assert_eq!(done, beside_row(command));
     }
 
     #[test]
@@ -5295,12 +5403,12 @@ mod tests {
             text(&menu.lines(31, 6, SpinnerFrame::REST).0)[4],
             " \u{f03ff} pi  <TAB> another agent"
         );
-        let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
+        let done = closed(menu.key(&KeyEvent::from(KeyCode::Enter)));
         let command = agents::on_skill(Harness::Pi, "tdd", None)
             .unwrap()
             .words()
             .to_vec();
-        assert_eq!(wants, beside_row(command));
+        assert_eq!(done, beside_row(command));
     }
 
     #[test]
@@ -5328,20 +5436,12 @@ mod tests {
         let (menu, wants) = stays(menu.pick(&skill("code-review")));
         assert_eq!(wants, Wants::Nothing);
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
-        let (menu, wants) = stays(menu.pick(&skill("code-review")));
+        let done = closed(menu.pick(&skill("code-review")));
         let command = agents::on_skill(CLAUDE, "code-review", None)
             .unwrap()
             .words()
             .to_vec();
-        assert_eq!(wants, beside_row(command));
-        assert_eq!(
-            menu.lines(31, 6, SpinnerFrame::REST)
-                .1
-                .at(Position::new(4, 3)),
-            None
-        );
-        let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
-        assert_eq!(wants, Wants::Nothing);
+        assert_eq!(done, beside_row(command));
     }
 
     #[test]
@@ -5388,7 +5488,7 @@ mod tests {
     }
 
     fn at(id: u32) -> lune_domain::mux::TerminalKey {
-        ViewKey::terminal(id).key()
+        ViewKey::terminal(id).terminal_key().unwrap()
     }
 
     fn plan(agents: Vec<(u32, Doing)>) -> Plan {
@@ -5469,6 +5569,7 @@ mod tests {
             worktree: worktree(),
             views,
             seen,
+            seen_browsers: Vec::new(),
         }
     }
 
@@ -5509,6 +5610,7 @@ mod tests {
             project: project().id(),
             worktrees: vec![worktree()],
             seen: worktree_seen(),
+            seen_browsers: Vec::new(),
         };
         let planned = |agents: Vec<(u32, Doing)>| planned(act.clone(), agents);
         for on in [Machine::Local, vps()] {
@@ -5572,13 +5674,13 @@ mod tests {
         (0..height).map(row).collect()
     }
 
-    fn drawing(menu: &Menu) -> impl FnOnce(&mut Buffer, Rect) -> Drawn + '_ {
+    fn drawing(menu: &InteractiveMenu) -> impl FnOnce(&mut Buffer, Rect) -> Drawn + '_ {
         move |buffer, over| menu.draw(buffer, over, UNIX_EPOCH).0
     }
 
     #[test]
     fn the_menu_floats_at_the_bottom_right_of_the_view_s_side() {
-        let menu = Menu::new(1, view_row(), PICKED);
+        let menu = InteractiveMenu::new(id(), view_row(), PICKED);
         let boxed = |inner: &str| format!("{}│{inner:<24}│", "z".repeat(24));
         assert_eq!(
             floated(drawing(&menu), 50, 14),
@@ -5636,7 +5738,7 @@ mod tests {
         })
     }
 
-    fn clicked(menu: &Menu, text: &str) -> Option<Choice> {
+    fn clicked(menu: &InteractiveMenu, text: &str) -> Option<Choice> {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 10));
         let (drawn, _) = menu.draw(&mut buffer, Rect::new(10, 0, 50, 10), UNIX_EPOCH);
         let at = drawn_at(&buffer, text).expect("drawn");
@@ -5656,7 +5758,7 @@ mod tests {
 
     #[test]
     fn a_click_on_an_entry_or_a_key_of_the_menu_presses_its_key() {
-        let menu = Menu::new(1, view_row(), PICKED);
+        let menu = InteractiveMenu::new(id(), view_row(), PICKED);
         assert_eq!(
             clicked(&menu, "Skills ▸"),
             Some(pressed(KeyCode::Char('c')))
@@ -5723,8 +5825,8 @@ mod tests {
         Work::Link(pull_request())
     }
 
-    fn pulling_on(row: Target, key: char) -> Menu {
-        let (menu, wants) = stays(Menu::pull(1, row, link(), CLAUDE).key(&char(key)));
+    fn pulling_on(row: Target, key: char) -> WaitingMenu {
+        let (menu, wants) = waits(InteractiveMenu::pull(id(), row, link(), CLAUDE).key(&char(key)));
         let wanted = if key == 'r' {
             Wanted::AtHead
         } else {
@@ -5735,7 +5837,7 @@ mod tests {
         menu
     }
 
-    fn pulling(key: char) -> Menu {
+    fn pulling(key: char) -> WaitingMenu {
         pulling_on(view_row(), key)
     }
 
@@ -5756,7 +5858,7 @@ mod tests {
 
     #[test]
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
-        let menu = Menu::pull(1, view_row(), link(), CLAUDE);
+        let menu = InteractiveMenu::pull(id(), view_row(), link(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
@@ -5769,15 +5871,14 @@ mod tests {
         );
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
-        assert!(!menu.turning());
-        let syncing = Menu::pull(1, view_row(), link(), CLAUDE);
-        let (syncing, wants) = stays(syncing.key(&char('r')));
+        let syncing = InteractiveMenu::pull(id(), view_row(), link(), CLAUDE);
+        let (syncing, wants) = waits(syncing.key(&char('r')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
         assert_eq!(
             text(&syncing.lines(31, 9, SpinnerFrame::REST).0)[1],
             " ⠋ Syncing #2736…"
         );
-        let (menu, wants) = stays(menu.key(&char('w')));
+        let (menu, wants) = waits(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
         assert_eq!(
             text(&menu.lines(31, 9, SpinnerFrame::REST).0),
@@ -5791,14 +5892,7 @@ mod tests {
             text(&menu.lines(31, 9, SpinnerFrame::F3).0)[1],
             " ⠸ Making a worktree of #2736…"
         );
-        assert!(menu.turning());
-        let (menu, wants) = stays(menu.key(&char('r')));
-        assert_eq!(wants, Wants::Nothing);
-        assert!(menu.pulling());
-        assert_eq!(
-            closed(menu.key(&KeyEvent::from(KeyCode::Esc))),
-            Done::Nothing
-        );
+        assert!(menu.turning() && menu.pulling());
     }
 
     #[test]
@@ -5824,7 +5918,7 @@ mod tests {
         .map(str::to_owned)
         .to_vec();
         for (key, agent) in [('w', None), ('r', Some(argv(review.clone())))] {
-            let (menu, wants) = stays(pulling(key).pulled(ready(At::Unopened)));
+            let (menu, wants) = waits(pulling(key).pulled(ready(At::Unopened)));
             let (cwd, name) = (directory(&folder), "#2736".to_owned());
             assert_eq!(wants, Wants::Make { cwd, name, agent });
             assert_eq!(
@@ -5839,36 +5933,29 @@ mod tests {
             );
             assert!(menu.turning());
         }
-        let there = || At::There(ViewPlace::new_in("cdk", 2, 1, 9));
+        let there = || At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
         let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
         assert_eq!(
             closed(pulling('w').pulled(ready(there()))),
             Done::Go(Machine::Local, place)
         );
-        let (menu, wants) = stays(pulling('r').pulled(ready(there())));
-        assert!(
-            !menu.opens_pulled(),
-            "a view beside another opens at once, with no pull"
-        );
+        let done = closed(pulling('r').pulled(ready(there())));
         let opens = agent(review);
         let view = ViewKey::terminal(9);
         assert_eq!(
-            wants,
-            Wants::Open {
+            done,
+            Done::Open {
+                on: Machine::Local,
                 session: other.clone(),
                 view,
                 opens
             }
         );
-        let Target::View(_, row) = menu.target() else {
-            panic!("not a view's row")
-        };
-        assert_eq!(row.place, ViewPlace::new_in("cdk", 2, 1, 9));
     }
 
     #[test]
     fn tab_in_the_menu_for_a_pull_request_starts_its_agent_in_the_other_harness() {
-        let menu = Menu::pull(1, view_row(), link(), CLAUDE);
+        let menu = InteractiveMenu::pull(id(), view_row(), link(), CLAUDE);
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(
             menu.lines(31, 9, SpinnerFrame::REST)
@@ -5882,9 +5969,7 @@ mod tests {
             text(&menu.lines(31, 9, SpinnerFrame::REST).0)[3],
             " \u{f03ff} pi  <TAB> another agent"
         );
-        let (menu, _) = stays(menu.key(&char('r')));
-        let (menu, wants) = stays(menu.key(&tab));
-        assert_eq!(wants, Wants::Nothing);
+        let (menu, _) = waits(menu.key(&char('r')));
         let folder = "/w/cdk/feat-x".to_owned();
         let work = Readied::Link(pull_request());
         let branch = Said::new("feat/x".to_owned());
@@ -5896,7 +5981,7 @@ mod tests {
             moved_off: false,
             work,
         };
-        let (_, wants) = stays(menu.pulled(Ok(here(ready))));
+        let (_, wants) = waits(menu.pulled(Ok(here(ready))));
         let review = [
             "pi",
             "/skill:thermo-nuclear-review https://github.com/cashubtc/cdk/pull/2736",
@@ -5910,7 +5995,7 @@ mod tests {
     fn the_menu_for_an_issue_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let menu = Menu::pull(1, view_row(), issue.clone(), CLAUDE);
+        let menu = InteractiveMenu::pull(id(), view_row(), issue.clone(), CLAUDE);
         assert_eq!(
             text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
@@ -5923,7 +6008,7 @@ mod tests {
         );
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
-        let (menu, wants) = stays(menu.key(&char('t')));
+        let (menu, wants) = waits(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
         let folder = "/w/cdk/issue-2736".to_owned();
         let ready = Ready {
@@ -5933,7 +6018,7 @@ mod tests {
             moved_off: false,
             work: Readied::Link(link),
         };
-        let (_, wants) = stays(menu.pulled(Ok(here(ready))));
+        let (_, wants) = waits(menu.pulled(Ok(here(ready))));
         let tackle = [
             "claude",
             "--",
@@ -5948,7 +6033,8 @@ mod tests {
     fn t_on_a_worktree_that_moved_off_stays_open_saying_why_and_w_goes_on_from_there() {
         let link = Link::parse("https://github.com/cashubtc/cdk/issues/2736").expect("a link");
         let issue = Work::Link(link.clone());
-        let (menu, _) = stays(Menu::pull(1, view_row(), issue.clone(), CLAUDE).key(&char('t')));
+        let (menu, _) =
+            waits(InteractiveMenu::pull(id(), view_row(), issue.clone(), CLAUDE).key(&char('t')));
         let ready = Ready {
             at: At::Unopened,
             folder: directory("/w/cdk/issue-2736"),
@@ -5958,7 +6044,6 @@ mod tests {
         };
         let (menu, wants) = stays(menu.pulled(Ok(here(ready))));
         assert_eq!(wants, Wants::Nothing);
-        assert!(!menu.turning());
         let refused = [
             "─ #2736 ──────── cashubtc/cdk ─",
             " t  tackle",
@@ -5981,7 +6066,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(text(&menu.lines(31, 9, SpinnerFrame::REST).0), refused);
 
-        let (menu, wants) = stays(menu.key(&char('w')));
+        let (menu, wants) = waits(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
         assert!(menu.pulling());
     }
@@ -6012,12 +6097,12 @@ mod tests {
             ]
         );
 
-        let (menu, wants) = stays(menu.key(&char('w')));
+        let (menu, wants) = waits(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
         let found = Ok(here(ready));
         let note = "#2736's worktree is on stacked, not the pull request's head branch";
         assert_eq!(menu.off_branch(&found).as_deref(), Some(note));
-        let (_, wants) = stays(menu.pulled(found));
+        let (_, wants) = waits(menu.pulled(found));
         let (cwd, name) = (directory("/w/cdk/feat"), "#2736".to_owned());
         assert_eq!(
             wants,
@@ -6035,7 +6120,7 @@ mod tests {
             let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
             Work::parse("docs/plans/sync-rework.md\n", Some(from)).unwrap()
         };
-        let menu = Menu::pull(1, view_row(), file(), CLAUDE);
+        let menu = InteractiveMenu::pull(id(), view_row(), file(), CLAUDE);
         assert_eq!(
             text(&menu.lines(38, 9, SpinnerFrame::REST).0),
             [
@@ -6048,7 +6133,7 @@ mod tests {
         );
         let (menu, wants) = stays(menu.key(&char('r')));
         assert_eq!(wants, Wants::Nothing);
-        let (menu, wants) = stays(menu.key(&char('t')));
+        let (menu, wants) = waits(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
         assert_eq!(
             text(&menu.lines(38, 9, SpinnerFrame::REST).0)[1],
@@ -6067,7 +6152,7 @@ mod tests {
                 real: real.to_owned(),
             },
         };
-        let (_, wants) = stays(menu.pulled(Ok(here(ready()))));
+        let (_, wants) = waits(menu.pulled(Ok(here(ready()))));
         let command = [
             "claude",
             "--allowedTools",
@@ -6083,9 +6168,10 @@ mod tests {
         };
         assert_eq!(wants, made(Some(argv(command))));
 
-        let pressed =
-            |key: char| stays(Menu::pull(1, view_row(), file(), CLAUDE).key(&char(key))).0;
-        let (_, wants) = stays(pressed('w').pulled(Ok(here(ready()))));
+        let pressed = |key: char| {
+            waits(InteractiveMenu::pull(id(), view_row(), file(), CLAUDE).key(&char(key))).0
+        };
+        let (_, wants) = waits(pressed('w').pulled(Ok(here(ready()))));
         assert_eq!(wants, made(None));
 
         assert_eq!(
@@ -6126,13 +6212,13 @@ mod tests {
         };
         let row = || Target::View(vps(), row());
         let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
-        let there = ready(At::There(ViewPlace::new_in("cdk", 2, 1, 9)));
+        let there = ready(At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9)));
         assert_eq!(
             closed(pulling_on(row(), 'w').pulled(there)),
             Done::Go(vps(), place)
         );
         for asked in [row(), Target::Machine(vps())] {
-            let (menu, wants) = stays(pulling_on(asked, 'w').pulled(ready(At::Unopened)));
+            let (menu, wants) = waits(pulling_on(asked, 'w').pulled(ready(At::Unopened)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(
                 menu.target(),
@@ -6159,25 +6245,99 @@ mod tests {
         };
         let rows = [session_row(), view_row(), Target::Machine(Machine::Local)];
         for row in rows {
-            let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
-            let (menu, wants) = stays(pulling_on(row.clone(), 'r').pulled(found(at)));
-            assert!(matches!(&wants, Wants::Open { view, .. } if *view == ViewKey::terminal(9)));
-            let Target::View(machine, opening) = menu.target() else {
-                panic!("not a view's row")
-            };
-            assert_eq!(
-                (machine, opening.place.view()),
-                (&vps(), ViewKey::terminal(9))
-            );
+            let at = At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
+            let done = closed(pulling_on(row.clone(), 'r').pulled(found(at)));
+            assert!(matches!(
+                done,
+                Done::Open { on, view, .. } if on == vps() && view == ViewKey::terminal(9)
+            ));
 
             let place = Place::View(ViewPlace::new_in("cdk", 2, 1, 9));
-            let at = At::There(ViewPlace::new_in("cdk", 2, 1, 9));
+            let at = At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
             let goes = pulling_on(row.clone(), 'w').pulled(found(at));
             assert_eq!(closed(goes), Done::Go(vps(), place));
 
-            let (menu, wants) = stays(pulling_on(row, 'r').pulled(found(At::Unopened)));
+            let (menu, wants) = waits(pulling_on(row, 'r').pulled(found(At::Unopened)));
             assert!(matches!(wants, Wants::Make { .. }), "{wants:?}");
             assert_eq!(menu.target(), &Target::Machine(vps()));
+        }
+    }
+
+    #[test]
+    fn a_browser_view_row_offers_view_actions_and_omits_terminal_only_ones() {
+        let worktree = WorktreePlace {
+            project: ProjectRow::new("lune", 1),
+            worktree: WorktreeId::of(2).unwrap(),
+        };
+        let folder = Folder {
+            dir: directory("/w/lune/main"),
+            branch: Said::new("main".to_owned()),
+            repository: Some("/w/lune".to_owned()),
+            pull_request: None,
+        };
+        let row = ViewRow {
+            worktree,
+            kind: ViewKind::Browser(ViewId::of(30).unwrap()),
+            cwd: Cwd::At(folder),
+            arranged: Some(Arranged::Tabs),
+        };
+        assert_eq!(
+            row.pulled().err().as_deref(),
+            Some("menu: gh has found no pull request of the browser view's branch")
+        );
+        let unsaid = ViewRow {
+            cwd: Cwd::Unsaid,
+            ..row.clone()
+        };
+        assert_eq!(
+            unsaid.folder().err().as_deref(),
+            Some(
+                "menu: lune does not know yet where the browser view works; try again in a moment"
+            )
+        );
+        let target = Target::View(Machine::Local, row);
+        let mut menu = InteractiveMenu::new(id(), target.clone(), PICKED);
+        menu.reran(Ran::Ended(cargo_test()));
+        assert_eq!(
+            menu.target(),
+            &target,
+            "reran leaves a browser target untouched"
+        );
+        for allowed in [
+            Action::CloseView,
+            Action::NewView,
+            Action::NewBrowser,
+            Action::NewWelcome,
+            Action::NewReview,
+            Action::ShowPanes,
+            Action::SearchSkills,
+            Action::Review,
+            Action::IllegalStates,
+            Action::TigerStyle,
+            Action::FixChecks,
+            Action::NewWorktree,
+            Action::NewMachine,
+            Action::DeleteMerged,
+            Action::Rebase,
+            Action::BriefEvery,
+            Action::BriefThis,
+            Action::Ask,
+            Action::FileIssue,
+            Action::Quit,
+        ] {
+            assert!(target.fits(allowed), "{allowed:?} should fit a browser row");
+        }
+        for omitted in [
+            Action::RenameView,
+            Action::FixLast,
+            Action::ExplainLast,
+            Action::BriefHighlighted,
+            Action::ShowTabs,
+        ] {
+            assert!(
+                !target.fits(omitted),
+                "{omitted:?} must not fit a browser row"
+            );
         }
     }
 }

@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use lune_protocol::git::ParsedGitStatuses;
+use lune_protocol::github::ParsedPullRequests;
 use lune_protocol::watch::{LocalVersion, WatchedLocalAfter};
 use notify::RecursiveMode;
 use tokio::sync::Semaphore;
@@ -247,6 +249,7 @@ pub struct Bridges(Mutex<HashMap<Destination, Bridge>>);
 struct Bridge {
     watch: u64,
     daemon: latest::Sender<Kept>,
+    synced: latest::Sender<Option<LocalVersion>>,
     wake: wakes::Sender<()>,
     held: Arc<Semaphore>,
 }
@@ -284,6 +287,49 @@ impl Bridges {
             Kept::None | Kept::Coming => None,
         }
     }
+
+    pub async fn wait_synced(
+        &self,
+        destination: &Destination,
+        target: LocalVersion,
+        wait: Duration,
+    ) -> bool {
+        assert!(!wait.is_zero());
+        let reached = |seen: &Option<LocalVersion>| {
+            seen.is_some_and(|seen| seen.pid() == target.pid() && seen.seq() >= target.seq())
+        };
+        let mut synced = {
+            let bridges = locked(&self.0);
+            let Some(bridge) = bridges.get(destination) else {
+                return false;
+            };
+            let synced = bridge.synced.subscribe();
+            if reached(&synced.borrow()) {
+                return true;
+            }
+            if matches!(*bridge.daemon.borrow(), Kept::None) {
+                let _ = bridge.wake.try_send(());
+            }
+            synced
+        };
+        tokio::time::timeout(wait, synced.wait_for(reached))
+            .await
+            .is_ok_and(|result| result.is_ok())
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct TestBridge(Bridged);
+
+#[cfg(test)]
+impl TestBridge {
+    pub(crate) fn new(bridges: Arc<Bridges>, destination: Destination) -> Self {
+        Self(Bridged::new(bridges, destination, 1))
+    }
+
+    pub(crate) fn synced(&self, version: Option<LocalVersion>) {
+        self.0.synced(version);
+    }
 }
 
 struct Bridged {
@@ -296,13 +342,15 @@ struct Bridged {
 impl Bridged {
     fn new(bridges: Arc<Bridges>, destination: Destination, watch: u64) -> Self {
         let (wake, woken) = wakes::channel(1);
-        let (daemon, held) = (
+        let (daemon, synced, held) = (
             latest::Sender::new(Kept::None),
+            latest::Sender::new(None),
             Arc::new(Semaphore::new(HELD_MAX)),
         );
         let bridge = Bridge {
             watch,
             daemon,
+            synced,
             wake,
             held,
         };
@@ -327,6 +375,12 @@ impl Bridged {
             (Seen::Following(_), None) | (Seen::Initial(_), _) => Kept::None,
         };
         self.keep(kept);
+    }
+
+    fn synced(&self, version: Option<LocalVersion>) {
+        if let Some(bridge) = self.own(&mut locked(&self.bridges.0)) {
+            bridge.synced.send_replace(version);
+        }
     }
 
     fn coming(&self, seen: &Seen) {
@@ -749,6 +803,7 @@ async fn watched(
     let mut seen = Seen::Initial(InitialSeen::Reaching {
         since: SystemTime::now(),
     });
+    let mut anomalies = Troubles::default();
     let said = Arc::default();
     loop {
         let current = {
@@ -771,7 +826,7 @@ async fn watched(
                 continue;
             }
         };
-        let mut host = match seen {
+        let (version, mut host) = match seen {
             Seen::Initial(initial) => {
                 let question = current.question(None);
                 match ask_watch(&mut daemon, question, api::WatchLocalResponse::read_host).await {
@@ -790,7 +845,7 @@ async fn watched(
                         });
                         bridged.agree(&seen, Some(&daemon));
                         connected = Some(daemon);
-                        host
+                        (version, host)
                     }
                     Err(failed) => {
                         seen = Seen::Initial(initial);
@@ -829,7 +884,7 @@ async fn watched(
                             tokio::time::sleep_until(asked_at + WATCH_PACE).await;
                             continue;
                         }
-                        host
+                        (version, host)
                     }
                     Err(failed) => {
                         seen = Seen::Following(following);
@@ -849,10 +904,42 @@ async fn watched(
             |subagent| prost::Message::encoded_len(subagent).saturating_add(16),
             lune_protocol::HOST_SUBAGENTS_BYTES_MAX,
         );
-        if !told(&core, &destination, Reached::Host(host)) {
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
+        if !told(&core, &destination, Reached::Host(host)).await {
             return;
         }
+        bridged.synced(Some(version));
     }
+}
+
+fn sanitize_remote_host(
+    destination: &Destination,
+    host: &mut api::remote::Host,
+    anomalies: &mut Troubles,
+) {
+    let parsed = ParsedPullRequests::of_api(&host.pull_requests);
+    if let Some(why) = parsed.anomalies() {
+        anomalies.say(format!("{destination}: {why}"));
+        let mut clean: Vec<_> = parsed
+            .by_dir
+            .iter()
+            .map(|(dir, pull)| ((*dir).to_owned(), pull.to_api(dir)))
+            .collect();
+        clean.sort_by(|(a, _), (b, _)| a.cmp(b));
+        host.pull_requests = clean.into_iter().map(|(_, pull)| pull).collect();
+    }
+    let parsed = ParsedGitStatuses::of_api(&host.git_statuses);
+    if let Some(why) = parsed.anomalies() {
+        anomalies.say(format!("{destination}: {why}"));
+        let mut clean: Vec<_> = parsed
+            .by_dir
+            .iter()
+            .map(|(dir, status)| ((*dir).to_owned(), status.to_api(dir)))
+            .collect();
+        clean.sort_by(|(a, _), (b, _)| a.cmp(b));
+        host.git_statuses = clean.into_iter().map(|(_, status)| status).collect();
+    }
+    anomalies.done();
 }
 
 async fn handle_failure(
@@ -875,13 +962,16 @@ async fn handle_failure(
     .failed(failed);
     *seen = next;
     bridged.agree(seen, None);
+    if matches!(seen, Seen::Initial(_)) {
+        bridged.synced(None);
+    }
     if let Seen::Initial(InitialSeen::Unreached { failed, .. }) = seen
         && !logged
     {
         log::say(&format!("{destination}: unreached: {}", failed.why));
     }
     if let Some(reached) = seen.unreached()
-        && !told(core, destination, reached)
+        && !told(core, destination, reached).await
     {
         return false;
     }
@@ -1021,12 +1111,17 @@ impl Seen {
     }
 }
 
-fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached) -> bool {
+async fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached) -> bool {
+    let (answer, answered) = oneshot::channel();
     let command = Command::Remote {
         destination: destination.clone(),
         reached,
+        answer,
     };
-    tokio::task::block_in_place(|| core.send(command)).is_ok()
+    if tokio::task::block_in_place(|| core.send(command)).is_err() {
+        return false;
+    }
+    answered.await.is_ok()
 }
 
 async fn connect(
@@ -1575,5 +1670,114 @@ mod tests {
         let secs: Vec<u64> = (1..=9).map(|failures| again(failures).as_secs()).collect();
         assert_eq!(secs, [0, 1, 2, 4, 8, 16, 30, 30, 30]);
         assert_eq!(again(u32::MAX), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn remote_host_sanitization_drops_invalid_and_duplicate_entries() {
+        use lune_protocol::git::GitStatus;
+        use lune_protocol::github::{Mergeability, PullPage, PullRequest, State};
+
+        let destination: Destination = "nixos".parse().unwrap();
+        let pull = |dir: &str, url: &str, state| {
+            PullRequest {
+                page: PullPage::parse(url).unwrap(),
+                state,
+                stale: false,
+            }
+            .to_api(dir)
+        };
+        let open = State::Open {
+            draft: false,
+            checks: None,
+            mergeability: Some(Mergeability::Conflicting),
+        };
+        let first = pull("/a", "https://github.com/o/r/pull/1", open);
+        let dup = pull("/a", "https://github.com/o/r/pull/2", State::Merged);
+        let invalid = api::PullRequest {
+            dir: "/bad".to_owned(),
+            state: api::PullRequestState::Merged.into(),
+            url: "https://github.com/o/r/pull/3".to_owned(),
+            checks: None,
+            stale: false,
+            detail: Some(api::pull_request::Detail::Open(api::pull_request::Open {
+                draft: false,
+                checks: None,
+                mergeability: api::Mergeability::Conflicting.into(),
+            })),
+        };
+        let empty_dir = pull("", "https://github.com/o/r/pull/4", State::Closed);
+        let valid_status = GitStatus::Outside.to_api("/a");
+        let dup_status = GitStatus::Outside.to_api("/a");
+        let bad_status = api::GitStatus {
+            dir: "/bad".to_owned(),
+            stands: None,
+        };
+        let mut host = api::remote::Host {
+            pull_requests: vec![first.clone(), dup, invalid, empty_dir],
+            git_statuses: vec![valid_status.clone(), dup_status, bad_status],
+            ..api::remote::Host::default()
+        };
+        let mut anomalies = Troubles::default();
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
+        assert_eq!(host.pull_requests, vec![first]);
+        assert_eq!(host.git_statuses, vec![valid_status]);
+    }
+
+    #[test]
+    fn wait_synced_wakes_unreached_watch_and_waits_for_target_version() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let bridges = Arc::new(Bridges::default());
+            let destination: Destination = "nixos".parse().unwrap();
+            let mut watch = Bridged::new(Arc::clone(&bridges), destination.clone(), 1);
+            let pid = NonZeroU32::new(9).unwrap();
+            let earlier = LocalVersion::new(pid, 1);
+            let target = LocalVersion::new(pid, 2);
+
+            let mut waiting = std::pin::pin!(bridges.wait_synced(&destination, target, OUTLASTING));
+            let first = std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await;
+            assert!(first.is_pending());
+            lune_waits::awaited(
+                "wait_synced wakes backed-off watch",
+                watch.waits(OUTLASTING),
+            )
+            .await;
+            assert!(watch.woken.is_empty());
+
+            watch.synced(Some(earlier));
+            let still_waiting =
+                std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx))).await;
+            assert!(still_waiting.is_pending());
+
+            watch.synced(Some(target));
+            assert!(lune_waits::awaited("wait_synced resolves at target", waiting).await);
+
+            assert!(
+                bridges.wait_synced(&destination, target, OUTLASTING).await,
+                "already synced bridge returns immediately"
+            );
+            assert!(
+                watch.woken.is_empty(),
+                "already synced bridge does not send a wake"
+            );
+
+            let future_target = LocalVersion::new(pid, 3);
+            let mut interrupted =
+                std::pin::pin!(bridges.wait_synced(&destination, future_target, OUTLASTING));
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(interrupted.as_mut().poll(cx))).await;
+            assert!(pending.is_pending());
+            drop(watch);
+            assert!(
+                !lune_waits::awaited("dropped watch ends wait_synced", interrupted).await,
+                "dropped watch returns false"
+            );
+        });
     }
 }

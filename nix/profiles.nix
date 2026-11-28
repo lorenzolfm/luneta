@@ -9,38 +9,125 @@ let
     map (package: package.name)
       (builtins.fromTOML (builtins.readFile (root + "/Cargo.lock"))).package;
   nextest = builtins.fromTOML (builtins.readFile (root + "/.config/nextest.toml"));
-  ciProfile = nextest.profile.ci or null;
-  ciRetriesRaw = if builtins.isAttrs ciProfile then ciProfile.retries or 0 else 0;
-  ciRetriesValid =
-    (builtins.isInt ciRetriesRaw && ciRetriesRaw >= 0)
-    || (
-      builtins.isAttrs ciRetriesRaw
-      && builtins.isInt (ciRetriesRaw.count or null)
-      && ciRetriesRaw.count >= 0
-    );
-  ciRetries =
-    if builtins.isInt ciRetriesRaw then
-      ciRetriesRaw
-    else if builtins.isAttrs ciRetriesRaw && builtins.isInt (ciRetriesRaw.count or null) then
-      ciRetriesRaw.count
-    else
-      0;
-  ciFinalLevel =
-    if builtins.isAttrs ciProfile then ciProfile.final-status-level or "fail" else "fail";
-  flakyFinalLevels = [
-    "flaky"
-    "retry"
-    "slow"
-    "skip"
-    "pass"
-    "all"
+  nextestTopLevelFailures = map (
+    key: ".config/nextest.toml: unknown top-level key ${builtins.toJSON key}"
+  ) (builtins.filter (key: key != "profile") (builtins.attrNames nextest));
+  nextestProfilesRaw = nextest.profile or null;
+  nextestProfiles = if builtins.isAttrs nextestProfilesRaw then nextestProfilesRaw else { };
+  allowedNextestProfiles = {
+    default = [
+      "fail-fast"
+      "overrides"
+    ];
+    quick = [
+      "default-filter"
+      "overrides"
+    ];
+    ci = [
+      "retries"
+      "slow-timeout"
+      "failure-output"
+      "overrides"
+    ];
+  };
+  allowedOverrideKeys = [
+    "filter"
+    "priority"
+    "slow-timeout"
   ];
-  ciJunitPath = if builtins.isAttrs ciProfile then (ciProfile.junit or { }).path or null else null;
-  ciJunitValid =
-    builtins.isString ciJunitPath
-    && ciJunitPath != ""
-    && builtins.substring 0 1 ciJunitPath != "/"
-    && builtins.match "(^|.*/)\\.\\.(/.*|$)" ciJunitPath == null;
+  missingNextestProfiles = builtins.concatLists (
+    map (
+      profileName:
+      if nextestProfiles ? ${profileName} then
+        [ ]
+      else
+        [ ".config/nextest.toml: missing [profile.${profileName}] table required by flake.nix and CI" ]
+    ) (builtins.attrNames allowedNextestProfiles)
+  );
+  nextestFailures =
+    nextestTopLevelFailures
+    ++ (
+      if builtins.isAttrs nextestProfilesRaw then
+        [ ]
+      else
+        [ ".config/nextest.toml: [profile] must be a table" ]
+    )
+    ++ missingNextestProfiles
+    ++ builtins.concatLists (
+      map (
+        profileName:
+        let
+          profileAttrs = nextestProfiles.${profileName};
+          allowedKeys = allowedNextestProfiles.${profileName} or null;
+          unknownProfile =
+            if allowedKeys != null then
+              [ ]
+            else
+              [
+                ".config/nextest.toml: unknown profile [profile.${profileName}]; keep nix/profiles.nix and daemon host.rs schema aligned"
+              ];
+          nonTable =
+            if builtins.isAttrs profileAttrs then
+              [ ]
+            else
+              [ ".config/nextest.toml: [profile.${profileName}] must be a table" ];
+          profileRetries =
+            if !builtins.isAttrs profileAttrs then
+              [ ]
+            else if profileName == "ci" then
+              if (profileAttrs.retries or null) == 0 then
+                [ ]
+              else
+                [
+                  ".config/nextest.toml: [profile.ci].retries must be 0 so CI does not hide flaky tests (got ${
+                    builtins.toJSON (profileAttrs.retries or null)
+                  })"
+                ]
+            else if profileAttrs ? retries then
+              [
+                ".config/nextest.toml: [profile.${profileName}] sets retries = ${builtins.toJSON profileAttrs.retries}; keep retries disabled so CI does not hide flaky tests"
+              ]
+            else
+              [ ];
+          unknownKeys =
+            if allowedKeys == null || !builtins.isAttrs profileAttrs then
+              [ ]
+            else
+              map (key: ".config/nextest.toml: [profile.${profileName}] must not set ${key}") (
+                builtins.filter (
+                  key: !(builtins.elem key allowedKeys) && !(profileName != "ci" && key == "retries")
+                ) (builtins.attrNames profileAttrs)
+              );
+          overridesRaw = if builtins.isAttrs profileAttrs then profileAttrs.overrides or [ ] else [ ];
+          overrideFailures =
+            if !builtins.isList overridesRaw then
+              [ ".config/nextest.toml: [profile.${profileName}].overrides must be an array of tables" ]
+            else
+              builtins.concatLists (
+                map (
+                  entry:
+                  if !builtins.isAttrs entry then
+                    [ ".config/nextest.toml: [profile.${profileName}.overrides] contains a non-table entry" ]
+                  else
+                    (
+                      if entry ? retries then
+                        [
+                          ".config/nextest.toml: [profile.${profileName}.overrides] sets retries = ${builtins.toJSON entry.retries}; keep retries disabled so CI does not hide flaky tests"
+                        ]
+                      else
+                        [ ]
+                    )
+                    ++ map (key: ".config/nextest.toml: [profile.${profileName}.overrides] must not set ${key}") (
+                      builtins.filter (key: !(builtins.elem key allowedOverrideKeys) && key != "retries") (
+                        builtins.attrNames entry
+                      )
+                    )
+                ) overridesRaw
+              );
+        in
+        unknownProfile ++ nonTable ++ profileRetries ++ unknownKeys ++ overrideFailures
+      ) (builtins.attrNames nextestProfiles)
+    );
   devProfile = profile.dev or { };
   releaseProfile = profile.release or { };
   devPackages = devProfile.package or { };
@@ -245,33 +332,4 @@ in
   name:
   "Cargo.toml: ${name} gets a profile override, but no package in Cargo.lock has that name, so the override changes nothing"
 ) missing
-++ (
-  if builtins.isAttrs ciProfile then
-    [ ]
-  else
-    [ ".config/nextest.toml: missing [profile.ci] table required by flake.nix and CI" ]
-)
-++ (
-  if ciRetriesValid then
-    [ ]
-  else
-    [
-      ".config/nextest.toml: [profile.ci].retries must be a non-negative integer or table with a non-negative count"
-    ]
-)
-++ (
-  if ciRetries == 0 || builtins.elem ciFinalLevel flakyFinalLevels then
-    [ ]
-  else
-    [
-      ".config/nextest.toml: [profile.ci] sets retries = ${toString ciRetries}, so final-status-level must be one of ${builtins.concatStringsSep ", " flakyFinalLevels} (got ${builtins.toJSON ciFinalLevel}) for CI flaky log fallback"
-    ]
-)
-++ (
-  if ciJunitValid then
-    [ ]
-  else
-    [
-      ".config/nextest.toml: [profile.ci.junit].path must be a non-empty relative path without '..' so flake.nix can install junit.xml"
-    ]
-)
+++ nextestFailures

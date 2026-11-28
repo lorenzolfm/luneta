@@ -15,7 +15,7 @@ use crate::brief;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::picker::{Here, Seated};
-use crate::sidebar::{Listed, ViewPlace};
+use crate::sidebar::{Listed, TerminalPlace, ViewPlace};
 
 pub const HELD: Duration = Duration::from_secs(6);
 
@@ -279,7 +279,7 @@ impl State {
 #[derive(Debug)]
 struct Followed {
     state: State,
-    place: ViewPlace,
+    place: TerminalPlace,
     label: String,
     transcript: Option<SessionId>,
 }
@@ -471,7 +471,7 @@ impl Alerts {
             return Vec::new();
         };
         let mut keys: Vec<Key> = (self.followed.iter())
-            .filter(|(key, followed)| key.on == *on && followed.place == *place)
+            .filter(|(key, followed)| key.on == *on && followed.place.matches_view(place))
             .map(|(key, _)| key.clone())
             .collect();
         keys.sort_by_key(|key| key.pid);
@@ -594,7 +594,7 @@ impl Alerts {
     pub fn clicked(&mut self, key: &Key) -> Option<ViewPlace> {
         let followed = self.followed.get_mut(key)?;
         followed.state.down();
-        Some(followed.place.clone())
+        Some(followed.place.view_place())
     }
 }
 
@@ -756,8 +756,8 @@ mod tests {
         Listed::new_project("work", 10)
     }
 
-    fn place(view: u32) -> ViewPlace {
-        ViewPlace::new_in("work", 10, 1, view)
+    fn place(view: u32) -> TerminalPlace {
+        TerminalPlace::new_in("work", 10, 1, view)
     }
 
     fn seated(pid: u32, doing: Doing) -> Seated {
@@ -1036,11 +1036,11 @@ mod tests {
         alerts.heard(here(vec![waiting(1, 2), waiting(2, 2)]), now);
         let on = |view| Here::View {
             on: Machine::Local,
-            place: place(view),
+            place: place(view).view_place(),
         };
         let elsewhere = Here::View {
             on: Machine::Remote(nixos()),
-            place: place(2),
+            place: place(2).view_place(),
         };
         assert_eq!(alerts.at(Some(&elsewhere)), []);
         let in_a_session = Here::Session {

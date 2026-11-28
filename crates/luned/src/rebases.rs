@@ -4,11 +4,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lune_protocol::CONFLICTED_NAMED_MAX;
-use lune_protocol::github::State;
 use lune_protocol::said::Said;
+use lune_protocol::watch::LocalVersion;
 use tonic::{Code, Status};
 
-use crate::api::rebase_response::{self, Came as Told};
+use crate::api::rebase_response::{self, Came as Told, StatusRefresh as RefreshTold};
 use crate::api::{On, RebaseRequest, RebaseResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common, DefaultBranch, Git};
@@ -45,6 +45,35 @@ pub struct Rebased {
     pub branch: Said,
     pub onto: Said,
     pub came: Came,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusRefresh {
+    Refreshed(LocalVersion),
+    Untracked,
+    Stale,
+}
+
+impl StatusRefresh {
+    #[must_use]
+    pub fn to_api(self) -> RefreshTold {
+        match self {
+            StatusRefresh::Refreshed(version) => RefreshTold::RefreshedAt(version.to_api()),
+            StatusRefresh::Untracked => RefreshTold::Untracked(()),
+            StatusRefresh::Stale => RefreshTold::Stale(()),
+        }
+    }
+
+    pub fn of_api(said: Option<RefreshTold>) -> Result<Option<Self>, String> {
+        match said {
+            None => Ok(None),
+            Some(RefreshTold::RefreshedAt(version)) => LocalVersion::of_api(version)
+                .map(|version| Some(StatusRefresh::Refreshed(version)))
+                .map_err(|why| format!("luned sent an invalid refresh version: {why}")),
+            Some(RefreshTold::Untracked(())) => Ok(Some(StatusRefresh::Untracked)),
+            Some(RefreshTold::Stale(())) => Ok(Some(StatusRefresh::Stale)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,8 +115,12 @@ pub enum Unrebased {
     InDoubt(String),
 }
 
+pub(crate) struct Attempt {
+    pub(crate) top: Option<Directory>,
+    pub(crate) outcome: Result<Rebased, Unrebased>,
+}
+
 struct Ready {
-    top: String,
     branch: Said,
     onto: Onto,
     before: String,
@@ -100,45 +133,75 @@ enum Onto {
 
 struct NamedBranch(String);
 
-pub(crate) fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
+pub(crate) fn rebase_at(dir: &Directory, expected: Option<&Said>) -> Attempt {
     let until = Instant::now() + RUNNING_MAX;
+    let top = match toplevel(dir, until) {
+        Ok(top) => top,
+        Err(why) => {
+            return Attempt {
+                top: None,
+                outcome: Err(Unrebased::Refused(why)),
+            };
+        }
+    };
+    let outcome = rebase_in(&top, expected, until);
+    Attempt {
+        top: Some(top),
+        outcome,
+    }
+}
+
+#[cfg(test)]
+fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
+    rebase_at(dir, expected).outcome
+}
+
+fn rebase_in(
+    top: &Directory,
+    expected: Option<&Said>,
+    until: Instant,
+) -> Result<Rebased, Unrebased> {
+    let top = top.as_str();
     let Ready {
-        top,
         branch,
         onto,
         before,
-    } = ready(dir, expected, until).map_err(Unrebased::Refused)?;
+    } = ready(top, expected, until).map_err(Unrebased::Refused)?;
     let reference = onto.reference();
     let onto = Said::new(onto.to_string()).expect("what a rebase goes onto names a branch");
-    let doubt = |why: String| in_doubt(&top, &why);
+    let doubt = |why: String| in_doubt(top, &why);
     let named = branch.as_str();
-    let came = match picked(&top, &reference, named, until)? {
-        Picked::Ended if tip(&top, named, until).map_err(doubt)? == before => Came::Already,
+    let came = match picked(top, &reference, named, until)? {
+        Picked::Ended if tip(top, named, until).map_err(doubt)? == before => Came::Already,
         Picked::Ended => Came::Clean {
-            ahead: ahead(&top, &reference, named, until).map_err(doubt)?,
+            ahead: ahead(top, &reference, named, until).map_err(doubt)?,
         },
         Picked::Stopped => {
-            let at = stopped_at(&top, until).map_err(doubt)?;
+            let at = stopped_at(top, until).map_err(doubt)?;
             Came::Stopped(Stopped {
                 at,
-                conflicted: conflicted(&top, until).map_err(doubt)?,
+                conflicted: conflicted(top, until).map_err(doubt)?,
             })
         }
     };
     Ok(Rebased { branch, onto, came })
 }
 
-fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {
+fn toplevel(dir: &Directory, until: Instant) -> Result<Directory, String> {
     let top = says(dir.as_str(), "rev-parse", &["--show-toplevel"], &[], until)?;
     if top.is_empty() {
         return Err(format!("{dir} is in no worktree of a repository"));
     }
-    if let Some(doing) = under_way(&top, until)? {
+    Directory::parse(top)
+}
+
+fn ready(top: &str, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {
+    if let Some(doing) = under_way(top, until)? {
         return Err(format!(
             "{top} is in the middle of {doing}: finish it, or abort it, first"
         ));
     }
-    let Some(branch) = branch(&top, until)? else {
+    let Some(branch) = branch(top, until)? else {
         return Err(format!(
             "{top} is on no branch, and a rebase moves a branch"
         ));
@@ -148,18 +211,17 @@ fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Rea
     {
         return Err(format!("{top} is on {branch} now, not {expected}"));
     }
-    if !committed(&top, until)? {
+    if !committed(top, until)? {
         return Err(format!(
             "{top} has changes not committed: commit or stash them first"
         ));
     }
-    let onto = onto(&top, branch.as_str(), until)?;
+    let onto = onto(top, branch.as_str(), until)?;
     if let Some((remote, branch)) = onto.to_fetch() {
-        sync::fetch(&top, remote, branch, left(until, FETCHING)?)?;
+        sync::fetch(top, remote, branch, left(until, FETCHING)?)?;
     }
-    let before = tip(&top, branch.as_str(), until)?;
+    let before = tip(top, branch.as_str(), until)?;
     Ok(Ready {
-        top,
         branch,
         onto,
         before,
@@ -195,7 +257,7 @@ fn pulled(top: &str, branch: &str, until: Instant) -> Result<Option<Pulled>, Str
     let pulled = github::Asker::default()
         .pull_of(top, &repository, branch)
         .map_err(unasked)?;
-    let open = |pulled: &Pulled| matches!(pulled.pull_request.state, State::Open | State::Draft);
+    let open = |pulled: &Pulled| pulled.pull_request.is_open();
     Ok(pulled.filter(open))
 }
 
@@ -558,6 +620,15 @@ pub fn asked(on: Option<On>, dir: &Directory, branch: Option<&Said>) -> RebaseRe
 impl Rebased {
     #[must_use]
     pub fn to_api(&self) -> RebaseResponse {
+        self.to_api_inner(None)
+    }
+
+    #[must_use]
+    pub fn to_api_with(&self, status_refresh: StatusRefresh) -> RebaseResponse {
+        self.to_api_inner(Some(status_refresh.to_api()))
+    }
+
+    fn to_api_inner(&self, status_refresh: Option<RefreshTold>) -> RebaseResponse {
         let came = match &self.came {
             Came::Already => Told::Already(()),
             Came::Clean { ahead } => Told::Clean(rebase_response::Clean { ahead: *ahead }),
@@ -579,10 +650,18 @@ impl Rebased {
             branch,
             onto,
             came: Some(came),
+            status_refresh,
         }
     }
 
     pub fn of_api(said: RebaseResponse, asked: Option<&Said>) -> Result<Rebased, String> {
+        Self::of_api_with_refresh(said, asked).map(|(rebased, _)| rebased)
+    }
+
+    pub fn of_api_with_refresh(
+        said: RebaseResponse,
+        asked: Option<&Said>,
+    ) -> Result<(Rebased, Option<StatusRefresh>), String> {
         let branch = Said::new(said.branch).ok_or("luned named no branch it rebased")?;
         let unnamed = || format!("luned named nothing it rebased {branch} onto");
         let onto = Said::new(said.onto).ok_or_else(unnamed)?;
@@ -607,7 +686,8 @@ impl Rebased {
                 Came::Stopped(Stopped { at, conflicted })
             }
         };
-        Ok(Rebased { branch, onto, came })
+        let status_refresh = StatusRefresh::of_api(said.status_refresh)?;
+        Ok((Rebased { branch, onto, came }, status_refresh))
     }
 }
 
@@ -972,12 +1052,37 @@ mod tests {
                 Rebased::of_api(rebased.to_api(), asked),
                 Ok(rebased.clone())
             );
-            assert_eq!(Rebased::of_api(rebased.to_api(), None), Ok(rebased));
+            assert_eq!(
+                Rebased::of_api_with_refresh(rebased.to_api(), None),
+                Ok((rebased.clone(), None))
+            );
+            let version = LocalVersion::new(std::num::NonZeroU32::new(7).unwrap(), 42);
+            for refresh in [
+                StatusRefresh::Refreshed(version),
+                StatusRefresh::Untracked,
+                StatusRefresh::Stale,
+            ] {
+                assert_eq!(
+                    Rebased::of_api_with_refresh(rebased.to_api_with(refresh), asked),
+                    Ok((rebased.clone(), Some(refresh)))
+                );
+            }
         }
+        let bad_version = RebaseResponse {
+            branch: "b".to_owned(),
+            onto: "main".to_owned(),
+            came: Some(Told::Already(())),
+            status_refresh: Some(RefreshTold::RefreshedAt(crate::api::LocalVersion {
+                pid: 0,
+                seq: 1,
+            })),
+        };
+        assert!(Rebased::of_api(bad_version, None).is_err());
         let unsaid = RebaseResponse {
             branch: "b".to_owned(),
             onto: "main".to_owned(),
             came: None,
+            status_refresh: None,
         };
         assert!(Rebased::of_api(unsaid, None).is_err());
     }
@@ -988,6 +1093,7 @@ mod tests {
             branch: branch.to_owned(),
             onto: onto.to_owned(),
             came: Some(Told::Already(())),
+            status_refresh: None,
         };
         let unnamed = Rebased::of_api(said("", "main"), None).unwrap_err();
         assert_eq!(unnamed, "luned named no branch it rebased");
@@ -1021,6 +1127,7 @@ mod tests {
             branch: "b".to_owned(),
             onto: "main".to_owned(),
             came: Some(Told::Stopped(stopped)),
+            status_refresh: None,
         };
         let refused = Rebased::of_api(said, None).unwrap_err();
         let starts = "luned said the rebase stopped, but it names 3 files";

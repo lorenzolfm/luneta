@@ -5,6 +5,8 @@ use luned::api::Harness;
 
 pub const WIDTH: usize = 1;
 
+pub const BROWSER: &str = "\u{f0ac}";
+
 pub use lune_protocol::shell::SHELLS;
 
 const TERMINAL: &str = "\u{e795}";
@@ -190,6 +192,7 @@ mod tests {
 
     #[test]
     fn every_icon_takes_the_columns_a_row_keeps_for_one() {
+        assert_eq!(BROWSER.width(), WIDTH, "browser");
         for program in SHELLS.into_iter().chain(ICONS.map(|(program, _)| program)) {
             assert_eq!(
                 of(program).map(UnicodeWidthStr::width),

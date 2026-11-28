@@ -31,6 +31,18 @@ pub const AGENTS: Chord = (KeyCode::Char('b'), KeyModifiers::CONTROL);
 
 pub const PROJECTS: Chord = (KeyCode::Char('o'), KeyModifiers::SUPER);
 
+pub const REVIVE: Chord = (KeyCode::Char('T'), KeyModifiers::SUPER);
+
+#[must_use]
+pub fn revives((code, modifiers): Chord) -> bool {
+    let super_shift = KeyModifiers::SUPER | KeyModifiers::SHIFT;
+    match (code, modifiers) {
+        (KeyCode::Char('t' | 'T'), held) if held == super_shift => true,
+        (KeyCode::Char('T'), KeyModifiers::SUPER) => true,
+        _ => false,
+    }
+}
+
 pub const REVIEW: &str = "thermo-nuclear-review";
 
 pub const YANK: char = 'y';
@@ -160,6 +172,7 @@ actions! {
     Worktrees,
     Agents,
     Projects,
+    ReviveView,
     Dictate,
     ReadAloud,
     StopAloud,
@@ -483,6 +496,12 @@ impl Action {
                 let keywords = &["finder", "folder", "directory", "repository", "new", "add"];
                 anywhere("Open a project", keywords, PROJECTS)
             }
+            Action::ReviveView => {
+                let keywords = &[
+                    "closed", "reopen", "undo", "tab", "pane", "terminal", "browser",
+                ];
+                anywhere("Revive last view", keywords, REVIVE)
+            }
             Action::Dictate => anywhere("Hold to dictate", &["voice", "speech"], dictation::KEY),
             Action::ReadAloud => anywhere("Read aloud, pause", &["speak", "voice"], aloud::KEY),
             Action::StopAloud => anywhere("Stop reading", &["speak", "voice"], aloud::STOPS),
@@ -711,6 +730,30 @@ mod tests {
                     "{action:?} has {keyword}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn revive_shortcut_matches_super_shift_t_variants() {
+        let super_shift = KeyModifiers::SUPER | KeyModifiers::SHIFT;
+        assert!(revives(REVIVE));
+        assert!(revives((KeyCode::Char('t'), super_shift)));
+        assert!(revives((KeyCode::Char('T'), super_shift)));
+        assert!(revives((KeyCode::Char('T'), KeyModifiers::SUPER)));
+        for other in [
+            (KeyCode::Char('t'), KeyModifiers::SUPER),
+            (
+                KeyCode::Char('t'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            (KeyCode::Char('T'), KeyModifiers::SHIFT),
+            (
+                KeyCode::Char('t'),
+                KeyModifiers::SUPER | KeyModifiers::ALT | KeyModifiers::SHIFT,
+            ),
+            (KeyCode::Char('w'), super_shift),
+        ] {
+            assert!(!revives(other), "{other:?}");
         }
     }
 }

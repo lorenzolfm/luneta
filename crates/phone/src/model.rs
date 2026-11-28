@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
+use lune_protocol::git::{GitStatus, Head, ParsedGitStatuses};
+use lune_protocol::github::ParsedPullRequests;
 use lune_protocol::made::Made;
 
 use crate::api::project::clone;
@@ -124,6 +126,7 @@ pub struct Worktree {
     pub branch: Option<String>,
     pub seen: Seen,
     pub views: Vec<View>,
+    pub browsers: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -132,8 +135,8 @@ pub enum Seen {
     Unread,
     NoBranch,
     Working,
-    PullRequestOpen,
-    ChecksFailing,
+    PullRequestOpen { conflicting: bool },
+    ChecksFailing { conflicting: bool },
     Merged,
     Untold,
 }
@@ -213,6 +216,7 @@ struct Seat<'a> {
     on: Option<&'a str>,
     agents: &'a [api::Agent],
     git_statuses: &'a [api::GitStatus],
+    pull_requests: &'a [api::PullRequest],
     projects: Option<&'a api::Projects>,
 }
 
@@ -223,21 +227,28 @@ impl Model {
             on: None,
             agents: &host.agents,
             git_statuses: &host.git_statuses,
+            pull_requests: &host.pull_requests,
             projects: host.projects.as_ref(),
         };
         let mut seats = Vec::with_capacity(host.remotes.len());
         for remote in &host.remotes {
             let on = remote.destination.as_str();
-            let seat = |agents, git_statuses, projects| Seat {
+            let seat = |agents, git_statuses, pull_requests, projects| Seat {
                 on: Some(on),
                 agents,
                 git_statuses,
+                pull_requests,
                 projects,
             };
             match &remote.reached {
                 Some(remote::Reached::Here(())) => {}
                 Some(remote::Reached::Host(far)) => {
-                    let seat = seat(&far.agents, &far.git_statuses, far.projects.as_ref());
+                    let seat = seat(
+                        &far.agents,
+                        &far.git_statuses,
+                        &far.pull_requests,
+                        far.projects.as_ref(),
+                    );
                     seats.push((on, seat, Reached::Reached));
                 }
                 Some(remote::Reached::Unreached(unreached)) => {
@@ -245,11 +256,11 @@ impl Model {
                         .since
                         .and_then(|since| SystemTime::try_from(since).ok());
                     let why = unreached.why.clone();
-                    let seat = seat(&[], &[], unreached.projects.as_ref());
+                    let seat = seat(&[], &[], &[], unreached.projects.as_ref());
                     seats.push((on, seat, Reached::Unreached { why, since }));
                 }
                 Some(remote::Reached::Reaching(())) | None => {
-                    seats.push((on, seat(&[], &[], None), Reached::Reaching));
+                    seats.push((on, seat(&[], &[], &[], None), Reached::Reaching));
                 }
             }
         }
@@ -291,41 +302,58 @@ fn inbox_place(agent: &Agent) -> (bool, bool, Option<SystemTime>) {
 }
 
 fn held_of(seat: &Seat<'_>) -> Held {
-    let branches: HashMap<&str, &str> = seat
-        .git_statuses
+    let kept = match seat.projects.and_then(|projects| projects.held.as_ref()) {
+        Some(projects::Held::Kept(kept)) => kept,
+        Some(projects::Held::Unkept(why)) => return Held::Unkept { why: why.clone() },
+        None => return Held::Untold,
+    };
+    let statuses = ParsedGitStatuses::of_api(seat.git_statuses);
+    let branches: HashMap<&str, &str> = statuses
+        .by_dir
         .iter()
-        .filter_map(|status| match &status.stands {
-            Some(api::git_status::Stands::Checkout(api::Checkout {
-                head: Some(api::checkout::Head::Branch(branch)),
+        .filter_map(|(&dir, status)| match status {
+            GitStatus::Checkout {
+                head: Head::Branch { name, .. },
                 ..
-            })) => Some((status.dir.as_str(), branch.name.as_str())),
-            _ => None,
+            } => Some((dir, name.as_str())),
+            GitStatus::Outside
+            | GitStatus::NoCheckout { .. }
+            | GitStatus::Checkout {
+                head: Head::Detached,
+                ..
+            } => None,
         })
         .collect();
-    match seat.projects.and_then(|projects| projects.held.as_ref()) {
-        Some(projects::Held::Kept(kept)) => {
-            let projects = kept
-                .projects
-                .iter()
-                .map(|it| project_of(seat.on, it, &branches))
-                .collect();
-            Held::Kept { projects }
-        }
-        Some(projects::Held::Unkept(why)) => Held::Unkept { why: why.clone() },
-        None => Held::Untold,
-    }
+    let pulls = ParsedPullRequests::of_api(seat.pull_requests);
+    let conflicts: HashSet<&str> = pulls
+        .by_dir
+        .iter()
+        .filter(|(_, pull)| pull.has_conflicts())
+        .map(|(&dir, _)| dir)
+        .collect();
+    let projects = kept
+        .projects
+        .iter()
+        .map(|it| project_of(seat.on, it, &branches, &conflicts))
+        .collect();
+    Held::Kept { projects }
 }
 
-fn project_of(on: Option<&str>, project: &api::Project, branches: &HashMap<&str, &str>) -> Project {
+fn project_of(
+    on: Option<&str>,
+    project: &api::Project,
+    branches: &HashMap<&str, &str>,
+    conflicts: &HashSet<&str>,
+) -> Project {
     let holds = match &project.holds {
         Some(project::Holds::Folder(worktree)) => Holds::Folder {
-            worktree: worktree_of(on, worktree, branches),
+            worktree: worktree_of(on, worktree, branches, conflicts),
         },
         Some(project::Holds::Clone(clone)) => {
             let worktrees = clone
                 .worktrees
                 .iter()
-                .map(|it| worktree_of(on, it, branches))
+                .map(|it| worktree_of(on, it, branches, conflicts))
                 .collect();
             let unopened = match &clone.listing {
                 Some(clone::Listing::Unopened(unopened)) => Unopened::Listed {
@@ -354,20 +382,32 @@ fn worktree_of(
     on: Option<&str>,
     worktree: &api::Worktree,
     branches: &HashMap<&str, &str>,
+    conflicts: &HashSet<&str>,
 ) -> Worktree {
+    let conflicting = conflicts.contains(worktree.folder.as_str());
     let seen = match worktree.seen {
         Some(worktree::Seen::Missing(())) => Seen::Missing,
         Some(worktree::Seen::Unread(())) => Seen::Unread,
         Some(worktree::Seen::Stage(stage)) => match api::Stage::try_from(stage) {
             Ok(api::Stage::NoBranch) => Seen::NoBranch,
             Ok(api::Stage::Working) => Seen::Working,
-            Ok(api::Stage::PullRequestOpen) => Seen::PullRequestOpen,
-            Ok(api::Stage::ChecksFailing) => Seen::ChecksFailing,
+            Ok(api::Stage::PullRequestOpen) => Seen::PullRequestOpen { conflicting },
+            Ok(api::Stage::ChecksFailing) => Seen::ChecksFailing { conflicting },
             Ok(api::Stage::Merged) => Seen::Merged,
             Ok(api::Stage::Unspecified) | Err(_) => Seen::Untold,
         },
         None => Seen::Untold,
     };
+    let browsers = worktree.views.as_ref().map(|views| {
+        views
+            .items
+            .iter()
+            .filter_map(|view| match &view.kind {
+                Some(worktree::view::Kind::Browser(browser)) => Some(browser.id),
+                Some(worktree::view::Kind::TerminalId(_)) | None => None,
+            })
+            .collect()
+    });
     Worktree {
         id: worktree.id,
         name: worktree.name.clone(),
@@ -382,6 +422,7 @@ fn worktree_of(
             .iter()
             .map(|it| view_of(on, it))
             .collect(),
+        browsers,
     }
 }
 
@@ -473,24 +514,23 @@ fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
 }
 
 fn name_of(agent: &api::Agent) -> String {
-    let named = agent
-        .name
-        .as_ref()
-        .map(|name| name.text.trim())
-        .filter(|text| !text.is_empty());
-    let topic = || {
-        agent
-            .topic
-            .as_deref()
-            .map(str::trim)
-            .filter(|topic| !topic.is_empty())
-    };
+    let given = agent.name.as_ref().and_then(api::Name::given);
+    let topic = || agent.live_topic();
+    let auto = || agent.name.as_ref().and_then(api::Name::auto);
     let folder = || agent.cwd.rsplit('/').find(|part| !part.is_empty());
-    named
+    let name = given
         .or_else(topic)
+        .or_else(auto)
         .or_else(folder)
         .unwrap_or(agent.cwd.as_str())
-        .to_owned()
+        .to_owned();
+    if !agent.cwd.is_empty() {
+        assert!(
+            !name.is_empty(),
+            "an agent with a cwd gets a non-empty name"
+        );
+    }
+    name
 }
 
 fn status_of(agent: &api::Agent) -> Status {
@@ -633,6 +673,34 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_name_prefers_given_then_topic_then_auto_then_folder() {
+        let named = |text: &str, source: api::NameSource| {
+            Some(api::Name {
+                text: text.to_owned(),
+                source: Some(source.into()),
+            })
+        };
+        let mut given = agent(1, api::Status::Idle, 1, None);
+        given.name = named("fold", api::NameSource::User);
+        given.topic = Some("Session folds".to_owned());
+        assert_eq!(name_of(&given), "fold");
+
+        let mut auto_with_topic = agent(2, api::Status::Idle, 2, None);
+        auto_with_topic.name = named("Initial title", api::NameSource::Auto);
+        auto_with_topic.topic = Some("View tabs".to_owned());
+        assert_eq!(name_of(&auto_with_topic), "View tabs");
+
+        let mut auto_only = agent(3, api::Status::Idle, 3, None);
+        auto_only.name = named("Initial title", api::NameSource::Auto);
+        auto_only.topic = Some("   ".to_owned());
+        assert_eq!(name_of(&auto_only), "Initial title");
+
+        let mut derived_only = agent(4, api::Status::Idle, 4, None);
+        derived_only.name = named("lune-main", api::NameSource::Derived);
+        assert_eq!(name_of(&derived_only), "agent-4");
+    }
+
+    #[test]
     fn an_agent_is_placed_in_the_worktree_whose_view_holds_its_terminal() {
         let worktrees = vec![worktree_with(5, "fix", 9), worktree_with(6, "feat", 8)];
         let host = api::Host {
@@ -672,6 +740,7 @@ mod tests {
         let head = Some(api::checkout::Head::Branch(branch));
         let checkout = api::Checkout {
             head,
+            changes: Some(api::Changes::default()),
             ..api::Checkout::default()
         };
         let host = api::Host {
@@ -688,6 +757,107 @@ mod tests {
         assert_eq!(
             projects[0].holds.worktrees()[0].branch.as_deref(),
             Some("issue-723")
+        );
+    }
+
+    #[test]
+    fn a_worktree_says_when_its_open_pull_request_has_merge_conflicts() {
+        use lune_protocol::github::{Mergeability, PullPage, PullRequest, State};
+
+        let open_pull = |dir: &str, draft, mergeability| {
+            PullRequest {
+                page: PullPage::parse("https://github.com/o/r/pull/1").unwrap(),
+                state: State::Open {
+                    draft,
+                    checks: None,
+                    mergeability,
+                },
+                stale: false,
+            }
+            .to_api(dir)
+        };
+        let worktree = |id, name: &str, seen| api::Worktree {
+            seen,
+            ..worktree_with(id, name, u32::try_from(id).unwrap())
+        };
+        let stage = |stage: api::Stage| Some(worktree::Seen::Stage(stage.into()));
+        let worktrees = vec![
+            worktree(1, "open", stage(api::Stage::PullRequestOpen)),
+            worktree(2, "draft", stage(api::Stage::ChecksFailing)),
+            worktree(3, "clean", stage(api::Stage::PullRequestOpen)),
+            worktree(4, "merged", stage(api::Stage::Merged)),
+            worktree(5, "gone", Some(worktree::Seen::Missing(()))),
+            worktree(6, "working", stage(api::Stage::Working)),
+            worktree(7, "unread", Some(worktree::Seen::Unread(()))),
+            worktree(8, "detached", stage(api::Stage::NoBranch)),
+            worktree(9, "untold", None),
+            worktree(10, "dup", stage(api::Stage::PullRequestOpen)),
+            worktree(11, "legacy", stage(api::Stage::PullRequestOpen)),
+        ];
+        let conflicting = Some(Mergeability::Conflicting);
+        let mergeable = Some(Mergeability::Mergeable);
+        let corrupt_merged = api::PullRequest {
+            dir: "/w/lune/merged".to_owned(),
+            state: api::PullRequestState::Merged.into(),
+            url: "https://github.com/o/r/pull/1".to_owned(),
+            checks: None,
+            stale: false,
+            detail: Some(api::pull_request::Detail::Open(api::pull_request::Open {
+                draft: false,
+                checks: None,
+                mergeability: api::Mergeability::Conflicting.into(),
+            })),
+        };
+        let legacy_open = api::PullRequest {
+            dir: "/w/lune/legacy".to_owned(),
+            state: api::PullRequestState::Open.into(),
+            url: "https://github.com/o/r/pull/2".to_owned(),
+            checks: None,
+            stale: false,
+            detail: None,
+        };
+        let host = api::Host {
+            pull_requests: vec![
+                open_pull("/w/lune/open", false, conflicting),
+                open_pull("/w/lune/draft", true, conflicting),
+                open_pull("/w/lune/clean", false, mergeable),
+                corrupt_merged,
+                open_pull("/w/lune/gone", false, conflicting),
+                open_pull("/w/lune/working", false, conflicting),
+                open_pull("/w/lune/unread", false, conflicting),
+                open_pull("/w/lune/detached", false, conflicting),
+                open_pull("/w/lune/untold", false, conflicting),
+                open_pull("/w/lune/dup", false, mergeable),
+                open_pull("/w/lune/dup", false, conflicting),
+                legacy_open,
+            ],
+            projects: Some(kept(vec![clone_of(worktrees)])),
+            ..api::Host::default()
+        };
+        let Held::Kept { projects } = &Model::of(&host).here else {
+            panic!("the projects are kept");
+        };
+        let seen: Vec<(&str, Seen)> = projects[0]
+            .holds
+            .worktrees()
+            .iter()
+            .map(|worktree| (worktree.name.as_str(), worktree.seen))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("open", Seen::PullRequestOpen { conflicting: true }),
+                ("draft", Seen::ChecksFailing { conflicting: true }),
+                ("clean", Seen::PullRequestOpen { conflicting: false }),
+                ("merged", Seen::Merged),
+                ("gone", Seen::Missing),
+                ("working", Seen::Working),
+                ("unread", Seen::Unread),
+                ("detached", Seen::NoBranch),
+                ("untold", Seen::Untold),
+                ("dup", Seen::PullRequestOpen { conflicting: false }),
+                ("legacy", Seen::PullRequestOpen { conflicting: false }),
+            ]
         );
     }
 
@@ -945,5 +1115,50 @@ mod tests {
             }
         );
         assert_eq!(model.inbox[3].status, Status::Stopped);
+    }
+
+    #[test]
+    fn a_worktree_tracks_browser_view_ids_only_when_luned_sends_views() {
+        use api::worktree::{View as ApiView, Views, view::Kind};
+
+        let legacy = worktree_with(1, "legacy", 1);
+        let mut terminal_only = worktree_with(2, "term", 2);
+        terminal_only.views = Some(Views {
+            items: vec![ApiView {
+                kind: Some(Kind::TerminalId(2)),
+            }],
+        });
+        let mut with_browsers = worktree_with(3, "browse", 3);
+        with_browsers.views = Some(Views {
+            items: vec![
+                ApiView {
+                    kind: Some(Kind::TerminalId(3)),
+                },
+                ApiView {
+                    kind: Some(Kind::Browser(api::Browser {
+                        id: 20,
+                        url: Some("https://example.com".to_owned()),
+                    })),
+                },
+                ApiView {
+                    kind: Some(Kind::Browser(api::Browser { id: 21, url: None })),
+                },
+            ],
+        });
+        let host = api::Host {
+            projects: Some(kept(vec![clone_of(vec![
+                legacy,
+                terminal_only,
+                with_browsers,
+            ])])),
+            ..api::Host::default()
+        };
+        let Held::Kept { projects } = Model::of(&host).here else {
+            panic!("the projects are kept");
+        };
+        let worktrees = projects[0].holds.worktrees();
+        assert_eq!(worktrees[0].browsers, None);
+        assert_eq!(worktrees[1].browsers, Some(Vec::new()));
+        assert_eq!(worktrees[2].browsers, Some(vec![20, 21]));
     }
 }

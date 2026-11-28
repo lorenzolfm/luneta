@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{ProjectId, ViewId, WorktreeId};
+use lune_domain::projects::{ProjectId, WorktreeId};
 use lune_domain::rows::{self, Project, Worktree};
 
 use luned::Destination;
@@ -11,13 +11,13 @@ use luned::log;
 
 use crate::host::NOT_YET;
 use crate::machines::{self, Machine};
-use crate::sidebar::{Listed, ViewKey};
+use crate::sidebar::Listed;
 use crate::viewed::{Tab, WorktreeTabs};
 
-pub fn route(on: &Machine, view: ViewKey) -> Result<TerminalKey, String> {
-    match (view, on) {
-        (ViewKey::Terminal(_), Machine::Remote(_)) => Err(NOT_YET.to_owned()),
-        (ViewKey::Terminal(key), Machine::Local) => Ok(key),
+pub fn route_terminal(on: &Machine, key: TerminalKey) -> Result<TerminalKey, String> {
+    match on {
+        Machine::Remote(_) => Err(NOT_YET.to_owned()),
+        Machine::Local => Ok(key),
     }
 }
 
@@ -135,14 +135,8 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn tabs(
-        &self,
-        on: &Machine,
-        worktree: WorktreeId,
-    ) -> (Option<WorktreeTabs>, BTreeMap<ViewId, String>) {
-        let Some((project, shown)) = self.holding(on, worktree) else {
-            return (None, BTreeMap::new());
-        };
+    pub fn tabs(&self, on: &Machine, worktree: WorktreeId) -> Option<WorktreeTabs> {
+        let (project, _) = self.holding(on, worktree)?;
         let tab = |it: &Worktree| Tab {
             worktree: it.id,
             name: it.name.clone(),
@@ -152,13 +146,10 @@ impl Projected {
             tabs.iter().any(|tab| tab.worktree == worktree),
             "the tabs hold the worktree held"
         );
-        (
-            Some(WorktreeTabs {
-                project: project.id,
-                tabs,
-            }),
-            shown.titles(),
-        )
+        Some(WorktreeTabs {
+            project: project.id,
+            tabs,
+        })
     }
 }
 
@@ -256,6 +247,8 @@ mod tests {
 
     #[test]
     fn a_view_of_a_project_on_any_machine_leads_back_to_its_worktree() {
+        use lune_domain::projects::ViewId;
+
         let mut host = host();
         let far = api::remote::Host {
             projects: host.projects.clone(),
@@ -291,22 +284,18 @@ mod tests {
     }
 
     #[test]
-    fn a_project_row_s_tabs_are_its_worktrees_titled_by_their_terminals() {
+    fn a_project_row_s_tabs_are_its_worktrees() {
         let projected = Projected::adapted(&host()).unwrap();
-        let terminal = ViewId::of(21).unwrap();
         assert!(projected.project(&Machine::Local, seven()).is_some());
         assert_eq!(
             projected.project(&Machine::Local, ProjectId::of(8).unwrap()),
             None
         );
-        let (bar, titles) = projected.tabs(&Machine::Local, worktree(11));
-        let bar = bar.unwrap();
+        let bar = projected.tabs(&Machine::Local, worktree(11)).unwrap();
         let names: Vec<&str> = bar.tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
         assert_eq!(bar.project, seven(), "the tabs are the project's");
-        assert_eq!(titles.get(&terminal).map(String::as_str), Some("Fixing"));
-        let lost = ViewId::of(22).unwrap();
-        assert_eq!(titles.get(&lost), None);
+        assert_eq!(projected.tabs(&Machine::Local, worktree(99)), None);
     }
 
     #[test]
@@ -347,15 +336,14 @@ mod tests {
     fn a_view_routes_by_its_key_and_a_whole_project_row_to_its_first_keyed_terminal() {
         let projected = Projected::adapted(&host()).unwrap();
         let (here, project) = (Machine::Local, Listed::new_project("bitwarden backup", 7));
-        let unlisted = ViewKey::Terminal(keyed(9));
-        assert_eq!(route(&here, unlisted), Ok(keyed(9)));
+        assert_eq!(route_terminal(&here, keyed(9)), Ok(keyed(9)));
         assert_eq!(
             projected.whole(&here, &project),
             Ok(keyed(4)),
             "the first one keyed"
         );
         let far = Machine::Remote("far".parse().unwrap());
-        assert_eq!(route(&far, unlisted), Err(NOT_YET.to_owned()));
+        assert_eq!(route_terminal(&far, keyed(9)), Err(NOT_YET.to_owned()));
         assert_eq!(projected.whole(&far, &project), Err(NOT_YET.to_owned()));
         let gone = Listed::new_project("gone", 8);
         let unkept = Err("luned keeps no such project".to_owned());

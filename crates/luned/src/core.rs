@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime};
 use lune_domain::agent::{Harness, OscReads, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{
-    Dir, Holds, Listed, Name, Project, Projects, Seen, Stage, Subfolder, VIEWS_MAX, ViewId,
-    WORKTREES_MAX, Worktree, WorktreeId,
+    Dir, Holds, LAYOUT_VIEWS_MAX, Listed, Name, Project, Projects, Seen, Stage, Subfolder,
+    Terminal, VIEWS_MAX, View, ViewId, WORKTREES_MAX, Worktree, WorktreeId,
 };
 use lune_protocol::HOST_SUBAGENTS_BYTES_MAX;
 use lune_protocol::git::{GitStatus, Head};
@@ -34,7 +34,8 @@ use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::statuses::{ActiveStatus, Proof, Report, ReportedAgent, Statuses, Subagent};
 use crate::titles::{self, Titled};
-use crate::transcripts::SessionId;
+use crate::topics::TopicKey;
+use crate::transcripts::{SessionId, TranscriptHarness};
 use crate::watch::Troubles;
 use crate::{agy, osc_7501, pi};
 
@@ -167,6 +168,8 @@ pub enum Listing {
 pub const FOLLOW_DIRS_MAX: usize = WORKTREES_MAX + VIEWS_MAX;
 
 const _: () = assert!(FOLLOW_DIRS_MAX > 0);
+const _: () = assert!(FOLLOW_DIRS_MAX <= lune_protocol::github::PULL_REQUESTS_MAX);
+const _: () = assert!(FOLLOW_DIRS_MAX <= lune_protocol::git::GIT_STATUSES_MAX);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowDirs(BTreeSet<Dir>);
@@ -187,6 +190,11 @@ impl FollowDirs {
     }
 
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -194,6 +202,15 @@ impl FollowDirs {
     fn is_subset(&self, other: &FollowDirs) -> bool {
         self.0.is_subset(&other.0)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitStatusStored {
+    Published {
+        version: LocalVersion,
+        log: Option<String>,
+    },
+    Untracked,
 }
 
 pub enum Command {
@@ -206,10 +223,10 @@ pub enum Command {
         dir: Dir,
         status: GitStatus,
         why: Option<git::Why>,
-        answer: oneshot::Sender<Option<String>>,
+        answer: oneshot::Sender<GitStatusStored>,
     },
-    PullRequests(BTreeMap<String, Found>),
-    Topics(HashMap<SessionId, Said>),
+    PullRequests(BTreeMap<Dir, Found>),
+    Topics(HashMap<TopicKey, Said>),
     Hosts(Named),
     Projects {
         projects: Result<Projects, String>,
@@ -220,6 +237,7 @@ pub enum Command {
     Remote {
         destination: Destination,
         reached: Reached,
+        answer: oneshot::Sender<()>,
     },
     Say {
         said: ToSay,
@@ -230,9 +248,8 @@ pub enum Command {
     ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
     Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorktreeId>>>),
     Plain(oneshot::Sender<BTreeSet<Dir>>),
-    Branches(oneshot::Sender<BTreeMap<String, String>>),
+    Branches(oneshot::Sender<BTreeMap<Dir, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
-    Claudes(oneshot::Sender<Vec<Agent>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
     HostAll(oneshot::Sender<AllSnapshot>),
@@ -247,6 +264,12 @@ pub enum Command {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldView {
+    pub terminal: Option<TerminalKey>,
+    pub folder: Dir,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Local {
     pub git_statuses: Vec<api::GitStatus>,
@@ -256,6 +279,7 @@ pub struct Local {
     pub unread_files: Vec<api::UnreadFile>,
     pub sayings: Vec<api::Saying>,
     pub projects: api::projects::Held,
+    pub held_views: Result<Vec<HeldView>, String>,
 }
 
 impl Local {
@@ -682,8 +706,8 @@ struct Known {
     agent_statuses: Statuses,
     terminals: BTreeMap<ViewId, Located>,
     statuses: BTreeMap<Dir, GitStatus>,
-    pull_requests: BTreeMap<String, Found>,
-    topics: HashMap<SessionId, Said>,
+    pull_requests: BTreeMap<Dir, Found>,
+    topics: [HashMap<SessionId, Said>; TranscriptHarness::ALL.len()],
     remotes: KnownRemotes,
     projects: Result<Projects, String>,
     revision: Revision,
@@ -706,6 +730,7 @@ impl Known {
             unread_files: Vec::new(),
             sayings: Vec::new(),
             projects: api::projects::Held::Unkept(initial_projects.to_owned()),
+            held_views: Err(initial_projects.to_owned()),
         };
         let known = Known {
             found: Scan {
@@ -723,7 +748,7 @@ impl Known {
             terminals: BTreeMap::new(),
             statuses: BTreeMap::new(),
             pull_requests: BTreeMap::new(),
-            topics: HashMap::new(),
+            topics: std::array::from_fn(|_| HashMap::new()),
             remotes: KnownRemotes::new(),
             projects: Err(initial_projects.to_owned()),
             revision: Revision::default(),
@@ -795,25 +820,45 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 answer,
             } => {
                 if !known.dirs().contains(&dir) {
-                    let _ = answer.send(None);
+                    let _ = answer.send(GitStatusStored::Untracked);
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
-                let _ = answer.send(
-                    why.filter(|_| changed)
-                        .and_then(|why| why.said(dir.as_str())),
-                );
+                known.update_local();
+                assert!(known.statuses.contains_key(&dir));
+                assert!(known.statuses.len() <= FOLLOW_DIRS_MAX);
+                let log = why
+                    .filter(|_| changed)
+                    .and_then(|why| why.said(dir.as_str()));
+                let _ = answer.send(GitStatusStored::Published {
+                    version: known.versions.local(),
+                    log,
+                });
                 if known
                     .branch(&dir)
                     .is_some_and(|now| before.as_deref() != Some(now))
                 {
                     wake(&wakes.github);
                 }
+                continue;
             }
             Command::PullRequests(now) => known.pull_requests = now,
-            Command::Topics(now) => known.topics = now,
+            Command::Topics(now) => {
+                assert!(
+                    now.len() <= crate::statuses::AGENTS_MAX,
+                    "topics stay bounded by AGENTS_MAX"
+                );
+                let mut by_harness: [HashMap<SessionId, Said>; TranscriptHarness::ALL.len()] =
+                    std::array::from_fn(|_| HashMap::new());
+                for (key, topic) in now {
+                    let slot = key.harness().index();
+                    let replaced = by_harness[slot].insert(key.into_id(), topic);
+                    assert!(replaced.is_none(), "each topic key appears once");
+                }
+                known.topics = by_harness;
+            }
             Command::Hosts(now) => {
                 if known.remotes.named(now) {
                     known.publish_remotes();
@@ -845,10 +890,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             Command::Remote {
                 destination,
                 reached,
+                answer,
             } => {
                 if known.remotes.update_far(&destination, reached) {
                     known.publish_remotes();
                 }
+                let _ = answer.send(());
                 continue;
             }
             Command::Say { said, at, answer } => {
@@ -878,15 +925,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             }
             Command::Tracking(answer) => {
                 let _ = answer.send(known.tracking());
-                continue;
-            }
-            Command::Claudes(answer) => {
-                let claudes = known
-                    .all_agents()
-                    .into_iter()
-                    .filter(|agent| agent.harness == Harness::ClaudeCode)
-                    .collect();
-                let _ = answer.send(claudes);
                 continue;
             }
             Command::AllAgents(answer) => {
@@ -961,8 +999,7 @@ impl Known {
     fn forget_dirs(&mut self) {
         let dirs = self.dirs();
         self.statuses.retain(|dir, _| dirs.contains(dir));
-        self.pull_requests
-            .retain(|dir, _| Dir::parse(dir).is_ok_and(|dir| dirs.contains(&dir)));
+        self.pull_requests.retain(|dir, _| dirs.contains(dir));
     }
 
     fn branch(&self, dir: &Dir) -> Option<&str> {
@@ -981,13 +1018,13 @@ impl Known {
     }
 
     fn pull_request(&self, dir: &Dir) -> Option<&PullRequest> {
-        let found = self.pull_requests.get(dir.as_str())?;
+        let found = self.pull_requests.get(dir)?;
         let on_its_branch = self.branch(dir) == Some(found.branch.as_str());
         on_its_branch.then_some(&found.pull_request)
     }
 
-    fn branches(&self) -> BTreeMap<String, String> {
-        let branch = |dir: &Dir| Some((dir.as_str().to_owned(), self.branch(dir)?.to_owned()));
+    fn branches(&self) -> BTreeMap<Dir, String> {
+        let branch = |dir: &Dir| Some((dir.clone(), self.branch(dir)?.to_owned()));
         self.statuses.keys().filter_map(branch).collect()
     }
 
@@ -1163,15 +1200,10 @@ impl Known {
             .all_agents()
             .into_iter()
             .map(|agent| {
-                let topic = (agent.harness == Harness::ClaudeCode)
-                    .then(|| {
-                        agent
-                            .session_id
-                            .as_ref()
-                            .and_then(|id| self.topics.get(id.as_str()))
-                            .cloned()
-                    })
-                    .flatten();
+                let topic = TranscriptHarness::of(agent.harness).and_then(|harness| {
+                    let id = agent.session_id.as_ref()?.as_str();
+                    self.topics[harness.index()].get(id).cloned()
+                });
                 agent.to_api(topic)
             })
             .collect();
@@ -1200,24 +1232,74 @@ impl Known {
         let pull_requests = self
             .pull_requests
             .keys()
-            .filter_map(|dir| {
-                let parsed = Dir::parse(dir).ok()?;
-                Some(self.pull_request(&parsed)?.to_api(dir))
-            })
+            .filter_map(|dir| Some(self.pull_request(dir)?.to_api(dir.as_str())))
+            .collect::<Vec<_>>();
+        assert!(pull_requests.len() <= lune_protocol::github::PULL_REQUESTS_MAX);
+        let git_statuses: Vec<_> = self
+            .statuses
+            .iter()
+            .map(|(dir, status)| status.to_api(dir.as_str()))
             .collect();
+        assert!(git_statuses.len() <= lune_protocol::git::GIT_STATUSES_MAX);
         Local {
-            git_statuses: self
-                .statuses
-                .iter()
-                .map(|(dir, status)| status.to_api(dir.as_str()))
-                .collect(),
+            git_statuses,
             agents,
             unread,
             pull_requests,
             unread_files,
             sayings: self.sayings.fresh(now),
             projects: self.built_projects(),
+            held_views: self.built_held_views(),
         }
+    }
+
+    fn built_held_views(&self) -> Result<Vec<HeldView>, String> {
+        let projects = match &self.projects {
+            Ok(projects) => projects,
+            Err(why) => return Err(why.clone()),
+        };
+        let mut held = Vec::new();
+        for project in projects.all() {
+            for (folder, worktree) in project.placed() {
+                let mut has_browser = false;
+                for view in worktree.layout().views() {
+                    match view {
+                        View::Terminal(terminal) => {
+                            let (terminal_key, folder) =
+                                match self.terminals.get(&terminal.id().view()) {
+                                    Some(Located::Shown(Shown::Listed { key, cwd, .. })) => (
+                                        Some(*key),
+                                        cwd.clone().unwrap_or_else(|| terminal.folder().clone()),
+                                    ),
+                                    Some(Located::Shown(Shown::Unlisted(key))) => {
+                                        (Some(*key), terminal.folder().clone())
+                                    }
+                                    Some(Located::Lost | Located::Looking) | None => {
+                                        (None, terminal.folder().clone())
+                                    }
+                                };
+                            held.push(HeldView {
+                                terminal: terminal_key,
+                                folder,
+                            });
+                        }
+                        View::Browser(_) => has_browser = true,
+                        View::Welcome(_) | View::Review(_) => {}
+                    }
+                }
+                if has_browser {
+                    held.push(HeldView {
+                        terminal: None,
+                        folder,
+                    });
+                }
+            }
+        }
+        assert!(
+            held.len() <= VIEWS_MAX,
+            "at most {VIEWS_MAX} views are kept"
+        );
+        Ok(held)
     }
 
     fn built_projects(&self) -> api::projects::Held {
@@ -1227,13 +1309,15 @@ impl Known {
         };
         let worktree = |folder: Dir, given: &str, worktree: &Worktree| {
             let renamed = worktree.renamed().map(Name::as_str);
+            let (terminals, views) = self.built_views_and_terminals(worktree);
             api::Worktree {
                 id: worktree.id().get(),
                 name: renamed.unwrap_or(given).to_owned(),
                 renamed: renamed.is_some(),
                 seen: Some(self.seen(&folder).to_api()),
                 folder: folder.as_str().to_owned(),
-                terminals: self.built_terminals(worktree),
+                terminals,
+                views: Some(api::worktree::Views { items: views }),
                 used_at: worktree.used().map(|used| used.time().into()),
                 arranged: worktree.layout().arranged().map(|it| it.to_api().into()),
             }
@@ -1289,95 +1373,138 @@ impl Known {
         Said::Unopened(api::project::Unopened { subfolders })
     }
 
-    fn built_terminals(&self, worktree: &Worktree) -> Vec<api::Terminal> {
+    fn built_views_and_terminals(
+        &self,
+        worktree: &Worktree,
+    ) -> (Vec<api::Terminal>, Vec<api::worktree::View>) {
+        use api::worktree::view::Kind;
+        let mut terminals = Vec::new();
+        let mut views = Vec::new();
+        for view in worktree.layout().views() {
+            match view {
+                View::Terminal(terminal) => {
+                    let built = self.built_terminal(terminal);
+                    let terminal_id = built.id;
+                    terminals.push(built);
+                    views.push(api::worktree::View {
+                        kind: Some(Kind::TerminalId(terminal_id)),
+                    });
+                }
+                View::Browser(browser) => {
+                    views.push(api::worktree::View {
+                        kind: Some(Kind::Browser(api::Browser {
+                            id: browser.id().get(),
+                            url: browser.url().map(|url| url.as_str().to_owned()),
+                        })),
+                    });
+                }
+                View::Welcome(_) | View::Review(_) => {}
+            }
+        }
+        assert!(
+            views.len() <= LAYOUT_VIEWS_MAX,
+            "a worktree layout holds at most {LAYOUT_VIEWS_MAX} views"
+        );
+        assert!(
+            terminals.len() <= views.len(),
+            "every terminal is listed as a view"
+        );
+        (terminals, views)
+    }
+
+    fn built_terminal(&self, terminal: &Terminal) -> api::Terminal {
         use api::terminal::{Ended, Found as Told, Running, State};
-        let built = worktree.layout().terminals().map(|terminal| {
-            let id = terminal.id().view();
-            let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
-            let (told, state, folder, command, titled, shell, held) = match found {
-                Located::Shown(Shown::Listed {
-                    key,
-                    cwd,
-                    titled,
-                    program,
-                }) => {
-                    let api_key: api::TerminalKey = (*key).into();
-                    let folder = cwd.as_ref().unwrap_or_else(|| terminal.folder());
-                    let titled = titled.as_ref().map(Titled::to_api);
-                    match program {
-                        Program::Running { command, doing } => {
-                            let command = command.as_ref().map(|it| it.as_str().to_owned());
-                            let shell = doing.as_ref().map(Doing::to_api);
-                            let state = State::Running(Running {
-                                key: Some(api_key),
-                                command: command.clone(),
-                                titled: titled.clone(),
-                                shell: shell.clone(),
-                            });
-                            (
-                                Told::Key(api_key),
-                                state,
-                                folder,
-                                command,
-                                titled,
-                                shell,
-                                false,
-                            )
-                        }
-                        Program::Ended => {
-                            let state = State::Ended(Ended {
-                                key: Some(api_key),
-                                titled: titled.clone(),
-                            });
-                            (Told::Key(api_key), state, folder, None, titled, None, true)
-                        }
+        let id = terminal.id().view();
+        let found = self.terminals.get(&id).unwrap_or(&Located::Looking);
+        let (told, state, folder, command, titled, shell, held) = match found {
+            Located::Shown(Shown::Listed {
+                key,
+                cwd,
+                titled,
+                program,
+            }) => {
+                let api_key: api::TerminalKey = (*key).into();
+                let folder = cwd.as_ref().unwrap_or_else(|| terminal.folder());
+                let titled = titled.as_ref().map(Titled::to_api);
+                match program {
+                    Program::Running { command, doing } => {
+                        let command = command.as_ref().map(|it| it.as_str().to_owned());
+                        let shell = doing.as_ref().map(Doing::to_api);
+                        let state = State::Running(Running {
+                            key: Some(api_key),
+                            command: command.clone(),
+                            titled: titled.clone(),
+                            shell: shell.clone(),
+                        });
+                        (
+                            Told::Key(api_key),
+                            state,
+                            folder,
+                            command,
+                            titled,
+                            shell,
+                            false,
+                        )
+                    }
+                    Program::Ended => {
+                        let state = State::Ended(Ended {
+                            key: Some(api_key),
+                            titled: titled.clone(),
+                        });
+                        (Told::Key(api_key), state, folder, None, titled, None, true)
                     }
                 }
-                Located::Shown(Shown::Unlisted(key)) => {
-                    let api_key: api::TerminalKey = (*key).into();
-                    let state = State::Unlisted(api_key);
-                    (
-                        Told::Key(api_key),
-                        state,
-                        terminal.folder(),
-                        None,
-                        None,
-                        None,
-                        false,
-                    )
-                }
-                Located::Lost => (
-                    Told::Lost(()),
-                    State::StateLost(()),
-                    terminal.folder(),
-                    None,
-                    None,
-                    None,
-                    false,
-                ),
-                Located::Looking => (
-                    Told::Looking(()),
-                    State::StateLooking(()),
-                    terminal.folder(),
-                    None,
-                    None,
-                    None,
-                    false,
-                ),
-            };
-            api::Terminal {
-                id: id.get(),
-                found: Some(told),
-                folder: folder.as_str().to_owned(),
-                command,
-                titled,
-                shell,
-                held,
-                name: terminal.name().map(|name| name.as_str().to_owned()),
-                state: Some(state),
             }
-        });
-        built.collect()
+            Located::Shown(Shown::Unlisted(key)) => {
+                let api_key: api::TerminalKey = (*key).into();
+                let state = State::Unlisted(api_key);
+                (
+                    Told::Key(api_key),
+                    state,
+                    terminal.folder(),
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+            }
+            Located::Lost => (
+                Told::Lost(()),
+                State::StateLost(()),
+                terminal.folder(),
+                None,
+                None,
+                None,
+                false,
+            ),
+            Located::Looking => (
+                Told::Looking(()),
+                State::StateLooking(()),
+                terminal.folder(),
+                None,
+                None,
+                None,
+                false,
+            ),
+        };
+        let built = api::Terminal {
+            id: id.get(),
+            found: Some(told),
+            folder: folder.as_str().to_owned(),
+            command,
+            titled,
+            shell,
+            held,
+            name: terminal.name().map(|name| name.as_str().to_owned()),
+            state: Some(state),
+        };
+        assert_ne!(built.id, 0, "a terminal id is never 0");
+        assert_eq!(
+            built.held,
+            matches!(built.state, Some(State::Ended(_))),
+            "legacy held flag matches ended state"
+        );
+        built
     }
 
     fn seen(&self, folder: &Dir) -> Seen {
@@ -1888,9 +2015,13 @@ mod tests {
         .unwrap();
         let machine = |name: &str| name.parse::<Destination>().unwrap();
         let hosts = |lines| Command::Hosts(Named::new(lines, 0).unwrap());
-        let heard = |name: &str| Command::Remote {
-            destination: machine(name),
-            reached: Reached::Host(api::remote::Host::default()),
+        let heard = |name: &str| {
+            let (answer, _answered) = oneshot::channel();
+            Command::Remote {
+                destination: machine(name),
+                reached: Reached::Host(api::remote::Host::default()),
+                answer,
+            }
         };
         let told = || {
             let snapshot = ask(&core, Command::HostAll).unwrap();
@@ -2471,7 +2602,20 @@ mod tests {
             answer,
         })
         .unwrap();
-        assert_eq!(stored, None);
+        let GitStatusStored::Published { version, log } = stored else {
+            panic!("tracked dir must publish: {stored:?}");
+        };
+        assert_eq!(log, None);
+        assert_eq!(version, ask(&core, Command::HostLocal).unwrap().version());
+
+        let untracked = ask(&core, |answer| Command::GitStatus {
+            dir: Dir::parse("/w/other").unwrap(),
+            status: GitStatus::Outside,
+            why: None,
+            answer,
+        })
+        .unwrap();
+        assert_eq!(untracked, GitStatusStored::Untracked);
 
         let host = ask(&core, Command::HostAll).unwrap().to_api();
         assert_eq!(host.git_statuses.len(), 1);
@@ -2678,14 +2822,16 @@ mod tests {
         let lines = vec![Line::Far(machine("vps-1")), Line::Far(machine("vps-2"))];
         core.send(Command::Hosts(Named::new(lines.clone(), 0).unwrap()))
             .unwrap();
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-1"),
             reached: Reached::Host(remote_host(1)),
+            answer,
         })
         .unwrap();
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-2"),
             reached: Reached::Host(remote_host(2)),
+            answer,
         })
         .unwrap();
 
@@ -2725,9 +2871,10 @@ mod tests {
             &after_local.remotes.list()[1]
         ));
 
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-1"),
             reached: Reached::Host(remote_host(1)),
+            answer,
         })
         .unwrap();
         let same_remote = ask(&core, Command::HostAll).unwrap();
@@ -2737,9 +2884,10 @@ mod tests {
             same_remote.remotes.list_arc()
         ));
 
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-1"),
             reached: Reached::Host(remote_host(3)),
+            answer,
         })
         .unwrap();
         let after_remote = ask(&core, Command::HostAll).unwrap();
@@ -2797,9 +2945,10 @@ mod tests {
             Named::new(vec![Line::Far(machine("vps"))], 0).unwrap(),
         ))
         .unwrap();
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps"),
             reached: Reached::Host(remote_host(1)),
+            answer,
         })
         .unwrap();
 
@@ -2839,9 +2988,10 @@ mod tests {
         };
         assert_eq!(local_at.version, local_before.version);
 
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps"),
             reached: Reached::Host(remote_host(9)),
+            answer,
         })
         .unwrap();
         let all_after = all_watch_rx.blocking_recv().unwrap();
@@ -2916,5 +3066,178 @@ mod tests {
         let seq_after = known.versions.all().seq();
         known.refresh_sayings_at(expired_at + Duration::from_secs(5));
         assert_eq!(known.versions.all().seq(), seq_after);
+    }
+
+    #[test]
+    fn built_projects_lists_browser_views_in_layout_order_and_updates_on_navigate() {
+        use api::worktree::view::Kind;
+        use lune_domain::projects::layout::Towards;
+        use lune_domain::projects::{
+            Browser, BrowserUrl, Change, Id, Made, Opens, Placed, Size, Spot,
+        };
+
+        let wake = || mpsc::sync_channel(1).0;
+        let core = start(Wakes {
+            git: wake(),
+            github: wake(),
+            projects: wake(),
+        })
+        .unwrap();
+        let mut next = 0u64;
+        let mut fresh = || {
+            next += 1;
+            Ok(Id::of(next).unwrap())
+        };
+        let root = Dir::parse("/w/lune").unwrap();
+        let main = Subfolder::parse("main").unwrap();
+        let listed = Listed::of(BTreeSet::from([main.clone()])).unwrap();
+        let (projects, made) = Projects::default()
+            .changed(
+                Change::AddProject {
+                    spot: Spot::in_clone(root.clone(), listed.clone(), None),
+                    name: None,
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        let Some(Made::Project(project)) = made else {
+            panic!("project made")
+        };
+        let (projects, made) = projects
+            .changed(
+                Change::AddWorktree {
+                    project,
+                    spot: Spot::in_clone(root, listed, Some(main)),
+                    name: None,
+                    opens: Opens::Shell,
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        let Some(Made::Worktree(worktree)) = made else {
+            panic!("worktree made")
+        };
+        let terminal_id = projects.terminals().next().unwrap().1.id().view();
+        let size = Size::of(120, 40).unwrap();
+        let browser_a = ViewId::new(fresh().unwrap());
+        let welcome_id = ViewId::new(fresh().unwrap());
+        let review_id = ViewId::new(fresh().unwrap());
+        let browser_b = ViewId::new(fresh().unwrap());
+        let mut open_after = |projects: Projects, after: ViewId, view: View| {
+            let placed = Placed::Beside {
+                at: after,
+                towards: Towards::Right,
+            };
+            projects
+                .changed(
+                    Change::Open {
+                        worktree,
+                        view,
+                        placed,
+                        size,
+                    },
+                    None,
+                    &mut fresh,
+                )
+                .unwrap()
+                .0
+        };
+        let url_a = BrowserUrl::parse("https://example.com").unwrap();
+        let projects = open_after(
+            projects,
+            terminal_id,
+            View::Browser(Browser::new(browser_a, Some(url_a))),
+        );
+        let projects = open_after(projects, browser_a, View::Welcome(welcome_id));
+        let projects = open_after(projects, welcome_id, View::Review(review_id));
+        let projects = open_after(
+            projects,
+            review_id,
+            View::Browser(Browser::new(browser_b, None)),
+        );
+
+        core.send(Command::Projects {
+            projects: Ok(projects.clone()),
+            revision: Revision::default(),
+        })
+        .unwrap();
+        let host = ask(&core, Command::HostAll).unwrap().to_api();
+        let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
+            panic!("projects kept");
+        };
+        let worktree_row = &kept.projects[0].worktrees().unwrap()[0];
+        let views = &worktree_row
+            .views
+            .as_ref()
+            .expect("views are present")
+            .items;
+        assert_eq!(worktree_row.terminals.len(), 1);
+        assert_eq!(worktree_row.terminals[0].id, terminal_id.get());
+        assert_eq!(
+            views.len(),
+            3,
+            "welcome and review are omitted from sidebar views"
+        );
+        assert!(matches!(
+            &views[0].kind,
+            Some(Kind::TerminalId(id)) if *id == terminal_id.get()
+        ));
+        assert!(matches!(
+            &views[1].kind,
+            Some(Kind::Browser(browser))
+                if browser.id == browser_a.get()
+                    && browser.url.as_deref() == Some("https://example.com")
+        ));
+        assert!(matches!(
+            &views[2].kind,
+            Some(Kind::Browser(browser)) if browser.id == browser_b.get() && browser.url.is_none()
+        ));
+        let local = ask(&core, Command::HostLocal).unwrap().into_local();
+        let held_views = local.held_views.as_ref().unwrap();
+        assert_eq!(
+            held_views.len(),
+            2,
+            "terminal plus deduplicated browser occupancy for the worktree"
+        );
+        assert!(
+            held_views
+                .iter()
+                .all(|view| view.folder.as_str() == "/w/lune/main")
+        );
+
+        let url_next = BrowserUrl::parse("https://lune.dev/docs").unwrap();
+        let (projects, _) = projects
+            .changed(
+                Change::Navigate {
+                    view: browser_a,
+                    url: Some(url_next),
+                },
+                None,
+                &mut fresh,
+            )
+            .unwrap();
+        core.send(Command::Projects {
+            projects: Ok(projects),
+            revision: Revision::default(),
+        })
+        .unwrap();
+        let host = ask(&core, Command::HostAll).unwrap().to_api();
+        let Some(api::projects::Held::Kept(kept)) = host.projects.and_then(|it| it.held) else {
+            panic!("projects kept");
+        };
+        let worktree_row = &kept.projects[0].worktrees().unwrap()[0];
+        let views = &worktree_row
+            .views
+            .as_ref()
+            .expect("views are present")
+            .items;
+        assert!(matches!(
+            &views[1].kind,
+            Some(Kind::Browser(browser))
+                if browser.id == browser_a.get()
+                    && browser.url.as_deref() == Some("https://lune.dev/docs")
+        ));
     }
 }

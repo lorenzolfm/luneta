@@ -5,6 +5,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::projects::{Dir, ProjectId};
+use lune_protocol::github::Mergeability;
+use lune_protocol::said::Said;
 use luned::asks::Marked;
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
@@ -38,6 +40,16 @@ const ASKING: &str = "asking gh for the open issues and pull requests…";
 const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
 
 const ISSUES_OFF: &str = "   the repository has its issues turned off on GitHub";
+
+const CONFLICTS: &str = "conflicts";
+
+const CONFLICTS_CUT: &str = "conflicts ";
+
+const SIDE_SEPARATOR: &str = " · ";
+
+const _: () = assert!(CONFLICTS.is_ascii());
+const _: () = assert!(CONFLICTS_CUT.len() == CONFLICTS.len() + 1);
+const _: () = assert!(CONFLICTS_CUT.as_bytes()[CONFLICTS.len()] == b' ');
 
 const ASK_ROWS_MIN: u16 = 4;
 
@@ -502,17 +514,24 @@ impl Home {
             let here = self.cursor == Some(Item::Pull(pull.number));
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Pull(pull.number));
-            let side = if pull.draft {
-                format!("{} · draft", pull.branch)
+            let plain;
+            let side = if pull.mergeability == Some(Mergeability::Conflicting) {
+                Side::Conflicting {
+                    branch: &pull.branch,
+                    draft: pull.draft,
+                }
+            } else if pull.draft {
+                plain = format!("{}{SIDE_SEPARATOR}draft", pull.branch);
+                Side::Plain(&plain)
             } else {
-                pull.branch.clone()
+                Side::Plain(pull.branch.as_str())
             };
             lines.push(row(
                 width,
                 (here, marked),
                 (&numbered(pull.number), number_width),
                 &pull.title,
-                &side,
+                side,
             ));
         }
         lines.push(Line::default());
@@ -541,7 +560,7 @@ impl Home {
                 (here, marked),
                 (&numbered(issue.number), number_width),
                 &issue.title,
-                &side,
+                Side::Plain(&side),
             ));
         }
         (lines, at)
@@ -626,12 +645,18 @@ impl Homes {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Side<'a> {
+    Plain(&'a str),
+    Conflicting { branch: &'a Said, draft: bool },
+}
+
 fn row(
     width: usize,
     (here, marked): (bool, bool),
     (number, number_width): (&str, usize),
     title: &str,
-    side: &str,
+    side: Side<'_>,
 ) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let margin = if here {
@@ -650,12 +675,25 @@ fn row(
     );
     let lead = margin.width() + mark.width() + number.width();
     let room = width.saturating_sub(lead + 1);
-    let side_room = if side.is_empty() {
+    let side_width = match side {
+        Side::Plain(text) => text.width(),
+        Side::Conflicting { branch, draft } => {
+            let draft = if draft {
+                SIDE_SEPARATOR.width() + "draft".len()
+            } else {
+                0
+            };
+            CONFLICTS.len() + SIDE_SEPARATOR.width() + branch.as_str().width() + draft
+        }
+    };
+    let side_room = if side_width == 0 {
         0
     } else {
-        (side.width() + 2).min(room / 3)
+        (side_width + 2).min(room / 3)
     };
+    assert!(side_room <= room);
     let title_room = room.saturating_sub(side_room);
+    assert_eq!(title_room + side_room, room);
     let title = sidebar::cut(title, title_room);
     let gap = title_room.saturating_sub(title.width());
     let title_style = if here {
@@ -668,7 +706,25 @@ fn row(
     let mut spans = vec![margin, mark, number, Span::styled(title, title_style)];
     if side_room > 2 {
         spans.push(Span::raw(" ".repeat(gap + 2)));
-        spans.push(Span::styled(sidebar::cut(side, side_room - 2), dim));
+        let shown_room = side_room - 2;
+        match side {
+            Side::Plain(text) => spans.push(Span::styled(sidebar::cut(text, shown_room), dim)),
+            Side::Conflicting { branch, draft } => {
+                let red = Style::new().fg(moonlight::RED);
+                if shown_room > CONFLICTS.len() {
+                    spans.push(Span::styled(CONFLICTS, red));
+                    let rest = if draft {
+                        format!("{SIDE_SEPARATOR}{branch}{SIDE_SEPARATOR}draft")
+                    } else {
+                        format!("{SIDE_SEPARATOR}{branch}")
+                    };
+                    let rest = sidebar::cut(&rest, shown_room - CONFLICTS.len());
+                    spans.push(Span::styled(rest, dim));
+                } else {
+                    spans.push(Span::styled(sidebar::cut(CONFLICTS_CUT, shown_room), red));
+                }
+            }
+        }
     }
     Line::from(spans)
 }
@@ -685,6 +741,10 @@ mod tests {
         NonZeroU32::new(at).unwrap()
     }
 
+    fn said(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
     fn work(issues: &[(u32, &str, &[&str])], pulls: &[(u32, &str, &str, bool)]) -> Listed {
         let issues = issues.iter().map(|(at, title, labels)| Issue {
             number: number(*at),
@@ -695,8 +755,9 @@ mod tests {
             number: number(*at),
             title: (*title).to_owned(),
             draft: *draft,
-            branch: (*branch).to_owned(),
+            branch: said(branch),
             author: None,
+            mergeability: None,
         });
         Listed::Work(
             Work::new(
@@ -916,8 +977,9 @@ mod tests {
             number: number(524),
             title: "Say view, not pane".to_owned(),
             draft: false,
-            branch: "issue-511".to_owned(),
+            branch: said("issue-511"),
             author: None,
+            mergeability: None,
         };
         home.listed(
             Ok(Listed::Work(
@@ -1097,5 +1159,87 @@ mod tests {
                 &"│ › _                                                      │".to_owned()
             )
         );
+    }
+
+    #[test]
+    fn a_conflicting_pull_request_shows_conflicts_in_red_ahead_of_its_branch() {
+        let (mut home, now) = (home(), Instant::now());
+        let pulls = vec![
+            Pull {
+                number: number(524),
+                title: "Fix merge".to_owned(),
+                draft: false,
+                branch: said("issue-511"),
+                author: None,
+                mergeability: Some(Mergeability::Conflicting),
+            },
+            Pull {
+                number: number(526),
+                title: "Clean change".to_owned(),
+                draft: false,
+                branch: said("issue-520"),
+                author: None,
+                mergeability: Some(Mergeability::Mergeable),
+            },
+        ];
+        home.listed(
+            Ok(Listed::Work(
+                Work::new(Issues::Open(vec![]), pulls, More::default()).unwrap(),
+            )),
+            now,
+        );
+        let area = Rect::new(0, 0, 90, 10);
+        let mut buffer = Buffer::empty(area);
+        home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+        let line = |y: u16| {
+            let text: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            text.trim_end().to_owned()
+        };
+        assert!(line(3).ends_with("conflicts · issue-511"), "{}", line(3));
+        assert!(
+            line(4).ends_with("issue-520") && !line(4).contains("conflicts"),
+            "{}",
+            line(4)
+        );
+        let cells: Vec<&str> = (0..area.width).map(|x| buffer[(x, 3)].symbol()).collect();
+        let start = cells
+            .windows("conflicts".len())
+            .position(|it| it.concat() == "conflicts");
+        let start = u16::try_from(start.expect("conflicts")).unwrap();
+        assert_eq!(buffer[(start, 3)].fg, moonlight::RED);
+        let dot = start + u16::try_from("conflicts".len()).unwrap();
+        assert_eq!(buffer[(dot, 3)].fg, ratatui::style::Color::Reset);
+        assert!(
+            shown(&home, 60, 10)[3].ends_with("conflicts · i…"),
+            "{:?}",
+            shown(&home, 60, 10)
+        );
+        let narrow = Rect::new(0, 0, 45, 10);
+        let mut narrow_buffer = Buffer::empty(narrow);
+        home.draw(&mut narrow_buffer, narrow, SystemTime::UNIX_EPOCH);
+        let narrow_line: String = (0..narrow.width)
+            .map(|x| narrow_buffer[(x, 3)].symbol())
+            .collect();
+        let narrow_line = narrow_line.trim_end();
+        assert!(narrow_line.ends_with("conflict…"), "{narrow_line:?}");
+        let ellipsis_x = narrow.width - 2;
+        assert_eq!(narrow_buffer[(ellipsis_x, 3)].symbol(), "…");
+        assert_eq!(narrow_buffer[(ellipsis_x, 3)].fg, moonlight::RED);
+
+        let tight = Rect::new(0, 0, 48, 10);
+        let mut tight_buffer = Buffer::empty(tight);
+        home.draw(&mut tight_buffer, tight, SystemTime::UNIX_EPOCH);
+        let tight_line: String = (0..tight.width)
+            .map(|x| tight_buffer[(x, 3)].symbol())
+            .collect();
+        let tight_line = tight_line.trim_end();
+        assert!(tight_line.ends_with("conflicts…"), "{tight_line:?}");
+        let tight_ellipsis_x = tight.width - 2;
+        assert_eq!(tight_buffer[(tight_ellipsis_x, 3)].symbol(), "…");
+        assert_eq!(
+            tight_buffer[(tight_ellipsis_x, 3)].fg,
+            ratatui::style::Color::Reset
+        );
+        assert_eq!(tight_buffer[(tight_ellipsis_x - 1, 3)].fg, moonlight::RED);
     }
 }
