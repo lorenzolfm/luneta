@@ -13,6 +13,7 @@ use crate::agreed;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::menu::MenuId;
 use crate::reach::{self, Luned};
 use crate::start::UNFINISHED;
 use crate::state;
@@ -67,7 +68,7 @@ fn failed(why: &str) -> ExitCode {
 }
 
 pub fn start(
-    menu: u64,
+    menu: MenuId,
     on: Machine,
     dir: Directory,
     branch: Said,

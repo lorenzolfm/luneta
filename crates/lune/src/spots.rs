@@ -7,7 +7,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::Color;
 
 use crate::aloud::Button;
-use crate::menu::Choice;
+use crate::menu::{Choice, MenuId};
 use crate::moonlight;
 use crate::picker::Pick;
 use crate::pull::Link;
@@ -135,7 +135,7 @@ pub enum SidebarBottom {
     Nothing,
     Keys(Keyed, Spots<KeyEvent>),
     Menu {
-        number: u64,
+        number: MenuId,
         spots: Spots<Choice>,
     },
 }
@@ -145,7 +145,7 @@ pub enum Drawn {
     #[default]
     Nothing,
     Menu {
-        number: u64,
+        number: MenuId,
         area: Rect,
         spots: Spots<Choice>,
     },
@@ -179,7 +179,7 @@ pub enum Keyed {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hit {
     Keys(Keyed, KeyEvent),
-    Menu(u64, Choice),
+    Menu(MenuId, Choice),
     Picker(u64, Pick),
     Number(Link),
     Aloud(Button),
@@ -421,18 +421,24 @@ mod tests {
         let docked = Drawn::Sidebar {
             numbers: Spots::default(),
             bottom: SidebarBottom::Menu {
-                number: 3,
+                number: MenuId::of(3),
                 spots: spots.clone().map(Choice::Key),
             },
         };
-        assert_eq!(docked.at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
+        assert_eq!(
+            docked.at(at),
+            Some(Hit::Menu(MenuId::of(3), Choice::Key(key('d'))))
+        );
         assert_eq!(docked.boxed(), None);
         let floating = Drawn::Menu {
-            number: 3,
+            number: MenuId::of(3),
             area,
             spots: spots.clone().map(Choice::Key),
         };
-        assert_eq!(floating.at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
+        assert_eq!(
+            floating.at(at),
+            Some(Hit::Menu(MenuId::of(3), Choice::Key(key('d'))))
+        );
         assert_eq!(floating.boxed(), Some(area));
         assert_eq!(Drawn::Nothing.at(at), None);
     }

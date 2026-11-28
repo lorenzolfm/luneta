@@ -66,7 +66,7 @@ use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice, Origin, Rename};
+use crate::menu::{self, Choice, MenuId, Origin, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
@@ -96,7 +96,7 @@ pub enum Made {
         made: Result<Landing, String>,
     },
     Pulled {
-        menu: u64,
+        menu: MenuId,
         made: Result<Pulled, String>,
     },
 }
@@ -220,32 +220,32 @@ pub enum Event {
     ImageSlow(Destination),
     Named(Made),
     Skills {
-        menu: u64,
+        menu: MenuId,
         agent: agents::Harness,
         skills: Result<Vec<Skill>, String>,
     },
     Pulled {
-        menu: u64,
+        menu: MenuId,
         found: Result<Found, String>,
     },
     Prunes {
-        menu: u64,
+        menu: MenuId,
         plan: Result<prunes::Plan, String>,
     },
     Pruned {
-        menu: u64,
+        menu: MenuId,
         pruned: Result<prunes::Pruned, String>,
     },
     Printed {
-        menu: u64,
+        menu: MenuId,
         printed: Result<Printed, String>,
     },
     Checks {
-        menu: u64,
+        menu: MenuId,
         checks: Result<checks::Failing, String>,
     },
     Rebased {
-        menu: u64,
+        menu: MenuId,
         rebased: Result<Rebased, Unrebased>,
     },
     Briefed {
@@ -347,6 +347,15 @@ fn resized(chord: Chord) -> Option<Growth> {
         return Some(Growth::Grow);
     }
     (chord == SHRINK).then_some(Growth::Shrink)
+}
+
+fn is_chord(chord: Chord) -> bool {
+    chord == MENU
+        || List::opened_by(chord).is_some()
+        || chord == SWAP
+        || chord == COLLAPSE
+        || stepped(chord).is_some()
+        || resized(chord).is_some()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2138,15 +2147,28 @@ impl App {
                     true
                 }
                 Some(Over::Brief(_) | Over::Dictation(..)) => false,
-                None => match self.holder() {
-                    Holder::Sidebar(_) => {
-                        let asked = self.sidebar.paste(&text, now.system);
-                        self.follow(asked, now);
-                        true
+                None => {
+                    let left = self.sidebar.leave_floating_waiting().left();
+                    assert!(
+                        !self.sidebar.floating_waits(),
+                        "no waiting floating menu remains open before paste"
+                    );
+                    if left {
+                        assert!(
+                            !matches!(self.holder(), Holder::Sidebar(Holding::Afloat)),
+                            "leaving a waiting floating menu releases the floating hold"
+                        );
                     }
-                    Holder::Terminal => self.paste(&text),
-                    Holder::Box(_) => unreachable!("a box takes the paste"),
-                },
+                    match self.holder() {
+                        Holder::Sidebar(_) => {
+                            let asked = self.sidebar.paste(&text, now.system);
+                            self.follow(asked, now);
+                            true
+                        }
+                        Holder::Terminal => self.paste(&text) | left,
+                        Holder::Box(_) => unreachable!("a box takes the paste"),
+                    }
+                }
             },
             Input::FocusGained => self.focus_window(true),
             Input::FocusLost => self.focus_window(false),
@@ -2227,7 +2249,27 @@ impl App {
             None => {}
         }
         let mut dirty = false;
+        let mut kept_notice = false;
         match self.sidebar.floating() {
+            Some(Floating::Waiting(_)) => {
+                if key.kind == KeyEventKind::Repeat {
+                    return false;
+                }
+                if menu::closes(key) {
+                    self.sidebar.close_menu();
+                    return true;
+                }
+                if matches!(key.code, KeyCode::Modifier(_)) {
+                    return false;
+                }
+                if self.pane.side() == SplitSide::Sidebar && !menu::bare(key) && !is_chord(chord) {
+                    return false;
+                }
+                let left = self.sidebar.leave_floating_waiting();
+                assert!(left.left(), "a waiting floating menu was left");
+                kept_notice = left.kept_notice();
+                dirty = true;
+            }
             Some(Floating::Menu(_)) => {
                 if chord == MENU {
                     self.sidebar.close_menu();
@@ -2249,7 +2291,13 @@ impl App {
             }
             None => {}
         }
-        if self.chord(chord, now.system) {
+        let ran_chord = self.chord(chord, now.system);
+        assert_eq!(
+            ran_chord,
+            is_chord(chord),
+            "is_chord agrees with App::chord"
+        );
+        if ran_chord {
             return true;
         }
         match self.holder() {
@@ -2260,10 +2308,14 @@ impl App {
                         ImageKey::Unhandled => {}
                     }
                 }
-                dirty || self.key_to_session(key, now.system)
+                self.key_to_session(key, now.system) | dirty
             }
             Holder::Terminal | Holder::Sidebar(_) => {
-                let asked = self.sidebar.key(key, now);
+                let asked = if kept_notice {
+                    self.sidebar.key_keeping_notice(key, now)
+                } else {
+                    self.sidebar.key(key, now)
+                };
                 self.follow(asked, now);
                 true
             }
@@ -2743,6 +2795,21 @@ impl App {
             None => {}
         }
         match self.sidebar.floating() {
+            Some(Floating::Waiting(_)) => {
+                let scrolls = matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollLeft
+                        | MouseEventKind::ScrollRight
+                );
+                if scrolls || (down && off) {
+                    let left = self.sidebar.leave_floating_waiting().left();
+                    assert!(left, "a waiting floating menu was left");
+                } else {
+                    return;
+                }
+            }
             Some(Floating::Menu(_)) => {
                 if down && off {
                     self.let_go();
@@ -3582,17 +3649,48 @@ impl App {
         self.give(self.pane.side(), None, now);
     }
 
-    fn dictate(&mut self, now: Moment) -> bool {
-        let on_session = matches!(self.holder(), Holder::Terminal);
-        let under = match self.over.take() {
-            None if on_session => Where::Session(self.sidebar.here_agent()),
-            Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
-            Some(Over::Issue(issue)) => Where::Issue(issue),
+    fn take_dictation_target(&mut self) -> Option<Where> {
+        let waiting_on_session = matches!(
+            (self.holder(), self.pane.side()),
+            (
+                Holder::Sidebar(Holding::Afloat),
+                SplitSide::Session | SplitSide::Collapsed
+            )
+        ) && self.sidebar.floating_waits();
+        let on_session = matches!(self.holder(), Holder::Terminal) || waiting_on_session;
+        match self.over.take() {
+            None if on_session => {
+                if waiting_on_session {
+                    let left = self.sidebar.leave_floating_waiting().left();
+                    assert!(left, "a waiting floating menu was left before dictation");
+                }
+                assert!(
+                    matches!(self.holder(), Holder::Terminal),
+                    "session dictation starts with the terminal holding focus"
+                );
+                Some(Where::Session(self.sidebar.here_agent()))
+            }
+            Some(Over::Ask(ask)) if !ask.turning() => Some(Where::Ask(ask)),
+            Some(Over::Issue(issue)) => Some(Where::Issue(issue)),
             other => {
                 self.over = other;
-                return false;
+                None
             }
+        }
+    }
+
+    fn dictate(&mut self, now: Moment) -> bool {
+        let Some(under) = self.take_dictation_target() else {
+            return false;
         };
+        assert!(
+            self.over.is_none(),
+            "dictation takes any prior overlay before opening"
+        );
+        assert!(
+            !self.sidebar.floating_waits(),
+            "no waiting floating menu remains open once dictation starts"
+        );
         self.dictations += 1;
         let number = self.dictations;
         let dictation = if speech::fetched() {
@@ -4054,7 +4152,7 @@ impl App {
         });
     }
 
-    fn refuse_naming(&mut self, menu: Option<u64>, said: impl FnOnce(&str) -> String) -> bool {
+    fn refuse_naming(&mut self, menu: Option<MenuId>, said: impl FnOnce(&str) -> String) -> bool {
         if self.naming == Naming::Idle {
             return false;
         }
@@ -4107,7 +4205,7 @@ impl App {
         }
     }
 
-    fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>, now: SystemTime) {
+    fn pulled_made(&mut self, menu: MenuId, made: Result<Pulled, String>, now: SystemTime) {
         let opener = self
             .sidebar
             .made_for(menu)
@@ -4587,6 +4685,11 @@ impl App {
             }
             None => match self.sidebar.floating() {
                 Some(Floating::Menu(menu)) => {
+                    let (drawn, menu_cadence) = menu.draw(buffer, right, now.system);
+                    cadence.merge(menu_cadence);
+                    drawn
+                }
+                Some(Floating::Waiting(menu)) => {
                     let (drawn, menu_cadence) = menu.draw(buffer, right, now.system);
                     cadence.merge(menu_cadence);
                     drawn
@@ -5512,6 +5615,628 @@ mod tests {
         *fail_on_flush.borrow_mut() = None;
         app.draw_due(&mut terminal, retry).unwrap();
         assert_eq!(app.wait(retry), sidebar::SPIN);
+    }
+
+    fn start_test_pull(app: &mut App, url: &str, pull: menu::Pull, origin: Origin) {
+        let target = match app.sidebar.aimed_row() {
+            picker::Aim::At { target, .. } => (*target).clone(),
+            picker::Aim::Unplaced(why) => panic!("expected an aimed target: {why}"),
+        };
+        let work = luned::links::Work::parse(url, None).expect("valid GitHub link");
+        let asked = app.sidebar.pull_in_menu(target, work, pull, origin);
+        assert!(matches!(asked, Asked::Pull { .. }), "{asked:?}");
+    }
+
+    fn press_key(
+        app: &mut App,
+        terminal: &mut TestTerminal,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        now: Moment,
+    ) {
+        let key = KeyEvent::new(code, modifiers);
+        app.handle_at(Event::Input(Input::Key(key)), terminal, now)
+            .unwrap();
+    }
+
+    fn home_prompt_text(app: &App, system: SystemTime) -> String {
+        let area = Rect::new(0, 0, 50, 14);
+        let mut buffer = Buffer::empty(area);
+        let _ = app
+            .home()
+            .expect("home is shown")
+            .draw(&mut buffer, area, system);
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keyboard_and_paste_stay_responsive_while_tackle_and_worktree_load() {
+        use crate::actions::PALETTE;
+        use crate::menu::Pull;
+
+        let (mut terminal, written) = test_terminal(80, 24);
+        let (mut app, _inbox, _state) = test_app(80, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let mut tick = 0u64;
+        let mut next = || {
+            tick += 1;
+            let offset = Duration::from_secs(tick);
+            Moment {
+                steady: start + offset,
+                system: system + offset,
+            }
+        };
+
+        let now = next();
+        app.handle_at(Event::Daemon(Ok(busy_host(2, "work"))), &mut terminal, now)
+            .unwrap();
+        app.go_home(&Machine::Local, ProjectId::of(1).unwrap(), now.system);
+        app.give(SplitSide::Session, None, now.system);
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/1",
+            Pull::Agent,
+            Origin::Views,
+        );
+        assert!(app.sidebar.floating_waits());
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        let now = next();
+        press_key(&mut app, &mut terminal, SWAP.0, SWAP.1, now);
+        assert_eq!(
+            app.pane.side(),
+            SplitSide::Sidebar,
+            "Ctrl+a switches to sidebar while tackle loads"
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert!(
+            app.sidebar.turning(),
+            "tackle keeps running in the background"
+        );
+        assert!(
+            drew(&mut app, &mut terminal, &written, now),
+            "dismissing the box redraws"
+        );
+
+        let before_step = app.sidebar.aimed_row();
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/2",
+            Pull::Agent,
+            Origin::Sidebar,
+        );
+        assert_eq!(app.sidebar.holding(), Holding::Menu);
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert_ne!(
+            app.sidebar.aimed_row(),
+            before_step,
+            "j moves sidebar while tackle loads"
+        );
+        assert_eq!(app.sidebar.holding(), Holding::Nothing);
+
+        app.give(SplitSide::Session, None, now.system);
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/3",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        let now = next();
+        press_key(&mut app, &mut terminal, PALETTE.0, PALETTE.1, now);
+        assert!(matches!(app.over, Some(Over::Picker(_))));
+        assert!(app.sidebar.floating().is_none());
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.over.is_none());
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/4",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        let now = next();
+        press_key(&mut app, &mut terminal, COLLAPSE.0, COLLAPSE.1, now);
+        assert_eq!(app.pane.side(), SplitSide::Collapsed);
+        assert!(app.sidebar.floating().is_none());
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/5",
+            Pull::Agent,
+            Origin::Views,
+        );
+        let now = next();
+        press_key(&mut app, &mut terminal, MENU.0, MENU.1, now);
+        assert!(app.sidebar.floating().is_some());
+        assert!(!app.sidebar.floating_waits());
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            now,
+        );
+
+        app.give(SplitSide::Session, None, now.system);
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/6",
+            Pull::Agent,
+            Origin::Views,
+        );
+        let now = next();
+        press_key(&mut app, &mut terminal, LEFT.0, LEFT.1, now);
+        assert_eq!(app.pane.side(), SplitSide::Sidebar);
+
+        app.give(SplitSide::Session, None, now.system);
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/7",
+            Pull::Agent,
+            Origin::Views,
+        );
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.sidebar.floating().is_none());
+        let now = next();
+        app.handle_at(
+            Event::Input(Input::Paste("bc".to_owned())),
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/8",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        let now = next();
+        app.handle_at(
+            Event::Input(Input::Paste("d".to_owned())),
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        assert!(app.sidebar.floating().is_none());
+        assert!(home_prompt_text(&app, system).contains("abcd"));
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/9",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert_eq!(app.pane.side(), SplitSide::Session);
+        assert!(home_prompt_text(&app, system).contains("abcd"));
+    }
+
+    #[test]
+    fn mouse_clicks_and_scrolls_pass_through_while_tackle_or_worktree_loads() {
+        use crate::menu::Pull;
+
+        let (mut terminal, written) = test_terminal(80, 24);
+        let (mut app, _inbox, _state) = test_app(80, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let mut tick = 0u64;
+        let mut next = || {
+            tick += 1;
+            let offset = Duration::from_secs(tick);
+            Moment {
+                steady: start + offset,
+                system: system + offset,
+            }
+        };
+
+        let now = next();
+        app.handle_at(Event::Daemon(Ok(busy_host(2, "work"))), &mut terminal, now)
+            .unwrap();
+        app.go_home(&Machine::Local, ProjectId::of(1).unwrap(), now.system);
+        app.give(SplitSide::Session, None, now.system);
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/10",
+            Pull::Agent,
+            Origin::Views,
+        );
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        let boxed = app.drawn.boxed().expect("floating waiting box is drawn");
+
+        let send_mouse = |app: &mut App,
+                          terminal: &mut TestTerminal,
+                          kind: MouseEventKind,
+                          column: u16,
+                          row: u16,
+                          now: Moment| {
+            let mouse = MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            };
+            app.handle_at(Event::Input(Input::Mouse(mouse)), terminal, now)
+                .unwrap();
+        };
+
+        let now = next();
+        send_mouse(&mut app, &mut terminal, MouseEventKind::Moved, 1, 1, now);
+        assert!(
+            app.sidebar.floating_waits(),
+            "hovering does not dismiss the waiting box"
+        );
+
+        let now = next();
+        send_mouse(
+            &mut app,
+            &mut terminal,
+            MouseEventKind::Down(MouseButton::Left),
+            boxed.x,
+            boxed.y,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "clicking the waiting box frame stays put"
+        );
+
+        let now = next();
+        send_mouse(
+            &mut app,
+            &mut terminal,
+            MouseEventKind::ScrollDown,
+            1,
+            1,
+            now,
+        );
+        assert!(
+            app.sidebar.floating().is_none(),
+            "scrolling dismisses the waiting box"
+        );
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/11",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        let now = next();
+        send_mouse(
+            &mut app,
+            &mut terminal,
+            MouseEventKind::Down(MouseButton::Left),
+            1,
+            2,
+            now,
+        );
+        let now = next();
+        send_mouse(
+            &mut app,
+            &mut terminal,
+            MouseEventKind::Up(MouseButton::Left),
+            1,
+            2,
+            now,
+        );
+        assert!(
+            app.sidebar.floating().is_none(),
+            "clicking outside dismisses the waiting box"
+        );
+        assert_eq!(
+            app.pane.side(),
+            SplitSide::Sidebar,
+            "clicking the sidebar focuses it on first click"
+        );
+    }
+
+    #[test]
+    fn waiting_floating_menus_keep_modifiers_protect_interactive_paste_and_allow_dictation() {
+        use crate::menu::Pull;
+        use crossterm::event::ModifierKeyCode;
+
+        let (mut terminal, written) = test_terminal(80, 24);
+        let (mut app, _inbox, _state) = test_app(80, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let mut tick = 0u64;
+        let mut next = || {
+            tick += 1;
+            let offset = Duration::from_secs(tick);
+            Moment {
+                steady: start + offset,
+                system: system + offset,
+            }
+        };
+
+        let now = next();
+        app.handle_at(Event::Daemon(Ok(busy_host(2, "work"))), &mut terminal, now)
+            .unwrap();
+        app.go_home(&Machine::Local, ProjectId::of(1).unwrap(), now.system);
+        app.give(SplitSide::Session, None, now.system);
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/20",
+            Pull::Agent,
+            Origin::Views,
+        );
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        let now = next();
+        let repeat_enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat);
+        app.handle_at(Event::Input(Input::Key(repeat_enter)), &mut terminal, now)
+            .unwrap();
+        assert!(
+            app.sidebar.floating_waits(),
+            "a repeated key leaves a floating waiting menu open"
+        );
+        assert!(
+            !drew(&mut app, &mut terminal, &written, now),
+            "a repeated key does not dirty the frame"
+        );
+
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Modifier(ModifierKeyCode::LeftShift),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "a bare modifier leaves a floating waiting menu open"
+        );
+        assert!(
+            !drew(&mut app, &mut terminal, &written, now),
+            "a bare modifier does not dirty the frame"
+        );
+
+        assert!(
+            matches!(app.take_dictation_target(), Some(Where::Session(_))),
+            "dictation starts on Session while a waiting menu floats"
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert!(app.sidebar.turning());
+
+        app.give(SplitSide::Collapsed, None, now.system);
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/21",
+            Pull::Agent,
+            Origin::Views,
+        );
+        assert!(
+            matches!(app.take_dictation_target(), Some(Where::Session(_))),
+            "dictation starts on Collapsed while a waiting menu floats"
+        );
+        assert!(app.sidebar.floating().is_none());
+
+        app.give(SplitSide::Sidebar, None, now.system);
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/22",
+            Pull::Agent,
+            Origin::Views,
+        );
+        app.sidebar.notify("keep me".to_owned());
+        assert!(
+            app.take_dictation_target().is_none(),
+            "dictation does not start while the sidebar has focus"
+        );
+        assert!(app.sidebar.floating_waits());
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            dictation::KEY.0,
+            dictation::KEY.1,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "pressing dictation key while sidebar has focus leaves waiting floating menu open"
+        );
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "pressing an unbound modified key on sidebar leaves waiting floating menu open"
+        );
+        let sidebar_area = app.areas().0;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+        let _ = app.sidebar.draw(&mut buffer, sidebar_area, now.system);
+        let sidebar_text: String = (sidebar_area.top()..sidebar_area.bottom())
+            .map(|y| {
+                (sidebar_area.left()..sidebar_area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            sidebar_text.contains("keep me"),
+            "ignored modified keys on sidebar preserve an existing notice: {sidebar_text}"
+        );
+
+        let now = next();
+        app.handle_at(
+            Event::Pruned {
+                menu: MenuId::of(999),
+                pruned: Err("boom".to_owned()),
+            },
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        let before_step = app.sidebar.aimed_row();
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert_ne!(app.sidebar.aimed_row(), before_step);
+        let sidebar_area = app.areas().0;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+        let _ = app.sidebar.draw(&mut buffer, sidebar_area, now.system);
+        let sidebar_text: String = (sidebar_area.top()..sidebar_area.bottom())
+            .map(|y| {
+                (sidebar_area.left()..sidebar_area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            sidebar_text.contains("boom"),
+            "promoted floating notice survives the pass-through sidebar key: {sidebar_text}"
+        );
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/24",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        assert!(app.sidebar.floating_waits());
+        let now = next();
+        press_key(&mut app, &mut terminal, SWAP.0, SWAP.1, now);
+        assert!(app.sidebar.floating().is_none());
+        assert!(app.sidebar.turning());
+        assert_eq!(app.pane.side(), SplitSide::Session);
+
+        app.go_worktree(
+            &Machine::Local,
+            WorktreeId::of(100).unwrap(),
+            None,
+            now.system,
+        );
+        app.give(SplitSide::Session, None, now.system);
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/23",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert!(
+            drew(&mut app, &mut terminal, &written, now),
+            "leaving a waiting menu still redraws when key_to_session is quiet"
+        );
+
+        app.sidebar.sit(
+            Seat {
+                on: Machine::Local,
+                project: ProjectId::of(1).unwrap(),
+                at: Sitting::Worktree {
+                    worktree: WorktreeId::of(100).unwrap(),
+                    layout: SeatedLayout::Disconnected(ViewKey::terminal(1).key()),
+                },
+            },
+            now.system,
+        );
+        app.sidebar.float_menu();
+        assert!(app.sidebar.floating().is_some());
+        assert!(!app.sidebar.floating_waits());
+        assert!(
+            app.take_dictation_target().is_none(),
+            "dictation does not dismiss an interactive floating menu"
+        );
+        assert!(app.sidebar.floating().is_some());
+
+        let now = next();
+        app.handle_at(
+            Event::Input(Input::Paste("plain text".to_owned())),
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        assert!(
+            app.sidebar.floating().is_some(),
+            "pasting while an interactive floating menu is open stays in the menu"
+        );
     }
 
     #[test]

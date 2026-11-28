@@ -7,6 +7,7 @@ use luned::printed::Kept;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::menu::MenuId;
 use crate::reach::{self, Luned};
 
 pub fn prompt(page: &PullPage, failing: &Failing) -> String {
@@ -57,7 +58,7 @@ fn kept_file(failed: &Failed) -> Option<&str> {
     }
 }
 
-pub fn fetch(menu: u64, on: &Machine, page: PullPage, events: &Sender<Event>) {
+pub fn fetch(menu: MenuId, on: &Machine, page: PullPage, events: &Sender<Event>) {
     let on = on.clone();
     let due = Due::new(events, move |checks| Event::Checks { menu, checks });
     thread::spawn(move || {
