@@ -5457,7 +5457,7 @@ mod tests {
 
     #[test]
     fn paint_and_draw_due_adapt_when_terminal_area_changes_without_resize_event() {
-        let (mut terminal, written) = test_terminal(100, 12);
+        let (mut terminal, _written) = test_terminal(100, 12);
         let (mut app, _inbox, _state) = test_app(80, 20);
         let first = Moment::now();
 
@@ -5475,10 +5475,15 @@ mod tests {
         );
 
         let resized = Rect::new(0, 0, 92, 14);
-        terminal.resize(resized).unwrap();
+        let (mut resized_terminal, resized_written) = test_terminal(resized.width, resized.height);
         let later = Moment::now() + sidebar::SPIN;
         app.tick(later);
-        assert!(drew(&mut app, &mut terminal, &written, later));
+        assert!(drew(
+            &mut app,
+            &mut resized_terminal,
+            &resized_written,
+            later
+        ));
         assert_eq!(app.frame, resized);
         assert_eq!(app.areas(), areas(resized, app.width.columns()));
     }
@@ -5563,8 +5568,8 @@ mod tests {
             "resizing the window must not recompute cell size from startup window_pixels"
         );
 
-        terminal.resize(Rect::new(0, 0, 180, 60)).unwrap();
-        terminal.draw(|frame| app.paint(frame)).unwrap();
+        let (mut larger, _larger_written) = test_terminal(180, 60);
+        larger.draw(|frame| app.paint(frame)).unwrap();
         assert_eq!(
             app.cell, expected,
             "painting a resized frame must preserve cell size derived from startup window_pixels"
