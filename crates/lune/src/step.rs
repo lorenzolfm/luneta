@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write};
 use std::os::unix::process::CommandExt as _;
@@ -15,10 +14,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use clap::{ArgGroup, Args, ValueEnum};
 use lune_domain::agent::Harness;
-use lune_domain::flows::SESSION_ID_BYTES_MAX;
+use lune_domain::flows::SessionId;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Map, Value};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
 pub const TIMEOUT_SECS_DEFAULT: u64 = 1800;
@@ -180,8 +180,25 @@ pub enum StreamEvent {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prompt(String);
+
+impl Prompt {
+    pub fn parse(raw: String) -> Result<Prompt, String> {
+        if raw.trim().is_empty() {
+            return Err("prompt must not be empty".to_owned());
+        }
+        Ok(Prompt(raw))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Turn {
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
     summary: Option<String>,
 }
 
@@ -232,7 +249,7 @@ pub fn run(args: &StepArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let prompt = match read_text(args.prompt.as_deref(), args.prompt_file.as_deref()) {
+    let prompt = match read_prompt(args.prompt.as_deref(), args.prompt_file.as_deref()) {
         Ok(Some(text)) => text,
         Ok(None) => {
             eprintln!("lune _step: prompt must not be empty");
@@ -243,8 +260,15 @@ pub fn run(args: &StepArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let followup = match read_text(args.followup.as_deref(), args.followup_file.as_deref()) {
+    let followup = match read_prompt(args.followup.as_deref(), args.followup_file.as_deref()) {
         Ok(text) => text,
+        Err(why) => {
+            eprintln!("lune _step: {why}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let pi_session = match parse_pi_session(harness, args.pi_session.as_deref()) {
+        Ok(session) => session,
         Err(why) => {
             eprintln!("lune _step: {why}");
             return ExitCode::FAILURE;
@@ -266,8 +290,8 @@ pub fn run(args: &StepArgs) -> ExitCode {
         harness,
         stage,
         prompt: &prompt,
-        followup: followup.as_deref(),
-        pi_session: args.pi_session.as_deref(),
+        followup: followup.as_ref(),
+        pi_session: pi_session.as_ref(),
         session_out: args.session_out.as_deref(),
         deadline: Instant::now() + timeout,
     };
@@ -291,18 +315,32 @@ fn validate_timeout(secs: u64) -> Result<Duration, String> {
     Ok(Duration::from_secs(secs))
 }
 
-fn read_text(inline: Option<&str>, file: Option<&Path>) -> Result<Option<String>, String> {
+fn parse_pi_session(harness: Harness, path: Option<&Path>) -> Result<Option<SessionId>, String> {
+    match (harness, path) {
+        (Harness::Pi, Some(path)) => {
+            let raw = path
+                .to_str()
+                .ok_or_else(|| format!("--pi-session {} is not UTF-8", path.display()))?;
+            SessionId::parse(raw)
+                .map(Some)
+                .map_err(|why| format!("--pi-session: {why}"))
+        }
+        (_, Some(_)) => Err("--pi-session is only valid with --harness pi".to_owned()),
+        (_, None) => Ok(None),
+    }
+}
+
+fn read_prompt(inline: Option<&str>, file: Option<&Path>) -> Result<Option<Prompt>, String> {
     let raw = match (inline, file) {
         (Some(text), None) => text.to_owned(),
         (None, Some(path)) => read_file_bounded(path, PROMPT_BYTES_MAX)?,
         (None, None) => return Ok(None),
         (Some(_), Some(_)) => unreachable!("clap rejects both inline text and file"),
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.trim().is_empty() {
         return Ok(None);
     }
-    Ok(Some(raw))
+    Prompt::parse(raw).map(Some)
 }
 
 fn read_file_bounded(path: &Path, limit: usize) -> Result<String, String> {
@@ -321,9 +359,9 @@ fn read_file_bounded(path: &Path, limit: usize) -> Result<String, String> {
 struct StepPlan<'a> {
     harness: Harness,
     stage: &'a str,
-    prompt: &'a str,
-    followup: Option<&'a str>,
-    pi_session: Option<&'a Path>,
+    prompt: &'a Prompt,
+    followup: Option<&'a Prompt>,
+    pi_session: Option<&'a SessionId>,
     session_out: Option<&'a Path>,
     deadline: Instant,
 }
@@ -335,40 +373,25 @@ fn execute(
 ) -> Result<(), String> {
     let harness = step.harness;
     assert!(!step.stage.is_empty(), "stage label is non-empty");
-    assert!(!step.prompt.trim().is_empty(), "prompt is non-empty");
-    let pi_session = match (harness, step.pi_session) {
-        (Harness::Pi, Some(path)) => Some(
-            path.to_str()
-                .ok_or_else(|| format!("{} is not UTF-8", path.display()))?
-                .to_owned(),
-        ),
-        _ => None,
-    };
-    if let (Some(out_path), Some(session_path)) = (step.session_out, pi_session.as_deref()) {
-        write_session_id(out_path, session_path)?;
+    if let (Some(out_path), Some(session)) = (step.session_out, step.pi_session) {
+        write_session_id(out_path, session)?;
     }
     let turns = TurnPlan {
         harness,
         session_out: step.session_out,
-        record_stream_session: pi_session.is_none(),
+        record_stream_session: step.pi_session.is_none(),
         deadline: step.deadline,
     };
     renderer.note(&format!("═══ {} ({}) ═══", step.stage, harness.program()));
     renderer.raw(&osc_7501_working(harness, step.stage));
     renderer.failure()?;
 
-    let first = run_turn(
-        &turns,
-        step.prompt,
-        pi_session.as_deref(),
-        stopping,
-        renderer,
-    )?;
+    let first = run_turn(&turns, step.prompt, step.pi_session, stopping, renderer)?;
     let summary = match step.followup {
         None => first.summary,
         Some(followup) => {
-            let resume = pi_session.or(first.session_id);
-            let Some(handle) = resume.as_deref() else {
+            let resume = step.pi_session.or(first.session_id.as_ref());
+            let Some(handle) = resume else {
                 return Err(format!(
                     "{} emitted no session_id on turn 1; cannot resume for turn 2",
                     harness.program()
@@ -386,14 +409,11 @@ fn execute(
 }
 
 #[must_use]
-pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>) -> Command {
-    assert!(!prompt.trim().is_empty(), "prompt is non-empty");
-    if let Some(handle) = resume_handle {
-        assert!(!handle.trim().is_empty(), "resume handle is non-empty");
-        if harness != Harness::Pi {
-            assert!(!handle.starts_with('-'), "resume handle is not a flag");
-        }
-    }
+pub fn build_command(
+    harness: Harness,
+    prompt: &Prompt,
+    resume_handle: Option<&SessionId>,
+) -> Command {
     let mut command = Command::new(harness.program());
     match harness {
         Harness::ClaudeCode => {
@@ -405,9 +425,9 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
                 "--dangerously-skip-permissions",
             ]);
             if let Some(id) = resume_handle {
-                command.args(["--resume", id]);
+                command.args(["--resume", id.as_str()]);
             }
-            command.args(["--", prompt]);
+            command.args(["--", prompt.as_str()]);
         }
         Harness::Antigravity => {
             command.args([
@@ -416,16 +436,16 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
                 "--dangerously-skip-permissions",
             ]);
             if let Some(id) = resume_handle {
-                command.args(["--resume", id]);
+                command.args(["--resume", id.as_str()]);
             }
-            command.arg(format!("-p={prompt}"));
+            command.arg(format!("-p={}", prompt.as_str()));
         }
         Harness::Pi => {
             command.args(["--mode", "json"]);
             if let Some(session) = resume_handle {
-                command.args(["--session", session]);
+                command.args(["--session", session.as_str()]);
             }
-            command.args(["-p", "--", prompt]);
+            command.args(["-p", "--", prompt.as_str()]);
         }
     }
     luned::local_git(&mut command);
@@ -447,10 +467,72 @@ struct TurnPlan<'a> {
     deadline: Instant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgyToolProgress {
-    Announced,
-    Finished,
+mod agy_tools {
+    use std::collections::BTreeMap;
+
+    use super::AGY_TOOL_STEPS_MAX;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Progress {
+        Announced,
+        Finished,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(super) enum FinishTransition {
+        AnnouncedAndFinished,
+        FinishedOnly,
+        AlreadyFinished,
+    }
+
+    #[derive(Default)]
+    pub(super) struct AgyToolSteps {
+        steps: BTreeMap<u64, Progress>,
+    }
+
+    impl AgyToolSteps {
+        pub(super) fn announce(&mut self, index: u64) -> Result<bool, String> {
+            if self.steps.contains_key(&index) {
+                return Ok(false);
+            }
+            if self.steps.len() >= AGY_TOOL_STEPS_MAX {
+                return Err(format!("agy exceeded {AGY_TOOL_STEPS_MAX} tool steps"));
+            }
+            self.steps.insert(index, Progress::Announced);
+            Ok(true)
+        }
+
+        pub(super) fn finish(&mut self, index: u64) -> Result<FinishTransition, String> {
+            match self.steps.get_mut(&index) {
+                Some(Progress::Finished) => Ok(FinishTransition::AlreadyFinished),
+                Some(slot @ Progress::Announced) => {
+                    *slot = Progress::Finished;
+                    Ok(FinishTransition::FinishedOnly)
+                }
+                None => {
+                    if self.steps.len() >= AGY_TOOL_STEPS_MAX {
+                        return Err(format!("agy exceeded {AGY_TOOL_STEPS_MAX} tool steps"));
+                    }
+                    self.steps.insert(index, Progress::Finished);
+                    Ok(FinishTransition::AnnouncedAndFinished)
+                }
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn is_empty(&self) -> bool {
+            self.steps.is_empty()
+        }
+
+        #[cfg(test)]
+        pub(super) fn saturated_announced() -> AgyToolSteps {
+            AgyToolSteps {
+                steps: (0..AGY_TOOL_STEPS_MAX as u64)
+                    .map(|index| (index, Progress::Announced))
+                    .collect(),
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -458,19 +540,44 @@ enum AgyToolState {
     InProgress,
     Done,
     Error,
+    Unknown,
+}
+
+enum TurnParser {
+    ClaudeCode,
+    Antigravity(agy_tools::AgyToolSteps),
+    Pi,
+}
+
+impl TurnParser {
+    fn new(harness: Harness) -> TurnParser {
+        match harness {
+            Harness::ClaudeCode => TurnParser::ClaudeCode,
+            Harness::Antigravity => TurnParser::Antigravity(agy_tools::AgyToolSteps::default()),
+            Harness::Pi => TurnParser::Pi,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ParsedLine<'a> {
+    Events(Vec<StreamEvent>),
+    Ignored,
+    MalformedJson,
+    PlainText(&'a str),
 }
 
 struct Heard {
-    session_id: Option<String>,
+    session_id: Option<SessionId>,
     verdict: Option<Verdict>,
     unparsed_lines: u64,
-    agy_tool_steps: BTreeMap<u64, AgyToolProgress>,
+    parser: TurnParser,
 }
 
 fn run_turn(
     plan: &TurnPlan<'_>,
-    prompt: &str,
-    resume_handle: Option<&str>,
+    prompt: &Prompt,
+    resume_handle: Option<&SessionId>,
     stopping: &Stopping,
     renderer: &mut Renderer<impl Write>,
 ) -> Result<Turn, String> {
@@ -514,7 +621,7 @@ fn run_turn(
         session_id: None,
         verdict: None,
         unparsed_lines: 0,
-        agy_tool_steps: BTreeMap::new(),
+        parser: TurnParser::new(harness),
     };
     let mut ended = false;
     let mut exited_at: Option<Instant> = None;
@@ -609,67 +716,59 @@ fn heard_line(
     heard: &mut Heard,
     renderer: &mut Renderer<impl Write>,
 ) -> Result<(), String> {
-    assert!(heard.agy_tool_steps.len() <= AGY_TOOL_STEPS_MAX);
-    let events = parse_line_in_turn(plan.harness, line, &mut heard.agy_tool_steps)?;
-    assert!(events.len() <= EVENTS_PER_LINE_MAX);
-    if events.is_empty() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('{') {
-            heard.unparsed_lines += 1;
-        } else if !trimmed.is_empty() {
-            renderer.block(trimmed);
-        }
-    }
-    for event in events {
-        match event {
-            StreamEvent::SessionId(id) => {
-                if heard.session_id.is_none() {
-                    if !usable_session_id(&id) {
-                        return Err(format!(
-                            "{} reported an unusable session id",
-                            plan.harness.program()
-                        ));
+    match heard.parser.parse_line(line)? {
+        ParsedLine::Ignored => {}
+        ParsedLine::MalformedJson => heard.unparsed_lines += 1,
+        ParsedLine::PlainText(text) => renderer.block(text),
+        ParsedLine::Events(events) => {
+            assert!(events.len() <= EVENTS_PER_LINE_MAX);
+            for event in events {
+                match event {
+                    StreamEvent::SessionId(raw) => {
+                        if heard.session_id.is_none() {
+                            let id = SessionId::parse(&raw).map_err(|why| {
+                                format!(
+                                    "{} reported an unusable session id: {why}",
+                                    plan.harness.program()
+                                )
+                            })?;
+                            if plan.record_stream_session
+                                && let Some(path) = plan.session_out
+                            {
+                                write_session_id(path, &id)?;
+                            }
+                            heard.session_id = Some(id);
+                        }
                     }
-                    if plan.record_stream_session
-                        && let Some(path) = plan.session_out
-                    {
-                        write_session_id(path, &id)?;
+                    StreamEvent::TextDelta(delta) => renderer.delta(&delta),
+                    StreamEvent::TextBlock(text) => renderer.block(&text),
+                    StreamEvent::ToolUse { name, detail } => {
+                        renderer.tool(&name, detail.as_deref());
                     }
-                    heard.session_id = Some(id);
-                }
-            }
-            StreamEvent::TextDelta(delta) => renderer.delta(&delta),
-            StreamEvent::TextBlock(text) => renderer.block(&text),
-            StreamEvent::ToolUse { name, detail } => renderer.tool(&name, detail.as_deref()),
-            StreamEvent::ToolResult { name, is_error } => {
-                if is_error {
-                    let label = name.as_deref().unwrap_or("tool");
-                    renderer.note(&format!("✗ {label} failed"));
-                }
-            }
-            StreamEvent::TurnFinished(verdict) => {
-                heard.verdict = match (heard.verdict.take(), verdict) {
-                    (Some(Verdict::Failed(why)), Verdict::Succeeded(_)) => {
-                        Some(Verdict::Failed(why))
+                    StreamEvent::ToolResult { name, is_error } => {
+                        if is_error {
+                            let label = name.as_deref().unwrap_or("tool");
+                            renderer.note(&format!("✗ {label} failed"));
+                        }
                     }
-                    (_, verdict) => Some(verdict),
-                };
-            }
-            StreamEvent::Retried => {
-                if matches!(heard.verdict, Some(Verdict::Failed(_))) {
-                    heard.verdict = None;
+                    StreamEvent::TurnFinished(verdict) => {
+                        heard.verdict = match (heard.verdict.take(), verdict) {
+                            (Some(Verdict::Failed(why)), Verdict::Succeeded(_)) => {
+                                Some(Verdict::Failed(why))
+                            }
+                            (_, verdict) => Some(verdict),
+                        };
+                    }
+                    StreamEvent::Retried => {
+                        if matches!(heard.verdict, Some(Verdict::Failed(_))) {
+                            heard.verdict = None;
+                        }
+                    }
                 }
             }
         }
     }
     renderer.failure()
-}
-
-fn usable_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= SESSION_ID_BYTES_MAX
-        && !id.starts_with('-')
-        && !id.chars().any(char::is_control)
 }
 
 fn drain_stderr(mut stderr: impl io::Read) -> io::Result<String> {
@@ -765,13 +864,15 @@ fn end_group(child: &mut Child, group: Pid) -> Result<ExitStatus, String> {
         .map_err(|error| format!("failed to wait on child: {error}"))
 }
 
-fn write_session_id(path: &Path, id: &str) -> Result<(), String> {
-    assert!(!id.trim().is_empty(), "session id written is non-empty");
+// `session_out` is a plain text handoff file written only by `lune _step` and
+// read by `luned::flows::store::read_session_out`, which parses `SessionId`.
+fn write_session_id(path: &Path, id: &SessionId) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
     let staged = path.with_extension(format!("tmp.{}", std::process::id()));
-    let written = fs::write(&staged, format!("{id}\n")).and_then(|()| fs::rename(&staged, path));
+    let written =
+        fs::write(&staged, format!("{}\n", id.as_str())).and_then(|()| fs::rename(&staged, path));
     if written.is_err()
         && let Err(error) = fs::remove_file(&staged)
         && error.kind() != io::ErrorKind::NotFound
@@ -934,27 +1035,52 @@ fn finished(ok: bool, summary: Option<String>, fallback: &str) -> StreamEvent {
 
 #[must_use]
 pub fn parse_line(harness: Harness, line: &str) -> Vec<StreamEvent> {
-    parse_line_in_turn(harness, line, &mut BTreeMap::new())
+    let mut parser = TurnParser::new(harness);
+    match parser
+        .parse_line(line)
         .expect("a single line never exceeds AGY_TOOL_STEPS_MAX")
+    {
+        ParsedLine::Events(events) => events,
+        ParsedLine::Ignored | ParsedLine::MalformedJson | ParsedLine::PlainText(_) => Vec::new(),
+    }
 }
 
-fn parse_line_in_turn(
-    harness: Harness,
-    line: &str,
-    agy_tool_steps: &mut BTreeMap<u64, AgyToolProgress>,
-) -> Result<Vec<StreamEvent>, String> {
-    assert!(agy_tool_steps.len() <= AGY_TOOL_STEPS_MAX);
-    let Ok(record) = serde_json::from_str::<Value>(line) else {
-        return Ok(Vec::new());
-    };
-    let events = match harness {
-        Harness::ClaudeCode => parse_claude(&record),
-        Harness::Antigravity => parse_agy(&record, agy_tool_steps)?,
-        Harness::Pi => parse_pi(&record),
-    };
-    assert!(events.len() <= EVENTS_PER_LINE_MAX);
-    assert!(agy_tool_steps.len() <= AGY_TOOL_STEPS_MAX);
-    Ok(events)
+impl TurnParser {
+    fn parse_line<'a>(&mut self, line: &'a str) -> Result<ParsedLine<'a>, String> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(ParsedLine::Ignored);
+        }
+        if !trimmed.starts_with('{') {
+            return Ok(ParsedLine::PlainText(trimmed));
+        }
+        let events = match self {
+            TurnParser::ClaudeCode => {
+                let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
+                    return Ok(ParsedLine::MalformedJson);
+                };
+                parse_claude(&record)
+            }
+            TurnParser::Antigravity(tool_steps) => {
+                let Ok(record) = serde_json::from_str::<AgyEnvelope>(trimmed) else {
+                    return Ok(ParsedLine::MalformedJson);
+                };
+                parse_agy(&record, tool_steps)?
+            }
+            TurnParser::Pi => {
+                let Ok(record) = serde_json::from_str::<Value>(trimmed) else {
+                    return Ok(ParsedLine::MalformedJson);
+                };
+                parse_pi(&record)
+            }
+        };
+        assert!(events.len() <= EVENTS_PER_LINE_MAX);
+        if events.is_empty() {
+            Ok(ParsedLine::Ignored)
+        } else {
+            Ok(ParsedLine::Events(events))
+        }
+    }
 }
 
 fn parse_claude(record: &Value) -> Vec<StreamEvent> {
@@ -997,108 +1123,235 @@ fn parse_claude(record: &Value) -> Vec<StreamEvent> {
     events
 }
 
+#[derive(Debug, Deserialize)]
+struct AgyEnvelope {
+    event: Option<AgyEventKind>,
+    conversation_id: Option<String>,
+    step_update: Option<AgyStepUpdate>,
+    result: Option<AgyResultRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AgyEventKind {
+    Init,
+    StepUpdate,
+    Result,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyStepUpdate {
+    conversation_id: Option<String>,
+    step_index: Option<u64>,
+    state: Option<AgyWireToolState>,
+    step_type: Option<AgyStepType>,
+    text_delta: Option<String>,
+    tool_name: Option<String>,
+    tool_info: Option<AgyToolInfo>,
+    subagent_info: Option<AgySubagentInfo>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AgyStepType {
+    AgentResponse,
+    Tool,
+    UserInput,
+    Thinking,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum AgyWireToolState {
+    Pending,
+    Active,
+    Done,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyToolInfo {
+    name: Option<String>,
+    parameters: Option<Value>,
+    error: Option<Value>,
+    #[serde(flatten)]
+    fields: Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgySubagentInfo {
+    subagents: Option<Vec<AgySubagent>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgySubagent {
+    role: Option<String>,
+    type_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgyResultRecord {
+    conversation_id: Option<String>,
+    status: Option<String>,
+    finished_reason: Option<String>,
+    response: Option<String>,
+    error: Option<AgyWireError>,
+    denied_actions: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum AgyWireError {
+    Text(String),
+    Object {
+        message: Option<String>,
+        r#type: Option<String>,
+    },
+    Other(Value),
+}
+
+impl AgyWireError {
+    fn summary(&self) -> Option<&str> {
+        match self {
+            AgyWireError::Text(text) => nonempty_trimmed(text),
+            AgyWireError::Object { message, r#type } => message
+                .as_deref()
+                .and_then(nonempty_trimmed)
+                .or_else(|| r#type.as_deref().and_then(nonempty_trimmed)),
+            AgyWireError::Other(value) => (!value.is_null()).then_some("agy reported an error"),
+        }
+    }
+}
+
 fn parse_agy(
-    record: &Value,
-    tool_steps: &mut BTreeMap<u64, AgyToolProgress>,
+    record: &AgyEnvelope,
+    tool_steps: &mut agy_tools::AgyToolSteps,
 ) -> Result<Vec<StreamEvent>, String> {
-    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
     let mut events = Vec::new();
-    if let Some(id) = nonempty_str(&record["conversation_id"])
-        .or_else(|| nonempty_str(&record["step_update"]["conversation_id"]))
-        .or_else(|| nonempty_str(&record["result"]["conversation_id"]))
-    {
+    let conversation_id = record
+        .conversation_id
+        .as_deref()
+        .and_then(nonempty_trimmed)
+        .or_else(|| {
+            record
+                .step_update
+                .as_ref()
+                .and_then(|update| update.conversation_id.as_deref())
+                .and_then(nonempty_trimmed)
+        })
+        .or_else(|| {
+            record
+                .result
+                .as_ref()
+                .and_then(|result| result.conversation_id.as_deref())
+                .and_then(nonempty_trimmed)
+        });
+    if let Some(id) = conversation_id {
         events.push(StreamEvent::SessionId(id.to_owned()));
     }
-    match record["event"].as_str() {
-        Some("step_update") => {
-            let update = &record["step_update"];
-            match update["step_type"].as_str() {
-                Some("agent_response") => {
-                    if let Some(delta) = update["text_delta"].as_str().filter(|s| !s.is_empty()) {
-                        events.push(StreamEvent::TextDelta(delta.to_owned()));
+    match record.event {
+        Some(AgyEventKind::StepUpdate) => {
+            if let Some(update) = &record.step_update {
+                match update.step_type {
+                    Some(AgyStepType::AgentResponse) => {
+                        if let Some(delta) = update.text_delta.as_deref().filter(|s| !s.is_empty())
+                        {
+                            events.push(StreamEvent::TextDelta(delta.to_owned()));
+                        }
                     }
+                    Some(AgyStepType::Tool) => parse_agy_tool(update, tool_steps, &mut events)?,
+                    Some(AgyStepType::UserInput | AgyStepType::Thinking | AgyStepType::Unknown)
+                    | None => {}
                 }
-                Some("tool") => parse_agy_tool(update, tool_steps, &mut events)?,
-                _ => {}
             }
         }
-        Some("result") => {
+        Some(AgyEventKind::Result) => {
             events.push(StreamEvent::TurnFinished(parse_agy_result(
-                &record["result"],
+                record.result.as_ref(),
             )));
         }
-        _ => {}
+        Some(AgyEventKind::Init | AgyEventKind::Unknown) | None => {}
     }
     assert!(events.len() <= AGY_EVENTS_PER_LINE_MAX);
-    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
     Ok(events)
 }
 
 fn agy_finished_reason_ok(reason: &str) -> bool {
-    assert_ne!(reason.trim(), "");
     ["normal", "stop", "complete", "success"]
         .iter()
         .any(|ok| reason.eq_ignore_ascii_case(ok))
 }
 
-fn agy_result_failure(
-    result: &Value,
-    finished_reason: Option<&str>,
-    response: Option<&str>,
-) -> Verdict {
-    let summary = nonempty_str(&result["error"])
-        .or(finished_reason)
-        .or(response)
-        .or_else(|| nonempty_str(&result["status"]))
-        .unwrap_or("agy reported an error");
-    assert_ne!(summary.trim(), "");
-    Verdict::Failed(summary.to_owned())
-}
-
-fn parse_agy_result(result: &Value) -> Verdict {
-    let status_ok = result["status"].as_str() == Some("SUCCESS");
-    let finished_reason = nonempty_str(&result["finished_reason"]);
+fn parse_agy_result(result: Option<&AgyResultRecord>) -> Verdict {
+    let Some(result) = result else {
+        return Verdict::Failed("agy reported an error".to_owned());
+    };
+    let error = result.error.as_ref().and_then(AgyWireError::summary);
+    let status = result.status.as_deref().and_then(nonempty_trimmed);
+    let status_ok = status == Some("SUCCESS");
+    let finished_reason = result.finished_reason.as_deref().and_then(nonempty_trimmed);
     let finished_reason_ok = finished_reason.is_none_or(agy_finished_reason_ok);
-    let response = nonempty_str(&result["response"]);
+    let response = result.response.as_deref().and_then(nonempty_trimmed);
 
-    if status_ok {
-        if finished_reason_ok {
-            let has_denied_actions = result["denied_actions"]
-                .as_array()
-                .is_some_and(|denied| !denied.is_empty());
-            if response.is_none() && has_denied_actions {
-                Verdict::Failed("agy stopped because a tool action was denied".to_owned())
-            } else {
-                Verdict::Succeeded(response.map(str::to_owned))
-            }
+    if error.is_none() && status_ok && finished_reason_ok {
+        let has_denied_actions = result
+            .denied_actions
+            .as_deref()
+            .is_some_and(|denied| !denied.is_empty());
+        if response.is_none() && has_denied_actions {
+            Verdict::Failed("agy stopped because a tool action was denied".to_owned())
         } else {
-            agy_result_failure(result, finished_reason, response)
+            Verdict::Succeeded(response.map(str::to_owned))
         }
     } else {
-        agy_result_failure(result, finished_reason, response)
+        let summary = error
+            .or(finished_reason)
+            .or(response)
+            .or(status)
+            .unwrap_or("agy reported an error");
+        Verdict::Failed(summary.to_owned())
     }
 }
 
-fn agy_tool_state(update: &Value) -> AgyToolState {
-    assert_eq!(update["step_type"].as_str(), Some("tool"));
-    let state = update["state"].as_str();
-    let has_error = update["tool_info"]
-        .get("error")
+fn agy_tool_state(update: &AgyStepUpdate) -> AgyToolState {
+    let has_error = update
+        .tool_info
+        .as_ref()
+        .and_then(|info| info.error.as_ref())
         .is_some_and(|value| !value.is_null());
-    if state == Some("ERROR") || has_error {
-        AgyToolState::Error
-    } else if state == Some("DONE") {
-        AgyToolState::Done
-    } else {
-        AgyToolState::InProgress
+    if has_error {
+        return AgyToolState::Error;
+    }
+    match update.state {
+        Some(AgyWireToolState::Error) => AgyToolState::Error,
+        Some(AgyWireToolState::Done) => AgyToolState::Done,
+        Some(AgyWireToolState::Pending | AgyWireToolState::Active) => AgyToolState::InProgress,
+        Some(AgyWireToolState::Unknown) | None => AgyToolState::Unknown,
     }
 }
 
-fn agy_tool_use_event(update: &Value, name: &str) -> StreamEvent {
-    assert_ne!(name.trim(), "");
-    let detail = extract_tool_detail(&update["tool_info"]["parameters"])
-        .or_else(|| extract_tool_detail(&update["tool_info"]))
-        .or_else(|| parse_agy_subagent_detail(&update["subagent_info"]));
+fn agy_tool_use_event(update: &AgyStepUpdate, name: &str) -> StreamEvent {
+    let detail = update
+        .tool_info
+        .as_ref()
+        .and_then(|info| {
+            info.parameters
+                .as_ref()
+                .and_then(extract_tool_detail)
+                .or_else(|| extract_tool_detail_from_map(&info.fields))
+        })
+        .or_else(|| {
+            update
+                .subagent_info
+                .as_ref()
+                .and_then(parse_agy_subagent_detail)
+        });
     StreamEvent::ToolUse {
         name: name.to_owned(),
         detail,
@@ -1106,29 +1359,30 @@ fn agy_tool_use_event(update: &Value, name: &str) -> StreamEvent {
 }
 
 fn parse_agy_tool(
-    update: &Value,
-    tool_steps: &mut BTreeMap<u64, AgyToolProgress>,
+    update: &AgyStepUpdate,
+    tool_steps: &mut agy_tools::AgyToolSteps,
     events: &mut Vec<StreamEvent>,
 ) -> Result<(), String> {
-    assert_eq!(update["step_type"].as_str(), Some("tool"));
-    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
     let state = agy_tool_state(update);
-    let tool_name =
-        nonempty_str(&update["tool_name"]).or_else(|| nonempty_str(&update["tool_info"]["name"]));
-    let step_index = update["step_index"].as_u64();
+    let tool_name = update
+        .tool_name
+        .as_deref()
+        .and_then(nonempty_trimmed)
+        .or_else(|| {
+            update
+                .tool_info
+                .as_ref()
+                .and_then(|info| info.name.as_deref())
+                .and_then(nonempty_trimmed)
+        });
 
-    match (state, step_index) {
+    match (state, update.step_index) {
+        (AgyToolState::Unknown, _) => {}
         (AgyToolState::InProgress, Some(index)) => {
             if let Some(name) = tool_name
-                && !tool_steps.contains_key(&index)
+                && tool_steps.announce(index)?
             {
-                if tool_steps.len() < AGY_TOOL_STEPS_MAX {
-                    let previous = tool_steps.insert(index, AgyToolProgress::Announced);
-                    assert!(previous.is_none());
-                    events.push(agy_tool_use_event(update, name));
-                } else {
-                    return Err(format!("agy exceeded {AGY_TOOL_STEPS_MAX} tool steps"));
-                }
+                events.push(agy_tool_use_event(update, name));
             }
         }
         (AgyToolState::InProgress, None) => {
@@ -1138,31 +1392,23 @@ fn parse_agy_tool(
         }
         (AgyToolState::Done | AgyToolState::Error, Some(index)) => {
             let is_error = state == AgyToolState::Error;
-            match tool_steps.get(&index).copied() {
-                None => {
-                    if tool_steps.len() < AGY_TOOL_STEPS_MAX {
-                        let previous = tool_steps.insert(index, AgyToolProgress::Finished);
-                        assert!(previous.is_none());
-                        if let Some(name) = tool_name {
-                            events.push(agy_tool_use_event(update, name));
-                        }
-                        events.push(StreamEvent::ToolResult {
-                            name: tool_name.map(str::to_owned),
-                            is_error,
-                        });
-                    } else {
-                        return Err(format!("agy exceeded {AGY_TOOL_STEPS_MAX} tool steps"));
+            match tool_steps.finish(index)? {
+                agy_tools::FinishTransition::AnnouncedAndFinished => {
+                    if let Some(name) = tool_name {
+                        events.push(agy_tool_use_event(update, name));
                     }
-                }
-                Some(AgyToolProgress::Announced) => {
-                    let previous = tool_steps.insert(index, AgyToolProgress::Finished);
-                    assert_eq!(previous, Some(AgyToolProgress::Announced));
                     events.push(StreamEvent::ToolResult {
                         name: tool_name.map(str::to_owned),
                         is_error,
                     });
                 }
-                Some(AgyToolProgress::Finished) => {}
+                agy_tools::FinishTransition::FinishedOnly => {
+                    events.push(StreamEvent::ToolResult {
+                        name: tool_name.map(str::to_owned),
+                        is_error,
+                    });
+                }
+                agy_tools::FinishTransition::AlreadyFinished => {}
             }
         }
         (AgyToolState::Done | AgyToolState::Error, None) => {
@@ -1172,7 +1418,6 @@ fn parse_agy_tool(
             });
         }
     }
-    assert!(tool_steps.len() <= AGY_TOOL_STEPS_MAX);
     Ok(())
 }
 
@@ -1275,40 +1520,52 @@ fn push_content_block(events: &mut Vec<StreamEvent>, block: &Value) {
     }
 }
 
+const TOOL_DETAIL_KEYS: [&str; 15] = [
+    "command",
+    "command_line",
+    "CommandLine",
+    "file_path",
+    "FilePath",
+    "path",
+    "Path",
+    "TargetFile",
+    "AbsolutePath",
+    "pattern",
+    "Pattern",
+    "query",
+    "Query",
+    "url",
+    "Url",
+];
+
 fn extract_tool_detail(value: &Value) -> Option<String> {
-    let raw = nonempty_str(&value["command"])
-        .or_else(|| nonempty_str(&value["command_line"]))
-        .or_else(|| nonempty_str(&value["CommandLine"]))
-        .or_else(|| nonempty_str(&value["file_path"]))
-        .or_else(|| nonempty_str(&value["FilePath"]))
-        .or_else(|| nonempty_str(&value["path"]))
-        .or_else(|| nonempty_str(&value["Path"]))
-        .or_else(|| nonempty_str(&value["TargetFile"]))
-        .or_else(|| nonempty_str(&value["AbsolutePath"]))
-        .or_else(|| nonempty_str(&value["pattern"]))
-        .or_else(|| nonempty_str(&value["Pattern"]))
-        .or_else(|| nonempty_str(&value["query"]))
-        .or_else(|| nonempty_str(&value["Query"]))
-        .or_else(|| nonempty_str(&value["url"]))
-        .or_else(|| nonempty_str(&value["Url"]))?;
-    assert_ne!(raw.trim(), "");
-    let preview = single_line_preview(raw, DETAIL_CHARS_MAX);
-    assert_ne!(preview, "");
-    Some(preview)
+    extract_tool_detail_from_map(value.as_object()?)
 }
 
-fn parse_agy_subagent_detail(value: &Value) -> Option<String> {
-    let first = value["subagents"].as_array()?.first()?;
-    let raw = nonempty_str(&first["role"]).or_else(|| nonempty_str(&first["type_name"]))?;
-    assert_ne!(raw.trim(), "");
-    let preview = single_line_preview(raw, DETAIL_CHARS_MAX);
-    assert_ne!(preview, "");
-    Some(preview)
+fn extract_tool_detail_from_map(map: &Map<String, Value>) -> Option<String> {
+    let raw = TOOL_DETAIL_KEYS
+        .iter()
+        .find_map(|key| map.get(*key).and_then(nonempty_str))?;
+    Some(single_line_preview(raw, DETAIL_CHARS_MAX))
+}
+
+fn parse_agy_subagent_detail(info: &AgySubagentInfo) -> Option<String> {
+    let first = info.subagents.as_deref()?.first()?;
+    let raw = first
+        .role
+        .as_deref()
+        .and_then(nonempty_trimmed)
+        .or_else(|| first.type_name.as_deref().and_then(nonempty_trimmed))?;
+    Some(single_line_preview(raw, DETAIL_CHARS_MAX))
+}
+
+fn nonempty_trimmed(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn nonempty_str(value: &Value) -> Option<&str> {
-    let text = value.as_str()?.trim();
-    (!text.is_empty()).then_some(text)
+    nonempty_trimmed(value.as_str()?)
 }
 
 fn single_line_preview(text: &str, chars_max: usize) -> String {
@@ -1370,9 +1627,17 @@ mod tests {
 
     use super::*;
 
+    fn prompt(raw: &str) -> Prompt {
+        Prompt::parse(raw.to_owned()).unwrap()
+    }
+
+    fn session(raw: &str) -> SessionId {
+        SessionId::parse(raw).unwrap()
+    }
+
     #[test]
     fn build_command_matches_each_harness_cli_contract() {
-        let claude1 = build_command(Harness::ClaudeCode, "/tigerstyle PR #1", None);
+        let claude1 = build_command(Harness::ClaudeCode, &prompt("/tigerstyle PR #1"), None);
         let args: Vec<&OsStr> = claude1.get_args().collect();
         assert_eq!(claude1.get_program(), OsStr::new("claude"));
         assert_eq!(
@@ -1389,7 +1654,11 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let claude2 = build_command(Harness::ClaudeCode, "act now", Some("sess-123"));
+        let claude2 = build_command(
+            Harness::ClaudeCode,
+            &prompt("act now"),
+            Some(&session("sess-123")),
+        );
         let args: Vec<&OsStr> = claude2.get_args().collect();
         assert_eq!(
             args,
@@ -1407,7 +1676,7 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let agy1 = build_command(Harness::Antigravity, "/tigerstyle", None);
+        let agy1 = build_command(Harness::Antigravity, &prompt("/tigerstyle"), None);
         let args: Vec<&OsStr> = agy1.get_args().collect();
         assert_eq!(agy1.get_program(), OsStr::new("agy"));
         assert!(!args.contains(&OsStr::new("--verbose")));
@@ -1422,7 +1691,11 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let agy2 = build_command(Harness::Antigravity, "fix", Some("conv-9"));
+        let agy2 = build_command(
+            Harness::Antigravity,
+            &prompt("fix"),
+            Some(&session("conv-9")),
+        );
         let args: Vec<&OsStr> = agy2.get_args().collect();
         assert_eq!(
             args,
@@ -1437,7 +1710,7 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let agy_dash = build_command(Harness::Antigravity, "--help", None);
+        let agy_dash = build_command(Harness::Antigravity, &prompt("--help"), None);
         let args: Vec<&OsStr> = agy_dash.get_args().collect();
         assert_eq!(
             args,
@@ -1452,8 +1725,8 @@ mod tests {
 
         let pi = build_command(
             Harness::Pi,
-            "/skill:tigerstyle",
-            Some("/tmp/pi-session.jsonl"),
+            &prompt("/skill:tigerstyle"),
+            Some(&session("/tmp/pi-session.jsonl")),
         );
         let args: Vec<&OsStr> = pi.get_args().collect();
         assert_eq!(pi.get_program(), OsStr::new("pi"));
@@ -1626,81 +1899,136 @@ mod tests {
                 detail: Some("research".to_owned()),
             }]
         );
+
+        let result_success_with_error = r#"{"event":"result","result":{"status":"SUCCESS","error":"backend failure","response":"partial"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_success_with_error),
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "backend failure".to_owned()
+            ))]
+        );
+
+        let result_object_error = r#"{"event":"result","result":{"status":"ERROR","error":{"type":"RATE_LIMIT","message":"quota exceeded"}}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_object_error),
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "quota exceeded".to_owned()
+            ))]
+        );
+
+        let unknown_tool_state = r#"{"event":"step_update","step_update":{"step_index":9,"state":"CANCELLED","step_type":"tool","tool_name":"run_command"}}"#;
+        assert_eq!(parse_line(Harness::Antigravity, unknown_tool_state), vec![]);
+
+        let missing_tool_state = r#"{"event":"step_update","step_update":{"step_index":10,"step_type":"tool","tool_name":"run_command"}}"#;
+        assert_eq!(parse_line(Harness::Antigravity, missing_tool_state), vec![]);
     }
 
     #[test]
     fn agy_tool_steps_deduplicate_without_dropping_nameless_updates_and_fail_at_bound() {
-        let mut tool_steps = BTreeMap::new();
+        let mut parser = TurnParser::new(Harness::Antigravity);
 
         let pending_without_name = r#"{"event":"step_update","step_update":{"step_index":5,"state":"PENDING","step_type":"tool"}}"#;
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, pending_without_name, &mut tool_steps)
-                .unwrap(),
-            Vec::new()
+            parser.parse_line(pending_without_name).unwrap(),
+            ParsedLine::Ignored
         );
-        assert!(tool_steps.is_empty());
+        let TurnParser::Antigravity(steps) = &parser else {
+            unreachable!("antigravity parser holds agy tool steps");
+        };
+        assert!(steps.is_empty());
+
+        let unknown_state = r#"{"event":"step_update","step_update":{"step_index":5,"state":"CANCELLED","step_type":"tool","tool_name":"read_file"}}"#;
+        assert_eq!(
+            parser.parse_line(unknown_state).unwrap(),
+            ParsedLine::Ignored
+        );
 
         let active_named = r#"{"event":"step_update","step_update":{"step_index":5,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"parameters":{"Path":"/w/a.rs"}}}}"#;
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, active_named, &mut tool_steps).unwrap(),
-            vec![StreamEvent::ToolUse {
+            parser.parse_line(active_named).unwrap(),
+            ParsedLine::Events(vec![StreamEvent::ToolUse {
                 name: "read_file".to_owned(),
                 detail: Some("/w/a.rs".to_owned()),
-            }]
+            }])
         );
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, active_named, &mut tool_steps).unwrap(),
-            Vec::new()
+            parser.parse_line(active_named).unwrap(),
+            ParsedLine::Ignored
         );
 
         let error_update = r#"{"event":"step_update","step_update":{"step_index":5,"state":"ERROR","step_type":"tool","tool_name":"read_file","tool_info":{"error":{"message":"missing"}}}}"#;
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, error_update, &mut tool_steps).unwrap(),
-            vec![StreamEvent::ToolResult {
+            parser.parse_line(error_update).unwrap(),
+            ParsedLine::Events(vec![StreamEvent::ToolResult {
                 name: Some("read_file".to_owned()),
                 is_error: true,
-            }]
+            }])
         );
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, error_update, &mut tool_steps).unwrap(),
-            Vec::new()
+            parser.parse_line(error_update).unwrap(),
+            ParsedLine::Ignored
+        );
+        assert_eq!(
+            parser.parse_line(active_named).unwrap(),
+            ParsedLine::Ignored
         );
 
         let unindexed_active = r#"{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"bash"}}"#;
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, unindexed_active, &mut tool_steps).unwrap(),
-            vec![StreamEvent::ToolUse {
+            parser.parse_line(unindexed_active).unwrap(),
+            ParsedLine::Events(vec![StreamEvent::ToolUse {
                 name: "bash".to_owned(),
                 detail: None,
-            }]
+            }])
         );
         let unindexed_done = r#"{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"bash"}}"#;
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, unindexed_done, &mut tool_steps).unwrap(),
-            vec![StreamEvent::ToolResult {
+            parser.parse_line(unindexed_done).unwrap(),
+            ParsedLine::Events(vec![StreamEvent::ToolResult {
                 name: Some("bash".to_owned()),
                 is_error: false,
-            }]
+            }])
         );
 
-        let mut saturated: BTreeMap<u64, AgyToolProgress> = (0..AGY_TOOL_STEPS_MAX as u64)
-            .map(|index| (index, AgyToolProgress::Announced))
-            .collect();
+        let mut saturated = TurnParser::Antigravity(agy_tools::AgyToolSteps::saturated_announced());
         let existing_done = r#"{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"tool","tool_name":"read_file"}}"#;
         assert_eq!(
-            parse_line_in_turn(Harness::Antigravity, existing_done, &mut saturated).unwrap(),
-            vec![StreamEvent::ToolResult {
+            saturated.parse_line(existing_done).unwrap(),
+            ParsedLine::Events(vec![StreamEvent::ToolResult {
                 name: Some("read_file".to_owned()),
                 is_error: false,
-            }]
+            }])
         );
 
         let overflow = format!(
             r#"{{"event":"step_update","step_update":{{"step_index":{AGY_TOOL_STEPS_MAX},"state":"ACTIVE","step_type":"tool","tool_name":"read_file"}}}}"#
         );
-        let error =
-            parse_line_in_turn(Harness::Antigravity, &overflow, &mut saturated).unwrap_err();
+        let error = saturated.parse_line(&overflow).unwrap_err();
         assert!(error.contains("tool steps"), "{error}");
+    }
+
+    #[test]
+    fn parsed_line_distinguishes_ignored_json_from_malformed_json_and_plain_text() {
+        let mut parser = TurnParser::new(Harness::Antigravity);
+        assert_eq!(parser.parse_line("   ").unwrap(), ParsedLine::Ignored);
+        assert_eq!(
+            parser.parse_line("hello world").unwrap(),
+            ParsedLine::PlainText("hello world")
+        );
+        assert_eq!(
+            parser
+                .parse_line(r#"{"event":"result","truncated"#)
+                .unwrap(),
+            ParsedLine::MalformedJson
+        );
+        assert_eq!(
+            parser
+                .parse_line(
+                    r#"{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"user_input"}}"#
+                )
+                .unwrap(),
+            ParsedLine::Ignored
+        );
     }
 
     #[test]

@@ -386,4 +386,46 @@ fn a_claude_turn_without_a_result_record_fails() {
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("without a result record"), "{stdout}");
+    assert!(stdout.contains("1 lines did not parse"), "{stdout}");
+}
+
+#[test]
+fn deduplicated_agy_records_do_not_count_as_unparsed_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "#!/bin/sh\n\
+        printf '%s\\n' '{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"read_file\"}}'\n\
+        printf '%s\\n' '{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"read_file\"}}'\n\
+        printf '%s\\n' '{\"event\":\"step_update\",\"step_update\":{\"step_index\":0,\"state\":\"DONE\",\"step_type\":\"user_input\"}}'\n";
+    write_script(dir.path(), "agy", body);
+    let output = step_command(dir.path(), "agy").output().unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0 lines did not parse"), "{stdout}");
+}
+
+#[test]
+fn invalid_pi_session_flags_fail_cleanly_at_cli_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for bad in ["   ", "-flag.jsonl"] {
+        let output = step_command(dir.path(), "pi")
+            .arg(format!("--pi-session={bad}"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("--pi-session"), "{stderr}");
+        assert!(!stderr.contains("panicked"), "{stderr}");
+    }
+
+    let wrong_harness = step_command(dir.path(), "agy")
+        .args(["--pi-session", "/tmp/pi.jsonl"])
+        .output()
+        .unwrap();
+    assert!(!wrong_harness.status.success());
+    let stderr = String::from_utf8_lossy(&wrong_harness.stderr);
+    assert!(
+        stderr.contains("--pi-session is only valid with --harness pi"),
+        "{stderr}"
+    );
 }

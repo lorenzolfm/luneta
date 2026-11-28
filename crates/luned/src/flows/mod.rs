@@ -300,7 +300,7 @@ struct Actor {
     generations: BTreeMap<WorktreeId, u64>,
     steps_opened_count: u64,
     session_files: BTreeMap<WorktreeId, PathBuf>,
-    delivered_sessions: BTreeMap<WorktreeId, String>,
+    delivered_sessions: BTreeMap<WorktreeId, SessionId>,
     step_files: BTreeMap<WorktreeId, Vec<PathBuf>>,
     stop_files: BTreeMap<WorktreeId, PathBuf>,
     unclaimed_exits: BTreeMap<ViewId, TerminalExit>,
@@ -801,16 +801,19 @@ impl Actor {
             .registry
             .get(worktree)
             .and_then(FlowRun::resume_session)
-            .map(SessionId::as_str)
-            == Some(session_id.as_str())
+            == Some(&session_id)
             || self.delivered_sessions.get(&worktree) == Some(&session_id)
         {
             return;
         }
         self.delivered_sessions.insert(worktree, session_id.clone());
-        let effects = self
-            .registry
-            .handle(worktree, FlowEvent::SessionCaptured { view, session_id });
+        let effects = self.registry.handle(
+            worktree,
+            FlowEvent::SessionCaptured {
+                view,
+                session_id: session_id.as_str().to_owned(),
+            },
+        );
         log_alerts(effects);
         self.dirty = true;
     }
