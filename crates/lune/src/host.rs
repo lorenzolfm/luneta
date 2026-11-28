@@ -5965,8 +5965,6 @@ mod tests {
         let (_, right) = app.areas;
         let left = MouseButton::Left;
 
-        // Press in worktree -> Held::Session survives opening an overlay, and Up
-        // under the overlay releases Held::Session cleanly.
         app.handle_at(
             mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
             &mut terminal,
@@ -6000,7 +5998,6 @@ mod tests {
         );
         app.give(Focus::on(Side::Session));
 
-        // Floating menu via MENU chord also preserves Held::Session for its matching Up.
         app.handle_at(
             mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
             &mut terminal,
@@ -6009,18 +6006,24 @@ mod tests {
         .unwrap();
         assert_eq!(app.held, Held::Session);
         assert!(app.chord(MENU));
-        assert_eq!(app.held, Held::Session);
+        assert_eq!(
+            app.held,
+            Held::Session,
+            "opening the floating menu preserves worktree session capture"
+        );
         app.handle_at(
             mouse_input(MouseEventKind::Up(left), right.x + 2, right.y + 2),
             &mut terminal,
             at(100),
         )
         .unwrap();
-        assert_eq!(app.held, Held::Nothing);
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "Up under the floating menu finishes and clears Held::Session"
+        );
         app.give(Focus::on(Side::Session));
 
-        // Collapsing the sidebar also preserves Held::Session so Up over the collapsed
-        // strip still finishes the capture.
         app.handle_at(
             mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
             &mut terminal,
@@ -6029,17 +6032,24 @@ mod tests {
         .unwrap();
         assert_eq!(app.held, Held::Session);
         app.give(Focus::on(Side::Collapsed));
-        assert_eq!(app.held, Held::Session);
+        assert_eq!(
+            app.held,
+            Held::Session,
+            "collapsing the sidebar preserves worktree session capture"
+        );
         app.handle_at(
             mouse_input(MouseEventKind::Up(left), 0, right.y + 2),
             &mut terminal,
             at(115),
         )
         .unwrap();
-        assert_eq!(app.held, Held::Nothing);
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "Up over the collapsed strip finishes and clears Held::Session"
+        );
         app.give(Focus::on(Side::Session));
 
-        // FocusLost cancels worktree capture cleanly.
         app.handle_at(
             mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
             &mut terminal,
@@ -6049,10 +6059,12 @@ mod tests {
         assert_eq!(app.held, Held::Session);
         app.handle_at(Event::Input(Input::FocusLost), &mut terminal, at(140))
             .unwrap();
-        assert_eq!(app.held, Held::Nothing);
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "FocusLost clears active worktree capture"
+        );
 
-        // A new Down in the sidebar cancels a stranded worktree capture instead of
-        // routing the sidebar click back to the session.
         app.handle_at(
             mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
             &mut terminal,
@@ -6066,13 +6078,21 @@ mod tests {
             at(180),
         )
         .unwrap();
-        assert_eq!(app.held, Held::Nothing);
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "a new Down in the sidebar clears a stranded worktree capture"
+        );
         app.handle_at(
             mouse_input(MouseEventKind::Up(left), 2, 1),
             &mut terminal,
             at(200),
         )
         .unwrap();
-        assert_eq!(app.focus.side, Side::Sidebar);
+        assert_eq!(
+            app.focus.side,
+            Side::Sidebar,
+            "the sidebar click focuses the sidebar instead of routing to the session"
+        );
     }
 }

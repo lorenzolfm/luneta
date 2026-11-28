@@ -1870,8 +1870,6 @@ mod tests {
         let text = drawn_body(&ask).text().rect();
         let left = MouseButton::Left;
 
-        // Drag arriving after in-place denial and before the next paint must not
-        // stamp the old drawn body with the new BodyVersion.
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y + 1)),
             Mouse::Started
@@ -1892,8 +1890,6 @@ mod tests {
         );
         assert!(!ask.pressed());
 
-        // Release arriving after a capped scroll of identical lines and before
-        // paint copies what was on screen, then clears the stale highlight on paint.
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y + 1)),
             Mouse::Started
@@ -1913,8 +1909,6 @@ mod tests {
             "a highlight completed before paint clears once the scrolled BodyVersion paints"
         );
 
-        // Shrinking a height-capped box keeps text.x, text.y, and text.width equal
-        // while reducing text.height; row 0 ("…") must not keep a stale drag.
         let before_shrink = drawn_body(&ask).text().rect();
         assert_eq!(
             ask.mouse(mouse(
