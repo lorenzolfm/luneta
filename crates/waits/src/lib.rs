@@ -118,6 +118,12 @@ impl Debug for Lasted {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Awaited<T> {
+    Answered(T),
+    TimedOut,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Patience {
     deadline: Instant,
@@ -164,9 +170,12 @@ impl Patience {
         }
     }
 
-    pub async fn try_awaited<F: IntoFuture>(self, asked: F) -> Option<F::Output> {
+    pub async fn try_awaited<F: IntoFuture>(self, asked: F) -> Awaited<F::Output> {
         let deadline = tokio::time::Instant::from_std(self.deadline);
-        tokio::time::timeout_at(deadline, asked).await.ok()
+        match tokio::time::timeout_at(deadline, asked).await {
+            Ok(answer) => Awaited::Answered(answer),
+            Err(_) => Awaited::TimedOut,
+        }
     }
 
     pub async fn awaited_first<T, U>(
@@ -280,7 +289,7 @@ pub async fn awaited<F: IntoFuture>(what: &str, asked: F) -> F::Output {
     Patience::begun().awaited(what, asked).await
 }
 
-pub async fn try_awaited<F: IntoFuture>(asked: F) -> Option<F::Output> {
+pub async fn try_awaited<F: IntoFuture>(asked: F) -> Awaited<F::Output> {
     Patience::begun().try_awaited(asked).await
 }
 
@@ -310,4 +319,27 @@ fn blocks_no_runtime() {
         !inside,
         "a blocking wait inside a runtime starves its tasks: wait with the async form"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::pending;
+    use std::time::{Duration, Instant};
+
+    use super::{Awaited, Patience};
+
+    #[test]
+    fn try_awaited_distinguishes_answered_none_from_timeout() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let answered = runtime.block_on(super::try_awaited(async { None::<u8> }));
+        assert_eq!(answered, Awaited::Answered(None));
+        let impatient = Patience {
+            deadline: Instant::now() + Duration::from_millis(10),
+        };
+        let timed_out = runtime.block_on(impatient.try_awaited(pending::<Option<u8>>()));
+        assert_eq!(timed_out, Awaited::TimedOut);
+    }
 }

@@ -76,7 +76,8 @@ pub use pi::extension as pi_extension;
 #[cfg(target_os = "macos")]
 pub use process::{
     ActiveState as MacosActiveState, ProcessState as MacosProcessState,
-    StartTime as MacosStartTime, state as macos_process_state,
+    ProcessStateError as MacosProcessStateError, StartTime as MacosStartTime,
+    state as macos_process_state,
 };
 pub use process::{
     Exit as ProcessExit, READY_BYTES_MAX, ReadyLine, ReadyPrefix, read_ready_line, var,
