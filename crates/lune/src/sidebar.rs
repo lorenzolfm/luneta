@@ -5597,8 +5597,6 @@ impl Sidebar {
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(wall);
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
-        lines.extend(self.top(width));
         let (notes, spotted, buttons) = self.notes_at(width, height, frame);
         let room = height.saturating_sub(HEADER + notes.lines.len());
         self.room = room;
@@ -5624,23 +5622,6 @@ impl Sidebar {
                 self.revealed.clone_from(&self.here_row);
             }
             Highlight::Resting(_) | Highlight::Off => {}
-        }
-        if self.host.is_none() {
-            let waiting = if self.away.is_some() {
-                ""
-            } else {
-                "asking luned…"
-            };
-            lines.push(Line::styled(
-                format!(" {waiting}"),
-                Style::new().add_modifier(Modifier::DIM),
-            ));
-        } else if self.rows.is_empty() {
-            assert!(self.typed(), "only a search hides this machine's row");
-            lines.push(Line::styled(
-                " no match",
-                Style::new().add_modifier(Modifier::DIM),
-            ));
         }
         let lit = match (&landing, highlight) {
             (Some((_, lifted)), _) => Some((lifted.clone(), None, LIT)),
@@ -5712,14 +5693,6 @@ impl Sidebar {
             notes_y,
             notes: notes.said,
         };
-        lines.extend(drawn.into_iter().skip(self.top).take(room));
-        lines.resize(notes_from, Line::default());
-        let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
-        let spinners = notes.spinners;
-        lines.extend(notes.lines);
-        put(buffer, area, &lines, self.framing());
-        let mut spots = Spots::default();
-        let mut cut_spots = Spots::default();
         let shown = self.top..self.top + room;
         let mut cadence = Cadence::default();
         if width > 0 {
@@ -5734,10 +5707,37 @@ impl Sidebar {
                     cadence.age(since, wall);
                 }
             }
-            if spinners.iter().any(|line| notes_from + line < height) {
+            if notes.spinners.iter().any(|line| notes_from + line < height) {
                 cadence.spin();
             }
         }
+        let title_frame = if cadence.spinning() { frame } else { 0 };
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
+        lines.extend(self.top(width, title_frame));
+        if self.host.is_none() {
+            let waiting = if self.away.is_some() {
+                ""
+            } else {
+                "asking luned…"
+            };
+            lines.push(Line::styled(
+                format!(" {waiting}"),
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        } else if self.rows.is_empty() {
+            assert!(self.typed(), "only a search hides this machine's row");
+            lines.push(Line::styled(
+                " no match",
+                Style::new().add_modifier(Modifier::DIM),
+            ));
+        }
+        lines.extend(drawn.into_iter().skip(self.top).take(room));
+        lines.resize(notes_from, Line::default());
+        let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
+        lines.extend(notes.lines);
+        put(buffer, area, &lines, self.framing());
+        let mut spots = Spots::default();
+        let mut cut_spots = Spots::default();
         for NumberAt {
             line,
             columns,
@@ -5788,7 +5788,7 @@ impl Sidebar {
             Style::new().fg(moonlight::MUTE)
         };
         let mut lines = vec![Line::styled(RULE.repeat(width), rule), Line::default()];
-        for (count, (glyph, style)) in tallies(self.counts) {
+        for (count, (glyph, style)) in tallies(self.counts, 0) {
             if count == 0 {
                 continue;
             }
@@ -5812,8 +5812,8 @@ impl Sidebar {
         }
     }
 
-    fn top(&self, width: usize) -> [Line<'static>; HEADER] {
-        [self.title(width), Line::default()]
+    fn top(&self, width: usize, frame: usize) -> [Line<'static>; HEADER] {
+        [self.title(width, frame), Line::default()]
     }
 
     fn frame(&self, buffer: &mut Buffer, framed: Rect) {
@@ -5831,7 +5831,7 @@ impl Sidebar {
         }
     }
 
-    fn title(&self, width: usize) -> Line<'static> {
+    fn title(&self, width: usize, frame: usize) -> Line<'static> {
         let focused = self.has_keys();
         let dim = Style::new().fg(moonlight::MUTE);
         let moon = if focused {
@@ -5849,7 +5849,7 @@ impl Sidebar {
         } = self.counts;
         let mut counts: Vec<Span<'static>> = Vec::new();
         let waits = (waiting, Mark::Waiting.glyph(0));
-        for (count, (glyph, style)) in std::iter::once(waits).chain(tallies(self.counts)) {
+        for (count, (glyph, style)) in std::iter::once(waits).chain(tallies(self.counts, frame)) {
             if count == 0 {
                 continue;
             }
@@ -6112,11 +6112,11 @@ enum Bottom<'a> {
     Nothing,
 }
 
-fn tallies(counts: Counts) -> [(usize, (String, Style)); 3] {
+fn tallies(counts: Counts, frame: usize) -> [(usize, (String, Style)); 3] {
     let dot = dot();
     [
         (counts.new, (dot.content.into_owned(), dot.style)),
-        (counts.busy, Mark::Busy.glyph(0)),
+        (counts.busy, Mark::Busy.glyph(frame)),
         (counts.shell, Mark::Shell.glyph(0)),
     ]
 }
@@ -16077,19 +16077,43 @@ mod tests {
     }
 
     #[test]
-    fn only_on_screen_spinners_spin_and_the_tallies_stay_still() {
+    fn only_on_screen_spinners_spin_and_the_title_follows_them() {
         let mut busy = agent("s", 1, Status::Busy, Some("work"));
         busy.status_since = None;
         let views = vec![view(1, 0, "/w/a", "claude")];
         let mut sidebar = fresh();
         sidebar.hear(host(vec![session("s", 10, views)], vec![busy]));
 
-        let title_at = |sidebar: &mut Sidebar, at| seen_at(sidebar, false, 32, 8, at).0[0].clone();
-        assert_eq!(
-            title_at(&mut sidebar, moment(160_000)),
-            title_at(&mut sidebar, moment(160_300))
+        let title_at = |sidebar: &mut Sidebar, height, at| {
+            seen_at(sidebar, false, 32, height, at).0[0].clone()
+        };
+        assert!(title_at(&mut sidebar, 8, moment(160_000)).contains("⠋1"));
+        assert!(
+            title_at(&mut sidebar, 8, moment(160_300)).contains("⠸1"),
+            "title tally spins in step with an on-screen busy row"
         );
-        assert!(title_at(&mut sidebar, moment(160_300)).contains("⠋1"));
+        assert_eq!(
+            title_at(&mut sidebar, 4, moment(160_000)),
+            title_at(&mut sidebar, 4, moment(160_300)),
+            "title tally stays still when the busy row is below the viewport"
+        );
+        assert!(title_at(&mut sidebar, 4, moment(160_300)).contains("⠋1"));
+
+        sidebar.filing(1, "o/lune");
+        assert!(
+            title_at(&mut sidebar, 4, moment(160_300)).contains("⠸1"),
+            "title tally spins while an on-screen note spinner animates"
+        );
+        sidebar.filed(
+            1,
+            "o/lune",
+            &Err(luned::issues::Unfiled::Refused("no".to_owned())),
+        );
+        let _ = sidebar.clear_notice();
+        assert!(
+            title_at(&mut sidebar, 4, moment(160_300)).contains("⠋1"),
+            "title tally returns to its resting glyph once the note spinner stops"
+        );
 
         let strip_at = |sidebar: &mut Sidebar, at| {
             let buffer = collapsed(sidebar, 6, at);
@@ -16132,6 +16156,10 @@ mod tests {
             Some(SPIN),
             "folded project shows a busy spinner badge"
         );
+        assert!(
+            title_at(&mut sidebar, 5, moment(160_300)).contains("⠸1"),
+            "title tally spins with a folded project's busy spinner badge"
+        );
 
         let mut waiting = agent("s", 2, Status::Waiting, Some("ask"));
         waiting.status_since = None;
@@ -16143,6 +16171,10 @@ mod tests {
             paint(&mut sidebar, 7).wait(drawn, drawn),
             None,
             "a waiting badge hides the folded busy spinner, so nothing spins"
+        );
+        assert!(
+            title_at(&mut sidebar, 5, moment(160_300)).contains("⠋1"),
+            "title tally stays still when a waiting badge hides the folded busy spinner"
         );
     }
 

@@ -15,6 +15,11 @@ impl Cadence {
         self.spinning = true;
     }
 
+    #[must_use]
+    pub fn spinning(&self) -> bool {
+        self.spinning
+    }
+
     pub fn age(&mut self, since: SystemTime, wall: SystemTime) {
         if let Some(at) = sidebar::next_age(since, wall) {
             self.clock_next = Some(self.clock_next.map_or(at, |next| next.min(at)));
