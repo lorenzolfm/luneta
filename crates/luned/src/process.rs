@@ -25,6 +25,8 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
+#[cfg(target_os = "macos")]
+pub use os::{ActiveState, ProcessState, ProcessStateError, StartTime, state};
 pub use os::{Domain, cwd, environ, meta, parent, same_root, signalled, start, started};
 
 pub const ANCESTOR_DEPTH_MAX: usize = 64;
@@ -250,6 +252,10 @@ impl Exit {
 
     pub fn signal(&self, signal: rustix::process::Signal) -> Result<(), Errno> {
         self.0.signal(signal)
+    }
+
+    pub fn has_exited(&self) -> io::Result<bool> {
+        self.0.has_exited()
     }
 
     pub async fn wait(self) -> io::Result<()> {
@@ -551,6 +557,93 @@ mod tests {
         lune_waits::heard("an exit watch wakes when its process ends", &heard).unwrap();
         waiter.join().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_exit_watch_reports_has_exited_only_after_its_process_ends() {
+        use std::sync::Barrier;
+
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = rustix::process::Pid::from_child(&child);
+        let exit = super::Exit::watch(pid)
+            .unwrap()
+            .expect("a running child is watched");
+        assert!(!exit.has_exited().unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        lune_waits::eventually("has_exited becomes true once the process exits", || {
+            exit.has_exited().unwrap().then_some(())
+        });
+        let barrier = Barrier::new(4);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    assert!(exit.has_exited().unwrap());
+                });
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(lune_waits::awaited(
+                "wait completes after has_exited observed exit",
+                exit.wait(),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn concurrent_has_exited_calls_never_revert_to_false_after_exit() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const WORKERS: usize = 4;
+        const ROUNDS: usize = 8;
+
+        let patience = lune_waits::Patience::begun();
+        for _ in 0..ROUNDS {
+            let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+            let pid = rustix::process::Pid::from_child(&child);
+            let exit = super::Exit::watch(pid)
+                .unwrap()
+                .expect("a running child is watched");
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let barrier = Barrier::new(WORKERS);
+            let saw_exited = AtomicBool::new(false);
+            thread::scope(|scope| {
+                for _ in 0..WORKERS {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        lune_waits::eventually("concurrent has_exited observes exit", || {
+                            let already = saw_exited.load(Ordering::Acquire);
+                            let exited = exit.has_exited().unwrap();
+                            assert!(
+                                !already || exited,
+                                "has_exited reverted to false after another call observed exit"
+                            );
+                            if exited {
+                                saw_exited.store(true, Ordering::Release);
+                            }
+                            exited.then_some(())
+                        });
+                        assert!(exit.has_exited().unwrap());
+                    });
+                }
+            });
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime
+                .block_on(
+                    patience.awaited("wait completes after concurrent has_exited", exit.wait()),
+                )
+                .unwrap();
+        }
     }
 
     #[test]
