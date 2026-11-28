@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use lune_domain::agent::Harness;
 use lune_protocol::program_resume::ProcessArgv;
@@ -14,7 +15,7 @@ use serde::Deserialize;
 
 use crate::agent::{Agent, Name, Source};
 use crate::core::{self, Command};
-use crate::process::{self, AgentId, AgentPid};
+use crate::process::{self, AgentId};
 use crate::resume::trust;
 use crate::statuses::SOURCE_AGENTS_MAX;
 use crate::transcripts::SessionId;
@@ -32,10 +33,14 @@ const NAME_LINES_MAX: usize = 16 * 1024;
 
 const WRAPPERS_MAX: usize = 4;
 
+const WRAPPED_MAX: usize = 16;
+
 const _: () = assert!(NAMES_BYTES_MAX > 0);
 const _: () = assert!(NAME_LINES_MAX > 0);
 const _: () = assert!(WRAPPERS_MAX > 0);
 const _: () = assert!(WRAPPERS_MAX <= process::ANCESTOR_DEPTH_MAX);
+const _: () = assert!(WRAPPED_MAX > 0);
+const _: () = assert!(WRAPPED_MAX <= SOURCE_AGENTS_MAX);
 
 #[must_use]
 pub fn folder() -> Option<PathBuf> {
@@ -102,13 +107,44 @@ fn names_in(index: &[u8]) -> HashMap<String, Said> {
     names
 }
 
-fn index_end(codex: &Path) -> io::Result<Vec<u8>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    inode: u64,
+    bytes: u64,
+    modified: SystemTime,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Index {
+    stamp: Option<Stamp>,
+    names: HashMap<String, Said>,
+}
+
+fn index_since(codex: &Path, known: Option<Stamp>) -> io::Result<Option<Index>> {
     let mut file = match File::open(codex.join(NAMES)) {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(known.map(|_| Index::default()));
+        }
         Err(error) => return Err(error),
     };
-    let bytes = file.metadata()?.len();
+    let metadata = file.metadata()?;
+    let stamp = Stamp {
+        inode: metadata.ino(),
+        bytes: metadata.len(),
+        modified: metadata.modified()?,
+    };
+    if known == Some(stamp) {
+        return Ok(None);
+    }
+    let end = index_end(&mut file, stamp.bytes)?;
+    Ok(Some(Index {
+        stamp: Some(stamp),
+        names: names_in(&end),
+    }))
+}
+
+fn index_end(file: &mut File, bytes: u64) -> io::Result<Vec<u8>> {
     let from = bytes.saturating_sub(NAMES_BYTES_MAX);
     file.seek(SeekFrom::Start(from))?;
     let mut end = Vec::new();
@@ -129,27 +165,49 @@ fn locks_in(codex: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
-fn wraps(wrapper: AgentPid, pid: u32) -> bool {
-    assert_ne!(pid, wrapper.get(), "a wrapper is not the Codex it wraps");
+fn wrappers(pid: u32) -> Vec<u32> {
+    let mut wrappers = Vec::with_capacity(WRAPPERS_MAX);
     let mut at = pid;
     for _ in 0..WRAPPERS_MAX {
-        let Some(parent) = process::parent(at) else {
-            return false;
-        };
-        if parent == wrapper.get() {
-            return true;
+        match process::parent(at) {
+            Some(parent) if parent > 1 => {
+                wrappers.push(parent);
+                at = parent;
+            }
+            Some(_) | None => break,
         }
-        if parent <= 1 {
-            return false;
-        }
-        at = parent;
     }
-    false
+    assert!(wrappers.len() <= WRAPPERS_MAX);
+    wrappers
+}
+
+type Inside = HashMap<u32, Vec<u32>>;
+
+fn inside_each() -> Inside {
+    let program = Harness::Codex.program();
+    let process::Mine { found, unreadable } = process::mine(&[((), program)]);
+    let found = found.iter().map(|found| found.id.pid);
+    let unreadable = unreadable.iter().map(|unreadable| unreadable.id.pid);
+    let mut running: Vec<u32> = found.chain(unreadable).collect();
+    running.sort_unstable();
+    running.truncate(SOURCE_AGENTS_MAX);
+    let mut inside = Inside::new();
+    for pid in running {
+        for wrapper in wrappers(pid) {
+            let wrapped = inside.entry(wrapper).or_default();
+            if wrapped.len() < WRAPPED_MAX {
+                wrapped.push(pid);
+            }
+        }
+    }
+    assert!(inside.len() <= SOURCE_AGENTS_MAX * WRAPPERS_MAX);
+    inside
 }
 
 pub struct Threads {
     locks: Option<PathBuf>,
     codex: Option<PathBuf>,
+    index: Index,
     troubles: Troubles,
 }
 
@@ -159,6 +217,7 @@ impl Threads {
         Threads {
             locks: None,
             codex,
+            index: Index::default(),
             troubles: Troubles::default(),
         }
     }
@@ -191,21 +250,11 @@ impl Threads {
         }
     }
 
-    fn wrapped(&mut self, locks: &Path, agent: AgentPid) -> Option<SessionId> {
-        let program = Harness::Codex.program();
-        let process::Mine { found, unreadable } = process::mine(&[((), program)]);
-        let found = found.iter().map(|found| found.id.pid);
-        let unreadable = unreadable.iter().map(|unreadable| unreadable.id.pid);
-        let mut inside: Vec<u32> = found
-            .chain(unreadable)
-            .filter(|pid| *pid != agent.get())
-            .filter(|pid| wraps(agent, *pid))
-            .collect();
-        inside.sort_unstable();
-        inside.truncate(SOURCE_AGENTS_MAX);
+    fn wrapped(&mut self, locks: &Path, inside: &[u32]) -> Option<SessionId> {
+        assert!(inside.len() <= WRAPPED_MAX);
         inside
-            .into_iter()
-            .find_map(|pid| thread_in(locks, &self.files(pid)))
+            .iter()
+            .find_map(|pid| thread_in(locks, &self.files(*pid)))
     }
 
     pub fn held_by(&mut self, agents: &[Agent]) -> Held {
@@ -226,6 +275,7 @@ impl Threads {
     }
 
     fn held_in(&mut self, locks: &Path, codex: &[&Agent]) -> Held {
+        let mut inside: Option<Inside> = None;
         let mut sessions = Vec::with_capacity(codex.len());
         for agent in codex {
             let pid = agent.pid.get();
@@ -238,7 +288,11 @@ impl Threads {
             let wrapper = runs.name != Harness::Codex.program();
             let direct = thread_in(locks, &self.files(pid));
             let written = match direct {
-                None if wrapper => self.wrapped(locks, agent.pid),
+                None if wrapper => {
+                    let inside = inside.get_or_insert_with(inside_each);
+                    let inside = inside.get(&pid).map(Vec::as_slice);
+                    self.wrapped(locks, inside.unwrap_or_default())
+                }
                 direct => direct,
             };
             let argv = runs.argv.as_ref().map(ProcessArgv::words);
@@ -247,12 +301,11 @@ impl Threads {
             };
             sessions.push((AgentId::new(agent.pid, start), session));
         }
-        let names = if sessions.is_empty() {
-            HashMap::new()
-        } else {
-            self.names()
-        };
         let mut held = Held::new();
+        if sessions.is_empty() {
+            return held;
+        }
+        let names = self.names();
         for (agent, session) in sessions {
             let name = names.get(session.as_str()).map(|text| Name {
                 text: text.clone(),
@@ -265,19 +318,20 @@ impl Threads {
         held
     }
 
-    fn names(&mut self) -> HashMap<String, Said> {
-        let Some(codex) = self.codex.clone() else {
-            return HashMap::new();
-        };
-        match index_end(&codex) {
-            Ok(index) => names_in(&index),
-            Err(error) => {
-                let index = codex.join(NAMES);
-                self.troubles
-                    .say(format!("{} is unread: {error}", index.display()));
-                HashMap::new()
+    fn names(&mut self) -> &HashMap<String, Said> {
+        if let Some(codex) = self.codex.as_deref() {
+            match index_since(codex, self.index.stamp) {
+                Ok(Some(index)) => self.index = index,
+                Ok(None) => {}
+                Err(error) => {
+                    let index = codex.join(NAMES);
+                    self.troubles
+                        .say(format!("{} is unread: {error}", index.display()));
+                    self.index = Index::default();
+                }
             }
         }
+        &self.index.names
     }
 }
 
@@ -321,6 +375,7 @@ mod tests {
 
     use super::*;
     use crate::Directory;
+    use crate::process::AgentPid;
     use crate::statuses::ActiveStatus;
     use crate::statuses::tests::decided;
 
@@ -427,6 +482,60 @@ mod tests {
     }
 
     #[test]
+    fn the_index_is_read_again_only_once_it_has_changed() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path();
+        let named = |name: &str| format!("{{\"id\":\"{OLDER}\",\"thread_name\":\"{name}\"}}\n");
+        assert_eq!(
+            index_since(codex, None).unwrap(),
+            None,
+            "an index Codex has not written names nothing, as before"
+        );
+
+        fs::write(codex.join(NAMES), named("lighthouse")).unwrap();
+        let first = index_since(codex, None).unwrap().unwrap();
+        assert_eq!(first.names.get(OLDER).map(Said::as_str), Some("lighthouse"));
+        assert!(first.stamp.is_some());
+        assert_eq!(index_since(codex, first.stamp).unwrap(), None);
+
+        let longer = [named("lighthouse"), named("the keeper")].concat();
+        fs::write(codex.join(NAMES), longer).unwrap();
+        let second = index_since(codex, first.stamp).unwrap().unwrap();
+        assert_eq!(
+            second.names.get(OLDER).map(Said::as_str),
+            Some("the keeper")
+        );
+        assert_ne!(second.stamp, first.stamp);
+
+        let aside = codex.join("written aside");
+        fs::write(&aside, named("LIGHTHOUSE")).unwrap();
+        fs::rename(&aside, codex.join(NAMES)).unwrap();
+        let replaced = index_since(codex, second.stamp).unwrap().unwrap();
+        assert_eq!(
+            replaced.names.get(OLDER).map(Said::as_str),
+            Some("LIGHTHOUSE")
+        );
+
+        fs::remove_file(codex.join(NAMES)).unwrap();
+        assert_eq!(
+            index_since(codex, replaced.stamp).unwrap(),
+            Some(Index::default()),
+            "an index that is gone unnames every thread"
+        );
+        fs::create_dir(codex.join(NAMES)).unwrap();
+        assert!(index_since(codex, None).is_err());
+    }
+
+    #[test]
+    fn a_process_s_wrappers_are_the_processes_above_it_nearest_first() {
+        let above = wrappers(std::process::id());
+        assert_eq!(above.first(), Some(&std::os::unix::process::parent_id()));
+        assert!(above.len() <= WRAPPERS_MAX);
+        assert!(!above.contains(&std::process::id()));
+        assert_eq!(wrappers(1), Vec::<u32>::new());
+    }
+
+    #[test]
     fn a_lock_folder_codex_has_not_made_is_none_and_one_that_does_not_read_says_why() {
         let home = tempfile::tempdir().unwrap();
         let codex = home.path().canonicalize().unwrap();
@@ -443,10 +552,14 @@ mod tests {
     #[test]
     fn the_index_is_read_from_its_end_and_from_a_whole_line() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(index_end(home.path()).unwrap(), b"");
+        let index_end = |codex: &Path| {
+            let mut file = File::open(codex.join(NAMES)).unwrap();
+            let bytes = file.metadata().unwrap().len();
+            index_end(&mut file, bytes).unwrap()
+        };
         let line = format!("{{\"id\":\"{OLDER}\",\"thread_name\":\"lighthouse\"}}\n");
         fs::write(home.path().join(NAMES), &line).unwrap();
-        assert_eq!(index_end(home.path()).unwrap(), line.as_bytes());
+        assert_eq!(index_end(home.path()), line.as_bytes());
 
         let most = usize::try_from(NAMES_BYTES_MAX).unwrap();
         let filler = format!(
@@ -456,7 +569,7 @@ mod tests {
         let mut long = filler.repeat(most / filler.len() + 2);
         long.push_str(&line);
         fs::write(home.path().join(NAMES), &long).unwrap();
-        let end = index_end(home.path()).unwrap();
+        let end = index_end(home.path());
         assert!(end.len() <= most);
         assert!(
             end.starts_with(b"{\"id\""),
