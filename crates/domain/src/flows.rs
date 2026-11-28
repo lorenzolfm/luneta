@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use lune_protocol::github::PullPage;
 use lune_protocol::v1 as api;
 use serde::{Deserialize, Serialize};
 
@@ -64,9 +65,95 @@ const _: () = assert!(REASON_BYTES_MAX > ELLIPSIS.len());
 
 const ELLIPSIS: &str = "…";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+const GIT_OID_HEX_LENGTHS: [usize; 2] = [40, 64];
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GitOid(String);
+
+impl GitOid {
+    pub fn parse(raw: &str) -> Result<GitOid, String> {
+        let hex = raw
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !GIT_OID_HEX_LENGTHS.contains(&raw.len()) || !hex {
+            return Err(format!("{raw:?} is no git object id"));
+        }
+        Ok(GitOid(raw.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for GitOid {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<GitOid, String> {
+        GitOid::parse(&raw)
+    }
+}
+
+impl From<GitOid> for String {
+    fn from(oid: GitOid) -> String {
+        oid.0
+    }
+}
+
+impl fmt::Display for GitOid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn parse(raw: &str) -> Result<SessionId, String> {
+        if raw.trim().is_empty() {
+            return Err("session_id must not be empty".to_owned());
+        }
+        if raw.trim() != raw {
+            return Err("session_id must not start or end with whitespace".to_owned());
+        }
+        if raw.len() > SESSION_ID_BYTES_MAX {
+            return Err(format!("session_id exceeds {SESSION_ID_BYTES_MAX} bytes"));
+        }
+        if raw.chars().any(char::is_control) {
+            return Err("session_id must not contain control characters".to_owned());
+        }
+        if raw.starts_with('-') {
+            return Err("session_id must not start with '-', which reads as a flag".to_owned());
+        }
+        Ok(SessionId(raw.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SessionId {
+    type Error = String;
+
+    fn try_from(raw: String) -> Result<SessionId, String> {
+        SessionId::parse(&raw)
+    }
+}
+
+impl From<SessionId> for String {
+    fn from(id: SessionId) -> String {
+        id.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeMethod {
-    #[default]
     Squash,
     Merge,
     Rebase,
@@ -83,18 +170,65 @@ impl MergeMethod {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowSpec {
     pub name: String,
     pub stages: Vec<StageSpec>,
+    pub policy: FlowPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowPolicy {
     pub rebase_attempts_max: u32,
     pub fix_checks_attempts_max: u32,
     pub wait_for_all_checks: bool,
     pub step_timeout_secs: u64,
     pub ci_settle_secs: u64,
     pub interactive_land: InteractiveLandPolicy,
-    #[serde(default)]
     pub merge_method: MergeMethod,
+}
+
+impl FlowPolicy {
+    #[must_use]
+    pub const fn default_policy() -> FlowPolicy {
+        FlowPolicy {
+            rebase_attempts_max: REBASE_ATTEMPTS_MAX_DEFAULT,
+            fix_checks_attempts_max: FIX_CHECKS_ATTEMPTS_MAX_DEFAULT,
+            wait_for_all_checks: true,
+            step_timeout_secs: STEP_TIMEOUT_SECS_DEFAULT,
+            ci_settle_secs: CI_SETTLE_SECS_DEFAULT,
+            interactive_land: InteractiveLandPolicy::CheckThenConfirmMerge,
+            merge_method: MergeMethod::Squash,
+        }
+    }
+
+    pub fn validate(&self, flow_name: &str) -> Result<(), String> {
+        if self.rebase_attempts_max > RETRY_ATTEMPTS_MAX {
+            return Err(format!(
+                "flow {flow_name}: rebase_attempts_max {} exceeds {RETRY_ATTEMPTS_MAX}",
+                self.rebase_attempts_max
+            ));
+        }
+        if self.fix_checks_attempts_max > RETRY_ATTEMPTS_MAX {
+            return Err(format!(
+                "flow {flow_name}: fix_checks_attempts_max {} exceeds {RETRY_ATTEMPTS_MAX}",
+                self.fix_checks_attempts_max
+            ));
+        }
+        if !(STEP_TIMEOUT_SECS_MIN..=STEP_TIMEOUT_SECS_MAX).contains(&self.step_timeout_secs) {
+            return Err(format!(
+                "flow {flow_name}: step_timeout_secs {} must be in {STEP_TIMEOUT_SECS_MIN}..={STEP_TIMEOUT_SECS_MAX}",
+                self.step_timeout_secs
+            ));
+        }
+        if self.ci_settle_secs > CI_SETTLE_SECS_MAX {
+            return Err(format!(
+                "flow {flow_name}: ci_settle_secs {} exceeds {CI_SETTLE_SECS_MAX}",
+                self.ci_settle_secs
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl FlowSpec {
@@ -130,85 +264,54 @@ impl FlowSpec {
                     kind: StageKind::Land,
                 },
             ],
-            rebase_attempts_max: REBASE_ATTEMPTS_MAX_DEFAULT,
-            fix_checks_attempts_max: FIX_CHECKS_ATTEMPTS_MAX_DEFAULT,
-            wait_for_all_checks: true,
-            step_timeout_secs: STEP_TIMEOUT_SECS_DEFAULT,
-            ci_settle_secs: CI_SETTLE_SECS_DEFAULT,
-            interactive_land: InteractiveLandPolicy::CheckThenConfirmMerge,
-            merge_method: MergeMethod::Squash,
+            policy: FlowPolicy::default_policy(),
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
         validate_label("flow name", &self.name)?;
         validate_stages(&self.name, &self.stages)?;
-        if self.rebase_attempts_max > RETRY_ATTEMPTS_MAX {
-            return Err(format!(
-                "flow {}: rebase_attempts_max {} exceeds {RETRY_ATTEMPTS_MAX}",
-                self.name, self.rebase_attempts_max
-            ));
-        }
-        if self.fix_checks_attempts_max > RETRY_ATTEMPTS_MAX {
-            return Err(format!(
-                "flow {}: fix_checks_attempts_max {} exceeds {RETRY_ATTEMPTS_MAX}",
-                self.name, self.fix_checks_attempts_max
-            ));
-        }
-        if !(STEP_TIMEOUT_SECS_MIN..=STEP_TIMEOUT_SECS_MAX).contains(&self.step_timeout_secs) {
-            return Err(format!(
-                "flow {}: step_timeout_secs {} must be in {STEP_TIMEOUT_SECS_MIN}..={STEP_TIMEOUT_SECS_MAX}",
-                self.name, self.step_timeout_secs
-            ));
-        }
-        if self.ci_settle_secs > CI_SETTLE_SECS_MAX {
-            return Err(format!(
-                "flow {}: ci_settle_secs {} exceeds {CI_SETTLE_SECS_MAX}",
-                self.name, self.ci_settle_secs
-            ));
-        }
-        Ok(())
+        self.policy.validate(&self.name)
     }
 
-    pub fn effective_stages(&self, entry: &FlowEntry) -> Result<Vec<StageSpec>, String> {
+    pub fn effective_stages(&self, entry: FlowEntry) -> Result<Vec<RunStage>, String> {
         self.validate()?;
-        let mut stages = self.stages.clone();
-        match entry {
-            FlowEntry::Implement { prompt } => {
-                validate_prompt(prompt)?;
-                if !matches!(stages.first().map(|s| &s.kind), Some(StageKind::Implement)) {
-                    if stages.len() >= STAGES_MAX {
-                        return Err(format!(
-                            "flow {}: cannot prepend implement stage past limit of {STAGES_MAX}",
-                            self.name
-                        ));
-                    }
-                    stages.insert(
-                        0,
-                        StageSpec {
-                            label: "implement".to_owned(),
-                            kind: StageKind::Implement,
-                        },
-                    );
-                }
+        let (implement, rest) = match self.stages.split_first() {
+            Some((first, rest)) if first.kind == StageKind::Implement => (Some(first), rest),
+            _ => (None, self.stages.as_slice()),
+        };
+        let mut stages = Vec::with_capacity(STAGES_MAX);
+        if let FlowEntry::Implement { prompt } = entry {
+            validate_prompt(&prompt)?;
+            if implement.is_none() && self.stages.len() >= STAGES_MAX {
+                return Err(format!(
+                    "flow {}: cannot prepend implement stage past limit of {STAGES_MAX}",
+                    self.name
+                ));
             }
-            FlowEntry::PullRequest => {
-                if matches!(stages.first().map(|s| &s.kind), Some(StageKind::Implement)) {
-                    stages.remove(0);
-                }
-                assert!(
-                    !stages
-                        .iter()
-                        .any(|stage| matches!(stage.kind, StageKind::Implement)),
-                    "implement stage only appears at index 0"
-                );
-                if stages.is_empty() {
-                    return Err(format!("flow {}: has no stages after implement", self.name));
-                }
-            }
+            let label = implement.map_or("implement", |stage| stage.label.as_str());
+            stages.push(RunStage {
+                label: label.to_owned(),
+                kind: RunStageKind::Agent(AgentStage::Implement { prompt }),
+            });
         }
-        assert!(!stages.is_empty(), "effective flow has at least one stage");
-        assert!(stages.len() <= STAGES_MAX);
+        for stage in rest {
+            let kind = match &stage.kind {
+                StageKind::Implement => unreachable!("validate_stages keeps implement first"),
+                StageKind::ReviewSkill { skill } => RunStageKind::Agent(AgentStage::ReviewSkill {
+                    skill: skill.clone(),
+                }),
+                StageKind::Land => RunStageKind::Land,
+            };
+            stages.push(RunStage {
+                label: stage.label.clone(),
+                kind,
+            });
+        }
+        if stages.is_empty() {
+            return Err(format!("flow {}: has no stages after implement", self.name));
+        }
+        validate_run_stages(&self.name, &stages)?;
         Ok(stages)
     }
 }
@@ -223,26 +326,52 @@ fn validate_stages(flow_name: &str, stages: &[StageSpec]) -> Result<(), String> 
             stages.len()
         ));
     }
-    let mut saw_land = false;
     for (index, stage) in stages.iter().enumerate() {
         validate_label("stage label", &stage.label)?;
+        let last = index + 1 == stages.len();
         match &stage.kind {
-            StageKind::Implement => {
-                if index != 0 {
-                    return Err(format!("flow {flow_name}: implement stage must come first"));
-                }
+            StageKind::Implement if index != 0 => {
+                return Err(format!("flow {flow_name}: implement stage must come first"));
             }
-            StageKind::ReviewSkill { skill } => {
+            StageKind::Land if !last => {
+                return Err(format!(
+                    "flow {flow_name}: land stage may appear at most once and must be last"
+                ));
+            }
+            StageKind::ReviewSkill { skill } => validate_label("review skill", skill)?,
+            StageKind::Implement | StageKind::Land => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_stages(flow_name: &str, stages: &[RunStage]) -> Result<(), String> {
+    if stages.is_empty() {
+        return Err(format!("flow {flow_name}: runs no stage"));
+    }
+    if stages.len() > STAGES_MAX {
+        return Err(format!(
+            "flow {flow_name}: runs {} stages, exceeding limit of {STAGES_MAX}",
+            stages.len()
+        ));
+    }
+    for (index, stage) in stages.iter().enumerate() {
+        validate_label("stage label", &stage.label)?;
+        let last = index + 1 == stages.len();
+        match &stage.kind {
+            RunStageKind::Agent(AgentStage::Implement { .. }) if index != 0 => {
+                return Err(format!("flow {flow_name}: implement stage must come first"));
+            }
+            RunStageKind::Agent(AgentStage::Implement { prompt }) => validate_prompt(prompt)?,
+            RunStageKind::Agent(AgentStage::ReviewSkill { skill }) => {
                 validate_label("review skill", skill)?;
             }
-            StageKind::Land => {
-                if saw_land || index + 1 != stages.len() {
-                    return Err(format!(
-                        "flow {flow_name}: land stage may appear at most once and must be last"
-                    ));
-                }
-                saw_land = true;
+            RunStageKind::Land if !last => {
+                return Err(format!(
+                    "flow {flow_name}: land stage may appear at most once and must be last"
+                ));
             }
+            RunStageKind::Land => {}
         }
     }
     Ok(())
@@ -275,19 +404,6 @@ fn validate_prompt(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_session_id(session_id: &str) -> Result<(), String> {
-    if session_id.trim().is_empty() {
-        return Err("session_id must not be empty".to_owned());
-    }
-    if session_id.len() > SESSION_ID_BYTES_MAX {
-        return Err(format!("session_id exceeds {SESSION_ID_BYTES_MAX} bytes"));
-    }
-    if session_id.chars().any(char::is_control) {
-        return Err("session_id must not contain control characters".to_owned());
-    }
-    Ok(())
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageSpec {
     pub label: String,
@@ -299,6 +415,24 @@ pub enum StageKind {
     Implement,
     ReviewSkill { skill: String },
     Land,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunStage {
+    pub label: String,
+    pub kind: RunStageKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunStageKind {
+    Agent(AgentStage),
+    Land,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentStage {
+    Implement { prompt: String },
+    ReviewSkill { skill: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,16 +617,15 @@ pub enum MergeStateStatus {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrSnapshot {
-    pub url: String,
+    pub url: PullPage,
     pub state: PrState,
-    pub head_oid: String,
+    pub head_oid: GitOid,
     pub base_name: String,
     pub mergeable: Mergeable,
     pub merge_state: MergeStateStatus,
     pub pending_checks: u32,
     pub failed_checks: u32,
     pub passed_checks: u32,
-    pub stale: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -512,7 +645,7 @@ pub enum FixChecksGateFailure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RebaseOutcome {
     Already,
-    Clean { new_head: String },
+    Clean { new_head: GitOid },
     Stopped { onto: String, prompt: String },
     Failed(String),
 }
@@ -542,7 +675,11 @@ pub enum FlowEvent {
     },
     StagePostConditionsChecked(Result<(), StageGateFailure>),
     PushFinished {
-        result: Result<String, String>,
+        result: Result<GitOid, String>,
+        now_secs: u64,
+    },
+    LeasePushFinished {
+        result: Result<(), String>,
         now_secs: u64,
     },
     PrSnapshot {
@@ -550,9 +687,9 @@ pub enum FlowEvent {
         now_secs: u64,
     },
     RebaseFinished(RebaseOutcome),
-    RebasePostConditionsChecked(Result<String, String>),
+    RebasePostConditionsChecked(Result<GitOid, String>),
     ChecksFetched(Result<String, String>),
-    FixChecksPostConditionsChecked(Result<String, FixChecksGateFailure>),
+    FixChecksPostConditionsChecked(Result<GitOid, FixChecksGateFailure>),
     MergeFinished {
         outcome: MergeOutcome,
         now_secs: u64,
@@ -570,15 +707,13 @@ pub enum FlowEffect {
         worktree: WorktreeId,
         view_name: String,
         harness: Harness,
-        stage_kind: StageKind,
-        implement_prompt: Option<String>,
+        stage: AgentStage,
     },
     OpenUnattendedStage {
         worktree: WorktreeId,
         view_name: String,
         harness: Harness,
-        stage_kind: StageKind,
-        implement_prompt: Option<String>,
+        stage: AgentStage,
         timeout_secs: u64,
     },
     OpenUnattendedHelper {
@@ -592,7 +727,7 @@ pub enum FlowEffect {
         worktree: WorktreeId,
         view_name: String,
         harness: Harness,
-        session_id: Option<String>,
+        session_id: Option<SessionId>,
         fallback_view: Option<ViewId>,
         stopped_view: Option<ViewId>,
     },
@@ -605,7 +740,7 @@ pub enum FlowEffect {
     },
     PushForceWithLease {
         worktree: WorktreeId,
-        expected_head: String,
+        expected_head: GitOid,
     },
     PollPr {
         worktree: WorktreeId,
@@ -619,17 +754,17 @@ pub enum FlowEffect {
     },
     KeepChecks {
         worktree: WorktreeId,
-        pr_url: String,
+        pr_url: PullPage,
     },
     CheckFixChecksPostConditions {
         worktree: WorktreeId,
-        previous_head: String,
+        previous_head: GitOid,
     },
     MergePr {
         worktree: WorktreeId,
-        pr_url: String,
+        pr_url: PullPage,
         merge_method: MergeMethod,
-        expected_head: String,
+        expected_head: GitOid,
     },
     StopStep {
         worktree: WorktreeId,
@@ -643,27 +778,39 @@ pub enum FlowEffect {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ActiveStepKind {
-    Stage,
-    ResolveRebase,
-    FixChecks,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveStep {
     #[serde(with = "opt_view_id")]
     pub view: Option<ViewId>,
     pub view_name: String,
-    pub session_id: Option<String>,
-    pub kind: ActiveStepKind,
+    pub session_id: Option<SessionId>,
+}
+
+impl ActiveStep {
+    fn fresh(view_name: String) -> ActiveStep {
+        ActiveStep {
+            view: None,
+            view_name,
+            session_id: None,
+        }
+    }
+
+    fn paused(self, reason: PauseReason, detail: String, resumes: Resumes) -> PauseState {
+        PauseState {
+            reason,
+            detail,
+            resume_session: self.session_id,
+            view: self.view,
+            resumes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LandState {
     Pushing,
     WaitingPr {
-        expected_head: String,
+        expected_head: GitOid,
         pushed_at_secs: u64,
         settle_skipped: bool,
     },
@@ -677,21 +824,21 @@ pub enum LandState {
         step: ActiveStep,
     },
     PushingRebase {
-        expected_head: String,
+        expected_head: GitOid,
     },
     FetchingChecks {
-        expected_head: String,
+        expected_head: GitOid,
     },
     FixingChecks {
-        expected_head: String,
+        expected_head: GitOid,
         step: ActiveStep,
     },
     CheckingFixChecks {
-        expected_head: String,
+        expected_head: GitOid,
         step: ActiveStep,
     },
     Merging {
-        expected_head: String,
+        expected_head: GitOid,
     },
 }
 
@@ -717,10 +864,32 @@ pub enum PauseReason {
     FixChecksAttemptsExhausted,
     PushFailed,
     MergeFailed,
-    ConfirmMerge,
 }
 
 impl PauseReason {
+    pub const ALL: [PauseReason; 20] = [
+        PauseReason::UserPaused,
+        PauseReason::DaemonRestarted,
+        PauseReason::StepFailed,
+        PauseReason::DirtyTree,
+        PauseReason::NoPullRequest,
+        PauseReason::PullRequestClosed,
+        PauseReason::PullRequestDraft,
+        PauseReason::PullRequestBlocked,
+        PauseReason::PullRequestUnstable,
+        PauseReason::PullRequestHeadMismatch,
+        PauseReason::PullRequestStateUnknown,
+        PauseReason::ChecksTimedOut,
+        PauseReason::RebaseFailed,
+        PauseReason::RebasePostConditionFailed,
+        PauseReason::RebaseAttemptsExhausted,
+        PauseReason::ChecksFetchFailed,
+        PauseReason::ChecksUnchangedHead,
+        PauseReason::FixChecksAttemptsExhausted,
+        PauseReason::PushFailed,
+        PauseReason::MergeFailed,
+    ];
+
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -744,47 +913,85 @@ impl PauseReason {
             PauseReason::FixChecksAttemptsExhausted => "CI fix retry limit reached",
             PauseReason::PushFailed => "push failed",
             PauseReason::MergeFailed => "merge failed",
-            PauseReason::ConfirmMerge => "ready to merge",
         }
+    }
+
+    #[must_use]
+    pub const fn to_api(self) -> api::FlowPauseReason {
+        match self {
+            PauseReason::UserPaused => api::FlowPauseReason::UserPaused,
+            PauseReason::DaemonRestarted => api::FlowPauseReason::DaemonRestarted,
+            PauseReason::StepFailed => api::FlowPauseReason::StepFailed,
+            PauseReason::DirtyTree => api::FlowPauseReason::DirtyTree,
+            PauseReason::NoPullRequest => api::FlowPauseReason::NoPullRequest,
+            PauseReason::PullRequestClosed => api::FlowPauseReason::PullRequestClosed,
+            PauseReason::PullRequestDraft => api::FlowPauseReason::PullRequestDraft,
+            PauseReason::PullRequestBlocked => api::FlowPauseReason::PullRequestBlocked,
+            PauseReason::PullRequestUnstable => api::FlowPauseReason::PullRequestUnstable,
+            PauseReason::PullRequestHeadMismatch => api::FlowPauseReason::PullRequestHeadMismatch,
+            PauseReason::PullRequestStateUnknown => api::FlowPauseReason::PullRequestStateUnknown,
+            PauseReason::ChecksTimedOut => api::FlowPauseReason::ChecksTimedOut,
+            PauseReason::RebaseFailed => api::FlowPauseReason::RebaseFailed,
+            PauseReason::RebasePostConditionFailed => {
+                api::FlowPauseReason::RebasePostConditionFailed
+            }
+            PauseReason::RebaseAttemptsExhausted => api::FlowPauseReason::RebaseAttemptsExhausted,
+            PauseReason::ChecksFetchFailed => api::FlowPauseReason::ChecksFetchFailed,
+            PauseReason::ChecksUnchangedHead => api::FlowPauseReason::ChecksUnchangedHead,
+            PauseReason::FixChecksAttemptsExhausted => {
+                api::FlowPauseReason::FixChecksAttemptsExhausted
+            }
+            PauseReason::PushFailed => api::FlowPauseReason::PushFailed,
+            PauseReason::MergeFailed => api::FlowPauseReason::MergeFailed,
+        }
+    }
+
+    pub fn of_api(raw: i32) -> Result<PauseReason, String> {
+        let said = api::FlowPauseReason::try_from(raw)
+            .map_err(|_| format!("flow pause reason {raw} is not one lune knows"))?;
+        PauseReason::ALL
+            .into_iter()
+            .find(|reason| reason.to_api() == said)
+            .ok_or_else(|| format!("flow pause reason {raw} is unspecified"))
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PauseContext {
-    #[default]
-    None,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resumes {
+    Restart,
     CheckStage,
     WaitInteractive,
     Rebase,
-    ResolveRebase {
-        onto: String,
-    },
-    PushRebase {
-        expected_head: String,
-    },
-    ConfirmMerge {
-        pr_url: String,
-        expected_head: String,
-    },
+    ResolveRebase { onto: String },
+    PushRebase { expected_head: GitOid },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PauseState {
     pub reason: PauseReason,
     pub detail: String,
-    pub resume_session: Option<String>,
+    pub resume_session: Option<SessionId>,
     #[serde(with = "opt_view_id")]
     pub view: Option<ViewId>,
-    pub stage_step: ActiveStepKind,
-    #[serde(default)]
-    pub context: PauseContext,
+    pub resumes: Resumes,
+}
+
+impl PauseState {
+    fn bare(reason: PauseReason, detail: String, resumes: Resumes) -> PauseState {
+        PauseState {
+            reason,
+            detail,
+            resume_session: None,
+            view: None,
+            resumes,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FlowDone {
     Merged,
     ReadyToMerge,
-    Aborted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -794,9 +1001,14 @@ pub enum FlowPhase {
     WaitingInteractive {
         #[serde(with = "view_id")]
         view: ViewId,
-        session_id: Option<String>,
+        session_id: Option<SessionId>,
     },
     Landing(LandState),
+    ConfirmingMerge {
+        #[serde(with = "pull_page")]
+        pr_url: PullPage,
+        expected_head: GitOid,
+    },
     Paused(PauseState),
     Done(FlowDone),
 }
@@ -805,9 +1017,38 @@ pub enum FlowPhase {
 pub enum FlowBadgeKind {
     Running,
     WaitingInteractive,
+    ConfirmMerge,
     Paused,
     Merged,
     ReadyToMerge,
+}
+
+impl FlowBadgeKind {
+    #[must_use]
+    pub const fn to_api(self) -> api::FlowBadgeKind {
+        match self {
+            FlowBadgeKind::Running => api::FlowBadgeKind::Running,
+            FlowBadgeKind::WaitingInteractive => api::FlowBadgeKind::WaitingInteractive,
+            FlowBadgeKind::ConfirmMerge => api::FlowBadgeKind::ConfirmMerge,
+            FlowBadgeKind::Paused => api::FlowBadgeKind::Paused,
+            FlowBadgeKind::Merged => api::FlowBadgeKind::Merged,
+            FlowBadgeKind::ReadyToMerge => api::FlowBadgeKind::ReadyToMerge,
+        }
+    }
+
+    pub fn of_api(raw: i32) -> Result<FlowBadgeKind, String> {
+        match api::FlowBadgeKind::try_from(raw) {
+            Ok(api::FlowBadgeKind::Running) => Ok(FlowBadgeKind::Running),
+            Ok(api::FlowBadgeKind::WaitingInteractive) => Ok(FlowBadgeKind::WaitingInteractive),
+            Ok(api::FlowBadgeKind::ConfirmMerge) => Ok(FlowBadgeKind::ConfirmMerge),
+            Ok(api::FlowBadgeKind::Paused) => Ok(FlowBadgeKind::Paused),
+            Ok(api::FlowBadgeKind::Merged) => Ok(FlowBadgeKind::Merged),
+            Ok(api::FlowBadgeKind::ReadyToMerge) => Ok(FlowBadgeKind::ReadyToMerge),
+            Ok(api::FlowBadgeKind::Unspecified) | Err(_) => {
+                Err(format!("flow has unknown badge kind {raw}"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -824,7 +1065,7 @@ pub struct FlowSummary {
     pub pause_reason: Option<PauseReason>,
     pub detail: Option<String>,
     pub active_view: Option<ViewId>,
-    pub resume_session: Option<String>,
+    pub resume_session: Option<SessionId>,
     pub controls: Vec<FlowControl>,
 }
 
@@ -832,19 +1073,72 @@ pub struct FlowSummary {
 pub struct FlowRun {
     #[serde(with = "worktree_id")]
     pub worktree: WorktreeId,
-    pub spec: FlowSpec,
-    pub stages: Vec<StageSpec>,
+    pub flow_name: String,
+    pub policy: FlowPolicy,
+    pub stages: Vec<RunStage>,
     pub stage_index: u32,
     pub mode: FlowMode,
     #[serde(with = "harness_serde")]
     pub harness: Harness,
-    pub implement_prompt: Option<String>,
     pub phase: FlowPhase,
     pub rebase_attempts: u32,
     pub fix_checks_attempts: u32,
-    #[serde(default)]
     pub merge_race_repolls: u32,
-    pub last_pr_url: Option<String>,
+    #[serde(with = "opt_pull_page")]
+    pub last_pr_url: Option<PullPage>,
+}
+
+struct Entering<'a> {
+    worktree: WorktreeId,
+    stages: &'a [RunStage],
+    mode: FlowMode,
+    harness: Harness,
+    policy: &'a FlowPolicy,
+}
+
+impl Entering<'_> {
+    fn phase(&self, offset: usize, effects: &mut Vec<FlowEffect>) -> FlowPhase {
+        assert!(offset < self.stages.len(), "a stage is entered in bounds");
+        let stage = &self.stages[offset];
+        let RunStageKind::Agent(agent) = &stage.kind else {
+            return self.land(effects);
+        };
+        let effect = match self.mode {
+            FlowMode::Interactive => FlowEffect::OpenInteractiveStage {
+                worktree: self.worktree,
+                view_name: stage.label.clone(),
+                harness: self.harness,
+                stage: agent.clone(),
+            },
+            FlowMode::Unattended => FlowEffect::OpenUnattendedStage {
+                worktree: self.worktree,
+                view_name: stage.label.clone(),
+                harness: self.harness,
+                stage: agent.clone(),
+                timeout_secs: self.policy.step_timeout_secs,
+            },
+        };
+        effects.push(effect);
+        FlowPhase::RunningStage(ActiveStep::fresh(stage.label.clone()))
+    }
+
+    fn land(&self, effects: &mut Vec<FlowEffect>) -> FlowPhase {
+        if self.mode == FlowMode::Interactive
+            && self.policy.interactive_land == InteractiveLandPolicy::StopReadyToMerge
+        {
+            effects.push(FlowEffect::Alert {
+                worktree: self.worktree,
+                title: "Flow ready to merge".to_owned(),
+                detail: "Review stages finished in interactive mode".to_owned(),
+                urgent: false,
+            });
+            return FlowPhase::Done(FlowDone::ReadyToMerge);
+        }
+        effects.push(FlowEffect::PushIfAhead {
+            worktree: self.worktree,
+        });
+        FlowPhase::Landing(LandState::Pushing)
+    }
 }
 
 impl FlowRun {
@@ -855,38 +1149,39 @@ impl FlowRun {
         harness: Harness,
         entry: FlowEntry,
     ) -> Result<(FlowRun, Vec<FlowEffect>), String> {
-        let stages = spec.effective_stages(&entry)?;
-        let implement_prompt = match entry {
-            FlowEntry::Implement { prompt } => Some(prompt),
-            FlowEntry::PullRequest => None,
-        };
-        let mut run = FlowRun {
+        let stages = spec.effective_stages(entry)?;
+        let FlowSpec { name, policy, .. } = spec;
+        let mut effects = Vec::new();
+        let phase = Entering {
             worktree,
-            spec,
+            stages: &stages,
+            mode,
+            harness,
+            policy: &policy,
+        }
+        .phase(0, &mut effects);
+        let run = FlowRun {
+            worktree,
+            flow_name: name,
+            policy,
             stages,
             stage_index: 0,
             mode,
             harness,
-            implement_prompt,
-            phase: FlowPhase::Done(FlowDone::Aborted),
+            phase,
             rebase_attempts: 0,
             fix_checks_attempts: 0,
             merge_race_repolls: 0,
             last_pr_url: None,
         };
-        let mut effects = Vec::new();
-        run.enter_stage(0, &mut effects);
-        assert!(
-            !matches!(run.phase, FlowPhase::Done(FlowDone::Aborted)),
-            "started flow left dummy aborted phase"
-        );
         run.assert_invariants();
         Ok((run, effects))
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.spec.validate()?;
-        validate_stages(&self.spec.name, &self.stages)?;
+        validate_label("flow name", &self.flow_name)?;
+        self.policy.validate(&self.flow_name)?;
+        validate_run_stages(&self.flow_name, &self.stages)?;
         let offset = usize::try_from(self.stage_index)
             .map_err(|_| format!("flow stage_index {} out of range", self.stage_index))?;
         if offset >= self.stages.len() {
@@ -896,16 +1191,16 @@ impl FlowRun {
                 self.stages.len()
             ));
         }
-        if self.rebase_attempts > self.spec.rebase_attempts_max {
+        if self.rebase_attempts > self.policy.rebase_attempts_max {
             return Err(format!(
                 "flow rebase_attempts {} exceeds limit {}",
-                self.rebase_attempts, self.spec.rebase_attempts_max
+                self.rebase_attempts, self.policy.rebase_attempts_max
             ));
         }
-        if self.fix_checks_attempts > self.spec.fix_checks_attempts_max {
+        if self.fix_checks_attempts > self.policy.fix_checks_attempts_max {
             return Err(format!(
                 "flow fix_checks_attempts {} exceeds limit {}",
-                self.fix_checks_attempts, self.spec.fix_checks_attempts_max
+                self.fix_checks_attempts, self.policy.fix_checks_attempts_max
             ));
         }
         if self.merge_race_repolls > MERGE_RACE_REPOLL_MAX {
@@ -914,92 +1209,55 @@ impl FlowRun {
                 self.merge_race_repolls
             ));
         }
-        if let Some(prompt) = &self.implement_prompt {
-            validate_prompt(prompt)?;
-        }
-        if let Some(session) = self.resume_session() {
-            validate_session_id(session)?;
-        }
         self.validate_phase()
     }
 
     fn validate_phase(&self) -> Result<(), String> {
-        let landing = matches!(self.current_stage().kind, StageKind::Land);
+        let landing = self.landing();
+        let interactive = self.mode == FlowMode::Interactive;
         match &self.phase {
-            FlowPhase::RunningStage(step) | FlowPhase::CheckingStage(step) => {
-                if landing {
-                    return Err("a stage phase is on the land stage".to_owned());
-                }
-                if step.kind != ActiveStepKind::Stage {
-                    return Err(format!("a stage phase holds a {:?} step", step.kind));
-                }
+            FlowPhase::RunningStage(_) | FlowPhase::CheckingStage(_) if landing => {
+                Err("a stage phase is on the land stage".to_owned())
             }
-            FlowPhase::WaitingInteractive { .. } => {
-                if landing {
-                    return Err("an interactive wait is on the land stage".to_owned());
-                }
-                if self.mode != FlowMode::Interactive {
-                    return Err("an interactive wait is in an unattended flow".to_owned());
-                }
+            FlowPhase::WaitingInteractive { .. } if landing => {
+                Err("an interactive wait is on the land stage".to_owned())
             }
-            FlowPhase::Landing(land) => {
-                if !landing {
-                    return Err("a land phase is on a stage that does not land".to_owned());
-                }
-                self.validate_land(land)?;
+            FlowPhase::WaitingInteractive { .. } if !interactive => {
+                Err("an interactive wait is in an unattended flow".to_owned())
             }
-            FlowPhase::Paused(paused) => self.validate_pause(paused, landing)?,
-            FlowPhase::Done(_) => {}
+            FlowPhase::Landing(_) if !landing => {
+                Err("a land phase is on a stage that does not land".to_owned())
+            }
+            FlowPhase::Landing(land) => self.validate_land(land),
+            FlowPhase::ConfirmingMerge { .. } if !landing => {
+                Err("a merge confirmation is on a stage that does not land".to_owned())
+            }
+            FlowPhase::ConfirmingMerge { .. } if !interactive => {
+                Err("a merge confirmation is in an unattended flow".to_owned())
+            }
+            FlowPhase::Paused(paused) => self.validate_pause(paused, landing),
+            FlowPhase::RunningStage(_)
+            | FlowPhase::CheckingStage(_)
+            | FlowPhase::WaitingInteractive { .. }
+            | FlowPhase::ConfirmingMerge { .. }
+            | FlowPhase::Done(_) => Ok(()),
         }
-        Ok(())
     }
 
     fn validate_land(&self, land: &LandState) -> Result<(), String> {
-        let head = match land {
-            LandState::Pushing => None,
-            LandState::Rebasing => {
-                return self.validate_rebase_attempted();
+        match land {
+            LandState::Pushing | LandState::WaitingPr { .. } | LandState::Merging { .. } => Ok(()),
+            LandState::Rebasing | LandState::PushingRebase { .. } => {
+                self.validate_rebase_attempted()
             }
-            LandState::ResolvingRebase { onto, step }
-            | LandState::CheckingRebase { onto, step } => {
-                if onto.trim().is_empty() {
-                    return Err("a rebase phase has an empty onto ref".to_owned());
-                }
-                if step.kind != ActiveStepKind::ResolveRebase {
-                    return Err(format!("a rebase phase holds a {:?} step", step.kind));
-                }
-                return self.validate_rebase_attempted();
+            LandState::ResolvingRebase { onto, .. } | LandState::CheckingRebase { onto, .. } => {
+                validate_onto(onto)?;
+                self.validate_rebase_attempted()
             }
-            LandState::PushingRebase { expected_head } => {
-                self.validate_rebase_attempted()?;
-                Some(expected_head)
-            }
-            LandState::FetchingChecks { expected_head } => {
-                self.validate_fix_checks_attempted()?;
-                Some(expected_head)
-            }
-            LandState::FixingChecks {
-                expected_head,
-                step,
-            }
-            | LandState::CheckingFixChecks {
-                expected_head,
-                step,
-            } => {
-                if step.kind != ActiveStepKind::FixChecks {
-                    return Err(format!("a CI fix phase holds a {:?} step", step.kind));
-                }
-                self.validate_fix_checks_attempted()?;
-                Some(expected_head)
-            }
-            LandState::WaitingPr { expected_head, .. } | LandState::Merging { expected_head } => {
-                Some(expected_head)
-            }
-        };
-        if head.is_some_and(|head| head.trim().is_empty()) {
-            return Err("a land phase expects an empty head".to_owned());
+            LandState::FetchingChecks { .. }
+            | LandState::FixingChecks { .. }
+            | LandState::CheckingFixChecks { .. } => self.validate_fix_checks_attempted(),
         }
-        Ok(())
     }
 
     fn validate_rebase_attempted(&self) -> Result<(), String> {
@@ -1017,76 +1275,33 @@ impl FlowRun {
     }
 
     fn validate_pause(&self, paused: &PauseState, landing: bool) -> Result<(), String> {
-        match (paused.reason, &paused.context) {
-            (
-                PauseReason::ConfirmMerge,
-                PauseContext::ConfirmMerge {
-                    pr_url,
-                    expected_head,
-                },
-            ) => {
-                if pr_url.trim().is_empty() || expected_head.trim().is_empty() {
-                    return Err(
-                        "ConfirmMerge pause requires non-empty pr_url and expected_head".to_owned(),
-                    );
-                }
-                if !landing {
-                    return Err("ConfirmMerge pause is on a stage that does not land".to_owned());
-                }
+        match &paused.resumes {
+            Resumes::CheckStage | Resumes::WaitInteractive if landing => {
+                Err("a stage pause is on the land stage".to_owned())
             }
-            (PauseReason::ConfirmMerge, _) => {
-                return Err("ConfirmMerge pause missing ConfirmMerge context".to_owned());
+            Resumes::WaitInteractive if paused.view.is_none() => {
+                Err("an interactive wait pauses with no view to wait in".to_owned())
             }
-            (_, PauseContext::ConfirmMerge { .. }) => {
-                return Err("ConfirmMerge context used on non-ConfirmMerge pause".to_owned());
+            Resumes::Rebase | Resumes::ResolveRebase { .. } | Resumes::PushRebase { .. }
+                if !landing =>
+            {
+                Err("a rebase pause is on a stage that does not land".to_owned())
             }
-            (_, PauseContext::CheckStage) => {
-                if landing {
-                    return Err("CheckStage context is on the land stage".to_owned());
-                }
+            Resumes::ResolveRebase { onto } => {
+                validate_onto(onto)?;
+                self.validate_rebase_attempted()
             }
-            (_, PauseContext::WaitInteractive) => {
-                if landing {
-                    return Err("WaitInteractive context is on the land stage".to_owned());
-                }
-                if paused.view.is_none() {
-                    return Err("WaitInteractive context has no view to wait in".to_owned());
-                }
-            }
-            (_, PauseContext::ResolveRebase { onto }) if onto.trim().is_empty() => {
-                return Err("ResolveRebase context requires non-empty onto ref".to_owned());
-            }
-            (_, PauseContext::PushRebase { expected_head }) if expected_head.trim().is_empty() => {
-                return Err("PushRebase context requires non-empty expected head".to_owned());
-            }
-            (
-                _,
-                PauseContext::Rebase
-                | PauseContext::ResolveRebase { .. }
-                | PauseContext::PushRebase { .. },
-            ) => {
-                if !landing {
-                    return Err("a rebase context is on a stage that does not land".to_owned());
-                }
-                if paused.stage_step != ActiveStepKind::ResolveRebase {
-                    return Err(format!(
-                        "a rebase context pauses a {:?} step",
-                        paused.stage_step
-                    ));
-                }
-                self.validate_rebase_attempted()?;
-            }
-            (_, PauseContext::None) => {}
+            Resumes::Rebase | Resumes::PushRebase { .. } => self.validate_rebase_attempted(),
+            Resumes::Restart | Resumes::CheckStage | Resumes::WaitInteractive => Ok(()),
         }
-        Ok(())
     }
 
     fn assert_invariants(&self) {
         assert!(!self.stages.is_empty(), "flow has at least one stage");
         assert!(self.stages.len() <= STAGES_MAX);
         assert!(self.stage_offset() < self.stages.len());
-        assert!(self.rebase_attempts <= self.spec.rebase_attempts_max);
-        assert!(self.fix_checks_attempts <= self.spec.fix_checks_attempts_max);
+        assert!(self.rebase_attempts <= self.policy.rebase_attempts_max);
+        assert!(self.fix_checks_attempts <= self.policy.fix_checks_attempts_max);
         assert!(self.merge_race_repolls <= MERGE_RACE_REPOLL_MAX);
         let phase = self.validate_phase();
         assert!(phase.is_ok(), "flow phase invariant broken: {phase:?}");
@@ -1096,13 +1311,27 @@ impl FlowRun {
         usize::try_from(self.stage_index).expect("STAGES_MAX fits usize")
     }
 
+    fn landing(&self) -> bool {
+        matches!(self.current_stage().kind, RunStageKind::Land)
+    }
+
+    fn entering(&self) -> Entering<'_> {
+        Entering {
+            worktree: self.worktree,
+            stages: &self.stages,
+            mode: self.mode,
+            harness: self.harness,
+            policy: &self.policy,
+        }
+    }
+
     #[must_use]
     pub fn is_active(&self) -> bool {
         !matches!(self.phase, FlowPhase::Done(_))
     }
 
     #[must_use]
-    pub fn current_stage(&self) -> &StageSpec {
+    pub fn current_stage(&self) -> &RunStage {
         let offset = self.stage_offset();
         assert!(offset < self.stages.len());
         &self.stages[offset]
@@ -1121,25 +1350,25 @@ impl FlowRun {
                 | LandState::CheckingFixChecks { step, .. },
             ) => step.view,
             FlowPhase::Paused(paused) => paused.view,
-            FlowPhase::Landing(_) | FlowPhase::Done(_) => None,
+            FlowPhase::Landing(_) | FlowPhase::ConfirmingMerge { .. } | FlowPhase::Done(_) => None,
         }
     }
 
     #[must_use]
-    pub fn resume_session(&self) -> Option<&str> {
+    pub fn resume_session(&self) -> Option<&SessionId> {
         match &self.phase {
             FlowPhase::RunningStage(step) | FlowPhase::CheckingStage(step) => {
-                step.session_id.as_deref()
+                step.session_id.as_ref()
             }
-            FlowPhase::WaitingInteractive { session_id, .. } => session_id.as_deref(),
+            FlowPhase::WaitingInteractive { session_id, .. } => session_id.as_ref(),
             FlowPhase::Landing(
                 LandState::ResolvingRebase { step, .. }
                 | LandState::CheckingRebase { step, .. }
                 | LandState::FixingChecks { step, .. }
                 | LandState::CheckingFixChecks { step, .. },
-            ) => step.session_id.as_deref(),
-            FlowPhase::Paused(paused) => paused.resume_session.as_deref(),
-            FlowPhase::Landing(_) | FlowPhase::Done(_) => None,
+            ) => step.session_id.as_ref(),
+            FlowPhase::Paused(paused) => paused.resume_session.as_ref(),
+            FlowPhase::Landing(_) | FlowPhase::ConfirmingMerge { .. } | FlowPhase::Done(_) => None,
         }
     }
 
@@ -1158,6 +1387,12 @@ impl FlowRun {
                 FlowControl::Pause,
                 FlowControl::RetryStep,
                 FlowControl::SkipStep,
+                FlowControl::Abort,
+            ],
+            FlowPhase::ConfirmingMerge { .. } => vec![
+                FlowControl::Advance,
+                FlowControl::AutoRest,
+                FlowControl::Resume,
                 FlowControl::Abort,
             ],
             FlowPhase::RunningStage(_)
@@ -1184,16 +1419,8 @@ impl FlowRun {
                 | LandState::CheckingFixChecks { .. }
                 | LandState::Merging { .. },
             ) => vec![FlowControl::Abort],
-            FlowPhase::Paused(paused) => {
-                let mut controls = Vec::new();
-                if paused.reason == PauseReason::ConfirmMerge {
-                    controls.push(FlowControl::Advance);
-                    controls.push(FlowControl::AutoRest);
-                    controls.push(FlowControl::Resume);
-                    controls.push(FlowControl::Abort);
-                    return controls;
-                }
-                controls.push(FlowControl::Resume);
+            FlowPhase::Paused(_) => {
+                let mut controls = vec![FlowControl::Resume];
                 if self.mode == FlowMode::Interactive {
                     controls.push(FlowControl::AutoRest);
                 }
@@ -1220,22 +1447,21 @@ impl FlowRun {
             FlowPhase::Done(FlowDone::ReadyToMerge) => {
                 ("ready".to_owned(), FlowBadgeKind::ReadyToMerge, None, None)
             }
-            FlowPhase::Done(FlowDone::Aborted) => {
-                ("aborted".to_owned(), FlowBadgeKind::Paused, None, None)
-            }
-            FlowPhase::Paused(paused) => {
-                let badge = if paused.reason == PauseReason::ConfirmMerge {
-                    format!("{step_number}/{step_total} merge?")
-                } else {
-                    "paused".to_owned()
-                };
-                (
-                    badge,
-                    FlowBadgeKind::Paused,
-                    Some(paused.reason),
-                    Some(paused.detail.clone()),
-                )
-            }
+            FlowPhase::ConfirmingMerge { pr_url, .. } => (
+                format!("{step_number}/{step_total} merge?"),
+                FlowBadgeKind::ConfirmMerge,
+                None,
+                Some(clamp_reason(&format!(
+                    "{} is clean and ready to merge",
+                    pr_url.url()
+                ))),
+            ),
+            FlowPhase::Paused(paused) => (
+                "paused".to_owned(),
+                FlowBadgeKind::Paused,
+                Some(paused.reason),
+                Some(paused.detail.clone()),
+            ),
             FlowPhase::WaitingInteractive { .. } => (
                 format!("{step_number}/{step_total} {stage_label}"),
                 FlowBadgeKind::WaitingInteractive,
@@ -1271,7 +1497,7 @@ impl FlowRun {
         assert!(badge.len() <= BADGE_BYTES_MAX, "a badge fits its bound");
         FlowSummary {
             worktree: self.worktree,
-            flow_name: self.spec.name.clone(),
+            flow_name: self.flow_name.clone(),
             mode: self.mode,
             harness: self.harness,
             step_number,
@@ -1282,7 +1508,7 @@ impl FlowRun {
             pause_reason,
             detail,
             active_view: self.active_view(),
-            resume_session: self.resume_session().map(str::to_owned),
+            resume_session: self.resume_session().cloned(),
             controls: self.available_controls(),
         }
     }
@@ -1294,7 +1520,7 @@ impl FlowRun {
             FlowEvent::ViewOpened { view } => self.on_view_opened(view),
             FlowEvent::ViewOpenFailed { why } => self.on_view_open_failed(&why, &mut effects),
             FlowEvent::SessionCaptured { view, session_id } => {
-                self.on_session_captured(view, session_id, &mut effects);
+                self.on_session_captured(view, &session_id, &mut effects);
             }
             FlowEvent::TerminalExited { view, exit } => {
                 self.on_terminal_exited(view, exit, &mut effects);
@@ -1304,6 +1530,9 @@ impl FlowRun {
             }
             FlowEvent::PushFinished { result, now_secs } => {
                 self.on_push_finished(result, now_secs, &mut effects);
+            }
+            FlowEvent::LeasePushFinished { result, now_secs } => {
+                self.on_lease_push_finished(result, now_secs, &mut effects);
             }
             FlowEvent::PrSnapshot { snapshot, now_secs } => {
                 self.on_pr_snapshot(snapshot, now_secs, &mut effects);
@@ -1327,19 +1556,24 @@ impl FlowRun {
         effects
     }
 
-    pub fn control(&mut self, control: FlowControl) -> Result<Vec<FlowEffect>, String> {
-        self.assert_invariants();
-        if !self.available_controls().contains(&control) {
-            return Err(format!(
-                "{} is not available while the flow is {}",
-                control.label(),
-                self.summary().badge
-            ));
+    fn available(&self, control: FlowControl) -> Result<(), String> {
+        if self.available_controls().contains(&control) {
+            return Ok(());
         }
+        Err(format!(
+            "{} is not available while the flow is {}",
+            control.label(),
+            self.summary().badge
+        ))
+    }
+
+    fn control(&mut self, control: FlowControl) -> Result<Vec<FlowEffect>, String> {
+        self.assert_invariants();
+        self.available(control)?;
         let before = self.phase.clone();
         let mut effects = Vec::new();
         self.on_control(control, &mut effects);
-        if control != FlowControl::TakeOver {
+        if !matches!(control, FlowControl::TakeOver | FlowControl::Abort) {
             assert_ne!(self.phase, before, "an available control moves the flow");
         }
         self.assert_invariants();
@@ -1366,8 +1600,8 @@ impl FlowRun {
     }
 
     fn enter_stage(&mut self, index: u32, effects: &mut Vec<FlowEffect>) {
-        let total = u32::try_from(self.stages.len()).expect("STAGES_MAX fits u32");
-        if index >= total {
+        let offset = usize::try_from(index).expect("STAGES_MAX fits usize");
+        if offset >= self.stages.len() {
             self.phase = FlowPhase::Done(FlowDone::ReadyToMerge);
             effects.push(FlowEffect::Alert {
                 worktree: self.worktree,
@@ -1377,81 +1611,27 @@ impl FlowRun {
             });
             return;
         }
+        if matches!(self.stages[offset].kind, RunStageKind::Land) {
+            self.merge_race_repolls = 0;
+        }
+        let phase = self.entering().phase(offset, effects);
         self.stage_index = index;
-        let stage = self.stages[self.stage_offset()].clone();
-        match stage.kind {
-            StageKind::Land => self.enter_land(effects),
-            StageKind::Implement | StageKind::ReviewSkill { .. } => {
-                let step = ActiveStep {
-                    view: None,
-                    view_name: stage.label.clone(),
-                    session_id: None,
-                    kind: ActiveStepKind::Stage,
-                };
-                self.phase = FlowPhase::RunningStage(step);
-                match self.mode {
-                    FlowMode::Interactive => {
-                        effects.push(FlowEffect::OpenInteractiveStage {
-                            worktree: self.worktree,
-                            view_name: stage.label,
-                            harness: self.harness,
-                            stage_kind: stage.kind,
-                            implement_prompt: self.implement_prompt.clone(),
-                        });
-                    }
-                    FlowMode::Unattended => {
-                        effects.push(FlowEffect::OpenUnattendedStage {
-                            worktree: self.worktree,
-                            view_name: stage.label,
-                            harness: self.harness,
-                            stage_kind: stage.kind,
-                            implement_prompt: self.implement_prompt.clone(),
-                            timeout_secs: self.spec.step_timeout_secs,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    fn enter_land(&mut self, effects: &mut Vec<FlowEffect>) {
-        self.merge_race_repolls = 0;
-        if self.mode == FlowMode::Interactive
-            && self.spec.interactive_land == InteractiveLandPolicy::StopReadyToMerge
-        {
-            self.phase = FlowPhase::Done(FlowDone::ReadyToMerge);
-            effects.push(FlowEffect::Alert {
-                worktree: self.worktree,
-                title: "Flow ready to merge".to_owned(),
-                detail: "Review stages finished in interactive mode".to_owned(),
-                urgent: false,
-            });
-            return;
-        }
-        self.phase = FlowPhase::Landing(LandState::Pushing);
-        effects.push(FlowEffect::PushIfAhead {
-            worktree: self.worktree,
-        });
+        self.phase = phase;
     }
 
     fn confirm_merge(
         &mut self,
-        pr_url: String,
-        expected_head: String,
+        pr_url: PullPage,
+        expected_head: GitOid,
         effects: &mut Vec<FlowEffect>,
     ) {
-        assert!(!pr_url.trim().is_empty(), "ConfirmMerge carries PR URL");
-        assert!(
-            !expected_head.trim().is_empty(),
-            "ConfirmMerge carries expected head"
-        );
         self.phase = FlowPhase::Landing(LandState::Merging {
             expected_head: expected_head.clone(),
         });
         effects.push(FlowEffect::MergePr {
             worktree: self.worktree,
             pr_url,
-            merge_method: self.spec.merge_method,
+            merge_method: self.policy.merge_method,
             expected_head,
         });
     }
@@ -1494,144 +1674,94 @@ impl FlowRun {
     }
 
     fn on_view_open_failed(&mut self, why: &str, effects: &mut Vec<FlowEffect>) {
-        let (stage_step, context) = match &self.phase {
-            FlowPhase::RunningStage(_) => (ActiveStepKind::Stage, PauseContext::None),
-            FlowPhase::Landing(LandState::ResolvingRebase { onto, .. }) => (
-                ActiveStepKind::ResolveRebase,
-                PauseContext::ResolveRebase { onto: onto.clone() },
-            ),
-            FlowPhase::Landing(LandState::FixingChecks { .. }) => {
-                (ActiveStepKind::FixChecks, PauseContext::None)
+        let resumes = match &self.phase {
+            FlowPhase::RunningStage(_) | FlowPhase::Landing(LandState::FixingChecks { .. }) => {
+                Resumes::Restart
+            }
+            FlowPhase::Landing(LandState::ResolvingRebase { onto, .. }) => {
+                Resumes::ResolveRebase { onto: onto.clone() }
             }
             _ => return,
         };
+        let detail = format!("could not open stage view: {why}");
         self.pause(
-            PauseState {
-                reason: PauseReason::StepFailed,
-                detail: format!("could not open stage view: {why}"),
-                resume_session: None,
-                view: None,
-                stage_step,
-                context,
-            },
+            PauseState::bare(PauseReason::StepFailed, detail, resumes),
             effects,
             true,
         );
     }
 
     fn on_worker_failed(&mut self, why: &str, effects: &mut Vec<FlowEffect>) {
-        let (reason, resume_session, view, stage_step, context) = match &self.phase {
-            FlowPhase::Done(_) | FlowPhase::Paused(_) | FlowPhase::WaitingInteractive { .. } => {
+        let why = why.to_owned();
+        let paused = match &self.phase {
+            FlowPhase::Done(_)
+            | FlowPhase::Paused(_)
+            | FlowPhase::WaitingInteractive { .. }
+            | FlowPhase::ConfirmingMerge { .. } => {
                 return;
             }
-            FlowPhase::RunningStage(step) => (
-                PauseReason::StepFailed,
-                step.session_id.clone(),
-                step.view,
-                step.kind,
-                PauseContext::None,
-            ),
-            FlowPhase::CheckingStage(step) => (
-                PauseReason::StepFailed,
-                step.session_id.clone(),
-                step.view,
-                step.kind,
-                PauseContext::CheckStage,
-            ),
+            FlowPhase::RunningStage(step) => {
+                step.clone()
+                    .paused(PauseReason::StepFailed, why, Resumes::Restart)
+            }
+            FlowPhase::CheckingStage(step) => {
+                step.clone()
+                    .paused(PauseReason::StepFailed, why, Resumes::CheckStage)
+            }
             FlowPhase::Landing(land) => match land {
-                LandState::Pushing => (
+                LandState::Pushing => {
+                    PauseState::bare(PauseReason::PushFailed, why, Resumes::Restart)
+                }
+                LandState::PushingRebase { expected_head } => PauseState::bare(
                     PauseReason::PushFailed,
-                    None,
-                    None,
-                    ActiveStepKind::Stage,
-                    PauseContext::None,
-                ),
-                LandState::PushingRebase { expected_head } => (
-                    PauseReason::PushFailed,
-                    None,
-                    None,
-                    ActiveStepKind::ResolveRebase,
-                    PauseContext::PushRebase {
+                    why,
+                    Resumes::PushRebase {
                         expected_head: expected_head.clone(),
                     },
                 ),
-                LandState::WaitingPr { .. } => (
-                    PauseReason::StepFailed,
-                    None,
-                    None,
-                    ActiveStepKind::Stage,
-                    PauseContext::None,
-                ),
-                LandState::Rebasing => (
-                    PauseReason::RebaseFailed,
-                    None,
-                    None,
-                    ActiveStepKind::ResolveRebase,
-                    PauseContext::Rebase,
-                ),
+                LandState::WaitingPr { .. } => {
+                    PauseState::bare(PauseReason::StepFailed, why, Resumes::Restart)
+                }
+                LandState::Rebasing => {
+                    PauseState::bare(PauseReason::RebaseFailed, why, Resumes::Rebase)
+                }
                 LandState::ResolvingRebase { onto, step }
-                | LandState::CheckingRebase { onto, step } => (
+                | LandState::CheckingRebase { onto, step } => step.clone().paused(
                     PauseReason::StepFailed,
-                    step.session_id.clone(),
-                    step.view,
-                    ActiveStepKind::ResolveRebase,
-                    PauseContext::ResolveRebase { onto: onto.clone() },
+                    why,
+                    Resumes::ResolveRebase { onto: onto.clone() },
                 ),
-                LandState::FetchingChecks { .. } => (
-                    PauseReason::ChecksFetchFailed,
-                    None,
-                    None,
-                    ActiveStepKind::FixChecks,
-                    PauseContext::None,
-                ),
+                LandState::FetchingChecks { .. } => {
+                    PauseState::bare(PauseReason::ChecksFetchFailed, why, Resumes::Restart)
+                }
                 LandState::FixingChecks { step, .. }
-                | LandState::CheckingFixChecks { step, .. } => (
-                    PauseReason::StepFailed,
-                    step.session_id.clone(),
-                    step.view,
-                    ActiveStepKind::FixChecks,
-                    PauseContext::None,
-                ),
-                LandState::Merging { .. } => (
-                    PauseReason::MergeFailed,
-                    None,
-                    None,
-                    ActiveStepKind::Stage,
-                    PauseContext::None,
-                ),
+                | LandState::CheckingFixChecks { step, .. } => {
+                    step.clone()
+                        .paused(PauseReason::StepFailed, why, Resumes::Restart)
+                }
+                LandState::Merging { .. } => {
+                    PauseState::bare(PauseReason::MergeFailed, why, Resumes::Restart)
+                }
             },
         };
-        self.pause(
-            PauseState {
-                reason,
-                detail: why.to_owned(),
-                resume_session,
-                view,
-                stage_step,
-                context,
-            },
-            effects,
-            true,
-        );
+        self.pause(paused, effects, true);
     }
 
-    fn on_session_captured(
-        &mut self,
-        view: ViewId,
-        session_id: String,
-        effects: &mut Vec<FlowEffect>,
-    ) {
-        if let Err(why) = validate_session_id(&session_id) {
-            effects.push(FlowEffect::Alert {
-                worktree: self.worktree,
-                title: "Flow ignored a session id".to_owned(),
-                detail: clamp_reason(&format!(
-                    "view {view} reported an unusable session id ({why}); Take over starts a fresh session"
-                )),
-                urgent: false,
-            });
-            return;
-        }
+    fn on_session_captured(&mut self, view: ViewId, raw: &str, effects: &mut Vec<FlowEffect>) {
+        let session_id = match SessionId::parse(raw) {
+            Ok(session_id) => session_id,
+            Err(why) => {
+                effects.push(FlowEffect::Alert {
+                    worktree: self.worktree,
+                    title: "Flow ignored a session id".to_owned(),
+                    detail: clamp_reason(&format!(
+                        "view {view} reported an unusable session id ({why}); Take over starts a fresh session"
+                    )),
+                    urgent: false,
+                });
+                return;
+            }
+        };
         match &mut self.phase {
             FlowPhase::WaitingInteractive {
                 view: active,
@@ -1666,44 +1796,22 @@ impl FlowRun {
             FlowPhase::RunningStage(step) if step.view == Some(view) => {
                 let step = step.clone();
                 if !exit.is_success() {
-                    self.pause(
-                        PauseState {
-                            reason: PauseReason::StepFailed,
-                            detail: format!("{} ended with {exit}", step.view_name),
-                            resume_session: step.session_id,
-                            view: step.view,
-                            stage_step: ActiveStepKind::Stage,
-                            context: PauseContext::None,
-                        },
-                        effects,
-                        true,
-                    );
+                    let detail = format!("{} ended with {exit}", step.view_name);
+                    let paused = step.paused(PauseReason::StepFailed, detail, Resumes::Restart);
+                    self.pause(paused, effects, true);
                     return;
                 }
-                let require_open_pr = matches!(self.current_stage().kind, StageKind::Implement);
-                self.phase = FlowPhase::CheckingStage(step);
-                effects.push(FlowEffect::CheckStagePostConditions {
-                    worktree: self.worktree,
-                    require_open_pr,
-                });
+                self.check_stage(step, effects);
             }
             FlowPhase::Landing(LandState::ResolvingRebase { onto, step })
                 if step.view == Some(view) =>
             {
                 let (onto, step) = (onto.clone(), step.clone());
                 if !exit.is_success() {
-                    self.pause(
-                        PauseState {
-                            reason: PauseReason::StepFailed,
-                            detail: format!("{} ended with {exit}", step.view_name),
-                            resume_session: step.session_id,
-                            view: step.view,
-                            stage_step: ActiveStepKind::ResolveRebase,
-                            context: PauseContext::ResolveRebase { onto },
-                        },
-                        effects,
-                        true,
-                    );
+                    let detail = format!("{} ended with {exit}", step.view_name);
+                    let resumes = Resumes::ResolveRebase { onto };
+                    let paused = step.paused(PauseReason::StepFailed, detail, resumes);
+                    self.pause(paused, effects, true);
                     return;
                 }
                 self.phase = FlowPhase::Landing(LandState::CheckingRebase {
@@ -1721,18 +1829,9 @@ impl FlowRun {
             }) if step.view == Some(view) => {
                 let (expected_head, step) = (expected_head.clone(), step.clone());
                 if !exit.is_success() {
-                    self.pause(
-                        PauseState {
-                            reason: PauseReason::StepFailed,
-                            detail: format!("{} ended with {exit}", step.view_name),
-                            resume_session: step.session_id,
-                            view: step.view,
-                            stage_step: ActiveStepKind::FixChecks,
-                            context: PauseContext::None,
-                        },
-                        effects,
-                        true,
-                    );
+                    let detail = format!("{} ended with {exit}", step.view_name);
+                    let paused = step.paused(PauseReason::StepFailed, detail, Resumes::Restart);
+                    self.pause(paused, effects, true);
                     return;
                 }
                 self.phase = FlowPhase::Landing(LandState::CheckingFixChecks {
@@ -1757,110 +1856,73 @@ impl FlowRun {
             return;
         };
         let step = step.clone();
-        match result {
-            Ok(()) => self.enter_stage(self.stage_index + 1, effects),
-            Err(StageGateFailure::DirtyTree) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::DirtyTree,
-                        detail: format!(
-                            "{} left uncommitted changes in the worktree",
-                            step.view_name
-                        ),
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::CheckStage,
-                    },
-                    effects,
-                    true,
-                );
+        let (reason, detail) = match result {
+            Ok(()) => {
+                self.enter_stage(self.stage_index + 1, effects);
+                return;
             }
-            Err(StageGateFailure::NoOpenPr) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::NoPullRequest,
-                        detail: format!("{} finished without an open pull request", step.view_name),
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::CheckStage,
-                    },
-                    effects,
-                    true,
-                );
-            }
-            Err(StageGateFailure::Failed(why)) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::StepFailed,
-                        detail: why,
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::CheckStage,
-                    },
-                    effects,
-                    true,
-                );
-            }
-        }
+            Err(StageGateFailure::DirtyTree) => (
+                PauseReason::DirtyTree,
+                format!(
+                    "{} left uncommitted changes in the worktree",
+                    step.view_name
+                ),
+            ),
+            Err(StageGateFailure::NoOpenPr) => (
+                PauseReason::NoPullRequest,
+                format!("{} finished without an open pull request", step.view_name),
+            ),
+            Err(StageGateFailure::Failed(why)) => (PauseReason::StepFailed, why),
+        };
+        let paused = step.paused(reason, detail, Resumes::CheckStage);
+        self.pause(paused, effects, true);
+    }
+
+    fn wait_for_pr(&mut self, expected_head: GitOid, now_secs: u64, effects: &mut Vec<FlowEffect>) {
+        self.phase = FlowPhase::Landing(LandState::WaitingPr {
+            expected_head,
+            pushed_at_secs: now_secs,
+            settle_skipped: false,
+        });
+        effects.push(FlowEffect::PollPr {
+            worktree: self.worktree,
+        });
     }
 
     fn on_push_finished(
         &mut self,
-        result: Result<String, String>,
+        result: Result<GitOid, String>,
         now_secs: u64,
         effects: &mut Vec<FlowEffect>,
     ) {
-        let rebased_head = match &self.phase {
-            FlowPhase::Landing(LandState::Pushing) => None,
-            FlowPhase::Landing(LandState::PushingRebase { expected_head }) => {
-                Some(expected_head.clone())
-            }
-            _ => return,
-        };
-        let pushed = match (result, rebased_head.as_deref()) {
-            (Ok(head_oid), Some(expected_head)) if head_oid != expected_head => Err(format!(
-                "pushed {head_oid}, but the checked rebase was {expected_head}"
-            )),
-            (result, _) => result,
-        };
-        match pushed {
-            Ok(head_oid) => {
-                assert!(
-                    !head_oid.trim().is_empty(),
-                    "a push reports the head it pushed"
-                );
-                self.phase = FlowPhase::Landing(LandState::WaitingPr {
-                    expected_head: head_oid,
-                    pushed_at_secs: now_secs,
-                    settle_skipped: false,
-                });
-                effects.push(FlowEffect::PollPr {
-                    worktree: self.worktree,
-                });
-            }
+        if !matches!(self.phase, FlowPhase::Landing(LandState::Pushing)) {
+            return;
+        }
+        match result {
+            Ok(head) => self.wait_for_pr(head, now_secs, effects),
             Err(why) => {
-                let (stage_step, context) = match rebased_head {
-                    Some(expected_head) => (
-                        ActiveStepKind::ResolveRebase,
-                        PauseContext::PushRebase { expected_head },
-                    ),
-                    None => (ActiveStepKind::Stage, PauseContext::None),
-                };
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::PushFailed,
-                        detail: why,
-                        resume_session: None,
-                        view: None,
-                        stage_step,
-                        context,
-                    },
-                    effects,
-                    true,
-                );
+                let paused = PauseState::bare(PauseReason::PushFailed, why, Resumes::Restart);
+                self.pause(paused, effects, true);
+            }
+        }
+    }
+
+    fn on_lease_push_finished(
+        &mut self,
+        result: Result<(), String>,
+        now_secs: u64,
+        effects: &mut Vec<FlowEffect>,
+    ) {
+        let FlowPhase::Landing(LandState::PushingRebase { expected_head }) = &self.phase else {
+            return;
+        };
+        let expected_head = expected_head.clone();
+        match result {
+            Ok(()) => self.wait_for_pr(expected_head, now_secs, effects),
+            Err(why) => {
+                let resumes = Resumes::PushRebase { expected_head };
+                let paused = PauseState::bare(PauseReason::PushFailed, why, resumes);
+                self.pause(paused, effects, true);
             }
         }
     }
@@ -1869,18 +1931,9 @@ impl FlowRun {
         if !self.expects_pr_snapshots() {
             return;
         }
-        self.pause(
-            PauseState {
-                reason: PauseReason::NoPullRequest,
-                detail: "the branch has no pull request to land".to_owned(),
-                resume_session: None,
-                view: None,
-                stage_step: ActiveStepKind::Stage,
-                context: PauseContext::None,
-            },
-            effects,
-            true,
-        );
+        let detail = "the branch has no pull request to land".to_owned();
+        let paused = PauseState::bare(PauseReason::NoPullRequest, detail, Resumes::Restart);
+        self.pause(paused, effects, true);
     }
 
     fn pause_land_wait(
@@ -1891,14 +1944,7 @@ impl FlowRun {
     ) {
         assert!(self.expects_pr_snapshots(), "only a PR wait times out");
         self.pause(
-            PauseState {
-                reason,
-                detail,
-                resume_session: None,
-                view: None,
-                stage_step: ActiveStepKind::Stage,
-                context: PauseContext::None,
-            },
+            PauseState::bare(reason, detail, Resumes::Restart),
             effects,
             true,
         );
@@ -1918,53 +1964,37 @@ impl FlowRun {
         else {
             return;
         };
-        if snapshot.stale {
-            return;
-        }
         let (expected_head, pushed_at_secs, settle_skipped) =
             (expected_head.clone(), *pushed_at_secs, *settle_skipped);
         let waited_secs = now_secs.saturating_sub(pushed_at_secs);
         self.last_pr_url = Some(snapshot.url.clone());
+        let url = snapshot.url.url().to_owned();
 
         if snapshot.state == PrState::Merged {
             self.phase = FlowPhase::Done(FlowDone::Merged);
             effects.push(FlowEffect::Alert {
                 worktree: self.worktree,
                 title: "Pull request merged".to_owned(),
-                detail: snapshot.url,
+                detail: url,
                 urgent: false,
             });
             return;
         }
 
         if snapshot.state == PrState::Closed {
-            self.pause(
-                PauseState {
-                    reason: PauseReason::PullRequestClosed,
-                    detail: format!("{} is closed", snapshot.url),
-                    resume_session: None,
-                    view: None,
-                    stage_step: ActiveStepKind::Stage,
-                    context: PauseContext::None,
-                },
+            self.pause_land_wait(
+                PauseReason::PullRequestClosed,
+                format!("{url} is closed"),
                 effects,
-                true,
             );
             return;
         }
 
         if snapshot.state == PrState::Draft || snapshot.merge_state == MergeStateStatus::Draft {
-            self.pause(
-                PauseState {
-                    reason: PauseReason::PullRequestDraft,
-                    detail: format!("{} is still a draft", snapshot.url),
-                    resume_session: None,
-                    view: None,
-                    stage_step: ActiveStepKind::Stage,
-                    context: PauseContext::None,
-                },
+            self.pause_land_wait(
+                PauseReason::PullRequestDraft,
+                format!("{url} is still a draft"),
                 effects,
-                true,
             );
             return;
         }
@@ -1972,8 +2002,8 @@ impl FlowRun {
         if snapshot.head_oid != expected_head {
             if waited_secs >= PR_INDEX_SECS_MAX {
                 let detail = format!(
-                    "{} has head {} after {waited_secs}s, not the local {expected_head}",
-                    snapshot.url, snapshot.head_oid
+                    "{url} has head {} after {waited_secs}s, not the local {expected_head}",
+                    snapshot.head_oid
                 );
                 self.pause_land_wait(PauseReason::PullRequestHeadMismatch, detail, effects);
             }
@@ -1984,10 +2014,8 @@ impl FlowRun {
             || snapshot.merge_state == MergeStateStatus::Unknown
         {
             if waited_secs >= PR_INDEX_SECS_MAX {
-                let detail = format!(
-                    "GitHub has not computed whether {} can merge after {waited_secs}s",
-                    snapshot.url
-                );
+                let detail =
+                    format!("GitHub has not computed whether {url} can merge after {waited_secs}s");
                 self.pause_land_wait(PauseReason::PullRequestStateUnknown, detail, effects);
             }
             return;
@@ -1999,26 +2027,16 @@ impl FlowRun {
                 MergeStateStatus::Dirty | MergeStateStatus::Behind
             );
         if needs_rebase {
-            if self.rebase_attempts >= self.spec.rebase_attempts_max {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::RebaseAttemptsExhausted,
-                        detail: format!(
-                            "reached limit of {} rebase attempts",
-                            self.spec.rebase_attempts_max
-                        ),
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::ResolveRebase,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
+            if self.rebase_attempts >= self.policy.rebase_attempts_max {
+                let detail = format!(
+                    "reached limit of {} rebase attempts",
+                    self.policy.rebase_attempts_max
                 );
+                self.pause_land_wait(PauseReason::RebaseAttemptsExhausted, detail, effects);
                 return;
             }
             self.rebase_attempts += 1;
-            assert!(self.rebase_attempts <= self.spec.rebase_attempts_max);
+            assert!(self.rebase_attempts <= self.policy.rebase_attempts_max);
             self.phase = FlowPhase::Landing(LandState::Rebasing);
             effects.push(FlowEffect::RunRebase {
                 worktree: self.worktree,
@@ -2030,17 +2048,17 @@ impl FlowRun {
             && snapshot.failed_checks == 0
             && snapshot.passed_checks == 0;
         let in_settle_window =
-            !settle_skipped && checks_empty && waited_secs < self.spec.ci_settle_secs;
+            !settle_skipped && checks_empty && waited_secs < self.policy.ci_settle_secs;
         let wait_pending = snapshot.pending_checks > 0
-            && (self.spec.wait_for_all_checks || snapshot.failed_checks == 0);
+            && (self.policy.wait_for_all_checks || snapshot.failed_checks == 0);
         if in_settle_window {
             return;
         }
         if wait_pending {
             if waited_secs >= CHECKS_WAIT_SECS_MAX {
                 let detail = format!(
-                    "{} still has {} pending checks after {waited_secs}s",
-                    snapshot.url, snapshot.pending_checks
+                    "{url} still has {} pending checks after {waited_secs}s",
+                    snapshot.pending_checks
                 );
                 self.pause_land_wait(PauseReason::ChecksTimedOut, detail, effects);
             }
@@ -2048,26 +2066,16 @@ impl FlowRun {
         }
 
         if snapshot.failed_checks > 0 {
-            if self.fix_checks_attempts >= self.spec.fix_checks_attempts_max {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::FixChecksAttemptsExhausted,
-                        detail: format!(
-                            "reached limit of {} CI fix attempts",
-                            self.spec.fix_checks_attempts_max
-                        ),
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::FixChecks,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
+            if self.fix_checks_attempts >= self.policy.fix_checks_attempts_max {
+                let detail = format!(
+                    "reached limit of {} CI fix attempts",
+                    self.policy.fix_checks_attempts_max
                 );
+                self.pause_land_wait(PauseReason::FixChecksAttemptsExhausted, detail, effects);
                 return;
             }
             self.fix_checks_attempts += 1;
-            assert!(self.fix_checks_attempts <= self.spec.fix_checks_attempts_max);
+            assert!(self.fix_checks_attempts <= self.policy.fix_checks_attempts_max);
             self.phase = FlowPhase::Landing(LandState::FetchingChecks { expected_head });
             effects.push(FlowEffect::KeepChecks {
                 worktree: self.worktree,
@@ -2078,61 +2086,29 @@ impl FlowRun {
 
         match snapshot.merge_state {
             MergeStateStatus::Blocked => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::PullRequestBlocked,
-                        detail: format!(
-                            "{} is blocked by branch protection or review",
-                            snapshot.url
-                        ),
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
+                let detail = format!("{url} is blocked by branch protection or review");
+                self.pause_land_wait(PauseReason::PullRequestBlocked, detail, effects);
             }
             MergeStateStatus::Unstable => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::PullRequestUnstable,
-                        detail: format!(
-                            "{} has unstable merge state without failing rollup checks",
-                            snapshot.url
-                        ),
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
+                let detail =
+                    format!("{url} has unstable merge state without failing rollup checks");
+                self.pause_land_wait(PauseReason::PullRequestUnstable, detail, effects);
             }
             MergeStateStatus::Clean | MergeStateStatus::HasHooks => {
-                if self.mode == FlowMode::Interactive {
-                    assert_ne!(snapshot.url.trim(), "");
-                    assert_ne!(expected_head.trim(), "");
-                    self.pause(
-                        PauseState {
-                            reason: PauseReason::ConfirmMerge,
-                            detail: format!("{} is clean and ready to merge", snapshot.url),
-                            resume_session: None,
-                            view: None,
-                            stage_step: ActiveStepKind::Stage,
-                            context: PauseContext::ConfirmMerge {
-                                pr_url: snapshot.url,
-                                expected_head,
-                            },
-                        },
-                        effects,
-                        false,
-                    );
-                } else {
+                if self.mode == FlowMode::Unattended {
                     self.confirm_merge(snapshot.url, expected_head, effects);
+                    return;
                 }
+                self.phase = FlowPhase::ConfirmingMerge {
+                    pr_url: snapshot.url,
+                    expected_head,
+                };
+                effects.push(FlowEffect::Alert {
+                    worktree: self.worktree,
+                    title: "Flow ready to merge".to_owned(),
+                    detail: clamp_reason(&format!("{url} is clean; advance the flow to merge it")),
+                    urgent: false,
+                });
             }
             MergeStateStatus::Draft
             | MergeStateStatus::Unknown
@@ -2148,7 +2124,7 @@ impl FlowRun {
             return;
         }
         assert!(self.rebase_attempts >= 1);
-        assert!(self.rebase_attempts <= self.spec.rebase_attempts_max);
+        assert!(self.rebase_attempts <= self.policy.rebase_attempts_max);
         match outcome {
             RebaseOutcome::Already => {
                 self.phase = FlowPhase::Landing(LandState::Pushing);
@@ -2161,41 +2137,26 @@ impl FlowRun {
                 let view_name = format!("rebase {}", self.rebase_attempts);
                 self.phase = FlowPhase::Landing(LandState::ResolvingRebase {
                     onto,
-                    step: ActiveStep {
-                        view: None,
-                        view_name: view_name.clone(),
-                        session_id: None,
-                        kind: ActiveStepKind::ResolveRebase,
-                    },
+                    step: ActiveStep::fresh(view_name.clone()),
                 });
                 effects.push(FlowEffect::OpenUnattendedHelper {
                     worktree: self.worktree,
                     view_name,
                     harness: self.harness,
                     prompt,
-                    timeout_secs: self.spec.step_timeout_secs,
+                    timeout_secs: self.policy.step_timeout_secs,
                 });
             }
             RebaseOutcome::Failed(why) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::RebaseFailed,
-                        detail: why,
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::ResolveRebase,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
+                let paused = PauseState::bare(PauseReason::RebaseFailed, why, Resumes::Restart);
+                self.pause(paused, effects, true);
             }
         }
     }
 
     fn on_rebase_post_conditions(
         &mut self,
-        result: Result<String, String>,
+        result: Result<GitOid, String>,
         effects: &mut Vec<FlowEffect>,
     ) {
         let FlowPhase::Landing(LandState::CheckingRebase { onto, step }) = &self.phase else {
@@ -2205,27 +2166,14 @@ impl FlowRun {
         match result {
             Ok(new_head) => self.push_rebase(new_head, effects),
             Err(why) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::RebasePostConditionFailed,
-                        detail: why,
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::ResolveRebase,
-                        context: PauseContext::ResolveRebase { onto },
-                    },
-                    effects,
-                    true,
-                );
+                let resumes = Resumes::ResolveRebase { onto };
+                let paused = step.paused(PauseReason::RebasePostConditionFailed, why, resumes);
+                self.pause(paused, effects, true);
             }
         }
     }
 
-    fn push_rebase(&mut self, new_head: String, effects: &mut Vec<FlowEffect>) {
-        assert!(
-            !new_head.trim().is_empty(),
-            "a rebase reports the head it made"
-        );
+    fn push_rebase(&mut self, new_head: GitOid, effects: &mut Vec<FlowEffect>) {
         assert!(self.rebase_attempts >= 1, "a rebase push follows a rebase");
         self.merge_race_repolls = 0;
         self.phase = FlowPhase::Landing(LandState::PushingRebase {
@@ -2242,48 +2190,34 @@ impl FlowRun {
             return;
         };
         assert!(self.fix_checks_attempts >= 1);
-        assert!(self.fix_checks_attempts <= self.spec.fix_checks_attempts_max);
+        assert!(self.fix_checks_attempts <= self.policy.fix_checks_attempts_max);
         let expected_head = expected_head.clone();
         match result {
             Ok(prompt) => {
                 let view_name = format!("fix-checks {}", self.fix_checks_attempts);
                 self.phase = FlowPhase::Landing(LandState::FixingChecks {
                     expected_head,
-                    step: ActiveStep {
-                        view: None,
-                        view_name: view_name.clone(),
-                        session_id: None,
-                        kind: ActiveStepKind::FixChecks,
-                    },
+                    step: ActiveStep::fresh(view_name.clone()),
                 });
                 effects.push(FlowEffect::OpenUnattendedHelper {
                     worktree: self.worktree,
                     view_name,
                     harness: self.harness,
                     prompt,
-                    timeout_secs: self.spec.step_timeout_secs,
+                    timeout_secs: self.policy.step_timeout_secs,
                 });
             }
             Err(why) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::ChecksFetchFailed,
-                        detail: why,
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::FixChecks,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
+                let paused =
+                    PauseState::bare(PauseReason::ChecksFetchFailed, why, Resumes::Restart);
+                self.pause(paused, effects, true);
             }
         }
     }
 
     fn on_fix_checks_post_conditions(
         &mut self,
-        result: Result<String, FixChecksGateFailure>,
+        result: Result<GitOid, FixChecksGateFailure>,
         effects: &mut Vec<FlowEffect>,
     ) {
         let FlowPhase::Landing(LandState::CheckingFixChecks {
@@ -2294,59 +2228,28 @@ impl FlowRun {
             return;
         };
         let (step, previous_head) = (step.clone(), expected_head.clone());
-        match result {
+        let (reason, detail) = match result {
             Ok(new_head) => {
-                assert!(!new_head.trim().is_empty(), "a CI fix reports its head");
                 assert_ne!(new_head, previous_head, "a checked CI fix moved the head");
                 self.merge_race_repolls = 0;
                 self.phase = FlowPhase::Landing(LandState::Pushing);
                 effects.push(FlowEffect::PushIfAhead {
                     worktree: self.worktree,
                 });
+                return;
             }
-            Err(FixChecksGateFailure::DirtyTree) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::DirtyTree,
-                        detail: format!("{} left uncommitted changes", step.view_name),
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::FixChecks,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
-            }
-            Err(FixChecksGateFailure::HeadUnchanged) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::ChecksUnchangedHead,
-                        detail: format!("{} did not create a new commit", step.view_name),
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::FixChecks,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
-            }
-            Err(FixChecksGateFailure::Failed(why)) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::StepFailed,
-                        detail: why,
-                        resume_session: step.session_id,
-                        view: step.view,
-                        stage_step: ActiveStepKind::FixChecks,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
-            }
-        }
+            Err(FixChecksGateFailure::DirtyTree) => (
+                PauseReason::DirtyTree,
+                format!("{} left uncommitted changes", step.view_name),
+            ),
+            Err(FixChecksGateFailure::HeadUnchanged) => (
+                PauseReason::ChecksUnchangedHead,
+                format!("{} did not create a new commit", step.view_name),
+            ),
+            Err(FixChecksGateFailure::Failed(why)) => (PauseReason::StepFailed, why),
+        };
+        let paused = step.paused(reason, detail, Resumes::Restart);
+        self.pause(paused, effects, true);
     }
 
     fn on_merge_finished(
@@ -2364,8 +2267,8 @@ impl FlowRun {
                 self.phase = FlowPhase::Done(FlowDone::Merged);
                 let detail = self
                     .last_pr_url
-                    .clone()
-                    .unwrap_or_else(|| "PR merged".to_owned());
+                    .as_ref()
+                    .map_or_else(|| "PR merged".to_owned(), |page| page.url().to_owned());
                 effects.push(FlowEffect::Alert {
                     worktree: self.worktree,
                     title: "Pull request merged".to_owned(),
@@ -2386,32 +2289,13 @@ impl FlowRun {
                 });
             }
             MergeOutcome::BaseUpdatedRace => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::MergeFailed,
-                        detail: "gh pr merge raced with base branch update repeatedly".to_owned(),
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
+                let detail = "gh pr merge raced with base branch update repeatedly".to_owned();
+                let paused = PauseState::bare(PauseReason::MergeFailed, detail, Resumes::Restart);
+                self.pause(paused, effects, true);
             }
             MergeOutcome::Failed(why) => {
-                self.pause(
-                    PauseState {
-                        reason: PauseReason::MergeFailed,
-                        detail: why,
-                        resume_session: None,
-                        view: None,
-                        stage_step: ActiveStepKind::Stage,
-                        context: PauseContext::None,
-                    },
-                    effects,
-                    true,
-                );
+                let paused = PauseState::bare(PauseReason::MergeFailed, why, Resumes::Restart);
+                self.pause(paused, effects, true);
             }
         }
     }
@@ -2422,42 +2306,32 @@ impl FlowRun {
             "only an available control reaches the flow"
         );
         match control {
-            FlowControl::Abort => {
-                self.stop_running_step(effects);
-                self.phase = FlowPhase::Done(FlowDone::Aborted);
-            }
+            FlowControl::Abort => self.stop_running_step(effects),
             FlowControl::Pause => self.on_pause(effects),
-            FlowControl::Advance => match self.phase.clone() {
-                FlowPhase::WaitingInteractive { view, session_id } => {
-                    self.check_interactive_stage(view, session_id, effects);
+            FlowControl::Advance | FlowControl::AutoRest | FlowControl::Resume => {
+                if control == FlowControl::AutoRest {
+                    self.mode = FlowMode::Unattended;
                 }
-                FlowPhase::Paused(PauseState {
-                    reason: PauseReason::ConfirmMerge,
-                    context:
-                        PauseContext::ConfirmMerge {
-                            pr_url,
-                            expected_head,
-                        },
-                    ..
-                }) => self.confirm_merge(pr_url, expected_head, effects),
-                _ => unreachable!("Advance is only available at an interactive wait or a merge"),
-            },
-            FlowControl::AutoRest => {
-                self.mode = FlowMode::Unattended;
                 match self.phase.clone() {
-                    FlowPhase::WaitingInteractive { view, session_id } => {
+                    FlowPhase::WaitingInteractive { view, session_id }
+                        if control != FlowControl::Resume =>
+                    {
                         self.check_interactive_stage(view, session_id, effects);
                     }
-                    FlowPhase::Paused(_) => self.resume_from_pause(effects),
-                    _ => unreachable!("Auto the rest is only available at a wait or a pause"),
+                    FlowPhase::ConfirmingMerge {
+                        pr_url,
+                        expected_head,
+                    } => self.confirm_merge(pr_url, expected_head, effects),
+                    FlowPhase::Paused(paused) if control != FlowControl::Advance => {
+                        self.resume_from_pause(paused, effects);
+                    }
+                    _ => unreachable!("{control:?} is offered only at a wait, a merge or a pause"),
                 }
             }
-            FlowControl::Resume => self.resume_from_pause(effects),
             FlowControl::RetryStep => {
-                if matches!(self.current_stage().kind, StageKind::Land) {
+                if self.landing() {
                     self.rebase_attempts = 0;
                     self.fix_checks_attempts = 0;
-                    self.merge_race_repolls = 0;
                 }
                 self.enter_stage(self.stage_index, effects);
             }
@@ -2469,25 +2343,22 @@ impl FlowRun {
     fn check_interactive_stage(
         &mut self,
         view: ViewId,
-        session_id: Option<String>,
+        session_id: Option<SessionId>,
         effects: &mut Vec<FlowEffect>,
     ) {
-        assert!(
-            !matches!(self.current_stage().kind, StageKind::Land),
-            "an interactive wait is never on the land stage"
-        );
         let step = ActiveStep {
             view: Some(view),
             view_name: self.current_stage().label.clone(),
             session_id,
-            kind: ActiveStepKind::Stage,
         };
         self.check_stage(step, effects);
     }
 
     fn check_stage(&mut self, step: ActiveStep, effects: &mut Vec<FlowEffect>) {
-        assert_eq!(step.kind, ActiveStepKind::Stage);
-        let require_open_pr = matches!(self.current_stage().kind, StageKind::Implement);
+        let require_open_pr = matches!(
+            self.current_stage().kind,
+            RunStageKind::Agent(AgentStage::Implement { .. })
+        );
         self.phase = FlowPhase::CheckingStage(step);
         effects.push(FlowEffect::CheckStagePostConditions {
             worktree: self.worktree,
@@ -2496,73 +2367,58 @@ impl FlowRun {
     }
 
     fn on_pause(&mut self, effects: &mut Vec<FlowEffect>) {
-        let (view, resume_session, stage_step, context) = match &self.phase {
-            FlowPhase::RunningStage(step) => (
-                step.view,
-                step.session_id.clone(),
-                step.kind,
-                PauseContext::None,
-            ),
-            FlowPhase::WaitingInteractive { view, session_id } => (
-                Some(*view),
-                session_id.clone(),
-                ActiveStepKind::Stage,
-                PauseContext::WaitInteractive,
-            ),
-            FlowPhase::Landing(LandState::ResolvingRebase { onto, step }) => (
-                step.view,
-                step.session_id.clone(),
-                ActiveStepKind::ResolveRebase,
-                PauseContext::ResolveRebase { onto: onto.clone() },
-            ),
-            FlowPhase::Landing(LandState::FixingChecks { step, .. }) => (
-                step.view,
-                step.session_id.clone(),
-                ActiveStepKind::FixChecks,
-                PauseContext::None,
+        let reason = PauseReason::UserPaused;
+        let detail = format!("paused at {}", self.current_stage().label);
+        let paused = match &self.phase {
+            FlowPhase::RunningStage(step)
+            | FlowPhase::Landing(LandState::FixingChecks { step, .. }) => {
+                step.clone().paused(reason, detail, Resumes::Restart)
+            }
+            FlowPhase::WaitingInteractive { view, session_id } => PauseState {
+                reason,
+                detail,
+                resume_session: session_id.clone(),
+                view: Some(*view),
+                resumes: Resumes::WaitInteractive,
+            },
+            FlowPhase::Landing(LandState::ResolvingRebase { onto, step }) => step.clone().paused(
+                reason,
+                detail,
+                Resumes::ResolveRebase { onto: onto.clone() },
             ),
             FlowPhase::Landing(LandState::WaitingPr { .. }) => {
-                (None, None, ActiveStepKind::Stage, PauseContext::None)
+                PauseState::bare(reason, detail, Resumes::Restart)
             }
             _ => unreachable!("Pause is only available while a step runs or a PR is awaited"),
         };
         self.stop_running_step(effects);
-        self.phase = FlowPhase::Paused(PauseState {
-            reason: PauseReason::UserPaused,
-            detail: format!("paused at {}", self.current_stage().label),
-            resume_session,
-            view,
-            stage_step,
-            context,
-        });
+        self.phase = FlowPhase::Paused(paused);
     }
 
     fn on_take_over(&mut self, effects: &mut Vec<FlowEffect>) {
-        let session_id = self.resume_session().map(str::to_owned);
+        let session_id = self.resume_session().cloned();
         let fallback_view = self.active_view();
         let view_name = format!("{} (takeover)", self.current_stage().label);
         let stopped_view = self.running_headless_view();
         if !matches!(self.phase, FlowPhase::Paused(_)) {
-            let (stage_step, context) = match &self.phase {
-                FlowPhase::RunningStage(_) => (ActiveStepKind::Stage, PauseContext::None),
-                FlowPhase::Landing(LandState::ResolvingRebase { onto, .. }) => (
-                    ActiveStepKind::ResolveRebase,
-                    PauseContext::ResolveRebase { onto: onto.clone() },
-                ),
-                FlowPhase::Landing(LandState::FixingChecks { .. }) => {
-                    (ActiveStepKind::FixChecks, PauseContext::None)
+            let reason = PauseReason::UserPaused;
+            let detail = format!("taken over at {}", self.current_stage().label);
+            let paused = match &self.phase {
+                FlowPhase::RunningStage(step)
+                | FlowPhase::Landing(LandState::FixingChecks { step, .. }) => {
+                    step.clone().paused(reason, detail, Resumes::Restart)
+                }
+                FlowPhase::Landing(LandState::ResolvingRebase { onto, step }) => {
+                    step.clone().paused(
+                        reason,
+                        detail,
+                        Resumes::ResolveRebase { onto: onto.clone() },
+                    )
                 }
                 _ => unreachable!("Take over is only available while a step runs or at a pause"),
             };
             self.stop_running_step(effects);
-            self.phase = FlowPhase::Paused(PauseState {
-                reason: PauseReason::UserPaused,
-                detail: format!("taken over at {}", self.current_stage().label),
-                resume_session: session_id.clone(),
-                view: fallback_view,
-                stage_step,
-                context,
-            });
+            self.phase = FlowPhase::Paused(paused);
         }
         effects.push(FlowEffect::OpenTakeOver {
             worktree: self.worktree,
@@ -2574,19 +2430,9 @@ impl FlowRun {
         });
     }
 
-    fn resume_from_pause(&mut self, effects: &mut Vec<FlowEffect>) {
-        let FlowPhase::Paused(paused) = self.phase.clone() else {
-            unreachable!("only a paused flow resumes");
-        };
-        match paused.context {
-            PauseContext::ConfirmMerge {
-                pr_url,
-                expected_head,
-            } => {
-                assert_eq!(paused.reason, PauseReason::ConfirmMerge);
-                self.confirm_merge(pr_url, expected_head, effects);
-            }
-            PauseContext::WaitInteractive => {
+    fn resume_from_pause(&mut self, paused: PauseState, effects: &mut Vec<FlowEffect>) {
+        match paused.resumes {
+            Resumes::WaitInteractive => {
                 let view = paused
                     .view
                     .expect("an interactive wait pauses with its view");
@@ -2599,16 +2445,15 @@ impl FlowRun {
                     self.check_interactive_stage(view, paused.resume_session, effects);
                 }
             }
-            PauseContext::CheckStage => {
+            Resumes::CheckStage => {
                 let step = ActiveStep {
                     view: paused.view,
                     view_name: self.current_stage().label.clone(),
                     session_id: paused.resume_session,
-                    kind: ActiveStepKind::Stage,
                 };
                 self.check_stage(step, effects);
             }
-            PauseContext::ResolveRebase { onto } => {
+            Resumes::ResolveRebase { onto } => {
                 assert!(
                     self.rebase_attempts >= 1,
                     "a rebase pause counted its attempt"
@@ -2617,7 +2462,6 @@ impl FlowRun {
                     view: paused.view,
                     view_name: format!("rebase {}", self.rebase_attempts),
                     session_id: paused.resume_session,
-                    kind: ActiveStepKind::ResolveRebase,
                 };
                 self.phase = FlowPhase::Landing(LandState::CheckingRebase {
                     onto: onto.clone(),
@@ -2628,7 +2472,7 @@ impl FlowRun {
                     onto,
                 });
             }
-            PauseContext::Rebase => {
+            Resumes::Rebase => {
                 assert!(
                     self.rebase_attempts >= 1,
                     "a rebase pause counted its attempt"
@@ -2638,20 +2482,13 @@ impl FlowRun {
                     worktree: self.worktree,
                 });
             }
-            PauseContext::PushRebase { expected_head } => self.push_rebase(expected_head, effects),
-            PauseContext::None => {
-                if matches!(self.current_stage().kind, StageKind::Land) {
-                    if paused.reason == PauseReason::RebaseAttemptsExhausted {
-                        self.rebase_attempts = 0;
-                    }
-                    if paused.reason == PauseReason::FixChecksAttemptsExhausted {
-                        self.fix_checks_attempts = 0;
-                    }
-                    if paused.reason == PauseReason::MergeFailed {
-                        self.merge_race_repolls = 0;
-                    }
-                    self.enter_land(effects);
-                    return;
+            Resumes::PushRebase { expected_head } => self.push_rebase(expected_head, effects),
+            Resumes::Restart => {
+                if paused.reason == PauseReason::RebaseAttemptsExhausted {
+                    self.rebase_attempts = 0;
+                }
+                if paused.reason == PauseReason::FixChecksAttemptsExhausted {
+                    self.fix_checks_attempts = 0;
                 }
                 self.enter_stage(self.stage_index, effects);
             }
@@ -2659,84 +2496,55 @@ impl FlowRun {
     }
 
     fn on_daemon_restarted(&mut self, effects: &mut Vec<FlowEffect>) {
-        let (detail, view, resume_session, stage_step, context) = match &self.phase {
-            FlowPhase::WaitingInteractive { .. } | FlowPhase::Paused(_) | FlowPhase::Done(_) => {
+        let reason = PauseReason::DaemonRestarted;
+        let later = "resume or retry when ready";
+        let land_detail = format!("luned restarted during Land; {later}");
+        let paused = match &self.phase {
+            FlowPhase::WaitingInteractive { .. }
+            | FlowPhase::ConfirmingMerge { .. }
+            | FlowPhase::Paused(_)
+            | FlowPhase::Done(_) => {
                 return;
             }
-            FlowPhase::RunningStage(step) => (
-                format!("luned restarted while {} was in flight", step.view_name),
-                step.view,
-                step.session_id.clone(),
-                step.kind,
-                PauseContext::None,
-            ),
-            FlowPhase::CheckingStage(step) => (
-                format!("luned restarted while checking {}", step.view_name),
-                step.view,
-                step.session_id.clone(),
-                step.kind,
-                PauseContext::CheckStage,
-            ),
-            FlowPhase::Landing(land) => {
-                let detail = "luned restarted during Land".to_owned();
-                match land {
-                    LandState::ResolvingRebase { onto, step }
-                    | LandState::CheckingRebase { onto, step } => (
-                        detail,
-                        step.view,
-                        step.session_id.clone(),
-                        ActiveStepKind::ResolveRebase,
-                        PauseContext::ResolveRebase { onto: onto.clone() },
-                    ),
-                    LandState::Rebasing => (
-                        detail,
-                        None,
-                        None,
-                        ActiveStepKind::ResolveRebase,
-                        PauseContext::Rebase,
-                    ),
-                    LandState::PushingRebase { expected_head } => (
-                        detail,
-                        None,
-                        None,
-                        ActiveStepKind::ResolveRebase,
-                        PauseContext::PushRebase {
-                            expected_head: expected_head.clone(),
-                        },
-                    ),
-                    LandState::FixingChecks { step, .. }
-                    | LandState::CheckingFixChecks { step, .. } => (
-                        detail,
-                        step.view,
-                        step.session_id.clone(),
-                        ActiveStepKind::FixChecks,
-                        PauseContext::None,
-                    ),
-                    LandState::Pushing
-                    | LandState::WaitingPr { .. }
-                    | LandState::FetchingChecks { .. }
-                    | LandState::Merging { .. } => (
-                        detail,
-                        None,
-                        None,
-                        ActiveStepKind::Stage,
-                        PauseContext::None,
-                    ),
-                }
+            FlowPhase::RunningStage(step) => {
+                let detail = format!(
+                    "luned restarted while {} was in flight; {later}",
+                    step.view_name
+                );
+                step.clone().paused(reason, detail, Resumes::Restart)
             }
-        };
-        self.pause(
-            PauseState {
-                reason: PauseReason::DaemonRestarted,
-                detail: format!("{detail}; resume or retry when ready"),
-                resume_session,
-                view,
-                stage_step,
-                context,
+            FlowPhase::CheckingStage(step) => {
+                let detail = format!("luned restarted while checking {}; {later}", step.view_name);
+                step.clone().paused(reason, detail, Resumes::CheckStage)
+            }
+            FlowPhase::Landing(land) => match land {
+                LandState::ResolvingRebase { onto, step }
+                | LandState::CheckingRebase { onto, step } => step.clone().paused(
+                    reason,
+                    land_detail,
+                    Resumes::ResolveRebase { onto: onto.clone() },
+                ),
+                LandState::Rebasing => PauseState::bare(reason, land_detail, Resumes::Rebase),
+                LandState::PushingRebase { expected_head } => PauseState::bare(
+                    reason,
+                    land_detail,
+                    Resumes::PushRebase {
+                        expected_head: expected_head.clone(),
+                    },
+                ),
+                LandState::FixingChecks { step, .. }
+                | LandState::CheckingFixChecks { step, .. } => {
+                    step.clone().paused(reason, land_detail, Resumes::Restart)
+                }
+                LandState::Pushing
+                | LandState::WaitingPr { .. }
+                | LandState::FetchingChecks { .. }
+                | LandState::Merging { .. } => {
+                    PauseState::bare(reason, land_detail, Resumes::Restart)
+                }
             },
-            effects,
-            true,
-        );
+        };
+        self.pause(paused, effects, true);
     }
 }
 
@@ -2800,10 +2608,6 @@ impl FlowRegistry {
             return Vec::new();
         };
         let effects = run.handle(event);
-        assert!(
-            !matches!(run.phase, FlowPhase::Done(FlowDone::Aborted)),
-            "only a control aborts a flow"
-        );
         assert!(self.flows.len() <= FLOWS_MAX);
         effects
     }
@@ -2817,7 +2621,7 @@ impl FlowRegistry {
             return Err("worktree has no active flow".to_owned());
         };
         let effects = run.control(control)?;
-        if matches!(run.phase, FlowPhase::Done(FlowDone::Aborted)) {
+        if control == FlowControl::Abort {
             self.flows.remove(&worktree);
         }
         assert!(self.flows.len() <= FLOWS_MAX);
@@ -2846,7 +2650,6 @@ impl FlowRegistry {
     pub fn summaries(&self) -> BTreeMap<WorktreeId, FlowSummary> {
         self.flows
             .iter()
-            .filter(|(_, run)| !matches!(run.phase, FlowPhase::Done(FlowDone::Aborted)))
             .map(|(&id, run)| (id, run.summary()))
             .collect()
     }
@@ -2862,6 +2665,13 @@ impl FlowRegistry {
     }
 }
 
+fn validate_onto(onto: &str) -> Result<(), String> {
+    if onto.trim().is_empty() {
+        return Err("a rebase names an empty onto ref".to_owned());
+    }
+    Ok(())
+}
+
 fn clamp_reason(detail: &str) -> String {
     let trimmed = detail.trim();
     if trimmed.len() <= REASON_BYTES_MAX {
@@ -2872,6 +2682,42 @@ fn clamp_reason(detail: &str) -> String {
     let clamped = format!("{}{ELLIPSIS}", &trimmed[..end]);
     assert!(clamped.len() <= REASON_BYTES_MAX);
     clamped
+}
+
+mod pull_page {
+    use lune_protocol::github::PullPage;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(page: &PullPage, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(page.url())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PullPage, D::Error> {
+        let raw = String::deserialize(d)?;
+        PullPage::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
+
+mod opt_pull_page {
+    use lune_protocol::github::PullPage;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    #[expect(
+        clippy::ref_option,
+        reason = "serde with requires passing the field by reference"
+    )]
+    pub fn serialize<S: Serializer>(page: &Option<PullPage>, s: S) -> Result<S::Ok, S::Error> {
+        match page {
+            Some(page) => s.serialize_some(page.url()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<PullPage>, D::Error> {
+        let raw = Option::<String>::deserialize(d)?;
+        raw.map(|raw| PullPage::parse(&raw).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 mod worktree_id {
@@ -3018,8 +2864,20 @@ mod tests {
         ViewId::of(id).unwrap()
     }
 
+    fn oid(digit: char) -> GitOid {
+        GitOid::parse(&digit.to_string().repeat(40)).unwrap()
+    }
+
+    fn page() -> PullPage {
+        PullPage::parse("https://github.com/owner/repo/pull/42").unwrap()
+    }
+
+    fn session(id: &str) -> SessionId {
+        SessionId::parse(id).unwrap()
+    }
+
     fn pr(
-        head_oid: &str,
+        head: char,
         state: PrState,
         mergeable: Mergeable,
         merge_state: MergeStateStatus,
@@ -3028,16 +2886,15 @@ mod tests {
         passed: u32,
     ) -> PrSnapshot {
         PrSnapshot {
-            url: "https://github.com/owner/repo/pull/42".to_owned(),
+            url: page(),
             state,
-            head_oid: head_oid.to_owned(),
+            head_oid: oid(head),
             base_name: "main".to_owned(),
             mergeable,
             merge_state,
             pending_checks: pending,
             failed_checks: failed,
             passed_checks: passed,
-            stale: false,
         }
     }
 
@@ -3102,14 +2959,14 @@ mod tests {
         }
 
         let effects = run.handle(FlowEvent::PushFinished {
-            result: Ok("aaa111".to_owned()),
+            result: Ok(oid('a')),
             now_secs: 100,
         });
         assert_eq!(effects, vec![FlowEffect::PollPr { worktree: wt(1) }]);
 
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "aaa111",
+                'a',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Clean,
@@ -3123,9 +2980,9 @@ mod tests {
             effects,
             vec![FlowEffect::MergePr {
                 worktree: wt(1),
-                pr_url: "https://github.com/owner/repo/pull/42".to_owned(),
+                pr_url: page(),
                 merge_method: MergeMethod::Squash,
-                expected_head: "aaa111".to_owned(),
+                expected_head: oid('a'),
             }]
         );
         assert_eq!(run.summary().badge, "4/4 merging");
@@ -3160,7 +3017,7 @@ mod tests {
         assert!(matches!(
             effects.as_slice(),
             [FlowEffect::OpenUnattendedStage {
-                stage_kind: StageKind::Implement,
+                stage: AgentStage::Implement { .. },
                 ..
             }]
         ));
@@ -3198,7 +3055,7 @@ mod tests {
                 worktree: wt(2),
                 view_name: "implement (takeover)".to_owned(),
                 harness: Harness::Antigravity,
-                session_id: Some("agy-conv-1".to_owned()),
+                session_id: Some(session("agy-conv-1")),
                 fallback_view: Some(view(20)),
                 stopped_view: None,
             }]
@@ -3277,7 +3134,7 @@ mod tests {
             label: "land".to_owned(),
             kind: StageKind::Land,
         }];
-        stop_spec.interactive_land = InteractiveLandPolicy::StopReadyToMerge;
+        stop_spec.policy.interactive_land = InteractiveLandPolicy::StopReadyToMerge;
         let (run, _) = FlowRun::start(
             wt(4),
             stop_spec,
@@ -3294,7 +3151,7 @@ mod tests {
             label: "land".to_owned(),
             kind: StageKind::Land,
         }];
-        confirm_spec.interactive_land = InteractiveLandPolicy::CheckThenConfirmMerge;
+        confirm_spec.policy.interactive_land = InteractiveLandPolicy::CheckThenConfirmMerge;
         let (mut run, _) = FlowRun::start(
             wt(4),
             confirm_spec,
@@ -3304,12 +3161,12 @@ mod tests {
         )
         .unwrap();
         run.handle(FlowEvent::PushFinished {
-            result: Ok("head1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 10,
         });
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "head1",
+                '1',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Clean,
@@ -3319,18 +3176,24 @@ mod tests {
             ),
             now_secs: 50,
         });
-        assert!(matches!(effects.as_slice(), [FlowEffect::Alert { .. }]));
-        assert_eq!(run.summary().pause_reason, Some(PauseReason::ConfirmMerge));
-        assert_eq!(run.summary().badge, "1/1 merge?");
+        assert!(matches!(
+            effects.as_slice(),
+            [FlowEffect::Alert { urgent: false, .. }]
+        ));
+        let summary = run.summary();
+        assert_eq!(summary.badge_kind, FlowBadgeKind::ConfirmMerge);
+        assert_eq!(summary.pause_reason, None);
+        assert_eq!(summary.badge, "1/1 merge?");
+        assert!(!summary.controls.contains(&FlowControl::TakeOver));
 
         let effects = run.control(FlowControl::Advance).unwrap();
         assert_eq!(
             effects,
             vec![FlowEffect::MergePr {
                 worktree: wt(4),
-                pr_url: "https://github.com/owner/repo/pull/42".to_owned(),
+                pr_url: page(),
                 merge_method: MergeMethod::Squash,
-                expected_head: "head1".to_owned(),
+                expected_head: oid('1'),
             }]
         );
     }
@@ -3342,7 +3205,7 @@ mod tests {
             label: "land".to_owned(),
             kind: StageKind::Land,
         }];
-        spec.ci_settle_secs = 20;
+        spec.policy.ci_settle_secs = 20;
         let (mut run, _) = FlowRun::start(
             wt(5),
             spec,
@@ -3352,14 +3215,14 @@ mod tests {
         )
         .unwrap();
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 100,
         });
 
         assert_eq!(
             run.handle(FlowEvent::PrSnapshot {
                 snapshot: pr(
-                    "old",
+                    '0',
                     PrState::Open,
                     Mergeable::Conflicting,
                     MergeStateStatus::Dirty,
@@ -3375,7 +3238,7 @@ mod tests {
         assert_eq!(
             run.handle(FlowEvent::PrSnapshot {
                 snapshot: pr(
-                    "h1",
+                    '1',
                     PrState::Open,
                     Mergeable::Unknown,
                     MergeStateStatus::Clean,
@@ -3391,7 +3254,7 @@ mod tests {
         assert_eq!(
             run.handle(FlowEvent::PrSnapshot {
                 snapshot: pr(
-                    "h1",
+                    '1',
                     PrState::Open,
                     Mergeable::Mergeable,
                     MergeStateStatus::Clean,
@@ -3407,7 +3270,7 @@ mod tests {
         assert_eq!(
             run.handle(FlowEvent::PrSnapshot {
                 snapshot: pr(
-                    "h1",
+                    '1',
                     PrState::Open,
                     Mergeable::Mergeable,
                     MergeStateStatus::Unstable,
@@ -3422,7 +3285,7 @@ mod tests {
 
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h1",
+                '1',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Behind,
@@ -3455,22 +3318,22 @@ mod tests {
                 onto: "refs/remotes/origin/main".to_owned(),
             }]
         );
-        let effects = run.handle(FlowEvent::RebasePostConditionsChecked(Ok("h2".to_owned())));
+        let effects = run.handle(FlowEvent::RebasePostConditionsChecked(Ok(oid('2'))));
         assert_eq!(
             effects,
             vec![FlowEffect::PushForceWithLease {
                 worktree: wt(5),
-                expected_head: "h2".to_owned(),
+                expected_head: oid('2'),
             }]
         );
-        run.handle(FlowEvent::PushFinished {
-            result: Ok("h2".to_owned()),
+        run.handle(FlowEvent::LeasePushFinished {
+            result: Ok(()),
             now_secs: 200,
         });
 
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h2",
+                '2',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Unstable,
@@ -3484,7 +3347,7 @@ mod tests {
             effects,
             vec![FlowEffect::KeepChecks {
                 worktree: wt(5),
-                pr_url: "https://github.com/owner/repo/pull/42".to_owned(),
+                pr_url: page(),
             }]
         );
         let effects = run.handle(FlowEvent::ChecksFetched(Ok("Fix test_foo".to_owned())));
@@ -3501,21 +3364,19 @@ mod tests {
             effects,
             vec![FlowEffect::CheckFixChecksPostConditions {
                 worktree: wt(5),
-                previous_head: "h2".to_owned(),
+                previous_head: oid('2'),
             }]
         );
-        let effects = run.handle(FlowEvent::FixChecksPostConditionsChecked(Ok(
-            "h3".to_owned()
-        )));
+        let effects = run.handle(FlowEvent::FixChecksPostConditionsChecked(Ok(oid('3'))));
         assert_eq!(effects, vec![FlowEffect::PushIfAhead { worktree: wt(5) }]);
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h3".to_owned()),
+            result: Ok(oid('3')),
             now_secs: 300,
         });
 
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h3",
+                '3',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Blocked,
@@ -3551,12 +3412,12 @@ mod tests {
         )
         .unwrap();
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 10,
         });
         run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h1",
+                '1',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::HasHooks,
@@ -3574,7 +3435,7 @@ mod tests {
 
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h1",
+                '1',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Behind,
@@ -3594,7 +3455,7 @@ mod tests {
             label: "land".to_owned(),
             kind: StageKind::Land,
         }];
-        spec.rebase_attempts_max = 1;
+        spec.policy.rebase_attempts_max = 1;
         let (mut run, _) = FlowRun::start(
             wt(7),
             spec,
@@ -3604,12 +3465,12 @@ mod tests {
         )
         .unwrap();
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 10,
         });
         run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h1",
+                '1',
                 PrState::Open,
                 Mergeable::Conflicting,
                 MergeStateStatus::Dirty,
@@ -3620,15 +3481,15 @@ mod tests {
             now_secs: 40,
         });
         run.handle(FlowEvent::RebaseFinished(RebaseOutcome::Clean {
-            new_head: "h2".to_owned(),
+            new_head: oid('2'),
         }));
-        run.handle(FlowEvent::PushFinished {
-            result: Ok("h2".to_owned()),
+        run.handle(FlowEvent::LeasePushFinished {
+            result: Ok(()),
             now_secs: 50,
         });
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h2",
+                '2',
                 PrState::Open,
                 Mergeable::Conflicting,
                 MergeStateStatus::Dirty,
@@ -3685,7 +3546,7 @@ mod tests {
         ));
         let summary = restored.get(wt(8)).unwrap().summary();
         assert_eq!(summary.pause_reason, Some(PauseReason::DaemonRestarted));
-        assert_eq!(summary.resume_session.as_deref(), Some("sess-80"));
+        assert_eq!(summary.resume_session, Some(session("sess-80")));
     }
 
     #[test]
@@ -3704,11 +3565,11 @@ mod tests {
         )
         .unwrap();
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 10,
         });
         let clean = pr(
-            "h1",
+            '1',
             PrState::Open,
             Mergeable::Mergeable,
             MergeStateStatus::Clean,
@@ -3812,12 +3673,12 @@ mod tests {
         )
         .unwrap();
         merging.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 10,
         });
         merging.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h1",
+                '1',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Clean,
@@ -3856,12 +3717,12 @@ mod tests {
         )
         .unwrap();
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 10,
         });
         let effects = run.handle(FlowEvent::PrSnapshot {
             snapshot: pr(
-                "h1",
+                '1',
                 PrState::Open,
                 Mergeable::Mergeable,
                 MergeStateStatus::Unstable,
@@ -3882,7 +3743,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_rejects_corrupt_spec_and_invalid_confirm_merge() {
+    fn loading_refuses_a_corrupt_flow() {
         let mut registry = FlowRegistry::default();
         registry
             .start(
@@ -3893,22 +3754,130 @@ mod tests {
                 FlowEntry::PullRequest,
             )
             .unwrap();
-        let mut raw: serde_json::Value = serde_json::to_value(&registry).unwrap();
-        raw["flows"][0]["spec"]["step_timeout_secs"] = serde_json::json!(0);
-        assert!(serde_json::from_value::<FlowRegistry>(raw).is_err());
-
-        let mut bad_confirm: serde_json::Value = serde_json::to_value(&registry).unwrap();
-        bad_confirm["flows"][0]["phase"] = serde_json::json!({
-            "Paused": {
-                "reason": "ConfirmMerge",
-                "detail": "ready",
-                "resume_session": null,
-                "view": null,
-                "stage_step": "Stage",
-                "context": "None"
-            }
+        let saved: serde_json::Value = serde_json::to_value(&registry).unwrap();
+        let rejects = |change: &dyn Fn(&mut serde_json::Value)| {
+            let mut raw = saved.clone();
+            change(&mut raw["flows"][0]);
+            assert!(
+                serde_json::from_value::<FlowRegistry>(raw).is_err(),
+                "a corrupt flow is refused"
+            );
+        };
+        rejects(&|run| run["policy"]["step_timeout_secs"] = serde_json::json!(0));
+        rejects(&|run| run["phase"] = serde_json::json!({ "Done": "Aborted" }));
+        rejects(&|run| {
+            run["phase"] = serde_json::json!({
+                "Paused": {
+                    "reason": "UserPaused",
+                    "detail": "paused",
+                    "resume_session": "-x",
+                    "view": null,
+                    "resumes": "Restart"
+                }
+            });
         });
-        assert!(serde_json::from_value::<FlowRegistry>(bad_confirm).is_err());
+        rejects(&|run| {
+            run["phase"] = serde_json::json!({
+                "Paused": {
+                    "reason": "UserPaused",
+                    "detail": "paused",
+                    "resume_session": null,
+                    "view": null
+                }
+            });
+        });
+        rejects(&|run| {
+            run["stages"] = serde_json::json!([{ "label": "land", "kind": "Land" }]);
+            run["phase"] = serde_json::json!({
+                "ConfirmingMerge": {
+                    "pr_url": "https://github.com/owner/repo/pull/42",
+                    "expected_head": "1".repeat(40)
+                }
+            });
+        });
+        rejects(&|run| {
+            run["stages"] = serde_json::json!([{ "label": "land", "kind": "Land" }]);
+            run["phase"] = serde_json::json!({
+                "Landing": { "WaitingPr": {
+                    "expected_head": "not an oid",
+                    "pushed_at_secs": 1,
+                    "settle_skipped": false
+                } }
+            });
+        });
+        rejects(&|run| {
+            run["stages"][0] = serde_json::json!({
+                "label": "implement",
+                "kind": { "Agent": { "Implement": { "prompt": " " } } }
+            });
+        });
+    }
+
+    #[test]
+    fn every_pause_reason_and_badge_kind_crosses_the_wire_and_back() {
+        for reason in PauseReason::ALL {
+            let raw = i32::from(reason.to_api());
+            assert_eq!(PauseReason::of_api(raw), Ok(reason));
+        }
+        assert!(PauseReason::of_api(api::FlowPauseReason::Unspecified.into()).is_err());
+        assert!(PauseReason::of_api(999).is_err());
+        for kind in [
+            FlowBadgeKind::Running,
+            FlowBadgeKind::WaitingInteractive,
+            FlowBadgeKind::ConfirmMerge,
+            FlowBadgeKind::Paused,
+            FlowBadgeKind::Merged,
+            FlowBadgeKind::ReadyToMerge,
+        ] {
+            assert_eq!(FlowBadgeKind::of_api(kind.to_api().into()), Ok(kind));
+        }
+        assert!(FlowBadgeKind::of_api(api::FlowBadgeKind::Unspecified.into()).is_err());
+    }
+
+    #[test]
+    fn git_oids_and_session_ids_parse_only_their_own_shape() {
+        assert!(GitOid::parse(&"a".repeat(40)).is_ok());
+        assert!(GitOid::parse(&"0".repeat(64)).is_ok());
+        for bad in ["", "h1", &"A".repeat(40), &"a".repeat(39), &"g".repeat(40)] {
+            assert!(GitOid::parse(bad).is_err(), "{bad:?} is no oid");
+        }
+        assert!(SessionId::parse("2f6c-41aa").is_ok());
+        assert!(SessionId::parse("/tmp/pi-1.jsonl").is_ok());
+        for bad in ["", " s", "s\n", "--resume", "-x"] {
+            assert!(SessionId::parse(bad).is_err(), "{bad:?} is no session id");
+        }
+    }
+
+    #[test]
+    fn the_implement_prompt_rides_on_the_first_stage_and_only_there() {
+        let entry = FlowEntry::Implement {
+            prompt: "Tackle #872".to_owned(),
+        };
+        let stages = FlowSpec::default_spec().effective_stages(entry).unwrap();
+        assert_eq!(
+            stages[0].kind,
+            RunStageKind::Agent(AgentStage::Implement {
+                prompt: "Tackle #872".to_owned()
+            })
+        );
+        let from_pr = FlowSpec::default_spec()
+            .effective_stages(FlowEntry::PullRequest)
+            .unwrap();
+        assert!(from_pr.iter().all(|stage| !matches!(
+            stage.kind,
+            RunStageKind::Agent(AgentStage::Implement { .. })
+        )));
+        let mut late = from_pr;
+        late.insert(
+            1,
+            RunStage {
+                label: "implement".to_owned(),
+                kind: RunStageKind::Agent(AgentStage::Implement {
+                    prompt: "late".to_owned(),
+                }),
+            },
+        );
+        assert!(validate_run_stages("default", &late).is_err());
     }
 
     fn land_only(mode: FlowMode) -> FlowRun {
@@ -3929,7 +3898,7 @@ mod tests {
         run
     }
 
-    fn conflicting(head: &str) -> PrSnapshot {
+    fn conflicting(head: char) -> PrSnapshot {
         pr(
             head,
             PrState::Open,
@@ -3944,11 +3913,11 @@ mod tests {
     fn resolving_rebase() -> FlowRun {
         let mut run = land_only(FlowMode::Unattended);
         run.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 100,
         });
         let effects = run.handle(FlowEvent::PrSnapshot {
-            snapshot: conflicting("h1"),
+            snapshot: conflicting('1'),
             now_secs: 101,
         });
         assert_eq!(effects, vec![FlowEffect::RunRebase { worktree: wt(9) }]);
@@ -4004,12 +3973,13 @@ mod tests {
             paused.control(FlowControl::Pause).unwrap(),
             vec![stop.clone()]
         );
-        let mut aborted = run.clone();
+        let mut registry = FlowRegistry::default();
+        registry.flows.insert(wt(9), run.clone());
         assert_eq!(
-            aborted.control(FlowControl::Abort).unwrap(),
+            registry.control(wt(9), FlowControl::Abort).unwrap(),
             vec![stop.clone()]
         );
-        assert_eq!(aborted.phase, FlowPhase::Done(FlowDone::Aborted));
+        assert!(registry.get(wt(9)).is_none(), "an aborted flow is gone");
         let effects = run.control(FlowControl::TakeOver).unwrap();
         assert_eq!(
             effects,
@@ -4039,16 +4009,16 @@ mod tests {
                 onto: "refs/remotes/origin/main".to_owned(),
             }]
         );
-        let effects = run.handle(FlowEvent::RebasePostConditionsChecked(Ok("h2".to_owned())));
+        let effects = run.handle(FlowEvent::RebasePostConditionsChecked(Ok(oid('2'))));
         assert_eq!(
             effects,
             vec![FlowEffect::PushForceWithLease {
                 worktree: wt(9),
-                expected_head: "h2".to_owned(),
+                expected_head: oid('2'),
             }]
         );
-        let effects = run.handle(FlowEvent::PushFinished {
-            result: Ok("h3".to_owned()),
+        let effects = run.handle(FlowEvent::LeasePushFinished {
+            result: Err("the lease no longer matches the remote".to_owned()),
             now_secs: 200,
         });
         assert!(matches!(effects.as_slice(), [FlowEffect::Alert { .. }]));
@@ -4058,7 +4028,7 @@ mod tests {
             effects,
             vec![FlowEffect::PushForceWithLease {
                 worktree: wt(9),
-                expected_head: "h2".to_owned(),
+                expected_head: oid('2'),
             }]
         );
     }
@@ -4067,16 +4037,16 @@ mod tests {
     fn a_restart_mid_rebase_resumes_the_rebase_and_not_a_plain_push() {
         let mut rebasing = land_only(FlowMode::Unattended);
         rebasing.handle(FlowEvent::PushFinished {
-            result: Ok("h1".to_owned()),
+            result: Ok(oid('1')),
             now_secs: 100,
         });
         rebasing.handle(FlowEvent::PrSnapshot {
-            snapshot: conflicting("h1"),
+            snapshot: conflicting('1'),
             now_secs: 101,
         });
         let mut pushing = rebasing.clone();
         pushing.handle(FlowEvent::RebaseFinished(RebaseOutcome::Clean {
-            new_head: "h2".to_owned(),
+            new_head: oid('2'),
         }));
 
         rebasing.handle(FlowEvent::DaemonRestarted);
@@ -4091,7 +4061,7 @@ mod tests {
             pushing.control(FlowControl::Resume).unwrap(),
             vec![FlowEffect::PushForceWithLease {
                 worktree: wt(9),
-                expected_head: "h2".to_owned(),
+                expected_head: oid('2'),
             }]
         );
     }
@@ -4100,17 +4070,17 @@ mod tests {
     fn waiting_for_the_pull_request_times_out_into_a_pause() {
         let mut run = land_only(FlowMode::Unattended);
         run.handle(FlowEvent::PushFinished {
-            result: Ok("local".to_owned()),
+            result: Ok(oid('c')),
             now_secs: 1000,
         });
-        let open = |head: &str, mergeable, merge_state, pending| {
+        let open = |head: char, mergeable, merge_state, pending| {
             pr(head, PrState::Open, mergeable, merge_state, pending, 0, 0)
         };
         let early = 1000 + PR_INDEX_SECS_MAX - 1;
         let late = 1000 + PR_INDEX_SECS_MAX;
 
         let mut behind = run.clone();
-        let theirs = open("theirs", Mergeable::Mergeable, MergeStateStatus::Clean, 0);
+        let theirs = open('9', Mergeable::Mergeable, MergeStateStatus::Clean, 0);
         let effects = behind.handle(FlowEvent::PrSnapshot {
             snapshot: theirs.clone(),
             now_secs: early,
@@ -4127,7 +4097,7 @@ mod tests {
 
         let mut unknown = run.clone();
         unknown.handle(FlowEvent::PrSnapshot {
-            snapshot: open("local", Mergeable::Unknown, MergeStateStatus::Unknown, 0),
+            snapshot: open('c', Mergeable::Unknown, MergeStateStatus::Unknown, 0),
             now_secs: late,
         });
         assert_eq!(
@@ -4136,7 +4106,7 @@ mod tests {
         );
 
         let mut pending = run.clone();
-        let running = open("local", Mergeable::Mergeable, MergeStateStatus::Blocked, 2);
+        let running = open('c', Mergeable::Mergeable, MergeStateStatus::Blocked, 2);
         let effects = pending.handle(FlowEvent::PrSnapshot {
             snapshot: running.clone(),
             now_secs: 1000 + CHECKS_WAIT_SECS_MAX - 1,
@@ -4210,11 +4180,11 @@ mod tests {
         let mut run = land_only(FlowMode::Unattended);
         run.stages.insert(
             0,
-            StageSpec {
+            RunStage {
                 label: "tigerstyle".to_owned(),
-                kind: StageKind::ReviewSkill {
+                kind: RunStageKind::Agent(AgentStage::ReviewSkill {
                     skill: "tigerstyle".to_owned(),
-                },
+                }),
             },
         );
         assert!(run.validate().is_err());

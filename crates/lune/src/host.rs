@@ -3077,9 +3077,9 @@ impl App {
                 let kind_before = before.map(|(kind, _)| *kind);
                 let tells = match flow.badge_kind {
                     FlowBadgeKind::Paused => before != Some(&next),
-                    FlowBadgeKind::Merged | FlowBadgeKind::ReadyToMerge => {
-                        kind_before != Some(flow.badge_kind)
-                    }
+                    FlowBadgeKind::ConfirmMerge
+                    | FlowBadgeKind::Merged
+                    | FlowBadgeKind::ReadyToMerge => kind_before != Some(flow.badge_kind),
                     FlowBadgeKind::Running | FlowBadgeKind::WaitingInteractive => false,
                 };
                 if tells {
@@ -3100,6 +3100,16 @@ impl App {
                     self.desktop.tell(Told::flow(
                         format!("Flow paused — {name}"),
                         format!("{}: {detail}", flow.stage_label),
+                    ));
+                }
+                FlowBadgeKind::ConfirmMerge => {
+                    self.sidebar
+                        .notify(format!("flow {name}: ready to merge, advance to land it"));
+                    self.desktop.tell(Told::flow(
+                        format!("Flow ready to merge — {name}"),
+                        flow.detail
+                            .clone()
+                            .unwrap_or_else(|| flow.stage_label.clone()),
                     ));
                 }
                 FlowBadgeKind::Merged => {

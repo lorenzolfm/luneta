@@ -6,8 +6,8 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use lune_domain::flows::{
-    CI_SETTLE_SECS_DEFAULT, FIX_CHECKS_ATTEMPTS_MAX_DEFAULT, FLOW_NAME_DEFAULT, FlowSpec,
-    InteractiveLandPolicy, MergeMethod, REBASE_ATTEMPTS_MAX_DEFAULT, STAGES_MAX,
+    CI_SETTLE_SECS_DEFAULT, FIX_CHECKS_ATTEMPTS_MAX_DEFAULT, FLOW_NAME_DEFAULT, FlowPolicy,
+    FlowSpec, InteractiveLandPolicy, MergeMethod, REBASE_ATTEMPTS_MAX_DEFAULT, STAGES_MAX,
     STEP_TIMEOUT_SECS_DEFAULT, StageKind, StageSpec,
 };
 use toml::Value;
@@ -188,13 +188,15 @@ fn parse_flow_spec(name: &str, value: &Value) -> Result<FlowSpec, String> {
     let spec = FlowSpec {
         name: name.to_owned(),
         stages,
-        rebase_attempts_max,
-        fix_checks_attempts_max,
-        wait_for_all_checks,
-        step_timeout_secs,
-        ci_settle_secs,
-        interactive_land,
-        merge_method,
+        policy: FlowPolicy {
+            rebase_attempts_max,
+            fix_checks_attempts_max,
+            wait_for_all_checks,
+            step_timeout_secs,
+            ci_settle_secs,
+            interactive_land,
+            merge_method,
+        },
     };
     spec.validate()?;
     Ok(spec)
@@ -373,13 +375,13 @@ interactive_land = "stop"
         let fast = loaded.get("fast").unwrap();
         assert_eq!(fast.stages.len(), 3);
         assert_eq!(fast.stages[1].label, "tigerstyle");
-        assert_eq!(fast.rebase_attempts_max, 2);
-        assert_eq!(fast.fix_checks_attempts_max, 1);
-        assert!(!fast.wait_for_all_checks);
-        assert_eq!(fast.step_timeout_secs, 600);
-        assert_eq!(fast.ci_settle_secs, 15);
+        assert_eq!(fast.policy.rebase_attempts_max, 2);
+        assert_eq!(fast.policy.fix_checks_attempts_max, 1);
+        assert!(!fast.policy.wait_for_all_checks);
+        assert_eq!(fast.policy.step_timeout_secs, 600);
+        assert_eq!(fast.policy.ci_settle_secs, 15);
         assert_eq!(
-            fast.interactive_land,
+            fast.policy.interactive_land,
             InteractiveLandPolicy::StopReadyToMerge
         );
     }
@@ -409,7 +411,7 @@ merge_method = "fast-forward"
 "#;
         let loaded = parse_flows_toml(toml);
         assert_eq!(
-            loaded.get("rebase_merge").unwrap().merge_method,
+            loaded.get("rebase_merge").unwrap().policy.merge_method,
             MergeMethod::Rebase
         );
         assert!(loaded.get("bad_method").is_none());

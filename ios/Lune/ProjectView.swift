@@ -152,10 +152,13 @@ private struct WorktreeHeader: View {
                 if !caption.isEmpty {
                     Text(caption.joined(separator: " · ")).font(.caption2).textCase(nil)
                 }
-                if let flow = worktree.flow, flow.badgeKind == .paused, let detail = flow.detail {
+                if let flow = worktree.flow,
+                    flow.badgeKind == .paused || flow.badgeKind == .confirmMerge,
+                    let detail = flow.detail
+                {
                     Text(detail)
                         .font(.caption2)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(flow.badgeKind == .paused ? .red : .green)
                         .textCase(nil)
                         .lineLimit(2)
                 }
@@ -216,6 +219,7 @@ private struct FlowBadge: View {
         switch flow.badgeKind {
         case .running: .blue
         case .waitingInteractive: .orange
+        case .confirmMerge: .green
         case .paused: .red
         case .merged: .purple
         case .readyToMerge: .green

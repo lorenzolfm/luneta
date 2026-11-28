@@ -315,8 +315,11 @@ fn print_summary_detail(flow: &FlowSummary) {
         flow.step_number, flow.step_total, flow.stage_label
     );
     println!("status: {}", flow.badge);
-    if let Some(reason) = &flow.pause_reason {
-        println!("pause: {reason}");
+    if let Some(raw) = flow.pause_reason {
+        match flows::PauseReason::of_api(raw) {
+            Ok(reason) => println!("pause: {}", reason.label()),
+            Err(why) => println!("pause: {why}"),
+        }
     }
     if let Some(detail) = &flow.detail {
         println!("detail: {detail}");

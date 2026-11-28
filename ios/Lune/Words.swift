@@ -111,7 +111,7 @@ extension Landed {
 extension Flow {
     var needsAttention: Bool {
         switch badgeKind {
-        case .paused, .waitingInteractive: true
+        case .paused, .waitingInteractive, .confirmMerge: true
         case .running, .merged, .readyToMerge: false
         }
     }
@@ -119,7 +119,7 @@ extension Flow {
     var canStartNew: Bool {
         switch badgeKind {
         case .merged, .readyToMerge: true
-        case .running, .waitingInteractive, .paused: false
+        case .running, .waitingInteractive, .confirmMerge, .paused: false
         }
     }
 }

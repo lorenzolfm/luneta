@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use lune_domain::flows::GitOid;
 use lune_domain::projects::{Dir, PATH_BYTES_MAX};
 pub use lune_protocol::PATCH_BYTES_MAX;
 use lune_protocol::diff::{ReadDiff, RelativePath, UntrackedFile};
@@ -918,14 +919,10 @@ pub fn is_clean(dir: &str) -> Result<bool, String> {
     Ok(said.is_empty())
 }
 
-pub fn head_oid(dir: &str) -> Result<String, String> {
+pub fn head_oid(dir: &str) -> Result<GitOid, String> {
     assert!(!dir.is_empty(), "worktree directory is non-empty");
-    let oid = says(dir, "rev-parse", &["--verify"], &["HEAD"])?;
-    if oid.is_empty() {
-        return Err(format!("git rev-parse HEAD in {dir} returned empty output"));
-    }
-    assert_ne!(oid, "");
-    Ok(oid)
+    let said = says(dir, "rev-parse", &["--verify"], &["HEAD"])?;
+    GitOid::parse(&said).map_err(|why| format!("git rev-parse HEAD in {dir}: {why}"))
 }
 
 pub fn is_ancestor(dir: &str, ancestor: &str, descendant: &str) -> Result<bool, String> {
@@ -1026,7 +1023,7 @@ fn push_remote(dir: &str, branch: &str) -> Result<String, String> {
     Ok("origin".to_owned())
 }
 
-pub fn push_if_ahead(dir: &str) -> Result<String, String> {
+pub fn push_if_ahead(dir: &str) -> Result<GitOid, String> {
     assert!(!dir.is_empty(), "worktree directory is non-empty");
     if !is_clean(dir)? {
         return Err(
@@ -1038,40 +1035,31 @@ pub fn push_if_ahead(dir: &str) -> Result<String, String> {
     };
     let head = head_oid(dir)?;
     let remote = push_remote(dir, &branch)?;
-    let refspec = format!("refs/heads/{branch}");
-    if upstream_oid(dir, &branch)?.is_some() {
-        let ahead_raw = says(dir, "rev-list", &["--count"], &["@{u}..HEAD"])?;
+    let tracked = upstream_oid(dir, &branch)?.is_some();
+    if tracked {
+        let ahead_raw = says(dir, "rev-list", &["--count"], &[format!("@{{u}}..{head}")])?;
         let ahead: u64 = ahead_raw
             .parse()
             .map_err(|_| format!("git rev-list --count said {ahead_raw:?}"))?;
         if ahead == 0 {
             return Ok(head);
         }
-        let git = Git::at(dir, "push");
-        let ran = git
-            .named([remote.as_str(), refspec.as_str()])
-            .run_alone(PUSH_LIMIT)
-            .map_err(|error| format!("git push in {dir} could not be run: {error}"))?;
-        ran.answer()
-            .map_err(|why| format!("git push in {dir}: {why}"))?;
-    } else {
-        let mut git = Git::at(dir, "push");
-        git.arg("-u");
-        let ran = git
-            .named([remote.as_str(), refspec.as_str()])
-            .run_alone(PUSH_LIMIT)
-            .map_err(|error| format!("git push -u in {dir} could not be run: {error}"))?;
-        ran.answer()
-            .map_err(|why| format!("git push -u in {dir}: {why}"))?;
     }
-    let after = head_oid(dir)?;
-    assert_ne!(after, "");
-    Ok(after)
+    let refspec = pushed_refspec(&head, &branch);
+    let ran = Git::at(dir, "push")
+        .named([remote.as_str(), refspec.as_str()])
+        .run_alone(PUSH_LIMIT)
+        .map_err(|error| format!("git push in {dir} could not be run: {error}"))?;
+    ran.answer()
+        .map_err(|why| format!("git push in {dir}: {why}"))?;
+    if !tracked {
+        track(dir, &branch, &remote)?;
+    }
+    Ok(head)
 }
 
-pub fn push_force_with_lease(dir: &str, expected_head: &str) -> Result<String, String> {
+pub fn push_force_with_lease(dir: &str, expected_head: &GitOid) -> Result<(), String> {
     assert!(!dir.is_empty(), "worktree directory is non-empty");
-    assert!(!expected_head.is_empty(), "the head to push is named");
     if !is_clean(dir)? {
         return Err(
             "working tree is not clean; commit or discard changes before pushing".to_owned(),
@@ -1081,19 +1069,16 @@ pub fn push_force_with_lease(dir: &str, expected_head: &str) -> Result<String, S
         return Err(format!("{dir} is not on a branch"));
     };
     let head = head_oid(dir)?;
-    if head != expected_head {
+    if head != *expected_head {
         return Err(format!(
             "HEAD moved to {head} after the rebase was checked at {expected_head}; not pushing"
         ));
     }
     let remote = push_remote(dir, &branch)?;
-    let refspec = format!("refs/heads/{branch}");
+    let refspec = pushed_refspec(expected_head, &branch);
     let mut git = Git::at(dir, "push");
     let upstream = upstream_oid(dir, &branch)?;
     git.leased(&branch, upstream.as_deref().unwrap_or(""));
-    if upstream.is_none() {
-        git.arg("-u");
-    }
     let ran = git
         .named([remote.as_str(), refspec.as_str()])
         .run_alone(PUSH_LIMIT)
@@ -1102,9 +1087,28 @@ pub fn push_force_with_lease(dir: &str, expected_head: &str) -> Result<String, S
         })?;
     ran.answer()
         .map_err(|why| format!("git push --force-with-lease in {dir}: {why}"))?;
-    let after = head_oid(dir)?;
-    assert_ne!(after, "");
-    Ok(after)
+    if upstream.is_none() {
+        track(dir, &branch, &remote)?;
+    }
+    Ok(())
+}
+
+fn pushed_refspec(head: &GitOid, branch: &str) -> String {
+    assert!(!branch.is_empty(), "branch name is non-empty");
+    format!("{head}:refs/heads/{branch}")
+}
+
+fn track(dir: &str, branch: &str, remote: &str) -> Result<(), String> {
+    assert!(!branch.is_empty(), "branch name is non-empty");
+    assert!(!remote.is_empty(), "remote name is non-empty");
+    let merge = format!("refs/heads/{branch}");
+    for (key, value) in [
+        (format!("branch.{branch}.remote"), remote),
+        (format!("branch.{branch}.merge"), merge.as_str()),
+    ] {
+        says(dir, "config", &[], &[key.as_str(), value])?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -3920,7 +3924,8 @@ mod tests {
         TrackedDirs, Tree, TreeWatch, Troubles, WatchEngine, Watches, Watching, add_one, ask,
         assert_watches_consistent, branch, changed, config_count, handle_event, head_oid,
         is_ancestor, is_clean, locked, place, pointed, push_force_with_lease, push_if_ahead,
-        rebase_in_progress, reconcile, reconcile_with, scratch, stamp, watched, watched_with,
+        rebase_in_progress, reconcile, reconcile_with, scratch, stamp, upstream_oid, watched,
+        watched_with,
     };
 
     fn git(dir: &Path, args: &[&str]) -> bool {
@@ -5560,11 +5565,16 @@ mod tests {
         scratch(&work, &["add", "feat.txt"]).unwrap();
         scratch(&work, &["commit", "-q", "-m", "feat"]).unwrap();
         let feat_oid = head_oid(work_str).unwrap();
-        assert!(is_ancestor(work_str, &base_oid, &feat_oid).unwrap());
-        assert!(!is_ancestor(work_str, &feat_oid, &base_oid).unwrap());
+        assert!(is_ancestor(work_str, base_oid.as_str(), feat_oid.as_str()).unwrap());
+        assert!(!is_ancestor(work_str, feat_oid.as_str(), base_oid.as_str()).unwrap());
 
         let pushed = push_if_ahead(work_str).unwrap();
         assert_eq!(pushed, feat_oid);
+        assert_eq!(
+            upstream_oid(work_str, "feat").unwrap().as_deref(),
+            Some(feat_oid.as_str()),
+            "a first push tracks the branch it made"
+        );
         let pushed_again = push_if_ahead(work_str).unwrap();
         assert_eq!(pushed_again, feat_oid);
 
@@ -5574,8 +5584,7 @@ mod tests {
         let amended_oid = head_oid(work_str).unwrap();
         assert_ne!(amended_oid, feat_oid);
         assert!(push_force_with_lease(work_str, &feat_oid).is_err());
-        let leased = push_force_with_lease(work_str, &amended_oid).unwrap();
-        assert_eq!(leased, amended_oid);
+        push_force_with_lease(work_str, &amended_oid).unwrap();
         let remote_feat = String::from_utf8(
             scratch(
                 &root,
@@ -5589,6 +5598,42 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(remote_feat.trim(), amended_oid);
+        assert_eq!(remote_feat.trim(), amended_oid.as_str());
+    }
+
+    #[test]
+    fn a_push_reports_the_commit_it_pushed_when_the_branch_moves_during_it() {
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(scratch_dir.path()).unwrap();
+        let bare = root.join("origin.git");
+        let work = root.join("work");
+        fs::create_dir(&bare).unwrap();
+        scratch(&bare, &["init", "--bare", "-q", "-b", "main"]).unwrap();
+        let (bare_str, work_str) = (bare.to_str().unwrap(), work.to_str().unwrap());
+        scratch(&root, &["clone", "-q", bare_str, work_str]).unwrap();
+        scratch(&work, &["commit", "-q", "--allow-empty", "-m", "initial"]).unwrap();
+        scratch(&work, &["switch", "-q", "-c", "feat"]).unwrap();
+        let pushed_head = head_oid(work_str).unwrap();
+        let hook = work.join(".git").join("hooks").join("pre-push");
+        let staged = std::process::Command::new("sh")
+            .args(["-c", "printf '#!/bin/sh\\ngit commit -q --allow-empty -m raced\\n' > \"$1\" && chmod +x \"$1\"", "sh"])
+            .arg(&hook)
+            .status()
+            .unwrap();
+        assert!(staged.success());
+
+        let pushed = push_if_ahead(work_str).unwrap();
+        assert_eq!(pushed, pushed_head);
+        assert_ne!(
+            head_oid(work_str).unwrap(),
+            pushed_head,
+            "the hook moved HEAD"
+        );
+        let remote = scratch(
+            &root,
+            &["--git-dir", bare_str, "rev-parse", "refs/heads/feat"],
+        );
+        let remote = String::from_utf8(remote.unwrap()).unwrap();
+        assert_eq!(remote.trim(), pushed_head.as_str());
     }
 }

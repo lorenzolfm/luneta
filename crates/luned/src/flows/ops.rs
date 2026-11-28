@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use lune_domain::agent::Harness;
 use lune_domain::flows::{
-    FixChecksGateFailure, MergeMethod, MergeOutcome, PrSnapshot, PrState, RebaseOutcome,
-    StageGateFailure, StageKind,
+    AgentStage, FixChecksGateFailure, GitOid, MergeMethod, MergeOutcome, PrSnapshot, PrState,
+    RebaseOutcome, SessionId, StageGateFailure,
 };
 use lune_domain::projects::Argv;
 use lune_protocol::github::{PullPage, State};
@@ -84,7 +84,7 @@ pub fn check_stage_post_conditions(
     Ok(())
 }
 
-pub fn check_rebase_post_conditions(dir: &str, onto_ref: &str) -> Result<String, String> {
+pub fn check_rebase_post_conditions(dir: &str, onto_ref: &str) -> Result<GitOid, String> {
     assert!(!dir.is_empty(), "worktree directory is non-empty");
     assert!(!onto_ref.is_empty(), "rebase target ref is non-empty");
     if git::rebase_in_progress(dir)? {
@@ -103,16 +103,15 @@ pub fn check_rebase_post_conditions(dir: &str, onto_ref: &str) -> Result<String,
 
 pub fn check_fix_checks_post_conditions(
     dir: &str,
-    previous_head: &str,
-) -> Result<String, FixChecksGateFailure> {
+    previous_head: &GitOid,
+) -> Result<GitOid, FixChecksGateFailure> {
     assert!(!dir.is_empty(), "worktree directory is non-empty");
-    assert!(!previous_head.is_empty(), "previous head oid is non-empty");
     let clean = git::is_clean(dir).map_err(FixChecksGateFailure::Failed)?;
     if !clean {
         return Err(FixChecksGateFailure::DirtyTree);
     }
     let head = git::head_oid(dir).map_err(FixChecksGateFailure::Failed)?;
-    if head == previous_head {
+    if head == *previous_head {
         return Err(FixChecksGateFailure::HeadUnchanged);
     }
     Ok(head)
@@ -131,11 +130,10 @@ pub fn poll_pr(dir: &str) -> Result<Option<PrSnapshot>, String> {
         Common::Unsaid(why) => return Err(why),
     };
     let pulled = github::Asker::default().pull_of(dir, &repository, &branch)?;
-    Ok(pulled.map(snapshot_of_pulled))
+    pulled.map(snapshot_of_pulled).transpose()
 }
 
-#[must_use]
-pub fn snapshot_of_pulled(pulled: Pulled) -> PrSnapshot {
+pub fn snapshot_of_pulled(pulled: Pulled) -> Result<PrSnapshot, String> {
     let state = match pulled.pull_request.state {
         State::Open => PrState::Open,
         State::Draft => PrState::Draft,
@@ -146,18 +144,19 @@ pub fn snapshot_of_pulled(pulled: Pulled) -> PrSnapshot {
         .pull_request
         .checks
         .map_or((0, 0, 0), |c| (c.pending, c.failed, c.passed));
-    PrSnapshot {
-        url: pulled.pull_request.page.url().to_owned(),
+    let head_oid = GitOid::parse(&pulled.head)
+        .map_err(|why| format!("{}: head {why}", pulled.pull_request.page.url()))?;
+    Ok(PrSnapshot {
+        url: pulled.pull_request.page,
         state,
-        head_oid: pulled.head,
+        head_oid,
         base_name: pulled.base_name,
         mergeable: pulled.mergeable,
         merge_state: pulled.merge_state,
         pending_checks: pending,
         failed_checks: failed,
         passed_checks: passed,
-        stale: pulled.pull_request.stale,
-    }
+    })
 }
 
 #[must_use]
@@ -191,13 +190,12 @@ pub fn run_rebase(dir: &str) -> RebaseOutcome {
     }
 }
 
-pub fn fetch_checks_prompt(pr_url: &str) -> Result<String, String> {
-    let page = PullPage::parse(pr_url)?;
-    let failing = checks::kept_failing(&page)?;
+pub fn fetch_checks_prompt(page: &PullPage) -> Result<String, String> {
+    let failing = checks::kept_failing(page)?;
     if failing.failed.is_empty() {
         return Err("no failing checks were found when fetching logs".to_owned());
     }
-    Ok(format_checks_prompt(&failing, pr_url))
+    Ok(format_checks_prompt(&failing, page.url()))
 }
 
 fn format_checks_prompt(failing: &Failing, pr_url: &str) -> String {
@@ -238,24 +236,19 @@ fn format_checks_prompt(failing: &Failing, pr_url: &str) -> String {
 #[must_use]
 pub fn merge_pr(
     dir: &str,
-    pr_url: &str,
+    page: &PullPage,
     merge_method: MergeMethod,
-    expected_head: &str,
+    expected_head: &GitOid,
 ) -> MergeOutcome {
     assert!(!dir.is_empty(), "merge directory is non-empty");
-    assert!(!pr_url.trim().is_empty(), "merge PR URL is non-empty");
-    assert!(
-        !expected_head.trim().is_empty(),
-        "merge names the head CI passed"
-    );
     let mut gh = Command::new("gh");
     let args = [
         "pr",
         "merge",
         merge_method.gh_flag(),
         "--match-head-commit",
-        expected_head,
-        pr_url,
+        expected_head.as_str(),
+        page.url(),
     ];
     git::local(gh.args(args).current_dir(dir));
     let ran = match program::run(&mut gh, MERGE_LIMIT) {
@@ -306,55 +299,42 @@ pub fn pr_scope(dir: &str, pr_url: Option<&str>) -> String {
 pub fn stage_prompts(
     dir: &str,
     harness: Harness,
-    stage_kind: &StageKind,
-    implement_prompt: Option<&str>,
-    pr_url: Option<&str>,
+    stage: &AgentStage,
+    pr_url: Option<&PullPage>,
 ) -> (String, Option<String>) {
-    assert!(
-        !matches!(stage_kind, StageKind::Land),
-        "land stage has no agent prompt"
-    );
-    match stage_kind {
-        StageKind::Implement => {
-            let user_prompt = implement_prompt.expect("implement stage requires a prompt");
-            assert_ne!(user_prompt.trim(), "");
-            (format!("{user_prompt}\n\n{IMPLEMENT_SUFFIX}"), None)
+    match stage {
+        AgentStage::Implement { prompt } => {
+            assert_ne!(prompt.trim(), "");
+            (format!("{prompt}\n\n{IMPLEMENT_SUFFIX}"), None)
         }
-        StageKind::ReviewSkill { skill } => {
+        AgentStage::ReviewSkill { skill } => {
             assert_ne!(skill.trim(), "");
             let spelled = spelled_skill(harness, skill);
-            let scope = pr_scope(dir, pr_url);
+            let scope = pr_scope(dir, pr_url.map(PullPage::url));
             let turn1 = format!(
                 "{spelled} Review the full PR diff for {scope}. Report your findings and stop \
                  without changing code yet."
             );
             (turn1, Some(REVIEW_FOLLOWUP.to_owned()))
         }
-        StageKind::Land => unreachable!("land stage asserted excluded above"),
     }
 }
 
 pub fn interactive_stage_argv(
     dir: &str,
     harness: Harness,
-    stage_kind: &StageKind,
-    implement_prompt: Option<&str>,
-    pr_url: Option<&str>,
+    stage: &AgentStage,
+    pr_url: Option<&PullPage>,
 ) -> Result<Argv, String> {
-    assert!(
-        !matches!(stage_kind, StageKind::Land),
-        "land stage has no interactive prompt"
-    );
-    match stage_kind {
-        StageKind::Implement => {
-            let prompt = implement_prompt.expect("implement stage requires a prompt");
+    match stage {
+        AgentStage::Implement { prompt } => {
             assert_ne!(prompt.trim(), "");
-            Argv::on_words(harness, prompt.to_owned(), &[])
+            Argv::on_words(harness, prompt.clone(), &[])
         }
-        StageKind::ReviewSkill { skill } => {
+        AgentStage::ReviewSkill { skill } => {
             assert_ne!(skill.trim(), "");
             let spelled = spelled_skill(harness, skill);
-            let scope = pr_scope(dir, pr_url);
+            let scope = pr_scope(dir, pr_url.map(PullPage::url));
             let prompt = format!("{spelled} {scope}");
             let words = match harness {
                 Harness::ClaudeCode | Harness::Pi => vec![harness.program().to_owned(), prompt],
@@ -364,7 +344,6 @@ pub fn interactive_stage_argv(
             };
             Argv::parse(words)
         }
-        StageKind::Land => unreachable!("land stage asserted excluded above"),
     }
 }
 
@@ -434,14 +413,14 @@ pub fn unattended_step_argv(
     Argv::parse(words)
 }
 
-pub fn takeover_argv(harness: Harness, session_id: Option<&str>) -> Result<Argv, String> {
+pub fn takeover_argv(harness: Harness, session_id: Option<&SessionId>) -> Result<Argv, String> {
     let words = match session_id {
-        Some(id) if !id.trim().is_empty() => vec![
+        Some(id) => vec![
             harness.program().to_owned(),
             harness.resumes().to_owned(),
-            id.trim().to_owned(),
+            id.as_str().to_owned(),
         ],
-        _ => vec![harness.program().to_owned()],
+        None => vec![harness.program().to_owned()],
     };
     Argv::parse(words)
 }
@@ -453,21 +432,24 @@ mod tests {
     #[test]
     fn takeover_argv_uses_each_harness_resume_flag() {
         assert_eq!(
-            takeover_argv(Harness::ClaudeCode, Some("s1"))
+            takeover_argv(Harness::ClaudeCode, Some(&SessionId::parse("s1").unwrap()))
                 .unwrap()
                 .words(),
             ["claude", "--resume", "s1"]
         );
         assert_eq!(
-            takeover_argv(Harness::Antigravity, Some("c1"))
+            takeover_argv(Harness::Antigravity, Some(&SessionId::parse("c1").unwrap()))
                 .unwrap()
                 .words(),
             ["agy", "--resume", "c1"]
         );
         assert_eq!(
-            takeover_argv(Harness::Pi, Some("/tmp/s.jsonl"))
-                .unwrap()
-                .words(),
+            takeover_argv(
+                Harness::Pi,
+                Some(&SessionId::parse("/tmp/s.jsonl").unwrap())
+            )
+            .unwrap()
+            .words(),
             ["pi", "--session", "/tmp/s.jsonl"]
         );
     }

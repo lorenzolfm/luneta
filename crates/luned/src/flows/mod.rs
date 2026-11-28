@@ -14,10 +14,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lune_domain::agent::Harness;
 use lune_domain::flows::{
-    FLOW_NAME_DEFAULT, FLOWS_MAX, FlowBadgeKind, FlowControl, FlowEffect, FlowEntry, FlowEvent,
-    FlowMode, FlowPhase, FlowRegistry, FlowRun, FlowSummary, StageKind, TerminalExit,
+    AgentStage, FLOW_NAME_DEFAULT, FLOWS_MAX, FlowControl, FlowEffect, FlowEntry, FlowEvent,
+    FlowMode, FlowPhase, FlowRegistry, FlowRun, FlowSummary, SessionId, TerminalExit,
 };
 use lune_domain::projects::{Argv, Opens, ViewId, WorktreeId};
+use lune_protocol::github::PullPage;
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
@@ -298,9 +299,8 @@ struct Actor {
 enum StepPrompt {
     Stage {
         dir: String,
-        stage_kind: StageKind,
-        implement_prompt: Option<String>,
-        pr_url: Option<String>,
+        stage: AgentStage,
+        pr_url: Option<PullPage>,
     },
     Helper(String),
 }
@@ -308,18 +308,9 @@ enum StepPrompt {
 impl StepPrompt {
     fn texts(self, harness: Harness) -> (String, Option<String>) {
         match self {
-            StepPrompt::Stage {
-                dir,
-                stage_kind,
-                implement_prompt,
-                pr_url,
-            } => ops::stage_prompts(
-                &dir,
-                harness,
-                &stage_kind,
-                implement_prompt.as_deref(),
-                pr_url.as_deref(),
-            ),
+            StepPrompt::Stage { dir, stage, pr_url } => {
+                ops::stage_prompts(&dir, harness, &stage, pr_url.as_ref())
+            }
             StepPrompt::Helper(prompt) => (prompt, None),
         }
     }
@@ -642,7 +633,8 @@ impl Actor {
                         && self
                             .registry
                             .get(worktree)
-                            .and_then(|run| run.resume_session())
+                            .and_then(FlowRun::resume_session)
+                            .map(SessionId::as_str)
                             != Some(session_id.as_str())
                     {
                         let effects = self.registry.handle(
@@ -756,6 +748,7 @@ impl Actor {
             .registry
             .get(worktree)
             .and_then(FlowRun::resume_session)
+            .map(SessionId::as_str)
             == Some(session_id.as_str())
             || self.delivered_sessions.get(&worktree) == Some(&session_id)
         {
@@ -810,8 +803,7 @@ impl Actor {
                 worktree,
                 view_name,
                 harness,
-                stage_kind,
-                implement_prompt,
+                stage,
             } => {
                 let pr_url = self
                     .registry
@@ -827,23 +819,15 @@ impl Actor {
                     }
                 };
                 let generation = self.generation(worktree);
-                let argv = move || {
-                    ops::interactive_stage_argv(
-                        &dir,
-                        harness,
-                        &stage_kind,
-                        implement_prompt.as_deref(),
-                        pr_url.as_deref(),
-                    )
-                };
+                let argv =
+                    move || ops::interactive_stage_argv(&dir, harness, &stage, pr_url.as_ref());
                 self.spawn_open_terminal(worktree, generation, view_name, argv, worker_tx)
             }
             FlowEffect::OpenUnattendedStage {
                 worktree,
                 view_name,
                 harness,
-                stage_kind,
-                implement_prompt,
+                stage,
                 timeout_secs,
             } => {
                 let pr_url = self
@@ -859,12 +843,7 @@ impl Actor {
                             .handle(worktree, FlowEvent::ViewOpenFailed { why });
                     }
                 };
-                let prompt = StepPrompt::Stage {
-                    dir,
-                    stage_kind,
-                    implement_prompt,
-                    pr_url,
-                };
+                let prompt = StepPrompt::Stage { dir, stage, pr_url };
                 self.open_unattended_step(
                     worktree,
                     view_name,
@@ -900,7 +879,7 @@ impl Actor {
                     worktree,
                     view_name,
                     harness,
-                    session_id.as_deref(),
+                    session_id.as_ref(),
                     fallback_view,
                     stopped_view,
                 );
@@ -961,7 +940,7 @@ impl Actor {
                     move || {
                         let result =
                             dir.and_then(|dir| git::push_force_with_lease(&dir, &expected_head));
-                        FlowEvent::PushFinished {
+                        FlowEvent::LeasePushFinished {
                             result,
                             now_secs: unix_now_secs(),
                         }
@@ -1207,7 +1186,7 @@ impl Actor {
         worktree: WorktreeId,
         view_name: String,
         harness: Harness,
-        session_id: Option<&str>,
+        session_id: Option<&SessionId>,
         fallback_view: Option<ViewId>,
         stopped_view: Option<ViewId>,
     ) {
@@ -1389,17 +1368,6 @@ fn unix_now_secs() -> u64 {
 }
 
 #[must_use]
-pub fn badge_kind_to_api(kind: FlowBadgeKind) -> api::FlowBadgeKind {
-    match kind {
-        FlowBadgeKind::Running => api::FlowBadgeKind::Running,
-        FlowBadgeKind::WaitingInteractive => api::FlowBadgeKind::WaitingInteractive,
-        FlowBadgeKind::Paused => api::FlowBadgeKind::Paused,
-        FlowBadgeKind::Merged => api::FlowBadgeKind::Merged,
-        FlowBadgeKind::ReadyToMerge => api::FlowBadgeKind::ReadyToMerge,
-    }
-}
-
-#[must_use]
 pub fn summary_to_api(summary: &FlowSummary) -> api::FlowSummary {
     assert!(summary.step_number >= 1);
     assert!(summary.step_number <= summary.step_total);
@@ -1412,11 +1380,14 @@ pub fn summary_to_api(summary: &FlowSummary) -> api::FlowSummary {
         step_total: summary.step_total,
         stage_label: summary.stage_label.clone(),
         badge: summary.badge.clone(),
-        badge_kind: badge_kind_to_api(summary.badge_kind).into(),
-        pause_reason: summary.pause_reason.map(|reason| reason.label().to_owned()),
+        badge_kind: summary.badge_kind.to_api().into(),
+        pause_reason: summary.pause_reason.map(|reason| reason.to_api().into()),
         detail: summary.detail.clone(),
         active_view: summary.active_view.map(ViewId::get),
-        resume_session: summary.resume_session.clone(),
+        resume_session: summary
+            .resume_session
+            .as_ref()
+            .map(|id| id.as_str().to_owned()),
         controls: summary
             .controls
             .iter()
@@ -1430,7 +1401,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::Receiver;
 
-    use lune_domain::flows::{FlowDone, FlowSpec, LandState, StageSpec};
+    use lune_domain::flows::{FlowSpec, GitOid, LandState, StageKind, StageSpec};
 
     use super::*;
 
@@ -1555,7 +1526,7 @@ mod tests {
         let pushed = worker_done(
             &h,
             FlowEvent::PushFinished {
-                result: Ok("h1".to_owned()),
+                result: Ok(GitOid::parse(&"1".repeat(40)).unwrap()),
                 now_secs: 10,
             },
         );
@@ -1693,11 +1664,6 @@ mod tests {
             .unwrap();
         assert_eq!(summary, None);
         assert!(h.actor.registry.get(wt(1)).is_none());
-        assert!(
-            !h.actor
-                .registry
-                .iter()
-                .any(|(_, run)| matches!(run.phase, FlowPhase::Done(FlowDone::Aborted)))
-        );
+        assert!(h.actor.registry.is_empty());
     }
 }

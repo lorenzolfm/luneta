@@ -131,6 +131,7 @@ pub struct Worktree {
 pub enum FlowBadgeKind {
     Running,
     WaitingInteractive,
+    ConfirmMerge,
     Paused,
     Merged,
     ReadyToMerge,
@@ -168,7 +169,6 @@ pub struct Flow {
     pub flow_name: String,
     pub badge: String,
     pub badge_kind: FlowBadgeKind,
-    pub pause_reason: Option<String>,
     pub detail: Option<String>,
     pub controls: Vec<FlowControl>,
     pub interactive: bool,
@@ -430,19 +430,19 @@ fn worktree_of(
             .iter()
             .map(|it| view_of(on, it))
             .collect(),
-        flow: worktree.flow.as_ref().map(flow_of),
+        flow: worktree.flow.as_ref().and_then(flow_of),
     }
 }
 
-fn flow_of(said: &api::FlowSummary) -> Flow {
+fn flow_of(said: &api::FlowSummary) -> Option<Flow> {
     let badge_kind = match api::FlowBadgeKind::try_from(said.badge_kind) {
         Ok(api::FlowBadgeKind::Running) => FlowBadgeKind::Running,
         Ok(api::FlowBadgeKind::WaitingInteractive) => FlowBadgeKind::WaitingInteractive,
+        Ok(api::FlowBadgeKind::ConfirmMerge) => FlowBadgeKind::ConfirmMerge,
+        Ok(api::FlowBadgeKind::Paused) => FlowBadgeKind::Paused,
         Ok(api::FlowBadgeKind::Merged) => FlowBadgeKind::Merged,
         Ok(api::FlowBadgeKind::ReadyToMerge) => FlowBadgeKind::ReadyToMerge,
-        Ok(api::FlowBadgeKind::Paused | api::FlowBadgeKind::Unspecified) | Err(_) => {
-            FlowBadgeKind::Paused
-        }
+        Ok(api::FlowBadgeKind::Unspecified) | Err(_) => return None,
     };
     let controls = said
         .controls
@@ -463,15 +463,14 @@ fn flow_of(said: &api::FlowSummary) -> Flow {
         api::FlowMode::try_from(said.mode),
         Ok(api::FlowMode::Interactive)
     );
-    Flow {
+    Some(Flow {
         flow_name: said.flow_name.clone(),
         badge: said.badge.clone(),
         badge_kind,
-        pause_reason: said.pause_reason.clone(),
         detail: said.detail.clone(),
         controls,
         interactive,
-    }
+    })
 }
 
 fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
@@ -1049,7 +1048,7 @@ mod tests {
             stage_label: "illegal-states".to_owned(),
             badge: "paused".to_owned(),
             badge_kind: api::FlowBadgeKind::Paused.into(),
-            pause_reason: Some("dirty_tree".to_owned()),
+            pause_reason: Some(api::FlowPauseReason::DirtyTree.into()),
             detail: Some("working tree has uncommitted changes".to_owned()),
             active_view: Some(109),
             resume_session: Some("sess-123".to_owned()),
@@ -1070,7 +1069,6 @@ mod tests {
         assert_eq!(flow.flow_name, "default");
         assert_eq!(flow.badge, "paused");
         assert_eq!(flow.badge_kind, FlowBadgeKind::Paused);
-        assert_eq!(flow.pause_reason.as_deref(), Some("dirty_tree"));
         assert_eq!(
             flow.detail.as_deref(),
             Some("working tree has uncommitted changes")
@@ -1084,5 +1082,31 @@ mod tests {
             ]
         );
         assert!(!flow.interactive);
+    }
+
+    #[test]
+    fn a_flow_of_a_badge_kind_the_phone_does_not_know_is_not_shown_as_paused() {
+        let summary = |badge_kind: api::FlowBadgeKind| api::FlowSummary {
+            worktree: 5,
+            flow_name: "default".to_owned(),
+            mode: api::FlowMode::Interactive.into(),
+            harness: api::Harness::ClaudeCode.into(),
+            step_number: 4,
+            step_total: 4,
+            stage_label: "land".to_owned(),
+            badge: "4/4 merge?".to_owned(),
+            badge_kind: badge_kind.into(),
+            pause_reason: None,
+            detail: None,
+            active_view: None,
+            resume_session: None,
+            controls: vec![api::FlowControl::Advance.into()],
+        };
+        let confirming = flow_of(&summary(api::FlowBadgeKind::ConfirmMerge)).unwrap();
+        assert_eq!(confirming.badge_kind, FlowBadgeKind::ConfirmMerge);
+        assert_eq!(flow_of(&summary(api::FlowBadgeKind::Unspecified)), None);
+        let mut unknown = summary(api::FlowBadgeKind::Paused);
+        unknown.badge_kind = 99;
+        assert_eq!(flow_of(&unknown), None);
     }
 }

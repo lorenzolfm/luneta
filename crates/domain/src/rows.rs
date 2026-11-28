@@ -5,8 +5,8 @@ use lune_protocol::shell::Doing;
 use lune_protocol::v1::{self as api, terminal};
 
 use crate::flows::{
-    BADGE_BYTES_MAX, FlowBadgeKind, FlowControl, FlowMode, NAME_BYTES_MAX, REASON_BYTES_MAX,
-    SESSION_ID_BYTES_MAX, STAGES_MAX,
+    BADGE_BYTES_MAX, FlowBadgeKind, FlowControl, FlowMode, NAME_BYTES_MAX, PauseReason,
+    REASON_BYTES_MAX, STAGES_MAX, SessionId,
 };
 use crate::mux::TerminalKey;
 use crate::projects::{Arranged, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId};
@@ -21,10 +21,10 @@ pub struct FlowRow {
     pub stage_label: String,
     pub badge: String,
     pub badge_kind: FlowBadgeKind,
-    pub pause_reason: Option<String>,
+    pub pause_reason: Option<PauseReason>,
     pub detail: Option<String>,
     pub active_view: Option<ViewId>,
-    pub resume_session: Option<String>,
+    pub resume_session: Option<SessionId>,
     pub controls: Vec<FlowControl>,
 }
 
@@ -43,13 +43,7 @@ impl FlowRow {
             ("name", Some(&said.flow_name), NAME_BYTES_MAX),
             ("stage label", Some(&said.stage_label), NAME_BYTES_MAX),
             ("badge", Some(&said.badge), BADGE_BYTES_MAX),
-            ("pause reason", said.pause_reason.as_ref(), REASON_BYTES_MAX),
             ("detail", said.detail.as_ref(), REASON_BYTES_MAX),
-            (
-                "resume session",
-                said.resume_session.as_ref(),
-                SESSION_ID_BYTES_MAX,
-            ),
         ];
         for (field, text, bytes_max) in bounded {
             if let Some(text) = text
@@ -73,16 +67,10 @@ impl FlowRow {
             ));
         }
         let mode = FlowMode::of_api(said.mode)?;
-        let badge_kind = match api::FlowBadgeKind::try_from(said.badge_kind) {
-            Ok(api::FlowBadgeKind::Running) => FlowBadgeKind::Running,
-            Ok(api::FlowBadgeKind::WaitingInteractive) => FlowBadgeKind::WaitingInteractive,
-            Ok(api::FlowBadgeKind::Paused) => FlowBadgeKind::Paused,
-            Ok(api::FlowBadgeKind::Merged) => FlowBadgeKind::Merged,
-            Ok(api::FlowBadgeKind::ReadyToMerge) => FlowBadgeKind::ReadyToMerge,
-            Ok(api::FlowBadgeKind::Unspecified) | Err(_) => {
-                return Err(format!("flow has unknown badge kind {}", said.badge_kind));
-            }
-        };
+        let badge_kind = FlowBadgeKind::of_api(said.badge_kind)?;
+        let pause_reason = said.pause_reason.map(PauseReason::of_api).transpose()?;
+        let resume_session = said.resume_session.as_deref().map(SessionId::parse);
+        let resume_session = resume_session.transpose()?;
         if said.controls.len() > FlowControl::ALL.len() {
             return Err(format!(
                 "flow lists {} controls, exceeding {}",
@@ -98,7 +86,7 @@ impl FlowRow {
             }
             controls.push(control);
         }
-        if said.pause_reason.is_some() != (badge_kind == FlowBadgeKind::Paused) {
+        if pause_reason.is_some() != (badge_kind == FlowBadgeKind::Paused) {
             return Err("flow has a pause reason exactly when it is paused".to_owned());
         }
         let active_view = match said.active_view {
@@ -116,10 +104,10 @@ impl FlowRow {
             stage_label: said.stage_label.clone(),
             badge: said.badge.clone(),
             badge_kind,
-            pause_reason: said.pause_reason.clone(),
+            pause_reason,
             detail: said.detail.clone(),
             active_view,
-            resume_session: said.resume_session.clone(),
+            resume_session,
             controls,
         };
         assert!(row.step_number >= 1);
@@ -995,11 +983,31 @@ mod tests {
         assert!(FlowRow::of_api(&long_name).is_err());
 
         let mut running_with_reason = valid();
-        running_with_reason.pause_reason = Some("paused".to_owned());
+        running_with_reason.pause_reason = Some(api::FlowPauseReason::UserPaused.into());
         assert!(FlowRow::of_api(&running_with_reason).is_err());
 
         let mut paused_without_reason = valid();
         paused_without_reason.badge_kind = api::FlowBadgeKind::Paused.into();
         assert!(FlowRow::of_api(&paused_without_reason).is_err());
+
+        let mut unspecified_reason = paused_without_reason.clone();
+        unspecified_reason.pause_reason = Some(api::FlowPauseReason::Unspecified.into());
+        assert!(FlowRow::of_api(&unspecified_reason).is_err());
+
+        let mut paused = paused_without_reason;
+        paused.pause_reason = Some(api::FlowPauseReason::DirtyTree.into());
+        let row = FlowRow::of_api(&paused).unwrap();
+        assert_eq!(row.pause_reason, Some(PauseReason::DirtyTree));
+
+        let mut confirming = valid();
+        confirming.badge_kind = api::FlowBadgeKind::ConfirmMerge.into();
+        assert_eq!(
+            FlowRow::of_api(&confirming).unwrap().badge_kind,
+            FlowBadgeKind::ConfirmMerge
+        );
+
+        let mut flag_session = valid();
+        flag_session.resume_session = Some("--dangerously-skip-permissions".to_owned());
+        assert!(FlowRow::of_api(&flag_session).is_err());
     }
 }

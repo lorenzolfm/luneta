@@ -1469,7 +1469,12 @@ impl Daemon for Host {
             Some(api::start_flow_request::Entry::ImplementPrompt(prompt)) => FlowEntry::Implement {
                 prompt: prompt.clone(),
             },
-            Some(api::start_flow_request::Entry::PullRequest(())) | None => FlowEntry::PullRequest,
+            Some(api::start_flow_request::Entry::PullRequest(())) => FlowEntry::PullRequest,
+            None => {
+                return Err(Status::invalid_argument(
+                    "entry: say whether the flow implements a prompt or starts from the pull request",
+                ));
+            }
         };
         if let Some(mut daemon) = self.bridged(on).await? {
             return daemon

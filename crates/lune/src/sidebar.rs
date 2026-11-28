@@ -6006,7 +6006,7 @@ impl Sidebar {
         if let Some(why) = self.unreached() {
             notes.say(&why, width, error);
         }
-        if let Some(flow_note) = self.paused_flow_note() {
+        if let Some(flow_note) = self.waiting_flow_note() {
             notes.say(&flow_note, width, error);
         }
         if let Some(lost) = self.folds.lost() {
@@ -6148,7 +6148,7 @@ impl Sidebar {
         }
     }
 
-    fn paused_flow_note(&self) -> Option<String> {
+    fn waiting_flow_note(&self) -> Option<String> {
         if !self.has_keys() {
             return None;
         }
@@ -6158,14 +6158,16 @@ impl Sidebar {
             Target::View(_, row) => row.flow.as_deref(),
             Target::Project(..) | Target::Machine(_) => None,
         }?;
-        if flow.badge_kind != FlowBadgeKind::Paused {
-            return None;
-        }
-        let detail = flow.detail.as_deref().unwrap_or("paused");
-        Some(format!(
-            "flow ({}): {detail} · f o take over, f r resume",
-            flow.stage_label
-        ))
+        let keys = match flow.badge_kind {
+            FlowBadgeKind::Paused => "f o take over, f r resume",
+            FlowBadgeKind::ConfirmMerge => "f n merge, f x abort",
+            FlowBadgeKind::Running
+            | FlowBadgeKind::WaitingInteractive
+            | FlowBadgeKind::Merged
+            | FlowBadgeKind::ReadyToMerge => return None,
+        };
+        let detail = flow.detail.as_deref().unwrap_or("waiting for you");
+        Some(format!("flow ({}): {detail} · {keys}", flow.stage_label))
     }
 
     fn bottom(&self) -> Bottom<'_> {
@@ -7200,6 +7202,12 @@ fn flow_line(here: bool, flow: &FlowRow, width: usize) -> Line<'static> {
     let (glyph, style) = match flow.badge_kind {
         FlowBadgeKind::Running => ("▸ ", Style::new().fg(moonlight::CYAN)),
         FlowBadgeKind::WaitingInteractive => ("◈ ", Style::new().fg(ACCENT)),
+        FlowBadgeKind::ConfirmMerge => (
+            "⇡ ",
+            Style::new()
+                .fg(moonlight::GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
         FlowBadgeKind::Paused => (
             "⏸ ",
             Style::new().fg(moonlight::RED).add_modifier(Modifier::BOLD),

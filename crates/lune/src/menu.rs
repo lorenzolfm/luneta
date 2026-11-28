@@ -6430,10 +6430,10 @@ mod tests {
             stage_label: "illegal-states".to_owned(),
             badge: "paused".to_owned(),
             badge_kind: lune_domain::flows::FlowBadgeKind::Paused,
-            pause_reason: Some("dirty_tree".to_owned()),
+            pause_reason: Some(lune_domain::flows::PauseReason::DirtyTree),
             detail: Some("uncommitted files".to_owned()),
             active_view: None,
-            resume_session: Some("sess-1".to_owned()),
+            resume_session: Some(lune_domain::flows::SessionId::parse("sess-1").unwrap()),
             controls: vec![
                 FlowControl::Resume,
                 FlowControl::TakeOver,
