@@ -120,55 +120,14 @@ struct Envelope {
 
 #[derive(Deserialize)]
 struct Payload {
-    session_id: Option<String>,
-    model: Option<RawModel>,
-    effort: Option<String>,
+    session_id: Option<Value>,
+    model: Option<Value>,
+    effort: Option<Value>,
     #[serde(alias = "effortLevel")]
-    effort_level: Option<String>,
-    context_window: Option<RawContextWindow>,
-    rate_limits: Option<RawRateLimits>,
-    cost: Option<RawCost>,
-}
-
-#[derive(Deserialize)]
-struct RawModel {
-    id: Option<String>,
-    display_name: Option<String>,
-    effort: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawContextWindow {
-    context_window_size: Option<u64>,
-    used_percentage: Option<f64>,
-    current_usage: Option<RawCurrentUsage>,
-}
-
-#[derive(Deserialize)]
-struct RawCurrentUsage {
-    #[serde(rename = "input_tokens")]
-    input: Option<u64>,
-    #[serde(rename = "cache_creation_input_tokens")]
-    cache_creation: Option<u64>,
-    #[serde(rename = "cache_read_input_tokens")]
-    cache_read: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct RawRateLimits {
-    five_hour: Option<RawRateLimit>,
-    seven_day: Option<RawRateLimit>,
-}
-
-#[derive(Deserialize)]
-struct RawRateLimit {
-    used_percentage: Option<f64>,
-    resets_at: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct RawCost {
-    total_cost_usd: Option<f64>,
+    effort_level: Option<Value>,
+    context_window: Option<Value>,
+    rate_limits: Option<Value>,
+    cost: Option<Value>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -234,6 +193,7 @@ struct FileStamp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InstalledStamp {
     settings: Option<FileStamp>,
+    settings_symlink: bool,
     script: Option<FileStamp>,
 }
 
@@ -242,8 +202,13 @@ enum InstallOutcome {
     Installed {
         stamp: InstalledStamp,
         efforts: EffortSettings,
+        note: Option<String>,
     },
     Retry,
+    Failed {
+        efforts: EffortSettings,
+        why: String,
+    },
 }
 
 pub struct StatusFiles {
@@ -251,6 +216,7 @@ pub struct StatusFiles {
     dir: PathBuf,
     claude: Option<PathBuf>,
     installed: Option<InstalledStamp>,
+    install_note: Option<String>,
     efforts: EffortSettings,
     processes: HashMap<AgentId, Process>,
     troubles: Troubles,
@@ -270,6 +236,7 @@ impl StatusFiles {
             dir,
             claude,
             installed: None,
+            install_note: None,
             efforts: EffortSettings::default(),
             processes: HashMap::new(),
             troubles: Troubles::default(),
@@ -284,21 +251,46 @@ impl StatusFiles {
     fn ensure_installed(&mut self) {
         let Some(claude) = self.claude.as_ref().filter(|claude| claude.is_dir()) else {
             self.installed = None;
+            self.install_note = None;
             self.efforts = EffortSettings::default();
             return;
         };
         let current = current_install_stamp(claude);
         if self.installed == Some(current) {
+            if let Some(note) = &self.install_note {
+                self.troubles.say(note.clone());
+            }
             return;
         }
         match install(claude, &self.lune) {
-            Ok(InstallOutcome::Installed { stamp, efforts }) => {
+            Ok(InstallOutcome::Installed {
+                stamp,
+                efforts,
+                note,
+            }) => {
                 self.installed = Some(stamp);
                 self.efforts = efforts;
+                if let Some(note) = &note {
+                    self.troubles.say(note.clone());
+                }
+                self.install_note = note;
             }
-            Ok(InstallOutcome::Retry) => self.installed = None,
+            Ok(InstallOutcome::Retry) => {
+                self.installed = None;
+                self.install_note = None;
+            }
+            Ok(InstallOutcome::Failed { efforts, why }) => {
+                self.installed = None;
+                self.install_note = None;
+                self.efforts = efforts;
+                self.troubles.say(format!(
+                    "claude's statusLine hook in {}: {why}",
+                    claude.display()
+                ));
+            }
             Err(error) => {
                 self.installed = None;
+                self.install_note = None;
                 self.troubles.say(format!(
                     "claude's statusLine hook in {}: {error}",
                     claude.display()
@@ -431,7 +423,8 @@ fn read(
     let session_id = envelope
         .state
         .session_id
-        .as_deref()
+        .as_ref()
+        .and_then(Value::as_str)
         .and_then(|id| Said::new(id.trim().to_owned()));
     let telemetry = envelope.state.telemetry(efforts);
     Ok(ReadOutcome::Live(
@@ -441,29 +434,49 @@ fn read(
 
 impl Payload {
     fn telemetry(&self, efforts: &EffortSettings) -> Option<AgentTelemetry> {
-        let model_id = self.model.as_ref().and_then(|model| model.id.as_deref());
+        let model_obj = self.model.as_ref().and_then(Value::as_object);
+        let model_id = model_obj
+            .and_then(|model| model.get("id"))
+            .and_then(Value::as_str);
         let effort = self
             .effort
-            .as_deref()
-            .or(self.effort_level.as_deref())
+            .as_ref()
+            .and_then(Value::as_str)
+            .or_else(|| self.effort_level.as_ref().and_then(Value::as_str))
             .or_else(|| {
-                self.model
-                    .as_ref()
-                    .and_then(|model| model.effort.as_deref())
+                model_obj
+                    .and_then(|model| model.get("effort"))
+                    .and_then(Value::as_str)
             })
             .map(str::to_ascii_lowercase)
             .and_then(|text| TelemetryText::parse(&text))
             .or_else(|| efforts.resolve(model_id));
-        let model = self
-            .model
-            .as_ref()
-            .and_then(|model| model.display_name.as_deref().or(model.id.as_deref()))
+        let model = model_obj
+            .and_then(|model| {
+                model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .filter(|raw| !raw.trim().is_empty())
+                    .or_else(|| model.get("id").and_then(Value::as_str))
+            })
+            .or_else(|| self.model.as_ref().and_then(Value::as_str))
             .map(|raw| clean_claude_model(raw, effort.as_ref().map(TelemetryText::as_str)))
             .and_then(TelemetryText::parse);
         let context = self.context_window.as_ref().and_then(parse_context);
         let usage = parse_usage(self.rate_limits.as_ref(), self.cost.as_ref());
         AgentTelemetry::new(model, effort, context, usage)
     }
+}
+
+fn parse_nonneg_secs(value: &Value) -> Option<u64> {
+    if let Some(secs) = value.as_u64() {
+        return Some(secs);
+    }
+    let secs = value
+        .as_f64()
+        .filter(|secs| secs.is_finite() && *secs >= 0.0)?;
+    let rounded = secs.round();
+    (rounded <= u64::MAX as f64).then_some(rounded as u64)
 }
 
 fn clean_claude_model<'a>(raw: &'a str, effort: Option<&str>) -> &'a str {
@@ -504,22 +517,34 @@ fn strip_context_suffix(model: &str) -> &str {
     }
 }
 
-fn parse_context(raw: &RawContextWindow) -> Option<ContextWindow> {
-    let window_tokens = raw.context_window_size.and_then(NonZeroU64::new);
-    let used_tokens = raw.current_usage.as_ref().and_then(|usage| {
-        if usage.input.is_none() && usage.cache_creation.is_none() && usage.cache_read.is_none() {
-            return None;
-        }
-        Some(
-            usage
-                .input
-                .unwrap_or(0)
-                .saturating_add(usage.cache_creation.unwrap_or(0))
-                .saturating_add(usage.cache_read.unwrap_or(0)),
-        )
-    });
+fn parse_context(raw: &Value) -> Option<ContextWindow> {
+    let raw = raw.as_object()?;
+    let window_tokens = raw
+        .get("context_window_size")
+        .and_then(Value::as_u64)
+        .and_then(NonZeroU64::new);
+    let used_tokens = raw
+        .get("current_usage")
+        .and_then(Value::as_object)
+        .and_then(|usage| {
+            let input = usage.get("input_tokens").and_then(Value::as_u64);
+            let cache_creation = usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64);
+            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+            if input.is_none() && cache_creation.is_none() && cache_read.is_none() {
+                return None;
+            }
+            Some(
+                input
+                    .unwrap_or(0)
+                    .saturating_add(cache_creation.unwrap_or(0))
+                    .saturating_add(cache_read.unwrap_or(0)),
+            )
+        });
     let used_permille = raw
-        .used_percentage
+        .get("used_percentage")
+        .and_then(Value::as_f64)
         .and_then(UsedPermille::of_percent)
         .or_else(|| Some(UsedPermille::of_ratio(used_tokens?, window_tokens?)))?;
     Some(ContextWindow {
@@ -529,10 +554,13 @@ fn parse_context(raw: &RawContextWindow) -> Option<ContextWindow> {
     })
 }
 
-fn parse_rate_limit(label: &str, raw: &RawRateLimit) -> Option<UsageWindow> {
-    let used_permille = UsedPermille::of_percent(raw.used_percentage?)?;
+fn parse_rate_limit(label: &str, raw: &Value) -> Option<UsageWindow> {
+    let raw = raw.as_object()?;
+    let used_permille =
+        UsedPermille::of_percent(raw.get("used_percentage").and_then(Value::as_f64)?)?;
     let resets_at = raw
-        .resets_at
+        .get("resets_at")
+        .and_then(parse_nonneg_secs)
         .filter(|secs| *secs > 0)
         .and_then(|secs| UNIX_EPOCH.checked_add(Duration::from_secs(secs)));
     let label = TelemetryText::parse(label)?;
@@ -543,26 +571,26 @@ fn parse_rate_limit(label: &str, raw: &RawRateLimit) -> Option<UsageWindow> {
     })
 }
 
-fn parse_usage(limits: Option<&RawRateLimits>, cost: Option<&RawCost>) -> Option<AgentUsage> {
+fn parse_usage(limits: Option<&Value>, cost: Option<&Value>) -> Option<AgentUsage> {
     let mut windows = Vec::new();
-    if let Some(limits) = limits {
+    if let Some(limits) = limits.and_then(Value::as_object) {
         if let Some(five_hour) = limits
-            .five_hour
-            .as_ref()
+            .get("five_hour")
             .and_then(|raw| parse_rate_limit("5h", raw))
         {
             windows.push(five_hour);
         }
         if let Some(seven_day) = limits
-            .seven_day
-            .as_ref()
+            .get("seven_day")
             .and_then(|raw| parse_rate_limit("7d", raw))
         {
             windows.push(seven_day);
         }
     }
     let session_cost_micro_usd = cost
-        .and_then(|cost| cost.total_cost_usd)
+        .and_then(Value::as_object)
+        .and_then(|cost| cost.get("total_cost_usd"))
+        .and_then(Value::as_f64)
         .and_then(cost_usd_to_micro_usd);
     AgentUsage::new(windows, session_cost_micro_usd)
 }
@@ -617,9 +645,15 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
     Some(file_stamp_of(&meta))
 }
 
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
 fn current_install_stamp(claude: &Path) -> InstalledStamp {
+    let settings_path = claude.join(SETTINGS_FILE);
     InstalledStamp {
-        settings: file_stamp(&claude.join(SETTINGS_FILE)),
+        settings: file_stamp(&settings_path),
+        settings_symlink: is_symlink(&settings_path),
         script: file_stamp(&claude.join(SCRIPT_FILE)),
     }
 }
@@ -894,7 +928,7 @@ fn decide_status_line_action(
 ) -> io::Result<StatusLineAction> {
     match settings.and_then(|map| map.get("statusLine")) {
         Some(Value::Bool(false)) => Ok(StatusLineAction::LeaveUntouched),
-        Some(Value::Bool(true)) | None => Ok(StatusLineAction::Wire(ChainSource::None)),
+        Some(Value::Bool(true) | Value::Null) | None => Ok(StatusLineAction::Wire(ChainSource::None)),
         Some(Value::Object(status_line)) => {
             match status_line.get("enabled") {
                 None | Some(Value::Bool(true)) => {}
@@ -979,51 +1013,117 @@ fn install(claude: &Path, lune: &Path) -> io::Result<InstallOutcome> {
     let ours = own_command(&script_path)?;
     assert_ne!(ours, "");
 
+    let settings_symlink = is_symlink(&settings_path);
     let snapshot = read_settings(&settings_path)?;
+    if settings_symlink && snapshot.stamp().is_none() {
+        return Ok(InstallOutcome::Installed {
+            stamp: InstalledStamp {
+                settings: None,
+                settings_symlink: true,
+                script: file_stamp(&script_path),
+            },
+            efforts: EffortSettings::default(),
+            note: Some(format!(
+                "{} is a symlink; skipping statusLine wiring",
+                settings_path.display()
+            )),
+        });
+    }
     let efforts = snapshot
         .map()
         .map(EffortSettings::from_map)
         .unwrap_or_default();
-    let action = decide_status_line_action(snapshot.map(), &script_path, &ours)?;
+    let action = match decide_status_line_action(snapshot.map(), &script_path, &ours) {
+        Ok(action) => action,
+        Err(error) => {
+            return Ok(InstallOutcome::Failed {
+                efforts,
+                why: error.to_string(),
+            });
+        }
+    };
 
     match action {
         StatusLineAction::LeaveUntouched => Ok(InstallOutcome::Installed {
             stamp: InstalledStamp {
                 settings: snapshot.stamp(),
+                settings_symlink,
                 script: file_stamp(&script_path),
             },
             efforts,
+            note: None,
         }),
         StatusLineAction::RefreshScript => {
-            let loaded = read_script_and_chain(&script_path, &ours)?;
-            let existing = loaded.as_ref().map(|(bytes, _)| bytes.as_slice());
-            let chain = loaded.as_ref().and_then(|(_, chain)| chain.as_ref());
-            let text = script(lune, chain)?;
-            let script_stamp = write_script(&script_path, &text, existing)?;
+            if is_symlink(&script_path) {
+                return Ok(InstallOutcome::Failed {
+                    efforts,
+                    why: format!("{} is a symlink", script_path.display()),
+                });
+            }
+            let script_stamp = match read_script_and_chain(&script_path, &ours).and_then(|loaded| {
+                let existing = loaded.as_ref().map(|(bytes, _)| bytes.as_slice());
+                let chain = loaded.as_ref().and_then(|(_, chain)| chain.as_ref());
+                let text = script(lune, chain)?;
+                write_script(&script_path, &text, existing)
+            }) {
+                Ok(stamp) => stamp,
+                Err(error) => {
+                    return Ok(InstallOutcome::Failed {
+                        efforts,
+                        why: error.to_string(),
+                    });
+                }
+            };
             Ok(InstallOutcome::Installed {
                 stamp: InstalledStamp {
                     settings: snapshot.stamp(),
+                    settings_symlink,
                     script: Some(script_stamp),
                 },
                 efforts,
+                note: None,
             })
         }
         StatusLineAction::Wire(source) => {
+            if settings_symlink {
+                return Ok(InstallOutcome::Installed {
+                    stamp: InstalledStamp {
+                        settings: snapshot.stamp(),
+                        settings_symlink: true,
+                        script: file_stamp(&script_path),
+                    },
+                    efforts,
+                    note: Some(format!(
+                        "{} is a symlink; skipping statusLine wiring",
+                        settings_path.display()
+                    )),
+                });
+            }
+            if is_symlink(&script_path) {
+                return Ok(InstallOutcome::Failed {
+                    efforts,
+                    why: format!("{} is a symlink", script_path.display()),
+                });
+            }
             let (existing, chain) = match source {
                 ChainSource::None => (None, None),
                 ChainSource::External(cmd) => (None, Some(cmd)),
-                ChainSource::FromExistingScript => {
-                    let loaded = read_script_and_chain(&script_path, &ours)?;
-                    match loaded {
-                        Some((bytes, chain)) => (Some(bytes), chain),
-                        None => (None, None),
+                ChainSource::FromExistingScript => match read_script_and_chain(&script_path, &ours)
+                {
+                    Ok(Some((bytes, chain))) => (Some(bytes), chain),
+                    Ok(None) => (None, None),
+                    Err(error) => {
+                        return Ok(InstallOutcome::Failed {
+                            efforts,
+                            why: error.to_string(),
+                        });
                     }
-                }
+                },
             };
             let text = script(lune, chain.as_ref())?;
             let script_stamp = write_script(&script_path, &text, existing.as_deref())?;
 
-            if file_stamp(&settings_path) != snapshot.stamp() {
+            if file_stamp(&settings_path) != snapshot.stamp() || is_symlink(&settings_path) {
                 return Ok(InstallOutcome::Retry);
             }
             let mode = snapshot.mode();
@@ -1047,9 +1147,11 @@ fn install(claude: &Path, lune: &Path) -> io::Result<InstallOutcome> {
             Ok(InstallOutcome::Installed {
                 stamp: InstalledStamp {
                     settings: Some(settings_stamp),
+                    settings_symlink: false,
                     script: Some(script_stamp),
                 },
                 efforts,
+                note: None,
             })
         }
     }
@@ -1211,5 +1313,145 @@ mod tests {
             "Opus 4.7"
         );
         assert_eq!(clean_claude_model("Claude ", None), "Claude");
+    }
+
+    #[test]
+    fn install_preserves_settings_symlink_handles_null_and_keeps_efforts_on_invalid_status_line() {
+        use std::os::unix::fs::symlink;
+
+        let scratch = tempfile::tempdir().unwrap();
+        let claude = scratch.path().join("claude");
+        let lune = scratch.path().join("lune");
+        let store = scratch.path().join("nix-store-settings.json");
+        fs::create_dir_all(&claude).unwrap();
+        fs::create_dir_all(lune.join(FOLDER)).unwrap();
+
+        let store_body = json!({
+            "effortLevel": "high",
+            "modelSettings": {
+                "claude-opus-4-7": { "effortLevel": "max" }
+            }
+        })
+        .to_string();
+        fs::write(&store, &store_body).unwrap();
+        fs::set_permissions(&store, Permissions::from_mode(0o444)).unwrap();
+        let settings_path = claude.join(SETTINGS_FILE);
+        symlink(&store, &settings_path).unwrap();
+
+        let InstallOutcome::Installed { efforts, note, .. } = install(&claude, &lune).unwrap()
+        else {
+            panic!("expected symlinked settings to install without mutating symlink");
+        };
+        assert!(note.is_some());
+        assert!(is_symlink(&settings_path));
+        assert_eq!(fs::read_to_string(&store).unwrap(), store_body);
+        assert_eq!(
+            efforts.resolve(Some("claude-opus-4-7")).unwrap().as_str(),
+            "max"
+        );
+        assert_eq!(
+            efforts.resolve(Some("claude-sonnet-4-6")).unwrap().as_str(),
+            "high"
+        );
+
+        let store_wired = scratch.path().join("nix-store-wired.json");
+        let ours = own_command(&claude.join(SCRIPT_FILE)).unwrap();
+        fs::write(
+            &store_wired,
+            json!({
+                "effortLevel": "medium",
+                "statusLine": { "type": "command", "command": ours }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::remove_file(&settings_path).unwrap();
+        symlink(&store_wired, &settings_path).unwrap();
+        let InstallOutcome::Installed { efforts, note, .. } = install(&claude, &lune).unwrap()
+        else {
+            panic!("expected wired symlinked settings to refresh script");
+        };
+        assert_eq!(note, None);
+        assert!(is_symlink(&settings_path));
+        assert!(claude.join(SCRIPT_FILE).is_file());
+        assert_eq!(efforts.resolve(None).unwrap().as_str(), "medium");
+
+        fs::remove_file(&settings_path).unwrap();
+        symlink(scratch.path().join("missing.json"), &settings_path).unwrap();
+        let InstallOutcome::Installed { note, .. } = install(&claude, &lune).unwrap() else {
+            panic!("expected dangling symlink to stay untouched");
+        };
+        assert!(note.is_some());
+        assert!(is_symlink(&settings_path));
+
+        fs::remove_file(&settings_path).unwrap();
+        fs::write(
+            &settings_path,
+            json!({ "effortLevel": "low", "statusLine": null }).to_string(),
+        )
+        .unwrap();
+        let InstallOutcome::Installed { efforts, note, .. } = install(&claude, &lune).unwrap()
+        else {
+            panic!("expected null statusLine to wire cleanly");
+        };
+        assert_eq!(note, None);
+        assert_eq!(efforts.resolve(None).unwrap().as_str(), "low");
+        let wired: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_path).unwrap()).unwrap();
+        assert!(wired["statusLine"]["command"].is_string());
+
+        fs::write(
+            &settings_path,
+            json!({ "effortLevel": "max", "statusLine": "invalid" }).to_string(),
+        )
+        .unwrap();
+        let InstallOutcome::Failed { efforts, .. } = install(&claude, &lune).unwrap() else {
+            panic!("expected invalid statusLine to report Failed while preserving efforts");
+        };
+        assert_eq!(efforts.resolve(None).unwrap().as_str(), "max");
+    }
+
+    #[test]
+    fn malformed_claude_telemetry_fields_degrade_per_field() {
+        let raw = json!({
+            "procStart": "42",
+            "state": {
+                "session_id": "s1",
+                "model": { "display_name": "Claude Opus 4.7 (1M context)", "effort": 99 },
+                "context_window": {
+                    "context_window_size": -5,
+                    "used_percentage": 25.0,
+                    "current_usage": "bad"
+                },
+                "rate_limits": {
+                    "five_hour": null,
+                    "seven_day": {
+                        "used_percentage": 42.5,
+                        "resets_at": 1_800_000_007.4
+                    }
+                },
+                "cost": "n/a"
+            }
+        });
+        let envelope: Envelope = serde_json::from_value(raw).unwrap();
+        let telemetry = envelope
+            .state
+            .telemetry(&EffortSettings::default())
+            .expect("valid sibling fields remain");
+        assert_eq!(
+            telemetry.model().map(TelemetryText::as_str),
+            Some("Opus 4.7")
+        );
+        assert_eq!(telemetry.context().unwrap().used_permille.get(), 250);
+        assert_eq!(telemetry.context().unwrap().window_tokens, None);
+        let usage = telemetry.usage().unwrap();
+        assert_eq!(usage.windows().len(), 1);
+        assert_eq!(usage.windows()[0].label.as_str(), "7d");
+        assert_eq!(usage.windows()[0].used_permille.get(), 425);
+        assert_eq!(
+            usage.windows()[0].resets_at,
+            Some(UNIX_EPOCH + Duration::from_secs(1_800_000_007))
+        );
+        assert_eq!(usage.session_cost_micro_usd(), None);
     }
 }

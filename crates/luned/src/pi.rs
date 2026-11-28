@@ -15,6 +15,7 @@ use lune_protocol::telemetry::{
     strip_effort_suffix,
 };
 use serde::Deserialize;
+use serde_json::Value;
 
 use crate::agent::{
     Sighting, absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble,
@@ -61,55 +62,43 @@ struct RawFile {
     mode: Option<String>,
     phase: Option<RawPhase>,
     prompt_open: Option<bool>,
-    telemetry: Option<RawTelemetry>,
+    telemetry: Option<Value>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawTelemetry {
-    model: Option<String>,
-    effort: Option<String>,
-    context: Option<RawTelemetryContext>,
-    cost_usd: Option<f64>,
+fn parse_telemetry(raw: &Value) -> Option<AgentTelemetry> {
+    let raw = raw.as_object()?;
+    let effort = raw
+        .get("effort")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .and_then(|text| TelemetryText::parse(&text));
+    let model = raw
+        .get("model")
+        .and_then(Value::as_str)
+        .map(|raw| match effort.as_ref() {
+            Some(effort) => strip_effort_suffix(raw.trim(), effort.as_str()),
+            None => raw.trim(),
+        })
+        .and_then(TelemetryText::parse);
+    let context = raw.get("context").and_then(parse_context);
+    let usage = raw
+        .get("costUsd")
+        .and_then(Value::as_f64)
+        .and_then(cost_usd_to_micro_usd)
+        .and_then(|micro_usd| AgentUsage::new(Vec::new(), Some(micro_usd)));
+    AgentTelemetry::new(model, effort, context, usage)
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawTelemetryContext {
-    used_percent: Option<f64>,
-    window_tokens: Option<u64>,
-    used_tokens: Option<u64>,
-}
-
-impl RawTelemetry {
-    fn parse(&self) -> Option<AgentTelemetry> {
-        let effort = self
-            .effort
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .and_then(|text| TelemetryText::parse(&text));
-        let model = self
-            .model
-            .as_deref()
-            .map(|raw| match effort.as_ref() {
-                Some(effort) => strip_effort_suffix(raw.trim(), effort.as_str()),
-                None => raw.trim(),
-            })
-            .and_then(TelemetryText::parse);
-        let context = self.context.as_ref().and_then(parse_context);
-        let usage = self
-            .cost_usd
-            .and_then(cost_usd_to_micro_usd)
-            .and_then(|micro_usd| AgentUsage::new(Vec::new(), Some(micro_usd)));
-        AgentTelemetry::new(model, effort, context, usage)
-    }
-}
-
-fn parse_context(raw: &RawTelemetryContext) -> Option<ContextWindow> {
-    let window_tokens = raw.window_tokens.and_then(NonZeroU64::new);
-    let used_tokens = raw.used_tokens;
+fn parse_context(raw: &Value) -> Option<ContextWindow> {
+    let raw = raw.as_object()?;
+    let window_tokens = raw
+        .get("windowTokens")
+        .and_then(Value::as_u64)
+        .and_then(NonZeroU64::new);
+    let used_tokens = raw.get("usedTokens").and_then(Value::as_u64);
     let used_permille = raw
-        .used_percent
+        .get("usedPercent")
+        .and_then(Value::as_f64)
         .and_then(UsedPermille::of_percent)
         .or_else(|| Some(UsedPermille::of_ratio(used_tokens?, window_tokens?)))?;
     Some(ContextWindow {
@@ -252,7 +241,7 @@ impl File {
             })
             .transpose()?;
         let entrypoint = raw.mode.and_then(|mode| Said::new(mode.trim().to_owned()));
-        let telemetry = raw.telemetry.as_ref().and_then(RawTelemetry::parse);
+        let telemetry = raw.telemetry.as_ref().and_then(parse_telemetry);
         Ok(File {
             session_id: raw.session_id,
             cwd: raw.cwd,
@@ -614,5 +603,46 @@ mod tests {
         let usage = telemetry.usage().expect("usage is present");
         assert_eq!(usage.windows(), []);
         assert_eq!(usage.session_cost_micro_usd(), Some(260_000));
+    }
+
+    #[test]
+    fn malformed_telemetry_fields_never_drop_pi_agent_parsing() {
+        let raw: RawFile = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "cwd": "/w",
+            "status": "busy",
+            "statusSince": 1000,
+            "telemetry": {
+                "model": "Opus 4.7",
+                "effort": "high",
+                "context": {
+                    "usedPercent": 12.5,
+                    "windowTokens": 1e25,
+                    "usedTokens": -3
+                },
+                "costUsd": "bad"
+            }
+        }))
+        .unwrap();
+        let file = File::parse(raw).unwrap();
+        let telemetry = file.telemetry.expect("valid sibling fields remain");
+        assert_eq!(
+            telemetry.model().map(TelemetryText::as_str),
+            Some("Opus 4.7")
+        );
+        assert_eq!(telemetry.context().unwrap().used_permille.get(), 125);
+        assert_eq!(telemetry.context().unwrap().window_tokens, None);
+        assert_eq!(telemetry.usage(), None);
+
+        let non_object: RawFile = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "cwd": "/w",
+            "status": "busy",
+            "statusSince": 1000,
+            "telemetry": "unexpected"
+        }))
+        .unwrap();
+        let parsed = File::parse(non_object).unwrap();
+        assert_eq!(parsed.telemetry, None);
     }
 }

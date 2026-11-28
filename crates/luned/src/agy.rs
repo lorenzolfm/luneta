@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, Metadata, OpenOptions, Permissions, TryLockError};
 use std::io::{self, ErrorKind, Read as _, Write as _};
@@ -133,46 +133,10 @@ struct Payload {
     conversation_title: Option<String>,
     agent_state: Option<String>,
     tool_confirmation_pending: Option<bool>,
-    model: Option<RawModel>,
-    context_window: Option<RawContextWindow>,
-    quota: Option<BTreeMap<String, RawQuota>>,
-    cost: Option<RawCost>,
-}
-
-#[derive(Deserialize)]
-struct RawModel {
-    id: Option<String>,
-    display_name: Option<String>,
-    effort: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct RawContextWindow {
-    context_window_size: Option<u64>,
-    used_percentage: Option<f64>,
-    current_usage: Option<RawCurrentUsage>,
-}
-
-#[derive(Deserialize)]
-struct RawCurrentUsage {
-    #[serde(rename = "input_tokens")]
-    input: Option<u64>,
-    #[serde(rename = "cache_creation_input_tokens")]
-    cache_creation: Option<u64>,
-    #[serde(rename = "cache_read_input_tokens")]
-    cache_read: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct RawQuota {
-    remaining_fraction: Option<f64>,
-    reset_time: Option<String>,
-    reset_in_seconds: Option<u64>,
-}
-
-#[derive(Deserialize)]
-struct RawCost {
-    total_usd: Option<f64>,
+    model: Option<Value>,
+    context_window: Option<Value>,
+    quota: Option<Value>,
+    cost: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -406,16 +370,20 @@ impl Payload {
     }
 
     fn telemetry(&self, modified: SystemTime) -> Option<AgentTelemetry> {
-        let effort = self
-            .model
-            .as_ref()
-            .and_then(|model| model.effort.as_deref())
+        let model_obj = self.model.as_ref().and_then(Value::as_object);
+        let effort = model_obj
+            .and_then(|model| model.get("effort"))
+            .and_then(Value::as_str)
             .map(str::to_ascii_lowercase)
             .and_then(|text| TelemetryText::parse(&text));
-        let model = self
-            .model
-            .as_ref()
-            .and_then(|model| model.display_name.as_deref().or(model.id.as_deref()))
+        let model = model_obj
+            .and_then(|model| {
+                model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .filter(|raw| !raw.trim().is_empty())
+                    .or_else(|| model.get("id").and_then(Value::as_str))
+            })
             .map(|raw| match &effort {
                 Some(effort) => strip_effort_suffix(raw, effort.as_str()),
                 None => raw,
@@ -427,22 +395,45 @@ impl Payload {
     }
 }
 
-fn parse_context(raw: &RawContextWindow) -> Option<ContextWindow> {
-    let window_tokens = raw.context_window_size.and_then(NonZeroU64::new);
-    let used_tokens = raw.current_usage.as_ref().and_then(|usage| {
-        if usage.input.is_none() && usage.cache_creation.is_none() && usage.cache_read.is_none() {
-            return None;
-        }
-        Some(
-            usage
-                .input
-                .unwrap_or(0)
-                .saturating_add(usage.cache_creation.unwrap_or(0))
-                .saturating_add(usage.cache_read.unwrap_or(0)),
-        )
-    });
+fn parse_nonneg_secs(value: &Value) -> Option<u64> {
+    if let Some(secs) = value.as_u64() {
+        return Some(secs);
+    }
+    let secs = value
+        .as_f64()
+        .filter(|secs| secs.is_finite() && *secs >= 0.0)?;
+    let rounded = secs.round();
+    (rounded <= u64::MAX as f64).then_some(rounded as u64)
+}
+
+fn parse_context(raw: &Value) -> Option<ContextWindow> {
+    let raw = raw.as_object()?;
+    let window_tokens = raw
+        .get("context_window_size")
+        .and_then(Value::as_u64)
+        .and_then(NonZeroU64::new);
+    let used_tokens = raw
+        .get("current_usage")
+        .and_then(Value::as_object)
+        .and_then(|usage| {
+            let input = usage.get("input_tokens").and_then(Value::as_u64);
+            let cache_creation = usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64);
+            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+            if input.is_none() && cache_creation.is_none() && cache_read.is_none() {
+                return None;
+            }
+            Some(
+                input
+                    .unwrap_or(0)
+                    .saturating_add(cache_creation.unwrap_or(0))
+                    .saturating_add(cache_read.unwrap_or(0)),
+            )
+        });
     let used_permille = raw
-        .used_percentage
+        .get("used_percentage")
+        .and_then(Value::as_f64)
         .and_then(UsedPermille::of_percent)
         .or_else(|| Some(UsedPermille::of_ratio(used_tokens?, window_tokens?)))?;
     Some(ContextWindow {
@@ -476,17 +467,25 @@ fn short_quota_label(bucket: &str) -> Option<TelemetryText> {
 }
 
 fn parse_usage(
-    quotas: Option<&BTreeMap<String, RawQuota>>,
-    cost: Option<&RawCost>,
+    quotas: Option<&Value>,
+    cost: Option<&Value>,
     modified: SystemTime,
 ) -> Option<AgentUsage> {
     let mut windows = Vec::new();
-    if let Some(quotas) = quotas {
-        for (bucket, quota) in quotas {
+    if let Some(quotas) = quotas.and_then(Value::as_object) {
+        let mut buckets: Vec<(&str, &Value)> = quotas
+            .iter()
+            .map(|(bucket, value)| (bucket.as_str(), value))
+            .collect();
+        buckets.sort_unstable_by_key(|(a, _)| *a);
+        for (bucket, entry) in buckets {
             if windows.len() >= USAGE_WINDOWS_MAX {
                 break;
             }
-            let Some(remaining) = quota.remaining_fraction else {
+            let Some(quota) = entry.as_object() else {
+                continue;
+            };
+            let Some(remaining) = quota.get("remaining_fraction").and_then(Value::as_f64) else {
                 continue;
             };
             let Some(used_permille) = UsedPermille::of_remaining_fraction(remaining) else {
@@ -496,12 +495,13 @@ fn parse_usage(
                 continue;
             };
             let resets_at = quota
-                .reset_time
-                .as_deref()
+                .get("reset_time")
+                .and_then(Value::as_str)
                 .and_then(parse_rfc3339_utc)
                 .or_else(|| {
                     quota
-                        .reset_in_seconds
+                        .get("reset_in_seconds")
+                        .and_then(parse_nonneg_secs)
                         .and_then(|secs| modified.checked_add(Duration::from_secs(secs)))
                 });
             windows.push(UsageWindow {
@@ -513,7 +513,9 @@ fn parse_usage(
     }
     assert!(windows.len() <= USAGE_WINDOWS_MAX);
     let session_cost_micro_usd = cost
-        .and_then(|cost| cost.total_usd)
+        .and_then(Value::as_object)
+        .and_then(|cost| cost.get("total_usd"))
+        .and_then(Value::as_f64)
         .and_then(cost_usd_to_micro_usd);
     AgentUsage::new(windows, session_cost_micro_usd)
 }
@@ -1550,5 +1552,49 @@ mod tests {
             Some(now + Duration::from_hours(1))
         );
         assert_eq!(usage.session_cost_micro_usd(), Some(420_000));
+    }
+
+    #[test]
+    fn malformed_telemetry_fields_never_drop_agy_agent_parsing() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_777_000_007);
+        let raw = json!({
+            "procStart": "42",
+            "state": {
+                "cwd": "/w",
+                "conversation_id": "c2",
+                "agent_state": "working",
+                "model": 123,
+                "context_window": {
+                    "context_window_size": -1,
+                    "used_percentage": 42.5,
+                    "current_usage": "bad"
+                },
+                "quota": {
+                    "bad_null": null,
+                    "claude": {
+                        "remaining_fraction": 0.5,
+                        "reset_in_seconds": -5
+                    },
+                    "gemini_flash": {
+                        "remaining_fraction": 0.25,
+                        "reset_in_seconds": 120.4
+                    }
+                },
+                "cost": "n/a"
+            }
+        });
+        let envelope: Envelope = serde_json::from_value(raw).unwrap();
+        assert_eq!(envelope.state.cwd().unwrap().as_str(), "/w");
+        assert_eq!(state_of(&envelope.state), Some(ActiveStatus::Working));
+        let telemetry = envelope.state.telemetry(now).expect("valid siblings remain");
+        assert_eq!(telemetry.model(), None);
+        assert_eq!(telemetry.context().unwrap().used_permille.get(), 425);
+        assert_eq!(telemetry.context().unwrap().window_tokens, None);
+        let windows = telemetry.usage().unwrap().windows();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label.as_str(), "claude");
+        assert_eq!(windows[0].resets_at, None);
+        assert_eq!(windows[1].label.as_str(), "flash");
+        assert_eq!(windows[1].resets_at, Some(now + Duration::from_mins(2)));
     }
 }

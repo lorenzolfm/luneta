@@ -678,6 +678,103 @@ function finiteNonNegative(raw: unknown): number | undefined {
   return raw;
 }
 
+function safeNonNegativeInt(raw: unknown): number | undefined {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
+  const floored = Math.floor(raw);
+  return Number.isSafeInteger(floored) ? floored : undefined;
+}
+
+type PersistedTelemetry =
+  | { readonly valid: true; readonly value: TelemetrySnapshot | undefined }
+  | { readonly valid: false };
+
+function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) return false;
+  }
+  return true;
+}
+
+function parsePersistedTelemetryContext(
+  raw: unknown,
+):
+  | { readonly valid: true; readonly value: TelemetryContext | undefined }
+  | { readonly valid: false } {
+  if (raw === undefined) return { valid: true, value: undefined };
+  if (!isRecord(raw) || !hasOnlyKeys(raw, ["usedPercent", "windowTokens", "usedTokens"])) {
+    return { valid: false };
+  }
+  const usedPercent =
+    raw["usedPercent"] === undefined ? undefined : finiteNonNegative(raw["usedPercent"]);
+  if (raw["usedPercent"] !== undefined && usedPercent === undefined) return { valid: false };
+  const windowTokens =
+    raw["windowTokens"] === undefined ? undefined : safeNonNegativeInt(raw["windowTokens"]);
+  if (
+    raw["windowTokens"] !== undefined &&
+    (windowTokens === undefined || windowTokens === 0 || windowTokens !== raw["windowTokens"])
+  ) {
+    return { valid: false };
+  }
+  const usedTokens =
+    raw["usedTokens"] === undefined ? undefined : safeNonNegativeInt(raw["usedTokens"]);
+  if (
+    raw["usedTokens"] !== undefined &&
+    (usedTokens === undefined || usedTokens !== raw["usedTokens"])
+  ) {
+    return { valid: false };
+  }
+  if (usedPercent === undefined && (usedTokens === undefined || windowTokens === undefined)) {
+    return { valid: false };
+  }
+  return {
+    valid: true,
+    value: {
+      ...(usedPercent !== undefined ? { usedPercent } : {}),
+      ...(windowTokens !== undefined ? { windowTokens } : {}),
+      ...(usedTokens !== undefined ? { usedTokens } : {}),
+    },
+  };
+}
+
+function parsePersistedTelemetry(raw: unknown): PersistedTelemetry {
+  if (raw === undefined) return { valid: true, value: undefined };
+  if (!isRecord(raw) || !hasOnlyKeys(raw, ["model", "effort", "context", "costUsd"])) {
+    return { valid: false };
+  }
+  const model = raw["model"] === undefined ? undefined : nonEmptyTrimmed(raw["model"]);
+  if (raw["model"] !== undefined && (model === undefined || model !== raw["model"])) {
+    return { valid: false };
+  }
+  const effort = raw["effort"] === undefined ? undefined : nonEmptyTrimmed(raw["effort"]);
+  if (
+    raw["effort"] !== undefined &&
+    (effort === undefined || effort !== raw["effort"] || effort !== effort.toLowerCase())
+  ) {
+    return { valid: false };
+  }
+  const context = parsePersistedTelemetryContext(raw["context"]);
+  if (!context.valid) return { valid: false };
+  const costUsd = raw["costUsd"] === undefined ? undefined : finiteNonNegative(raw["costUsd"]);
+  if (raw["costUsd"] !== undefined && costUsd === undefined) return { valid: false };
+  if (
+    model === undefined &&
+    effort === undefined &&
+    context.value === undefined &&
+    costUsd === undefined
+  ) {
+    return { valid: false };
+  }
+  return {
+    valid: true,
+    value: {
+      ...(model !== undefined ? { model } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+      ...(context.value !== undefined ? { context: context.value } : {}),
+      ...(costUsd !== undefined ? { costUsd } : {}),
+    },
+  };
+}
+
 function readSessionCost(ctx: Context): number | undefined {
   const entries = quietly(() => ctx.sessionManager.getEntries?.());
   if (!Array.isArray(entries)) return undefined;
@@ -710,8 +807,8 @@ function readTelemetry(
   const model = nonEmptyTrimmed(ctx.model?.name) ?? nonEmptyTrimmed(ctx.model?.id);
   const effort = nonEmptyTrimmed(quietly(() => pi.getThinkingLevel?.()))?.toLowerCase();
   const rawContext = quietly(() => ctx.getContextUsage?.());
-  const windowTokens = finiteNonNegative(rawContext?.contextWindow ?? ctx.model?.contextWindow);
-  const usedTokens = finiteNonNegative(rawContext?.tokens);
+  const windowTokens = safeNonNegativeInt(rawContext?.contextWindow ?? ctx.model?.contextWindow);
+  const usedTokens = safeNonNegativeInt(rawContext?.tokens);
   const usedPercent = finiteNonNegative(rawContext?.percent);
   let context: TelemetryContext | undefined;
   if (
@@ -720,10 +817,8 @@ function readTelemetry(
   ) {
     context = {
       ...(usedPercent !== undefined ? { usedPercent } : {}),
-      ...(windowTokens !== undefined && windowTokens > 0
-        ? { windowTokens: Math.floor(windowTokens) }
-        : {}),
-      ...(usedTokens !== undefined ? { usedTokens: Math.floor(usedTokens) } : {}),
+      ...(windowTokens !== undefined && windowTokens > 0 ? { windowTokens } : {}),
+      ...(usedTokens !== undefined ? { usedTokens } : {}),
     };
   }
   const cost = finiteNonNegative(costUsd);
@@ -786,8 +881,19 @@ function snapshotInFile(ctx: Context, started: string | undefined): RestoredSnap
     if (phase === undefined || typeof promptOpen !== "boolean") return undefined;
     const projected = currentReport(phase, promptOpen);
     if (!sameReport(report, projected)) return undefined;
-    const kind = isCanonicalReportFields(parsed, projected) ? "exact" : "needsRewrite";
-    return { kind, identity, snapshot: { phase, promptOpen }, since };
+    const persistedTelemetry = parsePersistedTelemetry(parsed["telemetry"]);
+    const snapshot: Snapshot = {
+      phase,
+      promptOpen,
+      ...(persistedTelemetry.valid && persistedTelemetry.value !== undefined
+        ? { telemetry: persistedTelemetry.value }
+        : {}),
+    };
+    const kind =
+      persistedTelemetry.valid && isCanonicalReportFields(parsed, projected)
+        ? "exact"
+        : "needsRewrite";
+    return { kind, identity, snapshot, since };
   }
 
   switch (report.status) {
@@ -924,6 +1030,11 @@ export default function (pi: Pi): void {
     });
   }
 
+  function syncTelemetryIfReady(state: ActiveState, ctx: Context): void {
+    if (state.disk.kind === "unwritten") return;
+    sync(state, ctx);
+  }
+
   pi.on("session_start", (event, ctx) => {
     if (lifecycle.kind !== "active") return;
     sessionCostUsd = readSessionCost(ctx);
@@ -946,7 +1057,7 @@ export default function (pi: Pi): void {
           snapshot: restored.snapshot,
           since: restored.since,
         };
-        syncResume(restored.identity);
+        sync(lifecycle, ctx);
         break;
       case "needsRewrite":
         lifecycle.disk = {
@@ -976,7 +1087,7 @@ export default function (pi: Pi): void {
       sessionCostUsd = (sessionCostUsd ?? 0) + messageCost;
     }
     if (lifecycle.phase.kind !== "running") {
-      sync(lifecycle, ctx);
+      syncTelemetryIfReady(lifecycle, ctx);
       return;
     }
     const stop = parseStopReason(message.stopReason);
@@ -1002,22 +1113,22 @@ export default function (pi: Pi): void {
 
   pi.on("turn_end", (_event, ctx) => {
     if (lifecycle.kind !== "active") return;
-    sync(lifecycle, ctx);
+    syncTelemetryIfReady(lifecycle, ctx);
   });
 
   pi.on("model_select", (_event, ctx) => {
     if (lifecycle.kind !== "active") return;
-    sync(lifecycle, ctx);
+    syncTelemetryIfReady(lifecycle, ctx);
   });
 
   pi.on("thinking_level_select", (_event, ctx) => {
     if (lifecycle.kind !== "active") return;
-    sync(lifecycle, ctx);
+    syncTelemetryIfReady(lifecycle, ctx);
   });
 
   pi.on("session_compact", (_event, ctx) => {
     if (lifecycle.kind !== "active") return;
-    sync(lifecycle, ctx);
+    syncTelemetryIfReady(lifecycle, ctx);
   });
 
   pi.on("agent_settled", (event, ctx) => {

@@ -4009,7 +4009,7 @@ impl SidebarState {
         let fallback_usage = if has_own_usage {
             None
         } else {
-            self.fallback_subscription_usage(usage_machine, last_usage)
+            self.fallback_subscription_usage(usage_machine, last_usage, wall)
         };
         statusbar::Snapshot {
             sidebar_focused,
@@ -4028,6 +4028,7 @@ impl SidebarState {
         &self,
         on: &Machine,
         last_usage: Option<&(agents::Harness, AgentUsage)>,
+        wall: SystemTime,
     ) -> Option<(agents::Harness, AgentUsage)> {
         let preferred = last_usage.map(|(harness, _)| *harness);
         let from_seen = |seen: Seen<'_>| {
@@ -4065,7 +4066,7 @@ impl SidebarState {
                     self.seen(&Machine::Local).and_then(from_seen)
                 }
             })
-            .or_else(|| last_usage.cloned())
+            .or_else(|| last_usage.and_then(|cached| fresh_cached_usage(cached, wall)))
     }
 
     fn lit_machine(&self) -> Option<Machine> {
@@ -8130,6 +8131,19 @@ fn remote_machine_name(machine: &Machine) -> Option<String> {
         Machine::Local => None,
         Machine::Remote(destination) => Some(destination.to_string()),
     }
+}
+
+fn fresh_cached_usage(
+    (harness, usage): &(agents::Harness, AgentUsage),
+    wall: SystemTime,
+) -> Option<(agents::Harness, AgentUsage)> {
+    let windows: Vec<_> = usage
+        .windows()
+        .iter()
+        .filter(|window| window.resets_at.is_none_or(|resets_at| resets_at > wall))
+        .cloned()
+        .collect();
+    AgentUsage::new(windows, None).map(|usage| (*harness, usage))
 }
 
 fn build_worktree_status(
@@ -20411,5 +20425,47 @@ mod tests {
             panic!("expected worktree fallback aim");
         };
         assert!(matches!(target.as_ref(), Target::Worktree(_, row) if row.place.worktree == older));
+    }
+
+    #[test]
+    fn fresh_cached_usage_drops_expired_windows_and_session_cost() {
+        use lune_protocol::telemetry::{TelemetryText, UsageWindow, UsedPermille};
+
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_007);
+        let window = |label: &str, resets_at: Option<SystemTime>| UsageWindow {
+            label: TelemetryText::parse(label).unwrap(),
+            used_permille: UsedPermille::try_new(500).unwrap(),
+            resets_at,
+        };
+        let mixed = AgentUsage::new(
+            vec![
+                window("5h", Some(wall)),
+                window("7d", Some(wall + Duration::from_mins(1))),
+            ],
+            Some(420_000),
+        )
+        .unwrap();
+        let (harness, kept) =
+            fresh_cached_usage(&(agents::Harness::ClaudeCode, mixed), wall).unwrap();
+        assert_eq!(harness, agents::Harness::ClaudeCode);
+        assert_eq!(kept.windows().len(), 1);
+        assert_eq!(kept.windows()[0].label.as_str(), "7d");
+        assert_eq!(kept.session_cost_micro_usd(), None);
+
+        let all_expired = AgentUsage::new(
+            vec![window("5h", Some(wall - Duration::from_secs(1)))],
+            Some(420_000),
+        )
+        .unwrap();
+        assert_eq!(
+            fresh_cached_usage(&(agents::Harness::ClaudeCode, all_expired), wall),
+            None
+        );
+
+        let undated = AgentUsage::new(vec![window("5h", None)], Some(100_000)).unwrap();
+        let (_, undated_kept) =
+            fresh_cached_usage(&(agents::Harness::Antigravity, undated), wall).unwrap();
+        assert_eq!(undated_kept.windows().len(), 1);
+        assert_eq!(undated_kept.session_cost_micro_usd(), None);
     }
 }

@@ -842,3 +842,45 @@ fn a_pi_agent_reports_model_effort_context_and_session_cost_telemetry() {
         Some(260_000)
     );
 }
+
+#[test]
+fn reload_preserves_running_state_across_early_telemetry_events_and_syncs_telemetry() {
+    let (host, _daemon) = with_pi();
+    let mut pi = Pi::start(&host, "tui");
+    let pid = pi.process.pid();
+
+    pi.says(&json!({ "setModel": { "id": "claude-opus-4-7", "name": "Opus 4.7", "contextWindow": 1_000_000 } }));
+    pi.says(&json!({ "setThinking": "high" }));
+    pi.says(&json!({ "type": "session_start", "reason": "startup" }));
+    pi.event("agent_start");
+    let file = file_of(&host, pid);
+    assert_eq!(status_in(&file), "busy");
+
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "setModel": { "id": "claude-sonnet-4-6", "name": "Sonnet 4.6", "contextWindow": 200_000 } }));
+    pi.says(&json!({ "type": "model_select" }));
+    pi.says(&json!({ "type": "thinking_level_select" }));
+    pi.says(&json!({ "type": "turn_end" }));
+    pi.says(&json!({ "type": "session_compact" }));
+    pi.says(&json!({
+        "type": "message_end",
+        "message": { "role": "assistant", "stopReason": "stop", "usage": { "cost": { "total": 0.1 } } }
+    }));
+    assert_eq!(status_in(&file), "busy");
+
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "busy");
+    let updated: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(updated["telemetry"]["model"], json!("Sonnet 4.6"));
+
+    pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
+    pi.says(&json!({ "load": "first" }));
+    pi.says(&json!({ "setModel": null }));
+    pi.says(&json!({ "setThinking": null }));
+    pi.says(&json!({ "setContext": null }));
+    pi.says(&json!({ "type": "session_start", "reason": "reload" }));
+    assert_eq!(status_in(&file), "busy");
+    let cleared: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert!(cleared.get("telemetry").is_none(), "{cleared}");
+}

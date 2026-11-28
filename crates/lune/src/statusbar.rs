@@ -812,7 +812,7 @@ fn format_percent(used: UsedPermille, decimal_below_ten: bool) -> String {
 fn format_tokens(tokens: NonZeroU64) -> String {
     let count = tokens.get();
     if count >= 1_000_000 {
-        let tenths = (count + 50_000) / 100_000;
+        let tenths = count / 100_000 + u64::from(count % 100_000 >= 50_000);
         let whole = tenths / 10;
         let frac = tenths % 10;
         if frac == 0 {
@@ -1175,6 +1175,21 @@ mod tests {
         assert_eq!(format_cost(0), "$0.00");
         assert_eq!(format_cost(4_200), "$0.004");
         assert_eq!(format_cost(12_345_000), "$12.35");
+    }
+
+    #[test]
+    fn format_tokens_handles_u64_max_without_overflow() {
+        assert_eq!(format_tokens(NonZeroU64::new(1_000_000).unwrap()), "1M");
+        assert_eq!(format_tokens(NonZeroU64::new(1_049_999).unwrap()), "1M");
+        assert_eq!(format_tokens(NonZeroU64::new(1_050_000).unwrap()), "1.1M");
+        assert_eq!(
+            format_tokens(NonZeroU64::new(u64::MAX - 50_000).unwrap()),
+            "18446744073709.5M"
+        );
+        assert_eq!(
+            format_tokens(NonZeroU64::new(u64::MAX).unwrap()),
+            "18446744073709.6M"
+        );
     }
 
     #[test]
