@@ -12,8 +12,8 @@ use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
 use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
 use lune_domain::rows::{self, Told};
 use lune_protocol::agent_status::AgentStatus;
-use lune_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
-use lune_protocol::github::{PullRequest, State, Verdict};
+use lune_protocol::git::{Changed, Changes, GitStatus, Head, ParsedGitStatuses, Upstream};
+use lune_protocol::github::{Mergeability, ParsedPullRequests, PullRequest, State, Verdict};
 use lune_protocol::said::Said;
 use lune_protocol::shell::{Doing, Ending, Front};
 use lune_protocol::unread;
@@ -31,7 +31,7 @@ use luned::prunes;
 use luned::rebases::{Rebased, Unrebased};
 use luned::seats::{self, Unread, seated};
 use luned::transcripts::SessionId;
-use luned::{Destination, Directory, log};
+use luned::{Destination, Directory, Troubles, log};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -850,9 +850,18 @@ fn changed_shown(changed: Changed) -> (Vec<Span<'static>>, usize) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Numbered {
     number: Number,
-    colour: Color,
-    checks: Option<Verdict>,
-    stale: bool,
+    state: NumberedState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumberedState {
+    Open {
+        draft: bool,
+        checks: Option<Verdict>,
+        conflicting: bool,
+        stale: bool,
+    },
+    Merged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -873,6 +882,14 @@ impl Numbered {
         match &self.number {
             Number::Linked(link) => Some(link),
             Number::Unlinked(_) => None,
+        }
+    }
+
+    fn colour(&self) -> Color {
+        match self.state {
+            NumberedState::Open { draft: false, .. } => moonlight::GREEN,
+            NumberedState::Open { draft: true, .. } => moonlight::MUTE,
+            NumberedState::Merged => moonlight::MAUVE,
         }
     }
 }
@@ -1888,6 +1905,7 @@ pub struct SidebarState {
     filed: Option<String>,
     menus: u64,
     due: Option<SystemTime>,
+    anomalies: Troubles,
 }
 
 #[derive(Debug)]
@@ -2464,6 +2482,10 @@ impl Sidebar {
         self.state().on_header()
     }
 
+    pub fn lit_machine(&self) -> Option<Machine> {
+        self.state().lit_machine()
+    }
+
     pub fn listing(&self) -> Listing {
         self.state().listing()
     }
@@ -2723,6 +2745,7 @@ impl SidebarState {
             filed: None,
             menus: 0,
             due: None,
+            anomalies: Troubles::default(),
         };
         state.place_rows(framed_rows(framed));
         state
@@ -3367,6 +3390,10 @@ impl SidebarState {
         })
     }
 
+    fn lit_machine(&self) -> Option<Machine> {
+        self.lit_spot().map(Spot::machine)
+    }
+
     fn on_header(&self) -> Option<Machine> {
         match self.lit_spot()? {
             Spot::Machine(machine) => Some(machine.clone()),
@@ -3402,20 +3429,14 @@ impl SidebarState {
 
     fn shelved(&self, machine: &Machine, seen: Result<&Seen<'_>, &Away>) -> Shelved {
         let heard = seen.ok();
-        let statuses: HashMap<&str, &luned::api::GitStatus> = heard
-            .iter()
-            .flat_map(|seen| seen.git_statuses)
-            .map(|status| (status.dir.as_str(), status))
-            .collect();
+        let statuses = git_statuses(heard.map_or(&[], |seen| seen.git_statuses));
         let mut projects = Vec::new();
         for known in shelf(&self.shelves, machine) {
             let mut worktrees = Vec::with_capacity(known.worktrees.len());
             for worktree in &known.worktrees {
-                let branch = statuses.get(worktree.folder.as_str()).and_then(|status| {
-                    Some(String::from(
-                        checkout(&GitStatus::of_api(status)?, None)?.branch,
-                    ))
-                });
+                let branch = statuses
+                    .get(worktree.folder.as_str())
+                    .and_then(|status| Some(String::from(checkout(status, None)?.branch)));
                 let terminals = worktree.views().map(|view| ViewKey::Terminal(view.key));
                 worktrees.push(Worktree {
                     place: worktree.place.clone(),
@@ -3765,6 +3786,24 @@ impl SidebarState {
                 Ok(heard) => (Some(heard), None),
                 Err(away) => (None, Some(away)),
             };
+            let parsed_statuses = heard
+                .as_ref()
+                .map(|heard| ParsedGitStatuses::of_api(heard.git_statuses));
+            let parsed_pulls = heard
+                .as_ref()
+                .map(|heard| ParsedPullRequests::of_api(heard.pull_requests));
+            if let Some(why) = parsed_pulls
+                .as_ref()
+                .and_then(ParsedPullRequests::anomalies)
+            {
+                self.anomalies.say(anomaly_note(&machine, &why));
+            }
+            if let Some(why) = parsed_statuses
+                .as_ref()
+                .and_then(ParsedGitStatuses::anomalies)
+            {
+                self.anomalies.say(anomaly_note(&machine, &why));
+            }
             if projects.is_empty() {
                 if finder.is_none() {
                     rows.push(Row::Machine {
@@ -3781,12 +3820,8 @@ impl SidebarState {
             let mut machine_titles: HashMap<WorktreeId, BTreeMap<ViewId, String>> = HashMap::new();
             let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
-            let statuses: HashMap<&str, &luned::api::GitStatus> = heard
-                .iter()
-                .flat_map(|heard| heard.git_statuses)
-                .map(|status| (status.dir.as_str(), status))
-                .collect();
-            let pull_requests = pull_requests(heard.as_ref().map_or(&[], |it| it.pull_requests));
+            let statuses = parsed_statuses.map_or_default(|parsed| parsed.by_dir);
+            let pull_requests = parsed_pulls.map_or_default(|parsed| parsed.by_dir);
             counts.projects += projects.len();
             for known in projects {
                 let listed = known.listed();
@@ -3892,9 +3927,9 @@ impl SidebarState {
                         let fold = Fold::Worktree(&machine, worktree.place.worktree);
                         let worktree_folded = finder.is_none() && self.folds.contains(fold);
                         let dir = worktree.folder.as_str();
-                        let checkout = statuses.get(dir).and_then(|status| {
-                            checkout(&GitStatus::of_api(status)?, pull_requests.get(dir))
-                        });
+                        let checkout = statuses
+                            .get(dir)
+                            .and_then(|status| checkout(status, pull_requests.get(dir)));
                         let branch = checkout.as_ref().map(|checkout| checkout.branch.as_str());
                         let (worktree_found, worktree_hits) = finder
                             .as_ref()
@@ -4029,6 +4064,7 @@ impl SidebarState {
             });
             rows.append(&mut machine_rows);
         }
+        self.anomalies.done();
         if finder.is_none() {
             assert!(!rows.is_empty(), "this machine always has a row");
         } else if best.is_none() && typos == Typos::None {
@@ -4909,9 +4945,9 @@ impl SidebarState {
         let shown = self.view_of(machine, session, view);
         let cwd = Cwd::of(shown.map(|shown| Directory::from(&shown.cwd)), |dir| {
             let (branch, repository) = git_in(seen.as_ref(), &dir);
-            let pulls = seen.iter().flat_map(|seen| seen.pull_requests);
-            let pull_request = pulls.into_iter().find(|pull| pull.dir == dir.as_str());
-            let pull_request = pull_request.and_then(PullRequest::of_api);
+            let pull_request = seen
+                .as_ref()
+                .and_then(|seen| pull_requests(seen.pull_requests).remove(dir.as_str()));
             Folder {
                 dir,
                 branch,
@@ -5702,11 +5738,7 @@ impl SidebarState {
         let mut notes = Vec::new();
         for (machine, seen) in &reached {
             let agents = seen.seated();
-            let statuses: HashMap<&str, &luned::api::GitStatus> = seen
-                .git_statuses
-                .iter()
-                .map(|status| (status.dir.as_str(), status))
-                .collect();
+            let statuses = git_statuses(seen.git_statuses);
             for known in seen.projects {
                 let listed = known.listed();
                 every.push((machine.clone(), listed.name.session().clone()));
@@ -5716,8 +5748,7 @@ impl SidebarState {
                     };
                     let cwd = view.cwd.as_str();
                     let branch = statuses.get(cwd).and_then(|status| {
-                        let checkout = checkout(&GitStatus::of_api(status)?, None);
-                        checkout.map(|checkout| checkout.branch.into())
+                        checkout(status, None).map(|checkout| checkout.branch.into())
                     });
                     notes.push(Note {
                         on: machine.clone(),
@@ -7011,10 +7042,18 @@ pub fn query(term: &str, width: usize) -> Line<'static> {
 }
 
 fn pull_requests(pull_requests: &[luned::api::PullRequest]) -> HashMap<&str, PullRequest> {
-    pull_requests
-        .iter()
-        .filter_map(|it| Some((it.dir.as_str(), PullRequest::of_api(it)?)))
-        .collect()
+    ParsedPullRequests::of_api(pull_requests).by_dir
+}
+
+fn git_statuses(statuses: &[luned::api::GitStatus]) -> HashMap<&str, GitStatus> {
+    ParsedGitStatuses::of_api(statuses).by_dir
+}
+
+fn anomaly_note(machine: &Machine, why: &str) -> String {
+    match machine {
+        Machine::Local => format!("local: {why}"),
+        Machine::Remote(destination) => format!("{destination}: {why}"),
+    }
 }
 
 fn pull_request_link(pulls: &HashMap<&str, PullRequest>, dir: &str) -> Option<Link> {
@@ -7222,11 +7261,8 @@ fn log_unasked(plan: &prunes::Plan) {
 }
 
 fn git_in(seen: Option<&Seen<'_>>, dir: &Directory) -> (Option<Said>, Option<String>) {
-    let statuses = seen.iter().flat_map(|seen| seen.git_statuses);
-    let status = statuses
-        .into_iter()
-        .find(|status| status.dir == dir.as_str());
-    let Some(status) = status.and_then(GitStatus::of_api) else {
+    let Some(status) = seen.and_then(|seen| git_statuses(seen.git_statuses).remove(dir.as_str()))
+    else {
         return (None, None);
     };
     let branch = checkout(&status, None).map(|checkout| checkout.branch);
@@ -7270,24 +7306,26 @@ fn checkout(status: &GitStatus, pull_request: Option<&PullRequest>) -> Option<Ch
 }
 
 fn numbered(pull_request: &PullRequest) -> Option<Numbered> {
-    let colour = match pull_request.state {
-        State::Open => moonlight::GREEN,
-        State::Draft => moonlight::MUTE,
-        State::Merged => moonlight::MAUVE,
+    let state = match pull_request.state {
+        State::Open {
+            draft,
+            checks,
+            mergeability,
+        } => NumberedState::Open {
+            draft,
+            checks: checks.and_then(|it| it.verdict()),
+            conflicting: mergeability.is_some_and(Mergeability::is_conflicting),
+            stale: pull_request.stale,
+        },
+        State::Merged => NumberedState::Merged,
         State::Closed => return None,
     };
-    let checks = pull_request.verdict();
     let number = pull_request.number();
     let link = Link::parse(pull_request.page.url());
     let number = link.map_or(Number::Unlinked(number), |link| {
         Number::Linked(Box::new(link))
     });
-    Some(Numbered {
-        number,
-        colour,
-        checks,
-        stale: pull_request.stale,
-    })
+    Some(Numbered { number, state })
 }
 
 fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
@@ -7298,6 +7336,15 @@ fn verdict_mark(verdict: Verdict, stale: bool) -> Span<'static> {
     };
     let colour = if stale { moonlight::MUTE } else { colour };
     Span::styled(mark, Style::new().fg(colour))
+}
+
+fn conflict_mark(stale: bool) -> Span<'static> {
+    let colour = if stale {
+        moonlight::MUTE
+    } else {
+        moonlight::RED
+    };
+    Span::styled("≠", Style::new().fg(colour))
 }
 
 fn glyphs(changes: &Changes, stashes: u32, upstream: Option<Upstream>) -> String {
@@ -7914,15 +7961,22 @@ impl<'a> Beside<'a> {
         if let Some(numbered) = checkout.pull_request.as_ref().filter(|_| keeps.number()) {
             spans.push(Span::raw(" "));
             let start: usize = spans.iter().map(Span::width).sum();
-            let shown = Span::styled(numbered.shown(), Style::new().fg(numbered.colour));
+            let shown = Span::styled(numbered.shown(), Style::new().fg(numbered.colour()));
             let columns = start..start + shown.width();
             number = numbered.link().map(|link| (columns, link));
             spans.push(shown);
-            spans.extend(
-                numbered
-                    .checks
-                    .map(|checks| verdict_mark(checks, numbered.stale)),
-            );
+            if let NumberedState::Open {
+                checks,
+                conflicting,
+                stale,
+                ..
+            } = numbered.state
+            {
+                spans.extend(checks.map(|checks| verdict_mark(checks, stale)));
+                if conflicting {
+                    spans.push(conflict_mark(stale));
+                }
+            }
         }
         let status = if keeps.status() {
             checkout.status.clone()
@@ -10917,9 +10971,9 @@ mod tests {
             .collect();
         let mut host = host(vec![session("s", 10, views)], Vec::new());
         let checkouts = [
-            ("/w/a", "main", 0, 126, State::Open),
+            ("/w/a", "main", 0, 126, open_pull_state(false)),
             ("/w/b", "handoff-eng-11259-and-more", 1, 4321, State::Merged),
-            ("/w/c", "fold", 0, 7, State::Draft),
+            ("/w/c", "fold", 0, 7, open_pull_state(true)),
             ("/w/d", "old", 0, 9, State::Closed),
         ];
         for (dir, branch, modified, number, state) in checkouts {
@@ -10944,7 +10998,6 @@ mod tests {
             let pull_request = PullRequest {
                 page,
                 state,
-                checks: None,
                 stale: false,
             };
             host.pull_requests.push(pull_request.to_api(dir));
@@ -11007,11 +11060,10 @@ mod tests {
             };
             host.git_statuses.push(status.to_api(dir));
             if number > 0 {
-                let (page, state) = (owner_s_page(number), State::Open);
+                let (page, state) = (owner_s_page(number), open_pull_state(false));
                 let pull_request = PullRequest {
                     page,
                     state,
-                    checks: None,
                     stale: false,
                 };
                 host.pull_requests.push(pull_request.to_api(dir));
@@ -11064,27 +11116,31 @@ mod tests {
                 passed,
             })
         };
+        let open = |draft, checks| State::Open {
+            draft,
+            checks,
+            mergeability: None,
+        };
         let checkouts = [
-            ("/w/a", "main", 126, State::Open, checks(1, 1, 3)),
-            ("/w/b", "fold", 7, State::Draft, checks(2, 0, 3)),
+            ("/w/a", "main", 126, open(false, checks(1, 1, 3))),
+            ("/w/b", "fold", 7, open(true, checks(2, 0, 3))),
             (
                 "/w/c",
                 "handoff-eng-11259-and-more",
                 4321,
-                State::Open,
-                checks(0, 0, 3),
+                open(false, checks(0, 0, 3)),
             ),
-            ("/w/d", "none", 8, State::Open, checks(0, 0, 0)),
-            ("/w/e", "old", 9, State::Open, None),
-            ("/w/f", "gone", 10, State::Merged, checks(0, 1, 0)),
-            ("/w/g", "late", 11, State::Open, checks(1, 0, 2)),
+            ("/w/d", "none", 8, open(false, checks(0, 0, 0))),
+            ("/w/e", "old", 9, open(false, None)),
+            ("/w/f", "gone", 10, State::Merged),
+            ("/w/g", "late", 11, open(false, checks(1, 0, 2))),
         ];
         let views = checkouts
             .iter()
             .zip(1..)
             .map(|((cwd, ..), id)| view(id, id, cwd, "fish"));
         let mut host = host(vec![session("s", 10, views.collect())], Vec::new());
-        for (dir, branch, number, state, checks) in checkouts {
+        for (dir, branch, number, state) in checkouts {
             let name = Said::new(branch.to_owned()).expect("a branch's name");
             let head = Head::Branch {
                 name,
@@ -11100,12 +11156,7 @@ mod tests {
             };
             host.git_statuses.push(status.to_api(dir));
             let (page, stale) = (owner_s_page(number), dir == "/w/g");
-            let pull_request = PullRequest {
-                page,
-                state,
-                checks,
-                stale,
-            };
+            let pull_request = PullRequest { page, state, stale };
             host.pull_requests.push(pull_request.to_api(dir));
         }
         let mut sidebar = fresh();
@@ -11142,6 +11193,136 @@ mod tests {
     }
 
     #[test]
+    fn an_open_pull_request_shows_when_it_has_merge_conflicts() {
+        use lune_protocol::github::Checks;
+
+        let checks = |pending, failed, passed| {
+            Some(Checks {
+                pending,
+                failed,
+                passed,
+            })
+        };
+        let open = |draft, checks, mergeability| State::Open {
+            draft,
+            checks,
+            mergeability,
+        };
+        let conflicting = Some(Mergeability::Conflicting);
+        let mergeable = Some(Mergeability::Mergeable);
+        let checkouts = [
+            (
+                "/w/a",
+                "main",
+                126,
+                open(false, checks(0, 0, 3), conflicting),
+                false,
+            ),
+            (
+                "/w/b",
+                "fail",
+                7,
+                open(false, checks(0, 1, 0), conflicting),
+                false,
+            ),
+            (
+                "/w/c",
+                "wait",
+                4321,
+                open(false, checks(1, 0, 2), conflicting),
+                false,
+            ),
+            ("/w/d", "draft", 8, open(true, None, conflicting), false),
+            (
+                "/w/e",
+                "clean",
+                9,
+                open(false, checks(0, 0, 3), mergeable),
+                false,
+            ),
+            ("/w/f", "gone", 10, State::Merged, false),
+            (
+                "/w/g",
+                "late",
+                11,
+                open(false, checks(0, 0, 2), conflicting),
+                true,
+            ),
+        ];
+        let views = checkouts
+            .iter()
+            .zip(1..)
+            .map(|((cwd, ..), id)| view(id, id, cwd, "fish"));
+        let mut host = host(vec![session("s", 10, views.collect())], Vec::new());
+        for (dir, branch, number, state, stale) in checkouts {
+            let name = Said::new(branch.to_owned()).expect("a branch's name");
+            let head = Head::Branch {
+                name,
+                upstream: None,
+                changed: None,
+            };
+            let status = GitStatus::Checkout {
+                repository: None,
+                head,
+                changes: Changes::default(),
+                stashes: 0,
+            };
+            host.git_statuses.push(status.to_api(dir));
+            let page = owner_s_page(number);
+            let pull_request = PullRequest { page, state, stale };
+            host.pull_requests.push(pull_request.to_api(dir));
+        }
+        host.pull_requests.push(api::PullRequest {
+            dir: "/w/f".to_owned(),
+            state: api::PullRequestState::Merged.into(),
+            url: owner_s_page(99).url().to_owned(),
+            checks: None,
+            stale: false,
+            detail: Some(api::pull_request::Detail::Open(api::pull_request::Open {
+                draft: false,
+                checks: None,
+                mergeability: api::Mergeability::Conflicting.into(),
+            })),
+        });
+        let mut sidebar = fresh();
+        sidebar.hear(host);
+
+        let buffer = drawn(&mut sidebar, false, 32, 25);
+        let line = |y: u16| {
+            let line: String = (0..31).map(|x| buffer[(x, y)].symbol()).collect();
+            line.trim_end().to_owned()
+        };
+        let branches: Vec<String> = [6, 9, 12, 15, 18, 21, 24].into_iter().map(line).collect();
+        assert_eq!(
+            branches,
+            [
+                "       main #126✓≠",
+                "       fail #7✗≠",
+                "       wait #4321●≠",
+                "       draft #8≠",
+                "       clean #9✓",
+                "       gone #10",
+                "       late #11✓≠",
+            ]
+        );
+        let mark = |y: u16, mark: &str| {
+            let x = (0..32)
+                .find(|x| buffer[(*x, y)].symbol() == mark)
+                .expect("the mark");
+            buffer[(x, y)].fg
+        };
+        assert_eq!(mark(6, "✓"), moonlight::GREEN);
+        assert_eq!(mark(6, "≠"), moonlight::RED);
+        assert_eq!(mark(9, "✗"), moonlight::RED);
+        assert_eq!(mark(9, "≠"), moonlight::RED);
+        assert_eq!(mark(12, "●"), moonlight::YELLOW);
+        assert_eq!(mark(12, "≠"), moonlight::RED);
+        assert_eq!(mark(15, "≠"), moonlight::RED);
+        assert_eq!(mark(24, "✓"), moonlight::MUTE);
+        assert_eq!(mark(24, "≠"), moonlight::MUTE);
+    }
+
+    #[test]
     fn a_worktree_named_after_its_branch_takes_one_line_folded_or_not() {
         let mut sidebar = fresh();
         let branched = worktree_of(31, "issue-489", "/w/issue-489", &[1]);
@@ -11169,16 +11350,20 @@ mod tests {
         };
         host.git_statuses.push(status.to_api("/w/issue-489"));
         let page = PullPage::parse(&LINK.replace("246", "538")).expect("a pull request's page");
-        let (state, checks) = (State::Open, None);
         let pull_request = PullRequest {
             page,
-            state,
-            checks,
+            state: open_pull_state(false),
             stale: false,
         };
         host.pull_requests.push(pull_request.to_api("/w/issue-489"));
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
-        checked_out(statuses, pulls, "/w/fix", "fix", Some((State::Open, LINK)));
+        checked_out(
+            statuses,
+            pulls,
+            "/w/fix",
+            "fix",
+            Some((open_pull_state(false), LINK)),
+        );
         sidebar.heard(host, SystemTime::UNIX_EPOCH);
 
         let one = "  ▾ issue-489 +120 -34 #538  !";
@@ -11732,6 +11917,14 @@ mod tests {
         page.expect("a pull request's page")
     }
 
+    fn open_pull_state(draft: bool) -> State {
+        State::Open {
+            draft,
+            checks: None,
+            mergeability: None,
+        }
+    }
+
     fn checked_out(
         git_statuses: &mut Vec<api::GitStatus>,
         pull_requests: &mut Vec<api::PullRequest>,
@@ -11758,7 +11951,6 @@ mod tests {
             let pull_request = PullRequest {
                 page,
                 state,
-                checks: None,
                 stale: false,
             };
             pull_requests.push(pull_request.to_api(dir));
@@ -11781,14 +11973,20 @@ mod tests {
         );
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let closed = "https://github.com/owner/repo/pull/9";
-        checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, LINK)));
+        checked_out(
+            statuses,
+            pulls,
+            "/w/a",
+            "fix",
+            Some((open_pull_state(false), LINK)),
+        );
         let off_github = "https://ghe.example/owner/repo/pull/7";
         checked_out(
             statuses,
             pulls,
             "/w/b",
             "old",
-            Some((State::Open, off_github)),
+            Some((open_pull_state(false), off_github)),
         );
         checked_out(
             statuses,
@@ -12030,7 +12228,13 @@ mod tests {
         let views = vec![view(1, 1, "/w/a", "fish")];
         let mut host = host(vec![session("s", 10, views)], Vec::new());
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
-        checked_out(statuses, pulls, "/w/a", "fix", Some((State::Open, said)));
+        checked_out(
+            statuses,
+            pulls,
+            "/w/a",
+            "fix",
+            Some((open_pull_state(false), said)),
+        );
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar, test_wall());
@@ -12093,7 +12297,13 @@ mod tests {
             panic!("nixos is reached");
         };
         let (statuses, pulls) = (&mut there.git_statuses, &mut there.pull_requests);
-        checked_out(statuses, pulls, "/w/b", "fix", Some((State::Open, far)));
+        checked_out(
+            statuses,
+            pulls,
+            "/w/b",
+            "fix",
+            Some((open_pull_state(false), far)),
+        );
         let mut sidebar = fresh();
         sidebar.hear(host);
         sidebar.focus(Keys::Sidebar, test_wall());
@@ -12178,7 +12388,7 @@ mod tests {
             pulls,
             "/w/f",
             "日本語の枝の名前が長い",
-            Some((State::Draft, &draft)),
+            Some((open_pull_state(true), &draft)),
         );
         sidebar.hear(host);
 
@@ -12589,6 +12799,7 @@ mod tests {
             " BS   back a group",
             " Ctrl a       Sidebar or views",
             " Super k      Pick an action",
+            " Super T      Revive last view",
             " Alt Shift u  Stop reading",
         ] {
             assert!(
@@ -12953,7 +13164,7 @@ mod tests {
                 panic!("the sidebar has heard of no host");
             };
             let url = format!("https://github.com/lorenzolfm/lune/pull/{number}");
-            let pull = Some((State::Open, url.as_str()));
+            let pull = Some((open_pull_state(false), url.as_str()));
             checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
         });
     }
@@ -15439,7 +15650,13 @@ mod tests {
         let views = vec![view(1, 1, "/w/a", long)];
         let mut local = host(vec![session(long, 10, views)], Vec::new());
         let (statuses, pulls) = (&mut local.git_statuses, &mut local.pull_requests);
-        checked_out(statuses, pulls, "/w/a", long, Some((State::Open, LINK)));
+        checked_out(
+            statuses,
+            pulls,
+            "/w/a",
+            long,
+            Some((open_pull_state(false), LINK)),
+        );
         local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
         let mut sidebar = fresh();
         sidebar.edit(|state| state.this = long.to_owned());
@@ -15922,7 +16139,7 @@ mod tests {
         let link = "https://github.com/lorenzolfm/lune/pull/5";
         let pulled = |dir: &str| {
             let mut pull_requests = Vec::new();
-            let pull = Some((State::Open, link));
+            let pull = Some((open_pull_state(false), link));
             checked_out(&mut Vec::new(), &mut pull_requests, dir, "feat", pull);
             pull_requests
         };

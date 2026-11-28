@@ -22,7 +22,7 @@ pub(crate) mod spot;
 
 pub use file::{Changed, Elsewhere, Failed, Forgotten, Lock, Revision, forget, holder, kept, take};
 pub use file::{Opened, Store, Unheld};
-pub use spot::{LOOK as SPOT_LOOK, clone_of, subfolders};
+pub use spot::{LOOK as SPOT_LOOK, Unlisted, clone_of, subfolders, subfolders_checked};
 
 const RANDOM_TRIES: u32 = 8;
 

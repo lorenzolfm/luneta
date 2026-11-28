@@ -39,9 +39,14 @@ struct WorkView: View {
                 Section("Pull requests") {
                     ForEach(shownPulls, id: \.number) { pull in
                         let author = pull.author.map { " by \($0)" } ?? ""
+                        let detail = [
+                            pull.mergeability.words,
+                            pull.draft ? "draft" : nil,
+                            "\(pull.branch)\(author)",
+                        ].compactMap { $0 }.joined(separator: " · ")
                         Marking(
                             number: pull.number, title: pull.title,
-                            detail: "\(pull.draft ? "draft · " : "")\(pull.branch)\(author)",
+                            detail: detail,
                             marked: marks(\.pulls))
                     }
                     if shownPulls.isEmpty {

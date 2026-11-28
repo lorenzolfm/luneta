@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use lune_domain::projects::Opens;
 use lune_waits::{Patience, eventually};
-use luned::api::change_projects_request::{AddProject, Change};
+use luned::api::change_projects_request::{AddProject, Change, CloseView, ReviveView};
 use luned::api::show_request::{self, Event, Hello, Size, open};
 use luned::api::show_response::{self, Laid, view::Found};
 use luned::api::{
@@ -1189,6 +1189,93 @@ fn custom_absolute_claude_override_without_flags_synthesizes_and_resumes() {
         || fs::read(&resumed_args).ok(),
     );
     let expected: Vec<u8> = ["--resume", CLAUDE_UUID]
+        .iter()
+        .flat_map(|s| s.as_bytes().iter().copied().chain(std::iter::once(0)))
+        .collect();
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn revive_view_resumes_a_closed_trusted_agent_session() {
+    let owned = Owned::new();
+    let work = owned.host.home.path().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let work_canon = fs::canonicalize(&work).unwrap();
+
+    let first_pid = owned.host.home.path().join("revive_claude_pid");
+    let resumed_args = owned.host.home.path().join("revive_claude_resumed");
+    let sessions = owned.host.home.path().join(".claude/sessions");
+    fs::create_dir_all(&sessions).unwrap();
+
+    let node = installed_node();
+    enable_esm(owned.host.bin());
+    let fake_claude = owned.host.bin().join("claude");
+    let claude_js = format!(
+        "#!{node}\n\
+         import fs from 'node:fs';\n\
+         const args = process.argv.slice(2);\n\
+         if (args[0] === '--resume') {{\n\
+           fs.writeFileSync('{resumed}.tmp', args.join('\\0') + '\\0');\n\
+           fs.renameSync('{resumed}.tmp', '{resumed}');\n\
+         }} else {{\n\
+           fs.writeFileSync('{pid}.tmp', String(process.pid));\n\
+           fs.renameSync('{pid}.tmp', '{pid}');\n\
+         }}\n\
+         setInterval(() => {{}}, 1000);\n",
+        node = node.display(),
+        resumed = resumed_args.display(),
+        pid = first_pid.display(),
+    );
+    fs::write(&fake_claude, claude_js).unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let worktree = open_worktree(&owned, &work);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, worktree);
+    let key = shown.open_shell();
+
+    run_in_shell(&owned, key, "claude --model opus");
+    let claude_pid: u32 = eventually("claude starts", || fs::read_to_string(&first_pid).ok())
+        .parse()
+        .unwrap();
+    let mut session_file = file_of_pid(CLAUDE_UUID, claude_pid, "idle");
+    session_file["cwd"] = serde_json::json!(work_canon.to_str().unwrap());
+    session_file["entrypoint"] = serde_json::json!("cli");
+    fs::write(
+        sessions.join(format!("{claude_pid}.json")),
+        session_file.to_string(),
+    )
+    .unwrap();
+
+    eventually("luned synthesizes and saves claude resume record", || {
+        let listed = list_resume(&owned, Some(key.id));
+        let record = listed.terminals.first()?.records.first()?;
+        (record.source() == ResumeRecordSource::Synthesized
+            && trusted_rule(record) == Some("claude")
+            && is_saved(record))
+        .then_some(())
+    });
+
+    asked(
+        &owned.host,
+        Change::CloseView(CloseView {
+            terminal: Some(key),
+        }),
+    )
+    .unwrap();
+    shown.until("closed agent view leaves layout", |laid| {
+        laid.views.is_empty()
+    });
+
+    let answered =
+        crate::projects::answered_on(&owned.host, None, Change::ReviveView(ReviveView {})).unwrap();
+    assert_eq!(
+        answered.made,
+        Some(luned::api::change_projects_response::Made::Found(worktree))
+    );
+    let got = eventually("revived view resumes the closed claude session", || {
+        fs::read(&resumed_args).ok()
+    });
+    let expected: Vec<u8> = ["--resume", CLAUDE_UUID, "--model", "opus"]
         .iter()
         .flat_map(|s| s.as_bytes().iter().copied().chain(std::iter::once(0)))
         .collect();

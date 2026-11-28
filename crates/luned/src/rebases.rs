@@ -4,7 +4,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use lune_protocol::CONFLICTED_NAMED_MAX;
-use lune_protocol::github::State;
 use lune_protocol::said::Said;
 use lune_protocol::watch::LocalVersion;
 use tonic::{Code, Status};
@@ -258,7 +257,7 @@ fn pulled(top: &str, branch: &str, until: Instant) -> Result<Option<Pulled>, Str
     let pulled = github::Asker::default()
         .pull_of(top, &repository, branch)
         .map_err(unasked)?;
-    let open = |pulled: &Pulled| matches!(pulled.pull_request.state, State::Open | State::Draft);
+    let open = |pulled: &Pulled| pulled.pull_request.is_open();
     Ok(pulled.filter(open))
 }
 

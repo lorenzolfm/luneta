@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use lune_protocol::git::ParsedGitStatuses;
+use lune_protocol::github::ParsedPullRequests;
 use lune_protocol::watch::{LocalVersion, WatchedLocalAfter};
 use notify::RecursiveMode;
 use tokio::sync::Semaphore;
@@ -801,6 +803,7 @@ async fn watched(
     let mut seen = Seen::Initial(InitialSeen::Reaching {
         since: SystemTime::now(),
     });
+    let mut anomalies = Troubles::default();
     let said = Arc::default();
     loop {
         let current = {
@@ -901,11 +904,42 @@ async fn watched(
             |subagent| prost::Message::encoded_len(subagent).saturating_add(16),
             lune_protocol::HOST_SUBAGENTS_BYTES_MAX,
         );
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
         if !told(&core, &destination, Reached::Host(host)).await {
             return;
         }
         bridged.synced(Some(version));
     }
+}
+
+fn sanitize_remote_host(
+    destination: &Destination,
+    host: &mut api::remote::Host,
+    anomalies: &mut Troubles,
+) {
+    let parsed = ParsedPullRequests::of_api(&host.pull_requests);
+    if let Some(why) = parsed.anomalies() {
+        anomalies.say(format!("{destination}: {why}"));
+        let mut clean: Vec<_> = parsed
+            .by_dir
+            .iter()
+            .map(|(dir, pull)| ((*dir).to_owned(), pull.to_api(dir)))
+            .collect();
+        clean.sort_by(|(a, _), (b, _)| a.cmp(b));
+        host.pull_requests = clean.into_iter().map(|(_, pull)| pull).collect();
+    }
+    let parsed = ParsedGitStatuses::of_api(&host.git_statuses);
+    if let Some(why) = parsed.anomalies() {
+        anomalies.say(format!("{destination}: {why}"));
+        let mut clean: Vec<_> = parsed
+            .by_dir
+            .iter()
+            .map(|(dir, status)| ((*dir).to_owned(), status.to_api(dir)))
+            .collect();
+        clean.sort_by(|(a, _), (b, _)| a.cmp(b));
+        host.git_statuses = clean.into_iter().map(|(_, status)| status).collect();
+    }
+    anomalies.done();
 }
 
 async fn handle_failure(
@@ -1636,6 +1670,57 @@ mod tests {
         let secs: Vec<u64> = (1..=9).map(|failures| again(failures).as_secs()).collect();
         assert_eq!(secs, [0, 1, 2, 4, 8, 16, 30, 30, 30]);
         assert_eq!(again(u32::MAX), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn remote_host_sanitization_drops_invalid_and_duplicate_entries() {
+        use lune_protocol::git::GitStatus;
+        use lune_protocol::github::{Mergeability, PullPage, PullRequest, State};
+
+        let destination: Destination = "nixos".parse().unwrap();
+        let pull = |dir: &str, url: &str, state| {
+            PullRequest {
+                page: PullPage::parse(url).unwrap(),
+                state,
+                stale: false,
+            }
+            .to_api(dir)
+        };
+        let open = State::Open {
+            draft: false,
+            checks: None,
+            mergeability: Some(Mergeability::Conflicting),
+        };
+        let first = pull("/a", "https://github.com/o/r/pull/1", open);
+        let dup = pull("/a", "https://github.com/o/r/pull/2", State::Merged);
+        let invalid = api::PullRequest {
+            dir: "/bad".to_owned(),
+            state: api::PullRequestState::Merged.into(),
+            url: "https://github.com/o/r/pull/3".to_owned(),
+            checks: None,
+            stale: false,
+            detail: Some(api::pull_request::Detail::Open(api::pull_request::Open {
+                draft: false,
+                checks: None,
+                mergeability: api::Mergeability::Conflicting.into(),
+            })),
+        };
+        let empty_dir = pull("", "https://github.com/o/r/pull/4", State::Closed);
+        let valid_status = GitStatus::Outside.to_api("/a");
+        let dup_status = GitStatus::Outside.to_api("/a");
+        let bad_status = api::GitStatus {
+            dir: "/bad".to_owned(),
+            stands: None,
+        };
+        let mut host = api::remote::Host {
+            pull_requests: vec![first.clone(), dup, invalid, empty_dir],
+            git_statuses: vec![valid_status.clone(), dup_status, bad_status],
+            ..api::remote::Host::default()
+        };
+        let mut anomalies = Troubles::default();
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
+        assert_eq!(host.pull_requests, vec![first]);
+        assert_eq!(host.git_statuses, vec![valid_status]);
     }
 
     #[test]

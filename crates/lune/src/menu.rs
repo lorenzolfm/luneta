@@ -1249,7 +1249,7 @@ impl ViewRow {
         };
         let number = page.number();
         match state {
-            State::Open | State::Draft => Ok((beside, page.clone())),
+            State::Open { .. } => Ok((beside, page.clone())),
             State::Merged => Err(format!("menu: #{number} is merged")),
             State::Closed => Err(format!("menu: #{number} is closed")),
         }
@@ -4226,7 +4226,6 @@ mod tests {
         let pull_request = Some(PullRequest {
             page: PullPage::parse(PULL).unwrap(),
             state,
-            checks: None,
             stale: false,
         });
         Target::View(
@@ -4236,6 +4235,14 @@ mod tests {
                 ..folder()
             }),
         )
+    }
+
+    fn open_state(draft: bool) -> State {
+        State::Open {
+            draft,
+            checks: None,
+            mergeability: None,
+        }
     }
 
     const PULL: &str = "https://github.com/owner/lune/pull/328";
@@ -4265,7 +4272,7 @@ mod tests {
 
     #[test]
     fn a_key_for_the_checks_starts_an_agent_on_those_that_failed() {
-        let (menu, _) = stays(opened(pull_row(State::Draft), Some('c')));
+        let (menu, _) = stays(opened(pull_row(open_state(true)), Some('c')));
         let (menu, wants) = stays(menu.key(&char('c')));
         assert_eq!(
             wants,
@@ -4289,7 +4296,7 @@ mod tests {
         assert_eq!(wants, beside_row(command));
 
         let fetched = |checks: Result<Failing, String>| {
-            let (menu, _) = stays(opened(pull_row(State::Open), Some('c')));
+            let (menu, _) = stays(opened(pull_row(open_state(false)), Some('c')));
             let (menu, _) = stays(menu.key(&char('c')));
             closed(menu.checked(checks))
         };

@@ -9,6 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use lune_domain::mux::TerminalKey;
+#[cfg(test)]
 use lune_protocol::github::State;
 
 use crate::api::projects::Held;
@@ -630,7 +631,7 @@ pub(crate) fn plan(
     let mut merged: Vec<(OnBranch<'_>, Pulled)> = Vec::new();
     for (on, answer) in askable.into_iter().zip(answers) {
         match answer {
-            Ok(Some(pulled)) if pulled.pull_request.state == State::Merged => {
+            Ok(Some(pulled)) if pulled.pull_request.is_merged() => {
                 merged.push((on, pulled));
             }
             Ok(_) => {}
@@ -1400,7 +1401,6 @@ mod tests {
             pull_request: PullRequest {
                 page,
                 state: State::Merged,
-                checks: None,
                 stale: false,
             },
             base_name: "main".to_owned(),
