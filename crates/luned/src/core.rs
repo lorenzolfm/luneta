@@ -188,6 +188,11 @@ impl FollowDirs {
     }
 
     #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -195,6 +200,15 @@ impl FollowDirs {
     fn is_subset(&self, other: &FollowDirs) -> bool {
         self.0.is_subset(&other.0)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GitStatusStored {
+    Published {
+        version: LocalVersion,
+        log: Option<String>,
+    },
+    Untracked,
 }
 
 pub enum Command {
@@ -207,7 +221,7 @@ pub enum Command {
         dir: Dir,
         status: GitStatus,
         why: Option<git::Why>,
-        answer: oneshot::Sender<Option<String>>,
+        answer: oneshot::Sender<GitStatusStored>,
     },
     PullRequests(BTreeMap<String, Found>),
     Topics(HashMap<TopicKey, Said>),
@@ -221,6 +235,7 @@ pub enum Command {
     Remote {
         destination: Destination,
         reached: Reached,
+        answer: oneshot::Sender<()>,
     },
     Say {
         said: ToSay,
@@ -795,22 +810,29 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 answer,
             } => {
                 if !known.dirs().contains(&dir) {
-                    let _ = answer.send(None);
+                    let _ = answer.send(GitStatusStored::Untracked);
                     continue;
                 }
                 let before = known.branch(&dir).map(str::to_owned);
                 let changed = known.statuses.get(&dir).is_some_and(|was| *was != status);
                 known.statuses.insert(dir.clone(), status);
-                let _ = answer.send(
-                    why.filter(|_| changed)
-                        .and_then(|why| why.said(dir.as_str())),
-                );
+                known.update_local();
+                assert!(known.statuses.contains_key(&dir));
+                assert!(known.statuses.len() <= FOLLOW_DIRS_MAX);
+                let log = why
+                    .filter(|_| changed)
+                    .and_then(|why| why.said(dir.as_str()));
+                let _ = answer.send(GitStatusStored::Published {
+                    version: known.versions.local(),
+                    log,
+                });
                 if known
                     .branch(&dir)
                     .is_some_and(|now| before.as_deref() != Some(now))
                 {
                     wake(&wakes.github);
                 }
+                continue;
             }
             Command::PullRequests(now) => known.pull_requests = now,
             Command::Topics(now) => {
@@ -858,10 +880,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             Command::Remote {
                 destination,
                 reached,
+                answer,
             } => {
                 if known.remotes.update_far(&destination, reached) {
                     known.publish_remotes();
                 }
+                let _ = answer.send(());
                 continue;
             }
             Command::Say { said, at, answer } => {
@@ -1887,9 +1911,13 @@ mod tests {
         .unwrap();
         let machine = |name: &str| name.parse::<Destination>().unwrap();
         let hosts = |lines| Command::Hosts(Named::new(lines, 0).unwrap());
-        let heard = |name: &str| Command::Remote {
-            destination: machine(name),
-            reached: Reached::Host(api::remote::Host::default()),
+        let heard = |name: &str| {
+            let (answer, _answered) = oneshot::channel();
+            Command::Remote {
+                destination: machine(name),
+                reached: Reached::Host(api::remote::Host::default()),
+                answer,
+            }
         };
         let told = || {
             let snapshot = ask(&core, Command::HostAll).unwrap();
@@ -2470,7 +2498,20 @@ mod tests {
             answer,
         })
         .unwrap();
-        assert_eq!(stored, None);
+        let GitStatusStored::Published { version, log } = stored else {
+            panic!("tracked dir must publish: {stored:?}");
+        };
+        assert_eq!(log, None);
+        assert_eq!(version, ask(&core, Command::HostLocal).unwrap().version());
+
+        let untracked = ask(&core, |answer| Command::GitStatus {
+            dir: Dir::parse("/w/other").unwrap(),
+            status: GitStatus::Outside,
+            why: None,
+            answer,
+        })
+        .unwrap();
+        assert_eq!(untracked, GitStatusStored::Untracked);
 
         let host = ask(&core, Command::HostAll).unwrap().to_api();
         assert_eq!(host.git_statuses.len(), 1);
@@ -2677,14 +2718,16 @@ mod tests {
         let lines = vec![Line::Far(machine("vps-1")), Line::Far(machine("vps-2"))];
         core.send(Command::Hosts(Named::new(lines.clone(), 0).unwrap()))
             .unwrap();
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-1"),
             reached: Reached::Host(remote_host(1)),
+            answer,
         })
         .unwrap();
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-2"),
             reached: Reached::Host(remote_host(2)),
+            answer,
         })
         .unwrap();
 
@@ -2724,9 +2767,10 @@ mod tests {
             &after_local.remotes.list()[1]
         ));
 
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-1"),
             reached: Reached::Host(remote_host(1)),
+            answer,
         })
         .unwrap();
         let same_remote = ask(&core, Command::HostAll).unwrap();
@@ -2736,9 +2780,10 @@ mod tests {
             same_remote.remotes.list_arc()
         ));
 
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps-1"),
             reached: Reached::Host(remote_host(3)),
+            answer,
         })
         .unwrap();
         let after_remote = ask(&core, Command::HostAll).unwrap();
@@ -2796,9 +2841,10 @@ mod tests {
             Named::new(vec![Line::Far(machine("vps"))], 0).unwrap(),
         ))
         .unwrap();
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps"),
             reached: Reached::Host(remote_host(1)),
+            answer,
         })
         .unwrap();
 
@@ -2838,9 +2884,10 @@ mod tests {
         };
         assert_eq!(local_at.version, local_before.version);
 
-        core.send(Command::Remote {
+        ask(&core, |answer| Command::Remote {
             destination: machine("vps"),
             reached: Reached::Host(remote_host(9)),
+            answer,
         })
         .unwrap();
         let all_after = all_watch_rx.blocking_recv().unwrap();
