@@ -17,7 +17,8 @@ use lune_domain::agent::Harness;
 use lune_domain::flows::SessionId;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
@@ -1123,11 +1124,24 @@ fn parse_claude(record: &Value) -> Vec<StreamEvent> {
     events
 }
 
+fn ok_or_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
 #[derive(Debug, Deserialize)]
 struct AgyEnvelope {
+    #[serde(default, deserialize_with = "ok_or_none")]
     event: Option<AgyEventKind>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     conversation_id: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     step_update: Option<AgyStepUpdate>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     result: Option<AgyResultRecord>,
 }
 
@@ -1143,13 +1157,21 @@ enum AgyEventKind {
 
 #[derive(Debug, Deserialize)]
 struct AgyStepUpdate {
+    #[serde(default, deserialize_with = "ok_or_none")]
     conversation_id: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     step_index: Option<u64>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     state: Option<AgyWireToolState>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     step_type: Option<AgyStepType>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     text_delta: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     tool_name: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     tool_info: Option<AgyToolInfo>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     subagent_info: Option<AgySubagentInfo>,
 }
 
@@ -1177,31 +1199,35 @@ enum AgyWireToolState {
 
 #[derive(Debug, Deserialize)]
 struct AgyToolInfo {
+    #[serde(default, deserialize_with = "ok_or_none")]
     name: Option<String>,
+    #[serde(default)]
     parameters: Option<Value>,
-    error: Option<Value>,
+    #[serde(default)]
+    error: Option<AgyWireError>,
     #[serde(flatten)]
     fields: Map<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AgySubagentInfo {
-    subagents: Option<Vec<AgySubagent>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AgySubagent {
-    role: Option<String>,
-    type_name: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
+    subagents: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct AgyResultRecord {
+    #[serde(default, deserialize_with = "ok_or_none")]
     conversation_id: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     status: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     finished_reason: Option<String>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     response: Option<String>,
+    #[serde(default)]
     error: Option<AgyWireError>,
+    #[serde(default, deserialize_with = "ok_or_none")]
     denied_actions: Option<Vec<Value>>,
 }
 
@@ -1209,10 +1235,7 @@ struct AgyResultRecord {
 #[serde(untagged)]
 enum AgyWireError {
     Text(String),
-    Object {
-        message: Option<String>,
-        r#type: Option<String>,
-    },
+    Object(Map<String, Value>),
     Other(Value),
 }
 
@@ -1220,11 +1243,15 @@ impl AgyWireError {
     fn summary(&self) -> Option<&str> {
         match self {
             AgyWireError::Text(text) => nonempty_trimmed(text),
-            AgyWireError::Object { message, r#type } => message
-                .as_deref()
-                .and_then(nonempty_trimmed)
-                .or_else(|| r#type.as_deref().and_then(nonempty_trimmed)),
-            AgyWireError::Other(value) => (!value.is_null()).then_some("agy reported an error"),
+            AgyWireError::Object(fields) => fields
+                .get("message")
+                .and_then(nonempty_str)
+                .or_else(|| fields.get("type").and_then(nonempty_str))
+                .or_else(|| (!fields.is_empty()).then_some("agy reported an error")),
+            AgyWireError::Other(value) => match value {
+                Value::Null | Value::Bool(false) => None,
+                _ => Some("agy reported an error"),
+            },
         }
     }
 }
@@ -1310,8 +1337,9 @@ fn parse_agy_result(result: Option<&AgyResultRecord>) -> Verdict {
             Verdict::Succeeded(response.map(str::to_owned))
         }
     } else {
+        let failed_reason = finished_reason.filter(|_| !finished_reason_ok);
         let summary = error
-            .or(finished_reason)
+            .or(failed_reason)
             .or(response)
             .or(status)
             .unwrap_or("agy reported an error");
@@ -1324,7 +1352,8 @@ fn agy_tool_state(update: &AgyStepUpdate) -> AgyToolState {
         .tool_info
         .as_ref()
         .and_then(|info| info.error.as_ref())
-        .is_some_and(|value| !value.is_null());
+        .and_then(AgyWireError::summary)
+        .is_some();
     if has_error {
         return AgyToolState::Error;
     }
@@ -1551,11 +1580,7 @@ fn extract_tool_detail_from_map(map: &Map<String, Value>) -> Option<String> {
 
 fn parse_agy_subagent_detail(info: &AgySubagentInfo) -> Option<String> {
     let first = info.subagents.as_deref()?.first()?;
-    let raw = first
-        .role
-        .as_deref()
-        .and_then(nonempty_trimmed)
-        .or_else(|| first.type_name.as_deref().and_then(nonempty_trimmed))?;
+    let raw = nonempty_str(&first["role"]).or_else(|| nonempty_str(&first["type_name"]))?;
     Some(single_line_preview(raw, DETAIL_CHARS_MAX))
 }
 
@@ -1914,6 +1939,53 @@ mod tests {
             vec![StreamEvent::TurnFinished(Verdict::Failed(
                 "quota exceeded".to_owned()
             ))]
+        );
+
+        let result_opaque_object_error = r#"{"event":"result","result":{"status":"SUCCESS","error":{"code":500,"detail":"backend crash"},"response":"partial"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_opaque_object_error),
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "agy reported an error".to_owned()
+            ))]
+        );
+
+        let result_error_status_with_normal_reason =
+            r#"{"event":"result","result":{"status":"ERROR","finished_reason":"NORMAL"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_error_status_with_normal_reason),
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "ERROR".to_owned()
+            ))]
+        );
+
+        let result_unexpected_secondary_field = r#"{"event":"result","result":{"conversation_id":"conv-99","status":"SUCCESS","response":"Done","denied_actions":"none"}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, result_unexpected_secondary_field),
+            vec![
+                StreamEvent::SessionId("conv-99".to_owned()),
+                StreamEvent::TurnFinished(Verdict::Succeeded(Some("Done".to_owned()))),
+            ]
+        );
+
+        let tool_empty_error_is_not_failure = r#"{"event":"step_update","step_update":{"step_index":11,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"name":"read_file","parameters":{"Path":"/w/ok.rs"},"error":""}}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, tool_empty_error_is_not_failure),
+            vec![StreamEvent::ToolUse {
+                name: "read_file".to_owned(),
+                detail: Some("/w/ok.rs".to_owned()),
+            }]
+        );
+
+        let tool_negative_step_index_still_parses = r#"{"event":"step_update","conversation_id":"conv-55","step_update":{"step_index":-1,"state":"ACTIVE","step_type":"tool","tool_name":"read_file","tool_info":{"name":123,"Path":"/w/a.rs"}}}"#;
+        assert_eq!(
+            parse_line(Harness::Antigravity, tool_negative_step_index_still_parses),
+            vec![
+                StreamEvent::SessionId("conv-55".to_owned()),
+                StreamEvent::ToolUse {
+                    name: "read_file".to_owned(),
+                    detail: Some("/w/a.rs".to_owned()),
+                },
+            ]
         );
 
         let unknown_tool_state = r#"{"event":"step_update","step_update":{"step_index":9,"state":"CANCELLED","step_type":"tool","tool_name":"run_command"}}"#;
