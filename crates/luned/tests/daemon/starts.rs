@@ -791,3 +791,38 @@ fn a_luned_that_does_not_start_is_started_once_a_second_at_the_most() {
     let starts = fs::read_to_string(&started).unwrap().lines().count();
     lasted.at_most_once_a_second(starts, "lune starts luned");
 }
+
+const REVIVE: &str = "\x1b[116;10u";
+
+#[test]
+fn super_shift_t_in_lune_revives_a_closed_view() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "revive");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    let first = eventually("lune opens the worktree's first view", || {
+        let worktree = shown(&owned, &dir.path)?;
+        let terminal = worktree.terminals.first()?;
+        matches!(terminal.found, Some(Found::Key(_))).then_some((worktree.id, terminal.id))
+    });
+    window.seated("revive/main");
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
+    });
+
+    window.send("\x1b[97;3u");
+    eventually("menu opens over the view", || {
+        (window.shows("n  New ▸") && window.shows("d  Close ▸")).then_some(())
+    });
+    window.send("dd");
+    eventually("closing the last view unviews lune", || {
+        (shown(&owned, &dir.path).is_none() && window.shows(UNSHOWN)).then_some(())
+    });
+
+    window.send(REVIVE);
+    let revived = eventually("Super+Shift+T revives the closed view", || {
+        let worktree = shown(&owned, &dir.path)?;
+        let terminal = worktree.terminals.first()?;
+        (!window.shows(UNSHOWN)).then_some((worktree.id, terminal.id))
+    });
+    assert_ne!(revived.1, first.1, "revived view gets a fresh view id");
+}

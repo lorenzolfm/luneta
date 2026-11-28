@@ -408,10 +408,9 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
             .any(|it| it.name.as_deref() == Some("logs"))
             .then_some(())
     });
-    assert!(
-        !window.shows("its new name"),
-        "the palette closes once the name is given"
-    );
+    eventually("the palette closes once the name is given", || {
+        (!window.shows("its new name")).then_some(())
+    });
 }
 
 #[test]

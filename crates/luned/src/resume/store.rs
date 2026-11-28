@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, ErrorKind, Read as _, Write as _};
@@ -50,9 +50,30 @@ impl ResumeAttempt {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedResumeRecord(ResumeRecord);
+
+impl OwnedResumeRecord {
+    #[must_use]
+    pub fn try_for_current_user(record: ResumeRecord) -> Option<Self> {
+        let our_uid = rustix::process::getuid().as_raw();
+        (record.uid() == our_uid).then_some(Self(record))
+    }
+
+    #[must_use]
+    pub fn as_record(&self) -> &ResumeRecord {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_record(self) -> ResumeRecord {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredResume {
     pub source: RecordSource,
-    pub record: ResumeRecord,
+    pub record: OwnedResumeRecord,
     pub attempt: ResumeAttempt,
 }
 
@@ -140,8 +161,29 @@ enum StoreState {
     Kept {
         file: PathBuf,
         records: BTreeMap<ViewId, StoredResume>,
+        written: Option<Vec<u8>>,
     },
     Unkept(String),
+}
+
+enum PersistError {
+    Changed(String),
+    Io(String),
+}
+
+impl PersistError {
+    fn into_string(self) -> String {
+        match self {
+            PersistError::Changed(why) | PersistError::Io(why) => why,
+        }
+    }
+
+    fn into_mark_tried(self) -> MarkTriedError {
+        match self {
+            PersistError::Changed(why) => MarkTriedError::Unkept(why),
+            PersistError::Io(why) => MarkTriedError::Io(why),
+        }
+    }
 }
 
 pub struct ResumeStore {
@@ -178,11 +220,12 @@ impl ResumeStore {
     pub fn open_at(path: PathBuf) -> (Self, Option<String>) {
         let uid = rustix::process::getuid().as_raw();
         match load_file(&path, uid) {
-            Ok((records, warning)) => (
+            Ok((records, warning, written)) => (
                 Self {
                     state: StoreState::Kept {
                         file: path,
                         records,
+                        written,
                     },
                 },
                 warning,
@@ -234,45 +277,62 @@ impl ResumeStore {
         }
     }
 
+    fn persist(&mut self, next: BTreeMap<ViewId, StoredResume>) -> Result<(), PersistError> {
+        let StoreState::Kept {
+            file,
+            records,
+            written,
+        } = &mut self.state
+        else {
+            unreachable!("only kept resume stores persist");
+        };
+        match check_unchanged(file, written.as_deref()) {
+            Ok(()) => {}
+            Err(PersistError::Changed(why)) => {
+                log::say(&why);
+                self.state = StoreState::Unkept(why.clone());
+                return Err(PersistError::Changed(why));
+            }
+            Err(PersistError::Io(why)) => return Err(PersistError::Io(why)),
+        }
+        let payload = write_file(file, &next)
+            .map_err(|error| PersistError::Io(format!("{}: {error}", file.display())))?;
+        *records = next;
+        *written = Some(payload);
+        Ok(())
+    }
+
     pub fn upsert(
         &mut self,
         terminal: ViewId,
         source: RecordSource,
-        record: ResumeRecord,
+        record: OwnedResumeRecord,
     ) -> Result<(), String> {
-        let our_uid = rustix::process::getuid().as_raw();
-        if record.uid() != our_uid {
-            return Err(format!(
-                "resume record uid {} does not match current user {our_uid}",
-                record.uid()
-            ));
-        }
-        match &mut self.state {
-            StoreState::Unkept(why) => Err(why.clone()),
+        let next = match &mut self.state {
+            StoreState::Unkept(why) => return Err(why.clone()),
             #[cfg(test)]
             StoreState::Memory(records) => {
                 if is_same_pending(records.get(&terminal), source, &record) {
                     return Ok(());
                 }
                 insert_bounded(records, terminal, source, record);
-                Ok(())
+                return Ok(());
             }
-            StoreState::Kept { file, records } => {
+            StoreState::Kept { records, .. } => {
                 if is_same_pending(records.get(&terminal), source, &record) {
                     return Ok(());
                 }
                 let mut next = records.clone();
                 insert_bounded(&mut next, terminal, source, record);
-                write_file(file, &next).map_err(|error| format!("{}: {error}", file.display()))?;
-                *records = next;
-                Ok(())
+                next
             }
-        }
+        };
+        self.persist(next).map_err(PersistError::into_string)
     }
 
     pub fn mark_tried(&mut self, terminal: ViewId) -> Result<(), MarkTriedError> {
-        match &mut self.state {
-            StoreState::Unkept(why) => Err(MarkTriedError::Unkept(why.clone())),
+        let next = match &mut self.state {
+            StoreState::Unkept(why) => return Err(MarkTriedError::Unkept(why.clone())),
             #[cfg(test)]
             StoreState::Memory(records) => {
                 let entry = records.get_mut(&terminal).ok_or(MarkTriedError::Missing)?;
@@ -280,9 +340,9 @@ impl ResumeStore {
                     return Err(MarkTriedError::AlreadyTried);
                 }
                 entry.attempt = ResumeAttempt::Tried;
-                Ok(())
+                return Ok(());
             }
-            StoreState::Kept { file, records } => {
+            StoreState::Kept { records, .. } => {
                 let entry = records.get(&terminal).ok_or(MarkTriedError::Missing)?;
                 if entry.attempt.is_tried() {
                     return Err(MarkTriedError::AlreadyTried);
@@ -290,47 +350,44 @@ impl ResumeStore {
                 let mut next = records.clone();
                 let next_entry = next.get_mut(&terminal).expect("checked entry exists");
                 next_entry.attempt = ResumeAttempt::Tried;
-                write_file(file, &next)
-                    .map_err(|error| MarkTriedError::Io(format!("{}: {error}", file.display())))?;
-                *records = next;
-                Ok(())
+                next
             }
-        }
+        };
+        self.persist(next).map_err(PersistError::into_mark_tried)
     }
 
     pub fn remove(&mut self, terminal: ViewId) -> Result<(), String> {
-        match &mut self.state {
-            StoreState::Unkept(why) => Err(why.clone()),
+        let next = match &mut self.state {
+            StoreState::Unkept(why) => return Err(why.clone()),
             #[cfg(test)]
             StoreState::Memory(records) => {
                 records.remove(&terminal);
-                Ok(())
+                return Ok(());
             }
-            StoreState::Kept { file, records } => {
+            StoreState::Kept { records, .. } => {
                 if !records.contains_key(&terminal) {
                     return Ok(());
                 }
                 let mut next = records.clone();
                 let removed = next.remove(&terminal);
                 assert!(removed.is_some());
-                write_file(file, &next).map_err(|error| format!("{}: {error}", file.display()))?;
-                *records = next;
-                Ok(())
+                next
             }
-        }
+        };
+        self.persist(next).map_err(PersistError::into_string)
     }
 
     pub fn remove_many(&mut self, terminals: &[ViewId]) -> Result<(), String> {
-        match &mut self.state {
-            StoreState::Unkept(why) => Err(why.clone()),
+        let next = match &mut self.state {
+            StoreState::Unkept(why) => return Err(why.clone()),
             #[cfg(test)]
             StoreState::Memory(records) => {
                 for terminal in terminals {
                     records.remove(terminal);
                 }
-                Ok(())
+                return Ok(());
             }
-            StoreState::Kept { file, records } => {
+            StoreState::Kept { records, .. } => {
                 if !terminals
                     .iter()
                     .any(|terminal| records.contains_key(terminal))
@@ -341,28 +398,52 @@ impl ResumeStore {
                 for terminal in terminals {
                     next.remove(terminal);
                 }
-                write_file(file, &next).map_err(|error| format!("{}: {error}", file.display()))?;
-                *records = next;
-                Ok(())
+                next
             }
-        }
+        };
+        self.persist(next).map_err(PersistError::into_string)
+    }
+
+    pub fn retain_views(&mut self, live: &BTreeSet<ViewId>) -> Result<usize, String> {
+        let (next, removed) = match &mut self.state {
+            StoreState::Unkept(why) => return Err(why.clone()),
+            #[cfg(test)]
+            StoreState::Memory(records) => {
+                let before = records.len();
+                records.retain(|id, _| live.contains(id));
+                return Ok(before - records.len());
+            }
+            StoreState::Kept { records, .. } => {
+                let removed = records.keys().filter(|id| !live.contains(id)).count();
+                if removed == 0 {
+                    return Ok(0);
+                }
+                let mut next = records.clone();
+                next.retain(|id, _| live.contains(id));
+                (next, removed)
+            }
+        };
+        self.persist(next).map_err(PersistError::into_string)?;
+        Ok(removed)
     }
 }
 
 fn is_same_pending(
     existing: Option<&StoredResume>,
     source: RecordSource,
-    record: &ResumeRecord,
+    record: &OwnedResumeRecord,
 ) -> bool {
+    let candidate = record.as_record();
     existing.is_some_and(|existing| {
+        let kept = existing.record.as_record();
         existing.attempt == ResumeAttempt::Pending
             && existing.source == source
-            && existing.record.pid() == record.pid()
-            && existing.record.proc_start() == record.proc_start()
-            && existing.record.argv() == record.argv()
-            && existing.record.cwd() == record.cwd()
-            && existing.record.placement() == record.placement()
-            && existing.record.process_argv() == record.process_argv()
+            && kept.pid() == candidate.pid()
+            && kept.proc_start() == candidate.proc_start()
+            && kept.argv() == candidate.argv()
+            && kept.cwd() == candidate.cwd()
+            && kept.placement() == candidate.placement()
+            && kept.process_argv() == candidate.process_argv()
     })
 }
 
@@ -370,13 +451,13 @@ fn insert_bounded(
     records: &mut BTreeMap<ViewId, StoredResume>,
     terminal: ViewId,
     source: RecordSource,
-    record: ResumeRecord,
+    record: OwnedResumeRecord,
 ) {
     let is_new = !records.contains_key(&terminal);
     if is_new && records.len() >= VIEWS_MAX {
         let oldest = records
             .iter()
-            .min_by_key(|(id, entry)| (entry.record.reported_at(), *id))
+            .min_by_key(|(id, entry)| (entry.record.as_record().reported_at(), *id))
             .map(|(&id, _)| id);
         if let Some(oldest) = oldest {
             let evicted = records.remove(&oldest);
@@ -406,10 +487,108 @@ pub fn forget_in(state_dir: &Path) -> Result<(), String> {
     }
 }
 
-fn load_file(
-    path: &Path,
-    our_uid: u32,
-) -> Result<(BTreeMap<ViewId, StoredResume>, Option<String>), String> {
+fn left(file: &Path, why: &str) -> String {
+    format!("{}: {why}, and so it is left as it is", file.display())
+}
+
+fn check_unchanged(path: &Path, written: Option<&[u8]>) -> Result<(), PersistError> {
+    let our_uid = rustix::process::getuid().as_raw();
+    let dir = path
+        .parent()
+        .ok_or_else(|| PersistError::Io("resume store has no parent".to_owned()))?;
+    match fs::symlink_metadata(dir) {
+        Ok(meta) => {
+            if !meta.is_dir() || meta.uid() != our_uid || meta.mode() & 0o077 != 0 {
+                return Err(PersistError::Io(format!(
+                    "{}: {} is not a private 0700 directory owned by this user",
+                    path.display(),
+                    dir.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return match written {
+                None => Ok(()),
+                Some(_) => Err(PersistError::Changed(left(
+                    path,
+                    "it changed since luned read it",
+                ))),
+            };
+        }
+        Err(error) => {
+            return Err(PersistError::Io(format!("{}: {error}", dir.display())));
+        }
+    }
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = match rustix::fs::open(path, flags, Mode::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => {
+            return match written {
+                None => Ok(()),
+                Some(_) => Err(PersistError::Changed(left(
+                    path,
+                    "it changed since luned read it",
+                ))),
+            };
+        }
+        Err(rustix::io::Errno::LOOP) => {
+            return Err(PersistError::Changed(left(
+                path,
+                "it is not a regular file",
+            )));
+        }
+        Err(error) => {
+            return Err(PersistError::Io(format!("{}: {error}", path.display())));
+        }
+    };
+    let Some(expected) = written else {
+        return Err(PersistError::Changed(left(
+            path,
+            "it changed since luned read it",
+        )));
+    };
+    let stat = rustix::fs::fstat(&fd)
+        .map_err(|error| PersistError::Io(format!("{}: {error}", path.display())))?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(PersistError::Changed(left(
+            path,
+            "it is not a regular file",
+        )));
+    }
+    if stat.st_uid != our_uid {
+        return Err(PersistError::Changed(left(
+            path,
+            "it is owned by another user",
+        )));
+    }
+    if stat.st_mode & 0o077 != 0 {
+        return Err(PersistError::Changed(left(
+            path,
+            "it is accessible to other users",
+        )));
+    }
+    let limit = u64::try_from(STORE_BYTES_MAX).expect("store limit fits u64");
+    let mut raw = Vec::new();
+    File::from(fd)
+        .take(limit + 1)
+        .read_to_end(&mut raw)
+        .map_err(|error| PersistError::Io(format!("{}: {error}", path.display())))?;
+    if raw != expected {
+        return Err(PersistError::Changed(left(
+            path,
+            "it changed since luned read it",
+        )));
+    }
+    Ok(())
+}
+
+type LoadedFile = (
+    BTreeMap<ViewId, StoredResume>,
+    Option<String>,
+    Option<Vec<u8>>,
+);
+
+fn load_file(path: &Path, our_uid: u32) -> Result<LoadedFile, String> {
     let Some(dir) = path.parent() else {
         return Err("resume store path has no parent directory".to_owned());
     };
@@ -423,14 +602,14 @@ fn load_file(
             }
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok((BTreeMap::new(), None));
+            return Ok((BTreeMap::new(), None, None));
         }
         Err(error) => return Err(format!("{}: {error}", dir.display())),
     }
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let fd = match rustix::fs::open(path, flags, Mode::empty()) {
         Ok(fd) => fd,
-        Err(rustix::io::Errno::NOENT) => return Ok((BTreeMap::new(), None)),
+        Err(rustix::io::Errno::NOENT) => return Ok((BTreeMap::new(), None, None)),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     let stat = rustix::fs::fstat(&fd).map_err(|error| format!("{}: {error}", path.display()))?;
@@ -488,7 +667,7 @@ fn load_file(
     assert!(records.len() <= VIEWS_MAX);
     let warning = (discarded > 0)
         .then(|| format!("discarded {discarded} invalid or cross-user resume record(s)"));
-    Ok((records, warning))
+    Ok((records, warning, Some(raw)))
 }
 
 fn parse_disk_entry(entry: DiskEntry) -> Option<StoredResume> {
@@ -513,7 +692,7 @@ fn parse_disk_entry(entry: DiskEntry) -> Option<StoredResume> {
     };
     let reported_at =
         ReportedAt::from_parts(entry.reported_at_secs, entry.reported_at_nanos).ok()?;
-    let record = ResumeRecord::new(
+    let record = OwnedResumeRecord::try_for_current_user(ResumeRecord::new(
         pid,
         proc_start,
         entry.uid,
@@ -524,7 +703,7 @@ fn parse_disk_entry(entry: DiskEntry) -> Option<StoredResume> {
         argv,
         cwd,
         reported_at,
-    );
+    ))?;
     Some(StoredResume {
         source: entry.source,
         record,
@@ -532,7 +711,7 @@ fn parse_disk_entry(entry: DiskEntry) -> Option<StoredResume> {
     })
 }
 
-fn write_file(path: &Path, records: &BTreeMap<ViewId, StoredResume>) -> io::Result<()> {
+fn write_file(path: &Path, records: &BTreeMap<ViewId, StoredResume>) -> io::Result<Vec<u8>> {
     assert!(records.len() <= VIEWS_MAX);
     let dir = path
         .parent()
@@ -559,30 +738,24 @@ fn write_file(path: &Path, records: &BTreeMap<ViewId, StoredResume>) -> io::Resu
 
     let mut disk_records = BTreeMap::new();
     for (&terminal, stored) in records {
-        assert_eq!(stored.record.uid(), our_uid);
-        let cwd = stored.record.cwd().map(|source| match source {
+        let record = stored.record.as_record();
+        let cwd = record.cwd().map(|source| match source {
             ResumeCwdSource::Explicit(dir) => DiskCwd::Explicit(dir.as_str().to_owned()),
             ResumeCwdSource::Inferred(dir) => DiskCwd::Inferred(dir.as_str().to_owned()),
         });
-        let reported_at = stored.record.reported_at();
+        let reported_at = record.reported_at();
         disk_records.insert(
             terminal.to_string(),
             DiskEntry {
                 source: stored.source,
-                pid: stored.record.pid().get(),
-                proc_start: stored.record.proc_start().as_str().to_owned(),
-                uid: stored.record.uid(),
-                process_name: stored.record.process_name().as_str().to_owned(),
-                process_exe: stored
-                    .record
-                    .process_exe()
-                    .map(|exe| exe.as_str().to_owned()),
-                process_argv: stored
-                    .record
-                    .process_argv()
-                    .map(|argv| argv.words().to_vec()),
-                placement: stored.record.placement().into(),
-                argv: stored.record.argv().words().to_vec(),
+                pid: record.pid().get(),
+                proc_start: record.proc_start().as_str().to_owned(),
+                uid: record.uid(),
+                process_name: record.process_name().as_str().to_owned(),
+                process_exe: record.process_exe().map(|exe| exe.as_str().to_owned()),
+                process_argv: record.process_argv().map(|argv| argv.words().to_vec()),
+                placement: record.placement().into(),
+                argv: record.argv().words().to_vec(),
                 cwd,
                 reported_at_secs: reported_at.secs(),
                 reported_at_nanos: reported_at.nanos(),
@@ -625,7 +798,7 @@ fn write_file(path: &Path, records: &BTreeMap<ViewId, StoredResume>) -> io::Resu
             dir.display()
         ));
     }
-    Ok(())
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -657,18 +830,26 @@ mod tests {
         record_at(uid, program, 1_800_000_000)
     }
 
+    fn owned_record_at(program: &str, secs: u64) -> OwnedResumeRecord {
+        let uid = rustix::process::getuid().as_raw();
+        OwnedResumeRecord::try_for_current_user(record_at(uid, program, secs)).unwrap()
+    }
+
+    fn owned_record(program: &str) -> OwnedResumeRecord {
+        owned_record_at(program, 1_800_000_000)
+    }
+
     #[test]
     fn store_persists_with_0700_dir_and_0600_file_and_tracks_tried() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("resume").join("records.json");
-        let uid = rustix::process::getuid().as_raw();
         let id = terminal_id(7);
 
         let (mut store, warning) = ResumeStore::open_at(file.clone());
         assert_eq!(warning, None);
         assert_eq!(store.unkept(), None);
         store
-            .upsert(id, RecordSource::Osc7577, record(uid, "nvim"))
+            .upsert(id, RecordSource::Osc7577, owned_record("nvim"))
             .unwrap();
 
         let dir_mode = fs::metadata(file.parent().unwrap())
@@ -691,7 +872,7 @@ mod tests {
         assert_eq!(warning, None);
         let entry = reloaded.get(id).unwrap();
         assert_eq!(entry.attempt, ResumeAttempt::Tried);
-        assert_eq!(entry.record.argv().program(), "nvim");
+        assert_eq!(entry.record.as_record().argv().program(), "nvim");
     }
 
     #[test]
@@ -701,16 +882,13 @@ mod tests {
         let uid = rustix::process::getuid().as_raw();
         let id = terminal_id(9);
 
+        assert!(OwnedResumeRecord::try_for_current_user(record(uid + 1, "nvim")).is_none());
+
         let (mut store, _) = ResumeStore::open_at(file.clone());
-        assert!(
-            store
-                .upsert(id, RecordSource::Osc7577, record(uid + 1, "nvim"))
-                .is_err()
-        );
         assert!(store.all().unwrap().is_empty());
 
         store
-            .upsert(id, RecordSource::Osc7577, record(uid, "nvim"))
+            .upsert(id, RecordSource::Osc7577, owned_record("nvim"))
             .unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
         let (mut rejected, warning) = ResumeStore::open_at(file.clone());
@@ -718,7 +896,7 @@ mod tests {
         assert!(warning.unwrap().contains("other users"));
         assert!(
             rejected
-                .upsert(id, RecordSource::Osc7577, record(uid, "vim"))
+                .upsert(id, RecordSource::Osc7577, owned_record("vim"))
                 .is_err()
         );
 
@@ -730,7 +908,7 @@ mod tests {
         assert!(warning.unwrap().contains("unsupported version 99"));
         assert!(
             future
-                .upsert(id, RecordSource::Osc7577, record(uid, "vim"))
+                .upsert(id, RecordSource::Osc7577, owned_record("vim"))
                 .is_err()
         );
         assert_eq!(fs::read_to_string(&file).unwrap(), newer);
@@ -747,19 +925,18 @@ mod tests {
     fn failed_persist_leaves_in_memory_state_unchanged() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("resume").join("records.json");
-        let uid = rustix::process::getuid().as_raw();
         let id1 = terminal_id(1);
         let id2 = terminal_id(2);
 
         let (mut store, _) = ResumeStore::open_at(file.clone());
         store
-            .upsert(id1, RecordSource::Osc7577, record(uid, "nvim"))
+            .upsert(id1, RecordSource::Osc7577, owned_record("nvim"))
             .unwrap();
         fs::set_permissions(file.parent().unwrap(), fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(
             store
-                .upsert(id2, RecordSource::Osc7577, record(uid, "vim"))
+                .upsert(id2, RecordSource::Osc7577, owned_record("vim"))
                 .is_err()
         );
         assert!(store.get(id2).is_none());
@@ -772,6 +949,60 @@ mod tests {
     }
 
     #[test]
+    fn external_edit_transitions_store_to_unkept_without_overwriting() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("resume").join("records.json");
+        let id1 = terminal_id(1);
+        let id2 = terminal_id(2);
+
+        let (mut store, _) = ResumeStore::open_at(file.clone());
+        store
+            .upsert(id1, RecordSource::Osc7577, owned_record("nvim"))
+            .unwrap();
+        let edited = r#"{"version": 99, "records": {}}"#;
+        fs::write(&file, edited).unwrap();
+
+        let err = store
+            .upsert(id2, RecordSource::Osc7577, owned_record("vim"))
+            .unwrap_err();
+        assert!(err.contains("it changed since luned read it"), "{err}");
+        assert!(store.unkept().is_some());
+        assert_eq!(fs::read_to_string(&file).unwrap(), edited);
+        assert!(matches!(
+            store.mark_tried(id1),
+            Err(MarkTriedError::Unkept(_))
+        ));
+    }
+
+    #[test]
+    fn retain_views_prunes_orphans_without_touching_live_records() {
+        let scratch = tempfile::tempdir().unwrap();
+        let file = scratch.path().join("resume").join("records.json");
+        let live_id = terminal_id(1);
+        let orphan_id = terminal_id(2);
+
+        let (mut store, _) = ResumeStore::open_at(file.clone());
+        let live = BTreeSet::from([live_id]);
+        assert_eq!(store.retain_views(&live).unwrap(), 0);
+        assert!(!file.exists(), "pruning with no orphans does not write");
+
+        store
+            .upsert(live_id, RecordSource::Osc7577, owned_record("nvim"))
+            .unwrap();
+        store
+            .upsert(orphan_id, RecordSource::Synthesized, owned_record("claude"))
+            .unwrap();
+        assert_eq!(store.retain_views(&live).unwrap(), 1);
+        assert!(store.get(live_id).is_some());
+        assert!(store.get(orphan_id).is_none());
+
+        let (reloaded, warning) = ResumeStore::open_at(file);
+        assert_eq!(warning, None);
+        assert!(reloaded.get(live_id).is_some());
+        assert!(reloaded.get(orphan_id).is_none());
+    }
+
+    #[test]
     fn store_evicts_oldest_at_views_max_and_discards_corrupt_disk_entries() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("resume").join("records.json");
@@ -779,7 +1010,7 @@ mod tests {
 
         let mut store = ResumeStore::in_memory();
         for raw_id in 1..=u64::try_from(VIEWS_MAX + 2).unwrap() {
-            let rec = record_at(uid, "nvim", 1_800_000_000 + raw_id);
+            let rec = owned_record_at("nvim", 1_800_000_000 + raw_id);
             store
                 .upsert(terminal_id(raw_id), RecordSource::Osc7577, rec)
                 .unwrap();

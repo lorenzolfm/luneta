@@ -911,6 +911,7 @@ message ChangeProjectsRequest {
     Bring bring = 15;
     CloseView close_view = 16;
     OpenBrowser open_browser = 17;
+    ReviveView revive_view = 18;
   }
 
   message AddProject {
@@ -1009,6 +1010,8 @@ message ChangeProjectsRequest {
       optional string fallback_folder = 2;
     }
   }
+
+  message ReviveView {}
 }
 
 message ChangeProjectsResponse {

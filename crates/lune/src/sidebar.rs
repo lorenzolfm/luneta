@@ -2473,6 +2473,10 @@ impl Sidebar {
         self.state().on_header()
     }
 
+    pub fn lit_machine(&self) -> Option<Machine> {
+        self.state().lit_machine()
+    }
+
     pub fn listing(&self) -> Listing {
         self.state().listing()
     }
@@ -3375,6 +3379,10 @@ impl SidebarState {
             dir,
             harness,
         })
+    }
+
+    fn lit_machine(&self) -> Option<Machine> {
+        self.lit_spot().map(Spot::machine)
     }
 
     fn on_header(&self) -> Option<Machine> {
@@ -12738,6 +12746,7 @@ mod tests {
             " BS   back a group",
             " Ctrl a       Sidebar or views",
             " Super k      Pick an action",
+            " Super T      Revive last view",
             " Alt Shift u  Stop reading",
         ] {
             assert!(
