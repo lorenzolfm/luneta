@@ -3011,9 +3011,7 @@ impl App {
         let project = self.projected.project(on, session.project());
         let held = project.and_then(|project| view_location(project, view));
         let Some((worktree, target)) = held else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {view}"));
+            return self.sidebar.notify(no_view(view));
         };
         self.go_worktree(on, worktree, Some(target));
         self.shown().welcome();
@@ -3032,9 +3030,7 @@ impl App {
                 let project = self.projected.project(on, session.project());
                 let held = project.and_then(|project| view_location(project, *view));
                 let Some((worktree, target)) = held else {
-                    return self
-                        .sidebar
-                        .notify(format!("menu: luned lists no view {view}"));
+                    return self.sidebar.notify(no_view(*view));
                 };
                 self.go_worktree(on, worktree, Some(target));
             }
@@ -3088,9 +3084,7 @@ impl App {
         let project = self.projected.project(on, session.project());
         let held = project.and_then(|project| view_location(project, view));
         let Some((worktree, target)) = held else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {view}"));
+            return self.sidebar.notify(no_view(view));
         };
         self.go_worktree(on, worktree, Some(target));
         self.shown().review();
@@ -3209,9 +3203,7 @@ impl App {
         let project = self.projected.project(on, session.project());
         let held = project.and_then(|project| view_location(project, view));
         let Some((worktree, target)) = held else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {view}"));
+            return self.sidebar.notify(no_view(view));
         };
         self.go_worktree(on, worktree, Some(target));
         self.shown().arrange(arranged);
@@ -3232,9 +3224,7 @@ impl App {
                 .notify("menu: luned keeps no such project".to_owned());
         };
         let Some((worktree, target)) = view_location(project, beside) else {
-            return self
-                .sidebar
-                .notify(format!("menu: luned lists no view {beside}"));
+            return self.sidebar.notify(no_view(beside));
         };
         self.go_worktree(on, worktree, Some(target));
         self.shown().open_beside_focused(opens);
@@ -4383,6 +4373,13 @@ fn view_location(project: &rows::Project, view: ViewKey) -> Option<(WorktreeId, 
     }
 }
 
+fn no_view(view: ViewKey) -> String {
+    match view {
+        ViewKey::Terminal(key) => format!("menu: luned lists no view {}", key.id),
+        ViewKey::Browser(_) => "menu: luned lists no browser view".to_owned(),
+    }
+}
+
 fn whole<W: io::Write, T>(
     terminal: &mut Terminal<CrosstermBackend<W>>,
     draw: impl FnOnce(&mut Terminal<CrosstermBackend<W>>) -> io::Result<T>,
@@ -5311,6 +5308,11 @@ mod tests {
             view_location(parsed, ViewKey::Browser(ViewId::of(99).unwrap())),
             None
         );
+        assert_eq!(
+            no_view(ViewKey::Browser(browser_id)),
+            "menu: luned lists no browser view"
+        );
+        assert_eq!(no_view(ViewKey::terminal(4)), "menu: luned lists no view 4");
 
         let (mut terminal, _written) = test_terminal(80, 20);
         let (mut app, _inbox, _state) = test_app(80, 20);

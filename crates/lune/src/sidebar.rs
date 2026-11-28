@@ -147,7 +147,7 @@ const NAME_KEPT: usize = 12;
 const LONG: Duration = Duration::from_secs(1);
 
 const NO_HERE_VIEW: &str =
-    "menu: the focused view holds no terminal, or lune has not heard which one yet";
+    "menu: the focused view is not listed, or lune has not heard which one yet";
 
 const PALETTE_ROW_GONE: &str =
     "palette: the highlighted row changed while the palette was open, so nothing ran";
@@ -4691,9 +4691,13 @@ impl Sidebar {
             .and_then(|place| self.here_target(Place::View(place)));
         let worktree = self.here_worktree().map(Place::Worktree);
         let worktree = worktree.and_then(|place| self.here_target(place));
-        match view {
-            Some(target) => Aim::At { target, worktree },
-            None => Aim::Unplaced(PALETTE_UNPLACED),
+        match (view, worktree) {
+            (Some(target), worktree) => Aim::At { target, worktree },
+            (None, Some(target)) => Aim::At {
+                target,
+                worktree: None,
+            },
+            (None, None) => Aim::Unplaced(PALETTE_UNPLACED),
         }
     }
 
@@ -16997,5 +17001,37 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("lune.dev"))
         );
+    }
+
+    #[test]
+    fn aimed_view_falls_back_to_the_shown_worktree_when_the_focused_view_is_not_listed() {
+        let mut sidebar = two_sessions();
+        let older = tab_of(10, 0);
+        sidebar.sit(Seat {
+            on: Machine::Local,
+            project: ProjectId::of(10).unwrap(),
+            at: Sitting::Worktree {
+                worktree: older,
+                layout: SeatedLayout::Live {
+                    arranged: Arranged::Tabs,
+                    version: None,
+                    view: None,
+                },
+            },
+        });
+        assert_eq!(sidebar.here_place(), Err(NO_HERE_VIEW));
+        assert_eq!(
+            sidebar.aimed_view(),
+            sidebar.aimed_worktree(),
+            "a shown worktree whose focused view is unlisted falls back to its worktree"
+        );
+        let Aim::At {
+            target,
+            worktree: None,
+        } = sidebar.aimed_view()
+        else {
+            panic!("expected worktree fallback aim");
+        };
+        assert!(matches!(target.as_ref(), Target::Worktree(_, row) if row.place.worktree == older));
     }
 }

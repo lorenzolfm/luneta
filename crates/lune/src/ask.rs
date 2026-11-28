@@ -21,7 +21,7 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint, ProjectTarget, Target};
 use crate::moonlight;
 use crate::reach::{self, Luned};
-use crate::sidebar::{self, ACCENT};
+use crate::sidebar::{self, ACCENT, ViewKey};
 
 const TITLE: &str = "Ask";
 
@@ -477,9 +477,10 @@ fn highlighted(target: &Target) -> String {
                 row.place.project.listed().name()
             )
         }
-        Target::View(_, row) => {
-            format!("view {}:{}", row.listed().name(), row.view())
-        }
+        Target::View(_, row) => match row.view() {
+            ViewKey::Terminal(key) => format!("view {}:{}", row.listed().name(), key.id),
+            ViewKey::Browser(_) => format!("a browser view in {}", row.listed().name()),
+        },
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
     let cwd = target.cwd().map_or_default(|cwd| format!(", in {cwd}"));
@@ -754,6 +755,31 @@ mod tests {
         let session = Ask::new(4, &project_on(nixos()), Path::new("/w"));
         assert_eq!(session.works, there(None));
         assert_eq!(top(&session), "┌─ Ask ─────────────────── ~ on nixos ─┐");
+        let browser_row = Target::View(
+            Machine::Local,
+            menu::ViewRow {
+                worktree: sidebar::WorktreePlace {
+                    project: sidebar::ProjectRow::new("lune", 1),
+                    worktree: lune_domain::projects::WorktreeId::of(2).unwrap(),
+                },
+                kind: menu::ViewKind::Browser(lune_domain::projects::ViewId::of(30).unwrap()),
+                cwd: menu::Cwd::At(menu::Folder {
+                    dir: Directory::parse("/w/lune/main".to_owned()).unwrap(),
+                    branch: lune_protocol::said::Said::new("feat/ask".to_owned()),
+                    repository: None,
+                    pull_request: None,
+                }),
+                arranged: None,
+            },
+        );
+        let browser = Ask::new(6, &browser_row, Path::new("/w"));
+        assert!(
+            browser.highlighted.contains(
+                "is a browser view in lune, in /w/lune/main, on branch feat/ask: \"this\""
+            ),
+            "{}",
+            browser.highlighted
+        );
         let header = Ask::new(5, &Target::Machine(nixos()), Path::new("/w"));
         assert_eq!(header.works, there(None));
         let row = "is the header of this machine: \"this\"";

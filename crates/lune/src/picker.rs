@@ -1612,10 +1612,14 @@ impl Picker {
                 Aim::At { target, worktree },
                 _,
             ) => {
-                let mut targets = std::iter::once(target).chain(worktree);
-                targets
-                    .find(|it| it.fits(action))
-                    .map(|it| Run::Menu(Rc::clone(it)))
+                if action.fits(target.noun()) {
+                    target.fits(action).then(|| Run::Menu(Rc::clone(target)))
+                } else {
+                    worktree
+                        .as_ref()
+                        .filter(|it| it.fits(action))
+                        .map(|it| Run::Menu(Rc::clone(it)))
+                }
             }
             (actions::Key::Row(_), Aim::At { target, .. }, Origin::Sidebar) => action
                 .fits(target.noun())
@@ -1686,15 +1690,19 @@ impl Picker {
         };
         let named = match target {
             Target::View(on, row) => {
-                let (project, view) = (row.listed().name(), row.view());
+                let project = row.listed().name();
+                let view = match row.view() {
+                    ViewKey::Terminal(key) => format!("view {}", key.id),
+                    ViewKey::Browser(_) => "browser".to_owned(),
+                };
                 let housed = self.housed(on, &row.worktree.project);
                 let mut worktrees = housed.iter().flat_map(|housed| &housed.worktrees);
                 match worktrees.find(|worktree| worktree.place == row.worktree) {
                     Some(worktree) => {
                         let named = in_project(project, worktree.named.name());
-                        format!("{named} · view {view}")
+                        format!("{named} · {view}")
                     }
-                    None => format!("{project} · view {view}"),
+                    None => format!("{project} · {view}"),
                 }
             }
             Target::Worktree(_, row) => in_project(row.place.project.listed().name(), &row.name),
@@ -5792,5 +5800,54 @@ mod tests {
                 said(&picker)
             );
         }
+    }
+
+    #[test]
+    fn a_browser_palette_omits_brief_highlighted_and_names_itself_browser() {
+        let browser = Target::View(
+            Machine::Local,
+            ViewRow {
+                worktree: fix(),
+                kind: ViewKind::Browser(ViewId::of(30).unwrap()),
+                cwd: Cwd::At(Folder {
+                    dir: directory("/home/you/fix"),
+                    branch: None,
+                    repository: None,
+                    pull_request: None,
+                }),
+                arranged: Some(projects::Arranged::Tabs),
+            },
+        );
+        let aimed = Palette {
+            aim: Aim::At {
+                target: Rc::new(browser),
+                worktree: Some(Rc::new(fix_worktree())),
+            },
+            origin: Origin::Views,
+        };
+        let mut picker = palette_on(works(), aimed);
+        assert_eq!(picker.aimed_at(), "lune › fix · browser");
+        let actions = every_action(&mut picker);
+        assert!(
+            !actions
+                .iter()
+                .any(|action| action == "Brief the highlighted"),
+            "BriefHighlighted must not leak onto a browser view via its worktree: {actions:?}"
+        );
+        for expected in [
+            "Brief this session",
+            "Close the view",
+            "Close the worktree",
+            "Rename the worktree…",
+        ] {
+            assert!(
+                actions.iter().any(|action| action == expected),
+                "{expected}: {actions:?}"
+            );
+        }
+        assert!(
+            !actions.iter().any(|action| action == "Rename the view…"),
+            "{actions:?}"
+        );
     }
 }

@@ -124,6 +124,7 @@ pub struct Worktree {
     pub branch: Option<String>,
     pub seen: Seen,
     pub views: Vec<View>,
+    pub browsers: Option<Vec<u64>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -368,6 +369,16 @@ fn worktree_of(
         },
         None => Seen::Untold,
     };
+    let browsers = worktree.views.as_ref().map(|views| {
+        views
+            .items
+            .iter()
+            .filter_map(|view| match &view.kind {
+                Some(worktree::view::Kind::Browser(browser)) => Some(browser.id),
+                Some(worktree::view::Kind::TerminalId(_)) | None => None,
+            })
+            .collect()
+    });
     Worktree {
         id: worktree.id,
         name: worktree.name.clone(),
@@ -382,6 +393,7 @@ fn worktree_of(
             .iter()
             .map(|it| view_of(on, it))
             .collect(),
+        browsers,
     }
 }
 
@@ -945,5 +957,50 @@ mod tests {
             }
         );
         assert_eq!(model.inbox[3].status, Status::Stopped);
+    }
+
+    #[test]
+    fn a_worktree_tracks_browser_view_ids_only_when_luned_sends_views() {
+        use api::worktree::{View as ApiView, Views, view::Kind};
+
+        let legacy = worktree_with(1, "legacy", 1);
+        let mut terminal_only = worktree_with(2, "term", 2);
+        terminal_only.views = Some(Views {
+            items: vec![ApiView {
+                kind: Some(Kind::TerminalId(2)),
+            }],
+        });
+        let mut with_browsers = worktree_with(3, "browse", 3);
+        with_browsers.views = Some(Views {
+            items: vec![
+                ApiView {
+                    kind: Some(Kind::TerminalId(3)),
+                },
+                ApiView {
+                    kind: Some(Kind::Browser(api::Browser {
+                        id: 20,
+                        url: Some("https://example.com".to_owned()),
+                    })),
+                },
+                ApiView {
+                    kind: Some(Kind::Browser(api::Browser { id: 21, url: None })),
+                },
+            ],
+        });
+        let host = api::Host {
+            projects: Some(kept(vec![clone_of(vec![
+                legacy,
+                terminal_only,
+                with_browsers,
+            ])])),
+            ..api::Host::default()
+        };
+        let Held::Kept { projects } = Model::of(&host).here else {
+            panic!("the projects are kept");
+        };
+        let worktrees = projects[0].holds.worktrees();
+        assert_eq!(worktrees[0].browsers, None);
+        assert_eq!(worktrees[1].browsers, Some(Vec::new()));
+        assert_eq!(worktrees[2].browsers, Some(vec![20, 21]));
     }
 }

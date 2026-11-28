@@ -906,6 +906,13 @@ pub struct Ended {
     pub at: SystemTime,
 }
 
+fn view_named(view: ViewKey) -> String {
+    match view {
+        ViewKey::Terminal(key) => format!("view {}", key.id),
+        ViewKey::Browser(_) => "the browser view".to_owned(),
+    }
+}
+
 impl Target {
     pub fn machine(&self) -> &Machine {
         match self {
@@ -1246,11 +1253,11 @@ impl ViewRow {
     }
 
     fn folder(&self) -> Result<&Folder, String> {
-        let view = self.view();
+        let view = view_named(self.view());
         match &self.cwd {
             Cwd::At(folder) => Ok(folder),
             Cwd::Unsaid => Err(format!(
-                "menu: lune does not know yet where view {view} works; try again in a moment"
+                "menu: lune does not know yet where {view} works; try again in a moment"
             )),
         }
     }
@@ -1265,14 +1272,14 @@ impl ViewRow {
     }
 
     fn pulled(&self) -> Result<(Beside, PullPage), String> {
-        let (beside, view) = (self.beside()?, self.view());
+        let (beside, view) = (self.beside()?, view_named(self.view()));
         let pull_request = self
             .cwd
             .at()
             .and_then(|folder| folder.pull_request.as_ref());
         let Some(PullRequest { page, state, .. }) = pull_request else {
             return Err(format!(
-                "menu: gh has found no pull request of view {view}'s branch"
+                "menu: gh has found no pull request of {view}'s branch"
             ));
         };
         let number = page.number();
@@ -1283,9 +1290,9 @@ impl ViewRow {
         }
     }
 
-    fn ended(&self, ran: &Ran) -> Result<(Beside, Ended), String> {
+    fn ended(&self, terminal: TerminalKey, ran: &Ran) -> Result<(Beside, Ended), String> {
         let beside = self.beside()?;
-        let view = beside.view;
+        let view = terminal.id;
         match ran {
             Ran::Ended(ended) => Ok((beside, ended.clone())),
             Ran::Going(Some(command)) => Err(format!(
@@ -1774,7 +1781,7 @@ impl Menu {
                 Ok(wants) => stays(Stage::Opening { keys }, wants),
                 Err(reason) => wrong(reason),
             },
-            Offer::Last(row, terminal, ran, last) => match row.ended(ran) {
+            Offer::Last(row, terminal, ran, last) => match row.ended(terminal, ran) {
                 Ok((beside, ended)) => {
                     let session = beside.session.clone();
                     let wants = Wants::Printed {
@@ -6217,6 +6224,20 @@ mod tests {
             cwd: Cwd::At(folder),
             arranged: Some(Arranged::Tabs),
         };
+        assert_eq!(
+            row.pulled().err().as_deref(),
+            Some("menu: gh has found no pull request of the browser view's branch")
+        );
+        let unsaid = ViewRow {
+            cwd: Cwd::Unsaid,
+            ..row.clone()
+        };
+        assert_eq!(
+            unsaid.folder().err().as_deref(),
+            Some(
+                "menu: lune does not know yet where the browser view works; try again in a moment"
+            )
+        );
         let target = Target::View(Machine::Local, row);
         let mut menu = Menu::new(1, target.clone(), PICKED);
         menu.reran(Ran::Ended(cargo_test()));
