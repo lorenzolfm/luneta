@@ -3,15 +3,18 @@ use std::convert::Infallible;
 use std::env;
 use std::fmt;
 use std::fs::{self, OpenOptions};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use hyper_util::rt::TokioIo;
-use lune_waits::{Span, eventually, eventually_showing};
+use lune_waits::{Span, awaited, eventually, eventually_showing};
 use luned::mux::own::api::mux_client::MuxClient;
 use luned::mux::own::api::{self as mux_api, InfoRequest, InfoResponse, ListRequest, Listing};
 use luned::mux::own::server;
 use luned::{ALONE, PeerPid, ProcessExit, SWEEP};
+#[cfg(target_os = "macos")]
+use luned::{MacosActiveState, MacosProcessState, MacosStartTime, macos_process_state};
 use tempfile::TempDir;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::Status;
@@ -32,7 +35,7 @@ const LOCK: &str = "mux.lock";
 
 const WAITS: [&str; 2] = ["sleep", "600"];
 
-pub fn built_server() -> PathBuf {
+fn built_server() -> PathBuf {
     let program = Path::new(LUNED).with_file_name("lune-mux");
     let shown = program.display();
     let rebuild = "dev test builds it, and so does cargo build -p lune-mux";
@@ -77,11 +80,18 @@ fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MuxState {
+    Active,
+    Stalled,
+}
+
 pub struct Owned {
     daemon: Option<Daemon>,
+    mux_child: Option<Running>,
     pub host: Host,
     runtime: tokio::runtime::Runtime,
-    mux_stalled: Cell<bool>,
+    mux_state: Cell<MuxState>,
 }
 
 impl Owned {
@@ -95,9 +105,10 @@ impl Owned {
             .unwrap();
         Owned {
             daemon: Some(daemon),
+            mux_child: None,
             host,
             runtime,
-            mux_stalled: Cell::new(false),
+            mux_state: Cell::new(MuxState::Active),
         }
     }
 
@@ -105,9 +116,16 @@ impl Owned {
         self.daemon = None;
     }
 
-    pub fn daemon_ended(&mut self, what: &str) -> std::process::ExitStatus {
+    pub fn daemon_ended(&mut self, what: &str) -> ExitStatus {
         let mut daemon = self.daemon.take().expect("a daemon was started");
         daemon.ended(what)
+    }
+
+    pub fn daemon_runs_through(&mut self, span: Span, what: &str) {
+        self.daemon
+            .as_mut()
+            .expect("a daemon was started")
+            .runs_through(span, what);
     }
 
     pub fn start_daemon(&mut self) {
@@ -119,6 +137,39 @@ impl Owned {
         assert!(self.daemon.is_none(), "one daemon runs at a time");
         let luned = self.host.vars().command(luned.to_str().unwrap());
         self.daemon = Some(start_as(luned).unwrap());
+    }
+
+    pub fn spawn_mux(&mut self, configure: impl FnOnce(&mut Command)) {
+        self.assert_mux_active("spawning lune-mux");
+        assert!(
+            self.mux_child.is_none(),
+            "one spawned lune-mux runs at a time"
+        );
+        let program = built_server();
+        let mut mux = self.host.vars().command(program.to_str().unwrap());
+        mux.arg(self.host.folder()).stdin(Stdio::null());
+        configure(&mut mux);
+        let running = Running::spawn(&mut mux);
+        let pid = MuxPid::from_u32(running.pid())
+            .expect("spawned lune-mux pid is > 1 and not the test process");
+        self.mux_child = Some(running);
+        eventually("the server listens", || match self.mux_socket() {
+            Ok(MuxSocket::Listening(listening)) if listening == pid => Some(()),
+            Ok(MuxSocket::Absent | MuxSocket::Listening(_)) => None,
+            Err(error) => panic!("lune-mux socket failed while waiting to listen: {error}"),
+        });
+    }
+
+    pub fn mux_exit_status(&mut self) -> Option<ExitStatus> {
+        self.mux_child
+            .as_mut()
+            .expect("a lune-mux was spawned")
+            .exit_status()
+    }
+
+    pub fn mux_ended(&mut self, what: &str) -> ExitStatus {
+        let mut mux = self.mux_child.take().expect("a lune-mux was spawned");
+        mux.ended(what)
     }
 
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
@@ -133,26 +184,36 @@ impl Owned {
         self.host.folder().join(server::SOCKET)
     }
 
+    fn assert_mux_active(&self, action: &str) {
+        assert_eq!(
+            self.mux_state.get(),
+            MuxState::Active,
+            "resume StalledMux before {action}"
+        );
+    }
+
     pub fn listing(&self) -> Listing {
+        self.assert_mux_active("listing lune-mux terminals");
         let socket = self.socket();
-        self.runtime.block_on(async move {
+        self.runtime.block_on(awaited("lune-mux lists", async move {
             mux_client(socket)
                 .await
                 .list(ListRequest {})
                 .await
                 .unwrap()
                 .into_inner()
-        })
+        }))
     }
 
     pub fn dumped(&self, terminal: mux_api::TerminalKey) -> String {
+        self.assert_mux_active("dumping a lune-mux terminal");
         let socket = self.socket();
         let dumped = mux_api::Dumped::Text.into();
         let request = mux_api::DumpRequest {
             dumped,
             terminal: Some(terminal),
         };
-        self.runtime.block_on(async move {
+        self.runtime.block_on(awaited("lune-mux dumps", async move {
             mux_client(socket)
                 .await
                 .dump(request)
@@ -160,7 +221,7 @@ impl Owned {
                 .unwrap()
                 .into_inner()
                 .text
-        })
+        }))
     }
 
     pub fn new_terminal(&self, tag: &[u8]) -> mux_api::TerminalKey {
@@ -168,6 +229,7 @@ impl Owned {
     }
 
     pub fn new_terminal_running(&self, tag: &[u8], argv: Vec<String>) -> mux_api::TerminalKey {
+        self.assert_mux_active("opening a lune-mux terminal");
         let socket = self.socket();
         let program = Some(mux_api::Program { argv });
         let ends = mux_api::Ends::Holds.into();
@@ -186,88 +248,80 @@ impl Owned {
             tag: tag.to_vec(),
             size,
         };
-        self.runtime.block_on(async move {
-            let made = mux_client(socket)
-                .await
-                .new_terminal(request)
-                .await
-                .unwrap();
-            made.into_inner().terminal.unwrap()
-        })
+        self.runtime
+            .block_on(awaited("lune-mux opens a terminal", async move {
+                let made = mux_client(socket)
+                    .await
+                    .new_terminal(request)
+                    .await
+                    .unwrap();
+                made.into_inner().terminal.unwrap()
+            }))
     }
 
     pub fn close_terminal(&self, request: mux_api::CloseTerminalRequest) {
+        self.assert_mux_active("closing a lune-mux terminal");
         let socket = self.socket();
-        self.runtime.block_on(async move {
-            mux_client(socket)
-                .await
-                .close_terminal(request)
-                .await
-                .unwrap();
-        });
+        self.runtime
+            .block_on(awaited("lune-mux closes a terminal", async move {
+                mux_client(socket)
+                    .await
+                    .close_terminal(request)
+                    .await
+                    .unwrap();
+            }));
     }
 
     pub fn kill_mux(&self) {
-        assert!(
-            !self.mux_stalled.get(),
-            "resume StalledMux before killing lune-mux"
-        );
-        let Some(pid) = self.mux_pid() else {
-            return;
-        };
-        let Some(exit) = ProcessExit::watch(pid.as_pid())
-            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit watch failed: {error}"))
-        else {
-            return;
-        };
-        match exit.signal(rustix::process::Signal::KILL) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::SRCH) => return,
-            Err(error) => panic!("lune-mux (pid {pid}) did not take SIGKILL: {error}"),
+        self.assert_mux_active("killing lune-mux");
+        let handle = MuxHandle::attach(self)
+            .unwrap_or_else(|error| panic!("lune-mux attach failed before killing: {error}"));
+        if let Some(handle) = handle {
+            handle.kill_and_wait(&self.runtime);
         }
-        self.runtime
-            .block_on(lune_waits::awaited("lune-mux exits", exit.wait()))
-            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit wait failed: {error}"));
+    }
+
+    fn kill_mux_on_drop(&mut self) {
+        self.mux_state.set(MuxState::Active);
+        let handle = match MuxHandle::attach(self) {
+            Ok(handle) => handle,
+            Err(error) if std::thread::panicking() => {
+                eprintln!("lune-mux attach failed during Owned::drop unwind: {error}");
+                return;
+            }
+            Err(error) => panic!("lune-mux attach failed during Owned::drop: {error}"),
+        };
+        if let Some(handle) = handle {
+            handle.kill_and_wait_for_drop(&self.runtime);
+        }
     }
 
     pub fn stall_mux(&self) -> StalledMux<'_> {
-        assert!(
-            !self.mux_stalled.get(),
-            "lune-mux is already stalled by an active StalledMux guard"
-        );
-        let pid = self.mux_pid().expect("lune-mux listens");
-        let handle = MuxHandle::watch(pid)
-            .unwrap_or_else(|| panic!("lune-mux (pid {pid}) exited before stopping"));
-        let mut pending = PendingStall::begin(self, handle);
-        pending.signal_stop();
-        eventually_showing("lune-mux stops", || match mux_stopped(pending.handle()) {
+        self.assert_mux_active("stalling lune-mux again");
+        let handle = MuxHandle::attach(self)
+            .unwrap_or_else(|error| panic!("lune-mux attach failed before SIGSTOP: {error}"))
+            .expect("lune-mux listens");
+        handle.signal_stop();
+        let stalled = StalledMux::begin(self, handle);
+        eventually_showing("lune-mux stops", || match mux_stopped(&stalled.handle) {
             MuxStopCheck::Stopped => Ok(()),
             MuxStopCheck::Pending(reason) => Err(reason),
             MuxStopCheck::Ended(ended) => {
-                pending.disarm();
-                panic!("lune-mux (pid {pid}) ended before stopping: {ended}");
+                panic!(
+                    "lune-mux (pid {}) ended before stopping: {ended}",
+                    stalled.handle.pid
+                );
             }
         });
-        pending.confirm()
+        stalled
     }
 
-    fn mux_pid(&self) -> Option<MuxPid> {
-        let socket = self.socket();
-        let own_uid = rustix::process::getuid().as_raw();
-        let listening = self.runtime.block_on(async move {
-            let stream = tokio::net::UnixStream::connect(socket).await.ok()?;
-            let cred = stream.peer_cred().ok()?;
-            assert_eq!(
-                cred.uid(),
-                own_uid,
-                "another user's process listens on mux.sock"
-            );
-            cred.pid()
-        })?;
-        Some(MuxPid::from_raw(listening).expect("lune-mux pid is > 1 and not the test process"))
+    fn mux_socket(&self) -> Result<MuxSocket, MuxPeerError> {
+        mux_socket_at(&self.runtime, self.socket())
     }
 
     pub fn stand_in_mux(&self, says: Option<&str>) -> Running {
+        self.assert_mux_active("starting a stand-in lune-mux");
         let mut command = Command::new(env::current_exe().unwrap());
         command.args(["own::stand_in_mux", "--exact", "--ignored"]);
         command
@@ -281,7 +335,11 @@ impl Owned {
         let pid = MuxPid::from_u32(stand_in.pid())
             .expect("stand-in lune-mux pid is > 1 and not the test process");
         eventually("the stand-in lune-mux listens", || {
-            (self.mux_pid() == Some(pid)).then_some(())
+            match self.mux_socket() {
+                Ok(MuxSocket::Listening(listening)) if listening == pid => Some(()),
+                Ok(MuxSocket::Absent | MuxSocket::Listening(_)) => None,
+                Err(error) => panic!("stand-in lune-mux socket failed: {error}"),
+            }
         });
         stand_in
     }
@@ -406,31 +464,202 @@ impl fmt::Display for MuxPid {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MuxSocket {
+    Absent,
+    Listening(MuxPid),
+}
+
+#[derive(Debug)]
+enum MuxPeerError {
+    Connect(std::io::Error),
+    PeerCred(std::io::Error),
+    ForeignUid { expected: u32, actual: u32 },
+    MissingPid,
+    InvalidPid(i32),
+}
+
+impl fmt::Display for MuxPeerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MuxPeerError::Connect(error) => write!(f, "connect to mux.sock failed: {error}"),
+            MuxPeerError::PeerCred(error) => write!(f, "peer_cred on mux.sock failed: {error}"),
+            MuxPeerError::ForeignUid { expected, actual } => write!(
+                f,
+                "another user's process listens on mux.sock (expected uid {expected}, saw {actual})"
+            ),
+            MuxPeerError::MissingPid => f.write_str("kernel reported no peer pid on mux.sock"),
+            MuxPeerError::InvalidPid(raw) => {
+                write!(f, "mux.sock peer pid {raw} is <= 1 or the test process")
+            }
+        }
+    }
+}
+
+fn mux_socket_at(
+    runtime: &tokio::runtime::Runtime,
+    socket: PathBuf,
+) -> Result<MuxSocket, MuxPeerError> {
+    let own_uid = rustix::process::getuid().as_raw();
+    let raw_pid = runtime.block_on(async move {
+        let stream = match tokio::net::UnixStream::connect(socket).await {
+            Ok(stream) => stream,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(MuxPeerError::Connect(error)),
+        };
+        let cred = match stream.peer_cred() {
+            Ok(cred) => cred,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::NotConnected | ErrorKind::ConnectionReset | ErrorKind::BrokenPipe
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(MuxPeerError::PeerCred(error)),
+        };
+        if cred.uid() != own_uid {
+            return Err(MuxPeerError::ForeignUid {
+                expected: own_uid,
+                actual: cred.uid(),
+            });
+        }
+        cred.pid().ok_or(MuxPeerError::MissingPid).map(Some)
+    })?;
+    let Some(raw_pid) = raw_pid else {
+        return Ok(MuxSocket::Absent);
+    };
+    let pid = MuxPid::from_raw(raw_pid).ok_or(MuxPeerError::InvalidPid(raw_pid))?;
+    Ok(MuxSocket::Listening(pid))
+}
+
+#[derive(Debug)]
+enum MuxAttachError {
+    Socket(MuxPeerError),
+    Watch(MuxPid, std::io::Error),
+    ExitCheck(MuxPid, std::io::Error),
+    UnstablePid(usize),
+}
+
+impl fmt::Display for MuxAttachError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MuxAttachError::Socket(error) => write!(f, "{error}"),
+            MuxAttachError::Watch(pid, error) => {
+                write!(f, "lune-mux (pid {pid}) exit watch failed: {error}")
+            }
+            MuxAttachError::ExitCheck(pid, error) => {
+                write!(f, "lune-mux (pid {pid}) exit check failed: {error}")
+            }
+            MuxAttachError::UnstablePid(attempts) => {
+                write!(f, "lune-mux pid changed across {attempts} attach attempts")
+            }
+        }
+    }
+}
+
 struct MuxHandle {
     pid: MuxPid,
     exit: ProcessExit,
     #[cfg(target_os = "macos")]
-    start_time: u64,
+    start_time: MacosStartTime,
 }
 
 impl MuxHandle {
-    fn watch(pid: MuxPid) -> Option<Self> {
-        let exit = ProcessExit::watch(pid.as_pid())
-            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit watch failed: {error}"))?;
-        #[cfg(target_os = "macos")]
-        let (start_time, _) = macos_process_info(pid)?;
-        Some(Self {
-            pid,
-            exit,
+    fn attach(owned: &Owned) -> Result<Option<Self>, MuxAttachError> {
+        const ATTACH_RETRIES_MAX: usize = 8;
+        const _: () = assert!(ATTACH_RETRIES_MAX > 0);
+
+        for _ in 0..ATTACH_RETRIES_MAX {
+            let MuxSocket::Listening(pid) = owned.mux_socket().map_err(MuxAttachError::Socket)?
+            else {
+                return Ok(None);
+            };
+            let Some(exit) = ProcessExit::watch(pid.as_pid())
+                .map_err(|error| MuxAttachError::Watch(pid, error))?
+            else {
+                continue;
+            };
             #[cfg(target_os = "macos")]
-            start_time,
-        })
+            let Some((start_time, _)) = macos_process_state(pid.get()) else {
+                continue;
+            };
+            match owned.mux_socket().map_err(MuxAttachError::Socket)? {
+                MuxSocket::Listening(confirmed) if confirmed == pid => {}
+                MuxSocket::Absent => return Ok(None),
+                MuxSocket::Listening(_) => continue,
+            }
+            if exit
+                .has_exited()
+                .map_err(|error| MuxAttachError::ExitCheck(pid, error))?
+            {
+                continue;
+            }
+            return Ok(Some(Self {
+                pid,
+                exit,
+                #[cfg(target_os = "macos")]
+                start_time,
+            }));
+        }
+        Err(MuxAttachError::UnstablePid(ATTACH_RETRIES_MAX))
+    }
+
+    fn has_exited(&self) -> Result<bool, std::io::Error> {
+        self.exit.has_exited()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn same_instance(&self) -> bool {
+        !self.exit.has_exited().unwrap_or(true)
+            && macos_process_state(self.pid.get())
+                .is_some_and(|(start_time, _)| start_time == self.start_time)
+    }
+
+    fn signal_stop(&self) {
+        #[cfg(target_os = "macos")]
+        assert!(
+            self.same_instance(),
+            "lune-mux (pid {}) exited before SIGSTOP",
+            self.pid
+        );
+        match self.exit.signal(rustix::process::Signal::STOP) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::SRCH) => {
+                panic!("lune-mux (pid {}) exited before SIGSTOP", self.pid);
+            }
+            Err(error) => {
+                panic!("lune-mux (pid {}) did not take SIGSTOP: {error}", self.pid);
+            }
+        }
     }
 
     fn resume(&self) {
+        match self.exit.has_exited() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) if std::thread::panicking() => {
+                eprintln!(
+                    "lune-mux (pid {}) exit check failed before SIGCONT while unwinding: {error}",
+                    self.pid
+                );
+                return;
+            }
+            Err(error) => panic!(
+                "lune-mux (pid {}) exit check failed before SIGCONT: {error}",
+                self.pid
+            ),
+        }
         #[cfg(target_os = "macos")]
-        if macos_process_info(self.pid).is_none_or(|(start_time, _)| start_time != self.start_time)
-        {
+        if !self.same_instance() {
             return;
         }
         match self.exit.signal(rustix::process::Signal::CONT) {
@@ -444,63 +673,49 @@ impl MuxHandle {
             Err(error) => panic!("lune-mux (pid {}) did not take SIGCONT: {error}", self.pid),
         }
     }
-}
 
-struct PendingStall<'a> {
-    owned: &'a Owned,
-    handle: Option<MuxHandle>,
-}
-
-impl<'a> PendingStall<'a> {
-    fn begin(owned: &'a Owned, handle: MuxHandle) -> Self {
-        owned.mux_stalled.set(true);
-        Self {
-            owned,
-            handle: Some(handle),
+    fn kill_and_wait(self, runtime: &tokio::runtime::Runtime) {
+        let pid = self.pid;
+        #[cfg(target_os = "macos")]
+        if !self.same_instance() {
+            return;
         }
-    }
-
-    fn handle(&self) -> &MuxHandle {
-        self.handle
-            .as_ref()
-            .expect("pending stall holds its handle")
-    }
-
-    fn signal_stop(&mut self) {
-        let handle = self.handle();
-        let pid = handle.pid;
-        match handle.exit.signal(rustix::process::Signal::STOP) {
+        match self.exit.signal(rustix::process::Signal::KILL) {
             Ok(()) => {}
-            Err(rustix::io::Errno::SRCH) => {
-                self.disarm();
-                panic!("lune-mux (pid {pid}) exited before SIGSTOP");
-            }
+            Err(rustix::io::Errno::SRCH) => return,
+            Err(error) => panic!("lune-mux (pid {pid}) did not take SIGKILL: {error}"),
+        }
+        runtime
+            .block_on(awaited("lune-mux exits", self.exit.wait()))
+            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit wait failed: {error}"));
+    }
+
+    fn kill_and_wait_for_drop(self, runtime: &tokio::runtime::Runtime) {
+        if !std::thread::panicking() {
+            self.kill_and_wait(runtime);
+            return;
+        }
+        let pid = self.pid;
+        #[cfg(target_os = "macos")]
+        if !self.same_instance() {
+            return;
+        }
+        match self.exit.signal(rustix::process::Signal::KILL) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::SRCH) => return,
             Err(error) => {
-                self.disarm();
-                panic!("lune-mux (pid {pid}) did not take SIGSTOP: {error}");
+                eprintln!("lune-mux (pid {pid}) did not take SIGKILL while unwinding: {error}");
+                return;
             }
         }
-    }
-
-    fn disarm(&mut self) {
-        self.handle = None;
-        self.owned.mux_stalled.set(false);
-    }
-
-    fn confirm(mut self) -> StalledMux<'a> {
-        let handle = self.handle.take().expect("pending stall holds its handle");
-        StalledMux {
-            owned: self.owned,
-            handle,
-        }
-    }
-}
-
-impl Drop for PendingStall<'_> {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.resume();
-            self.owned.mux_stalled.set(false);
+        match runtime.block_on(lune_waits::try_awaited(self.exit.wait())) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => {
+                eprintln!("lune-mux (pid {pid}) exit wait failed while unwinding: {error}");
+            }
+            None => {
+                eprintln!("lune-mux (pid {pid}) exit wait timed out while unwinding");
+            }
         }
     }
 }
@@ -511,10 +726,17 @@ pub struct StalledMux<'a> {
     handle: MuxHandle,
 }
 
+impl<'a> StalledMux<'a> {
+    fn begin(owned: &'a Owned, handle: MuxHandle) -> Self {
+        owned.mux_state.set(MuxState::Stalled);
+        Self { owned, handle }
+    }
+}
+
 impl Drop for StalledMux<'_> {
     fn drop(&mut self) {
         self.handle.resume();
-        self.owned.mux_stalled.set(false);
+        self.owned.mux_state.set(MuxState::Active);
     }
 }
 
@@ -526,16 +748,46 @@ enum MuxStopCheck {
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TaskState {
-    Stopped,
-    TracingStopped,
-    Zombie,
-    Dead,
+enum ActiveTaskState {
     Running,
     Sleeping,
     DiskSleep,
     Idle,
     Waking,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EndingTaskState {
+    Zombie,
+    Dead,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskState {
+    Stopped,
+    TracingStopped,
+    Ending(EndingTaskState),
+    Active(ActiveTaskState),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GoneReason {
+    NotFound,
+    NoSuchProcess,
+}
+
+#[cfg(target_os = "linux")]
+fn gone_reason(error: &std::io::Error) -> Option<GoneReason> {
+    if error.kind() == ErrorKind::NotFound {
+        Some(GoneReason::NotFound)
+    } else if rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::SRCH) {
+        Some(GoneReason::NoSuchProcess)
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -547,7 +799,7 @@ enum TaskStatError {
     InvalidTid,
     MismatchedTid {
         expected: std::num::NonZeroU32,
-        actual: u32,
+        actual: std::num::NonZeroU32,
     },
     InvalidAfterCommUtf8,
     MissingState,
@@ -556,10 +808,10 @@ enum TaskStatError {
 
 #[cfg(target_os = "linux")]
 enum StopPending {
-    ThreadVanished(std::io::ErrorKind),
+    ThreadVanished(GoneReason),
     ThreadExited(std::num::NonZeroU32),
-    ThreadEnding(std::num::NonZeroU32, TaskState),
-    ThreadActive(std::num::NonZeroU32, TaskState),
+    ThreadEnding(std::num::NonZeroU32, EndingTaskState),
+    ThreadActive(std::num::NonZeroU32, ActiveTaskState),
     NoThreads,
 }
 
@@ -567,8 +819,8 @@ enum StopPending {
 impl fmt::Debug for StopPending {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StopPending::ThreadVanished(kind) => {
-                write!(f, "lune-mux thread vanished during scan ({kind:?})")
+            StopPending::ThreadVanished(reason) => {
+                write!(f, "lune-mux thread vanished during scan ({reason:?})")
             }
             StopPending::ThreadExited(tid) => write!(f, "lune-mux thread {tid} exited mid-scan"),
             StopPending::ThreadEnding(tid, state) => {
@@ -585,7 +837,7 @@ impl fmt::Debug for StopPending {
 #[cfg(target_os = "linux")]
 enum StopEnded {
     Exited,
-    MainThread(TaskState),
+    MainThread(EndingTaskState),
 }
 
 #[cfg(target_os = "linux")]
@@ -600,20 +852,23 @@ impl fmt::Display for StopEnded {
 
 #[cfg(target_os = "linux")]
 fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
-    use std::io::ErrorKind;
     use std::num::NonZeroU32;
 
     const TASKS_MAX: usize = 256;
     const _: () = assert!(TASKS_MAX > 0);
 
-    let gone = |error: &std::io::Error| {
-        error.kind() == ErrorKind::NotFound
-            || rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::SRCH)
-    };
+    if handle
+        .has_exited()
+        .unwrap_or_else(|error| panic!("lune-mux (pid {}) exit check failed: {error}", handle.pid))
+    {
+        return MuxStopCheck::Ended(StopEnded::Exited);
+    }
     let raw = handle.pid.get();
     let tasks = match fs::read_dir(format!("/proc/{raw}/task")) {
         Ok(tasks) => tasks,
-        Err(error) if gone(&error) => return MuxStopCheck::Ended(StopEnded::Exited),
+        Err(error) if gone_reason(&error).is_some() => {
+            return MuxStopCheck::Ended(StopEnded::Exited);
+        }
         Err(error) => panic!("/proc/{raw}/task did not read: {error}"),
     };
     let mut tasks_count = 0;
@@ -624,10 +879,10 @@ fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
         );
         let entry = match entry {
             Ok(entry) => entry,
-            Err(error) if gone(&error) => {
-                return MuxStopCheck::Pending(StopPending::ThreadVanished(error.kind()));
-            }
-            Err(error) => panic!("/proc/{raw}/task entry did not read: {error}"),
+            Err(error) => match gone_reason(&error) {
+                Some(reason) => return MuxStopCheck::Pending(StopPending::ThreadVanished(reason)),
+                None => panic!("/proc/{raw}/task entry did not read: {error}"),
+            },
         };
         let tid_name = entry.file_name();
         let tid: NonZeroU32 = tid_name
@@ -638,7 +893,7 @@ fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
             });
         let stat = match fs::read(entry.path().join("stat")) {
             Ok(stat) => stat,
-            Err(error) if gone(&error) => {
+            Err(error) if gone_reason(&error).is_some() => {
                 return MuxStopCheck::Pending(StopPending::ThreadExited(tid));
             }
             Err(error) => panic!("/proc/{raw}/task/{tid}/stat did not read: {error}"),
@@ -648,24 +903,26 @@ fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
         });
         match state {
             TaskState::Stopped | TaskState::TracingStopped => {}
-            TaskState::Zombie | TaskState::Dead => {
+            TaskState::Ending(ending) => {
                 if tid.get() == raw {
-                    return MuxStopCheck::Ended(StopEnded::MainThread(state));
+                    return MuxStopCheck::Ended(StopEnded::MainThread(ending));
                 }
-                return MuxStopCheck::Pending(StopPending::ThreadEnding(tid, state));
+                return MuxStopCheck::Pending(StopPending::ThreadEnding(tid, ending));
             }
-            TaskState::Running
-            | TaskState::Sleeping
-            | TaskState::DiskSleep
-            | TaskState::Idle
-            | TaskState::Waking => {
-                return MuxStopCheck::Pending(StopPending::ThreadActive(tid, state));
+            TaskState::Active(active) => {
+                return MuxStopCheck::Pending(StopPending::ThreadActive(tid, active));
             }
         }
         tasks_count += 1;
     }
     if tasks_count == 0 {
         return MuxStopCheck::Pending(StopPending::NoThreads);
+    }
+    if handle
+        .has_exited()
+        .unwrap_or_else(|error| panic!("lune-mux (pid {}) exit check failed: {error}", handle.pid))
+    {
+        return MuxStopCheck::Ended(StopEnded::Exited);
     }
     MuxStopCheck::Stopped
 }
@@ -686,12 +943,12 @@ fn parse_task_stat(
     if comm_start_index >= comm_end_index {
         return Err(TaskStatError::InvertedComm);
     }
-    let parsed_tid: u32 = std::str::from_utf8(&stat[..comm_start_index])
+    let parsed_tid: std::num::NonZeroU32 = std::str::from_utf8(&stat[..comm_start_index])
         .map_err(|_| TaskStatError::InvalidTid)?
         .trim()
         .parse()
         .map_err(|_| TaskStatError::InvalidTid)?;
-    if parsed_tid != expected_tid.get() {
+    if parsed_tid != expected_tid {
         return Err(TaskStatError::MismatchedTid {
             expected: expected_tid,
             actual: parsed_tid,
@@ -708,27 +965,27 @@ fn parse_task_stat(
     match state {
         "T" => Ok(TaskState::Stopped),
         "t" => Ok(TaskState::TracingStopped),
-        "Z" => Ok(TaskState::Zombie),
-        "X" | "x" => Ok(TaskState::Dead),
-        "R" => Ok(TaskState::Running),
-        "S" => Ok(TaskState::Sleeping),
-        "D" => Ok(TaskState::DiskSleep),
-        "I" => Ok(TaskState::Idle),
-        "W" | "K" | "P" => Ok(TaskState::Waking),
+        "Z" => Ok(TaskState::Ending(EndingTaskState::Zombie)),
+        "X" | "x" => Ok(TaskState::Ending(EndingTaskState::Dead)),
+        "R" => Ok(TaskState::Active(ActiveTaskState::Running)),
+        "S" => Ok(TaskState::Active(ActiveTaskState::Sleeping)),
+        "D" => Ok(TaskState::Active(ActiveTaskState::DiskSleep)),
+        "I" => Ok(TaskState::Active(ActiveTaskState::Idle)),
+        "W" | "K" | "P" => Ok(TaskState::Active(ActiveTaskState::Waking)),
         other => Err(TaskStatError::UnknownState(other.to_owned())),
     }
 }
 
 #[cfg(target_os = "macos")]
 enum StopPending {
-    State(sysinfo::ProcessStatus),
+    State(MacosActiveState),
 }
 
 #[cfg(target_os = "macos")]
 impl fmt::Debug for StopPending {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let StopPending::State(status) = self;
-        write!(f, "lune-mux is in state {status:?}")
+        let StopPending::State(state) = self;
+        write!(f, "lune-mux is in state {state:?}")
     }
 }
 
@@ -736,10 +993,10 @@ impl fmt::Debug for StopPending {
 enum StopEnded {
     Exited,
     PidReused {
-        expected_start: u64,
-        actual_start: u64,
+        expected_start: MacosStartTime,
+        actual_start: MacosStartTime,
     },
-    State(sysinfo::ProcessStatus),
+    Zombie,
 }
 
 #[cfg(target_os = "macos")]
@@ -754,33 +1011,20 @@ impl fmt::Display for StopEnded {
                 f,
                 "pid reused (expected start {expected_start}, saw {actual_start})"
             ),
-            StopEnded::State(status) => write!(f, "state {status:?}"),
+            StopEnded::Zombie => f.write_str("state Zombie"),
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn macos_process_info(pid: MuxPid) -> Option<(u64, sysinfo::ProcessStatus)> {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-
-    let mut system = System::new();
-    let target_pid = sysinfo::Pid::from_u32(pid.get());
-    let refresh = ProcessRefreshKind::nothing();
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[target_pid]), true, refresh);
-    let process = system.process(target_pid)?;
-    assert_eq!(
-        process.pid(),
-        target_pid,
-        "sysinfo returned another process"
-    );
-    Some((process.start_time(), process.status()))
-}
-
-#[cfg(target_os = "macos")]
 fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
-    use sysinfo::ProcessStatus;
-
-    let Some((start_time, status)) = macos_process_info(handle.pid) else {
+    if handle
+        .has_exited()
+        .unwrap_or_else(|error| panic!("lune-mux (pid {}) exit check failed: {error}", handle.pid))
+    {
+        return MuxStopCheck::Ended(StopEnded::Exited);
+    }
+    let Some((start_time, state)) = macos_process_state(handle.pid.get()) else {
         return MuxStopCheck::Ended(StopEnded::Exited);
     };
     if start_time != handle.start_time {
@@ -789,16 +1033,19 @@ fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
             actual_start: start_time,
         });
     }
-    match status {
-        ProcessStatus::Stop => MuxStopCheck::Stopped,
-        ProcessStatus::Zombie | ProcessStatus::Dead => {
-            MuxStopCheck::Ended(StopEnded::State(status))
+    match state {
+        MacosProcessState::Stopped => {
+            if handle.has_exited().unwrap_or_else(|error| {
+                panic!("lune-mux (pid {}) exit check failed: {error}", handle.pid)
+            }) {
+                return MuxStopCheck::Ended(StopEnded::Exited);
+            }
+            MuxStopCheck::Stopped
         }
-        ProcessStatus::Idle | ProcessStatus::Run | ProcessStatus::Sleep => {
-            MuxStopCheck::Pending(StopPending::State(status))
-        }
-        other => panic!(
-            "lune-mux (pid {}) reported unexpected macOS process status {other:?}",
+        MacosProcessState::Zombie => MuxStopCheck::Ended(StopEnded::Zombie),
+        MacosProcessState::Active(active) => MuxStopCheck::Pending(StopPending::State(active)),
+        MacosProcessState::Unknown(raw) => panic!(
+            "lune-mux (pid {}) reported unexpected macOS process status {raw}",
             handle.pid
         ),
     }
@@ -821,7 +1068,8 @@ async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
 impl Drop for Owned {
     fn drop(&mut self) {
         self.stop_daemon();
-        self.kill_mux();
+        self.mux_child = None;
+        self.kill_mux_on_drop();
     }
 }
 
@@ -831,13 +1079,10 @@ fn osc_7501_reports_flow_from_lune_mux_to_luned_and_outrank_session_files() {
     use lune_protocol::program_status::Message;
     use luned::api::{self, Harness, StatusRung};
 
-    let owned = Owned::new();
-    let program = built_server();
-    let mut mux = owned.host.vars().command(program.to_str().unwrap());
-    mux.arg(owned.host.folder()).env("TERM_PROGRAM", "ghostty");
-    let _mux = Running::spawn(mux.stdin(Stdio::null()));
-    let socket = owned.socket();
-    eventually("the server listens", || socket.exists().then_some(()));
+    let mut owned = Owned::new();
+    owned.spawn_mux(|mux| {
+        mux.env("TERM_PROGRAM", "ghostty");
+    });
 
     let dir = tempfile::tempdir().unwrap();
     let step1 = dir.path().join("step1");
@@ -962,16 +1207,10 @@ fn the_server_listens_and_gives_way_as_the_daemon_has_it() {
 
 pub fn the_daemon_runs_on_while_a_terminal_does(_: Slot) {
     let mut owned = Owned::new();
-    let program = built_server();
-    let mut mux = owned.host.vars().command(program.to_str().unwrap());
-    mux.arg(owned.host.folder());
-    let _mux = Running::spawn(mux.stdin(Stdio::null()));
-    let socket = owned.socket();
-    eventually("the server listens", || socket.exists().then_some(()));
+    owned.spawn_mux(|_| {});
     owned.new_terminal(b"kept");
-    let daemon = owned.daemon.as_mut().unwrap();
     let kept = const { Span::of(ALONE.saturating_add(SWEEP.saturating_mul(3))) };
-    daemon.runs_through(kept, "the daemon ends while a terminal runs");
+    owned.daemon_runs_through(kept, "the daemon ends while a terminal runs");
 }
 
 #[test]
@@ -994,6 +1233,40 @@ fn mux_pid_rejects_init_non_positive_and_self() {
     assert_eq!(MuxPid::from_u32(other_u32), Some(pid));
 }
 
+#[test]
+fn mux_socket_at_distinguishes_absent_self_and_connect_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        mux_socket_at(&runtime, dir.path().join("missing.sock")).unwrap(),
+        MuxSocket::Absent
+    );
+
+    let regular = dir.path().join("file");
+    fs::write(&regular, b"").unwrap();
+    let connect_error = mux_socket_at(&runtime, regular.join("mux.sock")).unwrap_err();
+    assert!(
+        matches!(connect_error, MuxPeerError::Connect(_)),
+        "expected Connect error, got {connect_error:?}"
+    );
+
+    let self_socket = dir.path().join("self.sock");
+    let _listener =
+        runtime.block_on(async { tokio::net::UnixListener::bind(&self_socket).unwrap() });
+    let self_error = mux_socket_at(&runtime, self_socket).unwrap_err();
+    assert!(
+        matches!(
+            self_error,
+            MuxPeerError::InvalidPid(pid) if pid == rustix::process::getpid().as_raw_pid()
+        ),
+        "expected InvalidPid(self), got {self_error:?}"
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn parse_task_stat_reads_closed_states_and_rejects_mismatched_or_malformed_stat() {
@@ -1011,42 +1284,46 @@ fn parse_task_stat_reads_closed_states_and_rejects_mismatched_or_malformed_stat(
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) S 1 42 42", tid(43)),
-        Ok(TaskState::Sleeping)
+        Ok(TaskState::Active(ActiveTaskState::Sleeping))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) R 1 42 42", tid(43)),
-        Ok(TaskState::Running)
+        Ok(TaskState::Active(ActiveTaskState::Running))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) D 1 42 42", tid(43)),
-        Ok(TaskState::DiskSleep)
+        Ok(TaskState::Active(ActiveTaskState::DiskSleep))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) I 1 42 42", tid(43)),
-        Ok(TaskState::Idle)
+        Ok(TaskState::Active(ActiveTaskState::Idle))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) Z 1 42 42", tid(43)),
-        Ok(TaskState::Zombie)
+        Ok(TaskState::Ending(EndingTaskState::Zombie))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) X 1 42 42", tid(43)),
-        Ok(TaskState::Dead)
+        Ok(TaskState::Ending(EndingTaskState::Dead))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) x 1 42 42", tid(43)),
-        Ok(TaskState::Dead)
+        Ok(TaskState::Ending(EndingTaskState::Dead))
     );
     assert_eq!(
         parse_task_stat(b"43 (tokio-rt) W 1 42 42", tid(43)),
-        Ok(TaskState::Waking)
+        Ok(TaskState::Active(ActiveTaskState::Waking))
     );
     assert_eq!(
         parse_task_stat(b"99 (lune-mux) T 1", tid(43)),
         Err(TaskStatError::MismatchedTid {
             expected: tid(43),
-            actual: 99,
+            actual: tid(99),
         })
+    );
+    assert_eq!(
+        parse_task_stat(b"0 (lune-mux) T 1", tid(43)),
+        Err(TaskStatError::InvalidTid)
     );
     assert_eq!(
         parse_task_stat(b"43 lune-mux T 1", tid(43)),

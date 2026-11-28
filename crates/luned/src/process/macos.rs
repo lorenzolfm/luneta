@@ -1,8 +1,10 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue};
@@ -93,7 +95,56 @@ pub fn meta(pid: u32) -> Option<ProcessMeta> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StartTime {
+    secs: u64,
+    usecs: u64,
+}
+
+impl fmt::Display for StartTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{:06}", self.secs, self.usecs)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveState {
+    Idle,
+    Run,
+    Sleep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Stopped,
+    Active(ActiveState),
+    Zombie,
+    Unknown(u32),
+}
+
+#[must_use]
+pub fn state(pid: u32) -> Option<(StartTime, ProcessState)> {
+    let bsd = bsd_info_including_zombie(pid)?;
+    let start = StartTime {
+        secs: bsd.pbi_start_tvsec,
+        usecs: bsd.pbi_start_tvusec,
+    };
+    let state = match bsd.pbi_status {
+        libc::SSTOP => ProcessState::Stopped,
+        libc::SZOMB => ProcessState::Zombie,
+        libc::SIDL => ProcessState::Active(ActiveState::Idle),
+        libc::SRUN => ProcessState::Active(ActiveState::Run),
+        libc::SSLEEP => ProcessState::Active(ActiveState::Sleep),
+        other => ProcessState::Unknown(other),
+    };
+    Some((start, state))
+}
+
 fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    bsd_info_including_zombie(pid).filter(|bsd| bsd.pbi_status != libc::SZOMB)
+}
+
+fn bsd_info_including_zombie(pid: u32) -> Option<libc::proc_bsdinfo> {
     let native = libc::c_int::try_from(pid).ok()?;
     let size = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("it fits a c_int");
     #[expect(
@@ -110,9 +161,6 @@ fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
         return None;
     }
     assert_eq!(bsd.pbi_pid, pid, "proc_pidinfo said another process");
-    if bsd.pbi_status == libc::SZOMB {
-        return None;
-    }
     Some(bsd)
 }
 
@@ -423,6 +471,45 @@ const _: () = assert!(WATCH_INTR_MAX > 0);
 pub struct Exit {
     queue: OwnedFd,
     pid: Pid,
+    exited: AtomicBool,
+}
+
+#[expect(
+    unsafe_code,
+    reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
+)]
+fn poll_kqueue_exit(queue: &OwnedFd) -> io::Result<bool> {
+    let blank = Event::new(
+        EventFilter::Proc {
+            pid: Pid::INIT,
+            flags: ProcessEvents::EXIT,
+        },
+        EventFlags::empty(),
+        ptr::null_mut(),
+    );
+    let mut heard = [blank];
+    for _ in 0..WATCH_INTR_MAX {
+        match unsafe { kevent(queue, &[], &mut heard[..], Some(Duration::ZERO)) } {
+            Ok(0) => return Ok(false),
+            Ok(count) => {
+                assert_eq!(count, 1, "kevent filled at most one event slot");
+                if !heard[0].flags().contains(EventFlags::ERROR) {
+                    return Ok(true);
+                }
+                let failure =
+                    i32::try_from(heard[0].data()).map_or(Errno::INVAL, Errno::from_raw_os_error);
+                return if failure == Errno::SRCH {
+                    Ok(true)
+                } else {
+                    Err(failure.into())
+                };
+            }
+            Err(Errno::INTR) => {}
+            Err(Errno::SRCH) => return Ok(true),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(Errno::INTR.into())
 }
 
 impl Exit {
@@ -441,7 +528,13 @@ impl Exit {
         let mut unheard: [Event; 0] = [];
         for _ in 0..WATCH_INTR_MAX {
             match unsafe { kevent(&queue, &[end], &mut unheard[..], Some(Duration::ZERO)) } {
-                Ok(_) => return Ok(Some(Exit { queue, pid })),
+                Ok(_) => {
+                    return Ok(Some(Exit {
+                        queue,
+                        pid,
+                        exited: AtomicBool::new(false),
+                    }));
+                }
                 Err(Errno::INTR) => {}
                 Err(Errno::SRCH) => return Ok(None),
                 Err(error) => return Err(error.into()),
@@ -450,46 +543,37 @@ impl Exit {
         Err(Errno::INTR.into())
     }
 
+    pub fn has_exited(&self) -> io::Result<bool> {
+        if self.exited.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        let exited = poll_kqueue_exit(&self.queue)?;
+        if exited {
+            self.exited.store(true, Ordering::Release);
+        }
+        Ok(exited)
+    }
+
     pub fn signal(&self, signal: Signal) -> Result<(), Errno> {
+        match self.has_exited() {
+            Ok(true) => return Err(Errno::SRCH),
+            Ok(false) => {}
+            Err(error) => return Err(Errno::from_io_error(&error).unwrap_or(Errno::IO)),
+        }
         kill_process(self.pid, signal)
     }
 
-    #[expect(
-        unsafe_code,
-        reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
-    )]
     pub async fn wait(self) -> io::Result<()> {
+        if self.exited.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let ready = readable_fd(self.queue)?;
         for _ in 0..SPURIOUS_WAKES_MAX {
             let mut guard = ready.readable().await?;
-            let blank = Event::new(
-                EventFilter::Proc {
-                    pid: Pid::INIT,
-                    flags: ProcessEvents::EXIT,
-                },
-                EventFlags::empty(),
-                ptr::null_mut(),
-            );
-            let mut heard = [blank];
-            match unsafe { kevent(ready.get_ref(), &[], &mut heard[..], Some(Duration::ZERO)) } {
-                Ok(0) => guard.clear_ready(),
-                Ok(count) => {
-                    assert_eq!(count, 1, "kevent filled at most one event slot");
-                    if !heard[0].flags().contains(EventFlags::ERROR) {
-                        return Ok(());
-                    }
-                    let failure = i32::try_from(heard[0].data())
-                        .map_or(Errno::INVAL, Errno::from_raw_os_error);
-                    return if failure == Errno::SRCH {
-                        Ok(())
-                    } else {
-                        Err(failure.into())
-                    };
-                }
-                Err(Errno::INTR) => {}
-                Err(Errno::SRCH) => return Ok(()),
-                Err(error) => return Err(error.into()),
+            if poll_kqueue_exit(ready.get_ref())? {
+                return Ok(());
             }
+            guard.clear_ready();
         }
         Err(io::Error::other(
             "kqueue woke too many times without an exit event",

@@ -164,6 +164,11 @@ impl Patience {
         }
     }
 
+    pub async fn try_awaited<F: IntoFuture>(self, asked: F) -> Option<F::Output> {
+        let deadline = tokio::time::Instant::from_std(self.deadline);
+        tokio::time::timeout_at(deadline, asked).await.ok()
+    }
+
     pub async fn awaited_first<T, U>(
         self,
         what: impl Display,
@@ -273,6 +278,10 @@ pub fn heard<T>(what: &str, from: &Receiver<T>) -> T {
 
 pub async fn awaited<F: IntoFuture>(what: &str, asked: F) -> F::Output {
     Patience::begun().awaited(what, asked).await
+}
+
+pub async fn try_awaited<F: IntoFuture>(asked: F) -> Option<F::Output> {
+    Patience::begun().try_awaited(asked).await
 }
 
 pub fn ended(what: &str, child: &mut Child) -> ExitStatus {

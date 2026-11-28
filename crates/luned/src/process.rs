@@ -25,6 +25,8 @@ use macos as os;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("luned reads processes on Linux and macOS, and on nothing else yet");
 
+#[cfg(target_os = "macos")]
+pub use os::{ActiveState, ProcessState, StartTime, state};
 pub use os::{Domain, cwd, environ, meta, parent, same_root, signalled, start, started};
 
 pub const ANCESTOR_DEPTH_MAX: usize = 64;
@@ -250,6 +252,10 @@ impl Exit {
 
     pub fn signal(&self, signal: rustix::process::Signal) -> Result<(), Errno> {
         self.0.signal(signal)
+    }
+
+    pub fn has_exited(&self) -> io::Result<bool> {
+        self.0.has_exited()
     }
 
     pub async fn wait(self) -> io::Result<()> {
@@ -551,6 +557,32 @@ mod tests {
         lune_waits::heard("an exit watch wakes when its process ends", &heard).unwrap();
         waiter.join().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn an_exit_watch_reports_has_exited_only_after_its_process_ends() {
+        let mut child = Command::new("sleep").arg("60").spawn().unwrap();
+        let pid = rustix::process::Pid::from_child(&child);
+        let exit = super::Exit::watch(pid)
+            .unwrap()
+            .expect("a running child is watched");
+        assert!(!exit.has_exited().unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        lune_waits::eventually("has_exited becomes true once the process exits", || {
+            exit.has_exited().unwrap().then_some(())
+        });
+        assert!(exit.has_exited().unwrap());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(lune_waits::awaited(
+                "wait completes after has_exited observed exit",
+                exit.wait(),
+            ))
+            .unwrap();
     }
 
     #[test]
