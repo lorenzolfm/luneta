@@ -424,7 +424,7 @@ impl Keys {
     }
 }
 
-fn bare(key: &KeyEvent) -> bool {
+pub(crate) fn bare(key: &KeyEvent) -> bool {
     key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
 }
 

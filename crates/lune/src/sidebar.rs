@@ -5,7 +5,9 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+#[cfg(test)]
+use crossterm::event::KeyModifiers;
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
@@ -1740,6 +1742,30 @@ pub enum Floating<'a> {
     Note(&'a str),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeftFloating {
+    Stayed,
+    Left { kept_notice: bool },
+}
+
+impl LeftFloating {
+    #[must_use]
+    pub fn left(self) -> bool {
+        match self {
+            LeftFloating::Stayed => false,
+            LeftFloating::Left { .. } => true,
+        }
+    }
+
+    #[must_use]
+    pub fn kept_notice(self) -> bool {
+        match self {
+            LeftFloating::Stayed => false,
+            LeftFloating::Left { kept_notice } => kept_notice,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Counts {
     projects: usize,
@@ -1854,6 +1880,12 @@ enum Pending {
 enum Came {
     Typed,
     Read,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    Clear,
+    Keep,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2498,16 +2530,37 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn leave_waiting(&mut self) -> bool {
-        if !self.floating_waits() {
-            return false;
-        }
+    pub fn leave_floating_waiting(&mut self) -> LeftFloating {
+        let (number, kept_notice) = match &self.mode {
+            Mode::Afloat { menu, said } if menu.waits() => (menu.number(), said.is_some()),
+            Mode::Idle
+            | Mode::Pending(_)
+            | Mode::Search(_)
+            | Mode::Reorder(_)
+            | Mode::Menu { .. }
+            | Mode::Afloat { .. }
+            | Mode::AfloatNote(_) => return LeftFloating::Stayed,
+        };
+        assert!(
+            !self.working.contains_key(&number),
+            "a floating waiting menu is not already tucked in working"
+        );
         self.end_mode();
         assert!(
             self.floating().is_none(),
             "leaving a waiting menu leaves nothing afloat"
         );
-        true
+        assert!(
+            self.working.contains_key(&number),
+            "leaving a waiting menu keeps it tracked in working"
+        );
+        if kept_notice {
+            assert!(
+                self.notice.is_some(),
+                "leaving a waiting menu keeps its floating notice"
+            );
+        }
+        LeftFloating::Left { kept_notice }
     }
 
     pub fn float_note(&mut self, note: String) {
@@ -2528,11 +2581,25 @@ impl Sidebar {
     }
 
     pub fn drop_menu(&mut self, menu: u64) {
+        assert!(menu > 0, "menu numbers start at one");
+        assert!(
+            menu <= self.menus,
+            "dropped menu {menu} was issued by this sidebar"
+        );
         if self.open().is_some_and(|open| open.number() == menu) {
-            self.take_open();
+            let taken = self.take_open();
+            assert!(taken.is_some(), "the open menu matched and was taken");
         } else {
             self.working.remove(&menu);
         }
+        assert!(
+            self.open().is_none_or(|open| open.number() != menu),
+            "dropping a menu leaves it no longer open"
+        );
+        assert!(
+            !self.working.contains_key(&menu),
+            "dropping a menu leaves it absent from working"
+        );
     }
 
     fn drop_menu_saying(&mut self, menu: u64, notice: String) {
@@ -3727,17 +3794,62 @@ impl Sidebar {
     }
 
     pub fn key(&mut self, key: &KeyEvent, now: Moment) -> Asked {
-        self.key_from(key, now, Came::Typed)
+        self.key_from(key, now, Came::Typed, Notice::Clear)
     }
 
-    fn key_from(&mut self, key: &KeyEvent, now: Moment, came: Came) -> Asked {
+    pub fn key_keeping_notice(&mut self, key: &KeyEvent, now: Moment) -> Asked {
+        assert!(
+            self.notice.is_some(),
+            "keeping a promoted notice requires one to be set"
+        );
+        self.key_from(key, now, Came::Typed, Notice::Keep)
+    }
+
+    fn tuck_waiting_sidebar_menu(&mut self, number: u64) {
+        assert!(
+            !self.working.contains_key(&number),
+            "a waiting menu is not already tucked in working"
+        );
+        self.close_menu();
+        assert!(
+            self.open().is_none(),
+            "tucking a waiting sidebar menu leaves none open"
+        );
+        assert!(
+            self.working.contains_key(&number),
+            "tucking a waiting sidebar menu keeps it tracked in working"
+        );
+    }
+
+    fn key_from(&mut self, key: &KeyEvent, now: Moment, came: Came, notice: Notice) -> Asked {
         if self.pressed() {
             if key.code == KeyCode::Esc {
                 self.let_go();
             }
             return Asked::Nothing;
         }
-        self.notice = None;
+        if let Mode::Menu { menu, .. } = &self.mode
+            && menu.waits()
+        {
+            if menu::closes(key) {
+                if notice == Notice::Clear {
+                    self.notice = None;
+                }
+                self.copied = None;
+                self.filed = None;
+                self.tuck_waiting_sidebar_menu(menu.number());
+                return Asked::Nothing;
+            }
+            let leaves = menu::bare(key) && !matches!(key.code, KeyCode::Modifier(_));
+            if leaves {
+                self.tuck_waiting_sidebar_menu(menu.number());
+            } else {
+                return Asked::Nothing;
+            }
+        }
+        if notice == Notice::Clear {
+            self.notice = None;
+        }
         self.copied = None;
         self.filed = None;
         let paused = match &mut self.mode {
@@ -3758,12 +3870,6 @@ impl Sidebar {
             self.close_menu();
             return Asked::Nothing;
         }
-        if matches!(&self.mode, Mode::Menu { menu, .. } if menu.waits())
-            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
-            && !matches!(key.code, KeyCode::Modifier(_))
-        {
-            self.close_menu();
-        }
         if key.code == KeyCode::Char(menu::ALL_KEYS)
             && let Mode::Menu { menu, .. } = &self.mode
             && menu.lists()
@@ -3782,7 +3888,7 @@ impl Sidebar {
             }
             return asked;
         }
-        if !key.modifiers.difference(KeyModifiers::SHIFT).is_empty() {
+        if !menu::bare(key) {
             return Asked::Nothing;
         }
         if let Some(term) = self.search() {
@@ -4648,7 +4754,7 @@ impl Sidebar {
         if !self.has_keys() || there != Some(keyed) {
             return Asked::Nothing;
         }
-        self.key_from(key, now, Came::Read)
+        self.key_from(key, now, Came::Read, Notice::Clear)
     }
 
     fn pick(&mut self, name: &Name) -> Asked {
@@ -16349,6 +16455,8 @@ mod tests {
 
     #[test]
     fn moving_in_the_sidebar_while_tackle_or_worktree_loads_tucks_it_and_moves_at_once() {
+        use crossterm::event::ModifierKeyCode;
+
         let mut sidebar = own_two_sessions();
         sidebar.focus(Keys::Sidebar);
         let first = sidebar.lit_spot().cloned();
@@ -16358,6 +16466,23 @@ mod tests {
             panic!("tackle did not start");
         };
         assert!(sidebar.open().is_some_and(Menu::pulling));
+
+        let shift = KeyEvent::from(KeyCode::Modifier(ModifierKeyCode::LeftShift));
+        assert_eq!(sidebar.key(&shift, moment(160_050)), Asked::Nothing);
+        assert!(
+            sidebar.open().is_some_and(Menu::pulling),
+            "a bare modifier leaves a waiting sidebar menu open"
+        );
+        assert!(sidebar.working.is_empty());
+
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(sidebar.key(&ctrl_x, moment(160_075)), Asked::Nothing);
+        assert!(
+            sidebar.open().is_some_and(Menu::pulling),
+            "a modified non-closing key leaves a waiting sidebar menu open"
+        );
+        assert!(sidebar.working.is_empty());
+        assert_eq!(sidebar.lit_spot().cloned(), first);
 
         assert_eq!(sidebar.key(&char('j'), moment(160_100)), Asked::Nothing);
         assert_ne!(
@@ -16432,16 +16557,27 @@ mod tests {
             sidebar.working.is_empty(),
             "dropping a tucked menu clears its background spinner"
         );
+
+        let extra = "https://github.com/lorenzolfm/lune/issues/7";
+        assert_eq!(sidebar.paste(extra), Asked::Nothing);
+        let Asked::Pull { menu: open, .. } = sidebar.key(&char('t'), moment(162_000)) else {
+            panic!("open tackle did not start");
+        };
+        assert!(sidebar.open().is_some_and(|menu| menu.number() == open));
+        sidebar.drop_menu(open);
+        assert!(sidebar.open().is_none());
+        assert!(sidebar.working.is_empty());
     }
 
     #[test]
-    fn leave_waiting_tucks_only_waiting_floating_menus_and_keeps_their_notice() {
+    fn leave_floating_waiting_tucks_only_waiting_floating_menus_and_keeps_their_notice() {
         let mut sidebar = own_two_sessions();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         float_a_menu(&mut sidebar);
         assert!(!sidebar.floating_waits());
-        assert!(
-            !sidebar.leave_waiting(),
+        assert_eq!(
+            sidebar.leave_floating_waiting(),
+            LeftFloating::Stayed,
             "an interactive floating menu stays open"
         );
         assert!(sidebar.floating().is_some());
@@ -16458,10 +16594,44 @@ mod tests {
         };
         assert!(sidebar.floating_waits());
         sidebar.say("background note".to_owned());
-        assert!(sidebar.leave_waiting());
+        assert_eq!(
+            sidebar.leave_floating_waiting(),
+            LeftFloating::Left { kept_notice: true }
+        );
         assert!(sidebar.floating().is_none());
         assert_eq!(sidebar.holding(), Holding::Nothing);
         assert!(sidebar.working.contains_key(&menu));
         assert_eq!(sidebar.notice.as_deref(), Some("background note"));
+
+        sidebar.focus(Keys::Sidebar);
+        let before = sidebar.lit_spot().cloned();
+        assert_eq!(
+            sidebar.key_keeping_notice(&char('j'), moment(163_000)),
+            Asked::Nothing
+        );
+        assert_ne!(sidebar.lit_spot().cloned(), before);
+        assert_eq!(
+            sidebar.notice.as_deref(),
+            Some("background note"),
+            "pass-through sidebar key keeps a freshly promoted floating notice"
+        );
+        assert_eq!(sidebar.key(&char('k'), moment(163_100)), Asked::Nothing);
+        assert!(
+            sidebar.notice.is_none(),
+            "the following sidebar key clears the notice as usual"
+        );
+
+        let docked = "https://github.com/lorenzolfm/lune/issues/10";
+        assert_eq!(sidebar.paste(docked), Asked::Nothing);
+        let Asked::Pull { .. } = sidebar.key(&char('t'), moment(163_200)) else {
+            panic!("sidebar tackle did not start");
+        };
+        assert!(!sidebar.floating_waits());
+        assert_eq!(
+            sidebar.leave_floating_waiting(),
+            LeftFloating::Stayed,
+            "a sidebar-docked waiting menu is not a floating menu"
+        );
+        assert!(sidebar.open().is_some_and(Menu::pulling));
     }
 }

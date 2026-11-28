@@ -2025,7 +2025,17 @@ impl App {
                 }
                 Some(Over::Brief(_) | Over::Dictation(..)) => false,
                 None => {
-                    let left = self.sidebar.leave_waiting();
+                    let left = self.sidebar.leave_floating_waiting().left();
+                    assert!(
+                        !self.sidebar.floating_waits(),
+                        "no waiting floating menu remains open before paste"
+                    );
+                    if left {
+                        assert!(
+                            !matches!(self.holder(), Holder::Sidebar(Holding::Afloat)),
+                            "leaving a waiting floating menu releases the floating hold"
+                        );
+                    }
                     match self.holder() {
                         Holder::Sidebar(_) => {
                             let asked = self.sidebar.paste(&text);
@@ -2111,6 +2121,7 @@ impl App {
             None => {}
         }
         let mut dirty = false;
+        let mut kept_notice = false;
         match self.sidebar.floating() {
             Some(Floating::Menu(menu)) if menu.waits() => {
                 if menu::closes(key) {
@@ -2120,8 +2131,9 @@ impl App {
                 if matches!(key.code, KeyCode::Modifier(_)) {
                     return false;
                 }
-                let left = self.sidebar.leave_waiting();
-                assert!(left, "a waiting floating menu was left");
+                let left = self.sidebar.leave_floating_waiting();
+                assert!(left.left(), "a waiting floating menu was left");
+                kept_notice = left.kept_notice();
                 dirty = true;
             }
             Some(Floating::Menu(_)) => {
@@ -2159,7 +2171,11 @@ impl App {
                 self.key_to_session(key) | dirty
             }
             Holder::Terminal | Holder::Sidebar(_) => {
-                let asked = self.sidebar.key(key, now);
+                let asked = if kept_notice {
+                    self.sidebar.key_keeping_notice(key, now)
+                } else {
+                    self.sidebar.key(key, now)
+                };
                 self.follow(asked);
                 true
             }
@@ -2550,11 +2566,12 @@ impl App {
                         | MouseEventKind::ScrollLeft
                         | MouseEventKind::ScrollRight
                 );
-                if !(scrolls || (down && off)) {
+                if scrolls || (down && off) {
+                    let left = self.sidebar.leave_floating_waiting().left();
+                    assert!(left, "a waiting floating menu was left");
+                } else {
                     return;
                 }
-                let left = self.sidebar.leave_waiting();
-                assert!(left, "a waiting floating menu was left");
             }
             Some(Floating::Menu(_)) => {
                 if down && off {
@@ -3391,20 +3408,48 @@ impl App {
         self.give(Focus::on(self.focus.side));
     }
 
-    fn dictate(&mut self, now: Instant) -> bool {
-        let waiting_on_session = self.focus.over.is_none()
-            && self.focus.side != Side::Sidebar
-            && self.sidebar.floating_waits();
+    fn take_dictation_target(&mut self) -> Option<Where> {
+        let waiting_on_session = matches!(
+            (self.holder(), self.focus.side),
+            (
+                Holder::Sidebar(Holding::Afloat),
+                Side::Session | Side::Collapsed
+            )
+        ) && self.sidebar.floating_waits();
         let on_session = matches!(self.holder(), Holder::Terminal) || waiting_on_session;
-        let under = match self.focus.over.take() {
-            None if on_session => Where::Session(self.sidebar.here_agent()),
-            Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
-            Some(Over::Issue(issue)) => Where::Issue(issue),
+        match self.focus.over.take() {
+            None if on_session => {
+                if waiting_on_session {
+                    let left = self.sidebar.leave_floating_waiting().left();
+                    assert!(left, "a waiting floating menu was left before dictation");
+                }
+                assert!(
+                    matches!(self.holder(), Holder::Terminal),
+                    "session dictation starts with the terminal holding focus"
+                );
+                Some(Where::Session(self.sidebar.here_agent()))
+            }
+            Some(Over::Ask(ask)) if !ask.turning() => Some(Where::Ask(ask)),
+            Some(Over::Issue(issue)) => Some(Where::Issue(issue)),
             other => {
                 self.focus.over = other;
-                return false;
+                None
             }
+        }
+    }
+
+    fn dictate(&mut self, now: Instant) -> bool {
+        let Some(under) = self.take_dictation_target() else {
+            return false;
         };
+        assert!(
+            self.focus.over.is_none(),
+            "dictation takes any prior overlay before opening"
+        );
+        assert!(
+            !self.sidebar.floating_waits(),
+            "no waiting floating menu remains open once dictation starts"
+        );
         self.dictations += 1;
         let number = self.dictations;
         let dictation = if speech::fetched() {
@@ -5283,10 +5328,10 @@ mod tests {
         app: &mut App,
         terminal: &mut TestTerminal,
         code: KeyCode,
-        mods: KeyModifiers,
+        modifiers: KeyModifiers,
         now: Moment,
     ) {
-        let key = KeyEvent::new(code, mods);
+        let key = KeyEvent::new(code, modifiers);
         app.handle_at(Event::Input(Input::Key(key)), terminal, now)
             .unwrap();
     }
@@ -5298,8 +5343,12 @@ mod tests {
             .home()
             .expect("home is shown")
             .draw(&mut buffer, area, system);
-        (0..14)
-            .map(|y| (0..50).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect()
     }
 
@@ -5422,7 +5471,8 @@ mod tests {
         );
         let now = next();
         press_key(&mut app, &mut terminal, MENU.0, MENU.1, now);
-        assert!(app.sidebar.floating().is_some() && !app.sidebar.floating_waits());
+        assert!(app.sidebar.floating().is_some());
+        assert!(!app.sidebar.floating_waits());
         let now = next();
         press_key(
             &mut app,
@@ -5624,6 +5674,186 @@ mod tests {
             app.focus.side,
             Side::Sidebar,
             "clicking the sidebar focuses it on first click"
+        );
+    }
+
+    #[test]
+    fn waiting_floating_menus_keep_modifiers_protect_interactive_paste_and_allow_dictation() {
+        use crate::menu::Pull;
+        use crossterm::event::ModifierKeyCode;
+
+        let (mut terminal, written) = test_terminal(80, 24);
+        let (mut app, _inbox, _state) = test_app(80, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let mut tick = 0u64;
+        let mut next = || {
+            tick += 1;
+            let offset = Duration::from_secs(tick);
+            Moment {
+                steady: start + offset,
+                system: system + offset,
+            }
+        };
+
+        let now = next();
+        app.handle_at(Event::Daemon(Ok(busy_host(2, "work"))), &mut terminal, now)
+            .unwrap();
+        app.go_home(&Machine::Local, ProjectId::of(1).unwrap());
+        app.give(Focus::on(Side::Session));
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/20",
+            Pull::Agent,
+            Origin::Views,
+        );
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Modifier(ModifierKeyCode::LeftShift),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "a bare modifier leaves a floating waiting menu open"
+        );
+        assert!(
+            !drew(&mut app, &mut terminal, &written, now),
+            "a bare modifier does not dirty the frame"
+        );
+
+        assert!(
+            matches!(app.take_dictation_target(), Some(Where::Session(_))),
+            "dictation starts on Session while a waiting menu floats"
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert!(app.sidebar.turning());
+
+        app.give(Focus::on(Side::Collapsed));
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/21",
+            Pull::Agent,
+            Origin::Views,
+        );
+        assert!(
+            matches!(app.take_dictation_target(), Some(Where::Session(_))),
+            "dictation starts on Collapsed while a waiting menu floats"
+        );
+        assert!(app.sidebar.floating().is_none());
+
+        app.give(Focus::on(Side::Sidebar));
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/issues/22",
+            Pull::Agent,
+            Origin::Views,
+        );
+        assert!(
+            app.take_dictation_target().is_none(),
+            "dictation does not start while the sidebar has focus"
+        );
+        assert!(app.sidebar.floating_waits());
+
+        let now = next();
+        app.handle_at(
+            Event::Pruned {
+                menu: 999,
+                pruned: Err("boom".to_owned()),
+            },
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        let before_step = app.sidebar.aimed_row();
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert_ne!(app.sidebar.aimed_row(), before_step);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+        let _ = app.sidebar.draw(&mut buffer, Rect::new(0, 0, 40, 24), now);
+        let sidebar_text: String = (0..24)
+            .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect();
+        assert!(
+            sidebar_text.contains("boom"),
+            "promoted floating notice survives the pass-through sidebar key: {sidebar_text}"
+        );
+
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None);
+        app.give(Focus::on(Side::Session));
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/23",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        app.pacing.mark_dirty();
+        let now = next();
+        assert!(drew(&mut app, &mut terminal, &written, now));
+        written.borrow_mut().clear();
+
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            now,
+        );
+        assert!(app.sidebar.floating().is_none());
+        assert!(
+            drew(&mut app, &mut terminal, &written, now),
+            "leaving a waiting menu still redraws when key_to_session is quiet"
+        );
+
+        app.sidebar.sit(Seat {
+            on: Machine::Local,
+            project: ProjectId::of(1).unwrap(),
+            at: Sitting::Worktree {
+                worktree: WorktreeId::of(100).unwrap(),
+                layout: SeatedLayout::Disconnected(ViewKey::terminal(1).key()),
+            },
+        });
+        app.sidebar.float_menu();
+        assert!(app.sidebar.floating().is_some());
+        assert!(!app.sidebar.floating_waits());
+        assert!(
+            app.take_dictation_target().is_none(),
+            "dictation does not dismiss an interactive floating menu"
+        );
+        assert!(app.sidebar.floating().is_some());
+
+        let now = next();
+        app.handle_at(
+            Event::Input(Input::Paste("plain text".to_owned())),
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        assert!(
+            app.sidebar.floating().is_some(),
+            "pasting while an interactive floating menu is open stays in the menu"
         );
     }
 }
