@@ -137,7 +137,7 @@ impl FlowRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worktree {
     pub id: WorktreeId,
-    pub name: String,
+    pub name: Said,
     pub folder: Dir,
     pub tab: u32,
     pub views: Vec<View>,
@@ -546,9 +546,11 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
             .is_none_or(|views| views.items.len() <= LAYOUT_VIEWS_MAX),
         "a layout holds at most {LAYOUT_VIEWS_MAX} views"
     );
-    let named = &worktree.name;
     let id = WorktreeId::of(worktree.id);
-    let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
+    let id = id.ok_or_else(|| format!("worktree {} of project {of} has id 0", worktree.name))?;
+    let name = Said::new(worktree.name.clone())
+        .ok_or_else(|| format!("worktree {id} of project {of} has an empty name"))?;
+    let named = name.as_str();
     let views = if let Some(said_views) = worktree.views.as_ref() {
         let mut terminals = BTreeMap::new();
         for terminal in &worktree.terminals {
@@ -645,7 +647,6 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
         .transpose()
         .map_err(|why| format!("worktree {named}'s flow: {why}"))?
         .map(Box::new);
-    let name = named.clone();
     Ok(Worktree {
         id,
         name,
@@ -1085,7 +1086,11 @@ mod tests {
     fn a_worktree_said_with_no_stage_folder_or_arrangement_lune_reads_is_refused() {
         type Broke = fn(&mut api::Worktree);
         let unknown = "worktree docs says no stage lune knows";
-        let broken: [(Broke, &str); 4] = [
+        let broken: [(Broke, &str); 5] = [
+            (
+                |it| it.name = String::new(),
+                "worktree 000000000000000c of project bitwarden backup has an empty name",
+            ),
             (|it| it.seen = None, unknown),
             (|it| it.seen = Some(api::worktree::Seen::Stage(99)), unknown),
             (
