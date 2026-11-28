@@ -1274,9 +1274,9 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
     ]);
     let pulls = serde_json::json!([
         {"number": 524, "title": "Say view, not pane", "isDraft": true, "headRefName": "issue-511",
-         "author": {"login": "lorenzolfm"}},
+         "author": {"login": "lorenzolfm"}, "mergeable": "CONFLICTING"},
         {"number": 526, "title": "Match each place once", "isDraft": false,
-         "headRefName": "issue-523", "author": null},
+         "headRefName": "issue-523", "author": null, "mergeable": "MERGEABLE"},
     ]);
     far.gh.work(&issues, &pulls);
 
@@ -1298,12 +1298,18 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
             more: false
         }))
     );
-    let pull = |number, title: &str, draft, branch: &str, author: Option<&str>| ListedPull {
+    let pull = |number,
+                title: &str,
+                draft,
+                branch: &str,
+                author: Option<&str>,
+                mergeability: luned::api::Mergeability| ListedPull {
         number,
         title: title.to_owned(),
         draft,
         branch: branch.to_owned(),
         author: author.map(str::to_owned),
+        mergeability: mergeability.into(),
     };
     assert_eq!(
         listed.pulls,
@@ -1313,9 +1319,17 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
                 "Say view, not pane",
                 true,
                 "issue-511",
-                Some("lorenzolfm")
+                Some("lorenzolfm"),
+                luned::api::Mergeability::Conflicting
             ),
-            pull(526, "Match each place once", false, "issue-523", None),
+            pull(
+                526,
+                "Match each place once",
+                false,
+                "issue-523",
+                None,
+                luned::api::Mergeability::Mergeable
+            ),
         ]
     );
     assert!(!listed.more_pulls, "gh listed all that are open");
@@ -1327,7 +1341,7 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
         [
             format!("{at} issue list --state open --limit 51 --json number,title,labels"),
             format!(
-                "{at} pr list --state open --limit 51 --json number,title,isDraft,headRefName,author"
+                "{at} pr list --state open --limit 51 --json number,title,isDraft,headRefName,author,mergeable"
             ),
         ],
         "gh lists the open ones and one past the most, in the clone's root, on far"
