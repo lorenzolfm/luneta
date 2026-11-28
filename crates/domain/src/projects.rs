@@ -849,11 +849,13 @@ pub enum Ask {
     CloseWorktree {
         worktree: WorktreeId,
         seen: BTreeSet<ViewId>,
+        seen_browsers: Option<BTreeSet<ViewId>>,
     },
     CloseProject {
         project: ProjectId,
         worktrees: BTreeSet<WorktreeId>,
         seen: BTreeSet<ViewId>,
+        seen_browsers: Option<BTreeSet<ViewId>>,
     },
     Bring {
         worktree: WorktreeId,
@@ -963,16 +965,33 @@ impl Ask {
             Asked::ForgetProject(asked::ForgetProject { project }) => Change::ForgetProject {
                 project: id("project", project).map(ProjectId)?,
             },
-            Asked::CloseWorktree(asked::CloseWorktree { worktree, seen }) => {
+            Asked::CloseWorktree(asked::CloseWorktree {
+                worktree,
+                seen,
+                seen_browsers,
+            }) => {
                 let worktree = id("worktree", worktree).map(WorktreeId)?;
                 let seen = seen.into_iter().map(|it| id("seen", it).map(ViewId));
                 let seen = seen.collect::<Result<BTreeSet<ViewId>, String>>()?;
-                return Ok(Ask::CloseWorktree { worktree, seen });
+                let seen_browsers = seen_browsers
+                    .map(|seen| {
+                        seen.ids
+                            .into_iter()
+                            .map(|it| id("seen_browsers", it).map(ViewId))
+                            .collect::<Result<BTreeSet<ViewId>, String>>()
+                    })
+                    .transpose()?;
+                return Ok(Ask::CloseWorktree {
+                    worktree,
+                    seen,
+                    seen_browsers,
+                });
             }
             Asked::CloseProject(asked::CloseProject {
                 project,
                 worktrees,
                 seen,
+                seen_browsers,
             }) => {
                 let project = id("project", project).map(ProjectId)?;
                 let held = worktrees
@@ -981,10 +1000,19 @@ impl Ask {
                 let worktrees = held.collect::<Result<BTreeSet<WorktreeId>, String>>()?;
                 let seen = seen.into_iter().map(|it| id("seen", it).map(ViewId));
                 let seen = seen.collect::<Result<BTreeSet<ViewId>, String>>()?;
+                let seen_browsers = seen_browsers
+                    .map(|seen| {
+                        seen.ids
+                            .into_iter()
+                            .map(|it| id("seen_browsers", it).map(ViewId))
+                            .collect::<Result<BTreeSet<ViewId>, String>>()
+                    })
+                    .transpose()?;
                 return Ok(Ask::CloseProject {
                     project,
                     worktrees,
                     seen,
+                    seen_browsers,
                 });
             }
             Asked::Bring(asked::Bring { worktree, from }) => {
@@ -993,23 +1021,18 @@ impl Ask {
                 let from = TerminalKey::of(&from).map_err(field("from"))?;
                 return Ok(Ask::Bring { worktree, from });
             }
-            Asked::CloseView(asked::CloseView { terminal, view }) => {
-                return match (terminal, view) {
-                    (Some(terminal), None) => TerminalKey::of(&terminal)
-                        .map_err(field("terminal"))
-                        .map(CloseTarget::Terminal)
-                        .map(Ask::CloseView),
-                    (None, Some(view)) => id("view", view)
-                        .map(ViewId)
-                        .map(CloseTarget::Browser)
-                        .map(Ask::CloseView),
-                    (Some(_), Some(_)) => {
-                        Err("close_view: it names both a terminal and a view".to_owned())
-                    }
-                    (None, None) => {
-                        Err("close_view: it names neither a terminal nor a view".to_owned())
-                    }
-                };
+            Asked::CloseView(asked::CloseView { terminal }) => {
+                let terminal = terminal.ok_or("close_view: it names no terminal")?;
+                return TerminalKey::of(&terminal)
+                    .map_err(field("terminal"))
+                    .map(CloseTarget::Terminal)
+                    .map(Ask::CloseView);
+            }
+            Asked::CloseBrowser(asked::CloseBrowser { view }) => {
+                return id("view", view)
+                    .map(ViewId)
+                    .map(CloseTarget::Browser)
+                    .map(Ask::CloseView);
             }
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
                 Change::RenameTerminal {
@@ -4462,8 +4485,10 @@ mod tests {
     }
 
     #[test]
-    fn close_view_accepts_either_a_terminal_or_a_browser_view_and_refuses_both_or_neither() {
-        use api::change_projects_request::{Change as Asked, CloseView};
+    fn close_view_and_close_browser_parse_their_targets_and_refuse_missing_or_zero() {
+        use api::change_projects_request::{
+            Change as Asked, CloseBrowser, CloseProject, CloseView, CloseWorktree, SeenViews,
+        };
 
         let key = api::TerminalKey {
             id: 4,
@@ -4471,7 +4496,6 @@ mod tests {
         };
         let terminal = Asked::CloseView(CloseView {
             terminal: Some(key),
-            view: None,
         });
         let ask = Ask::of_api(terminal, |_| panic!("spot must not run")).unwrap();
         assert!(matches!(
@@ -4479,44 +4503,50 @@ mod tests {
             Ask::CloseView(CloseTarget::Terminal(k)) if k == TerminalKey::of(&key).unwrap()
         ));
 
-        let browser = Asked::CloseView(CloseView {
-            terminal: None,
-            view: Some(42),
-        });
+        let browser = Asked::CloseBrowser(CloseBrowser { view: 42 });
         let ask = Ask::of_api(browser, |_| panic!("spot must not run")).unwrap();
         assert!(matches!(
             ask,
             Ask::CloseView(CloseTarget::Browser(id)) if id == ViewId::of(42).unwrap()
         ));
 
-        let zero = Asked::CloseView(CloseView {
-            terminal: None,
-            view: Some(0),
-        });
+        let zero = Asked::CloseBrowser(CloseBrowser { view: 0 });
         assert!(
             Ask::of_api(zero, |_| panic!("spot must not run"))
                 .unwrap_err()
                 .contains("no id is 0")
         );
 
-        let both = Asked::CloseView(CloseView {
-            terminal: Some(key),
-            view: Some(42),
-        });
+        let missing = Asked::CloseView(CloseView { terminal: None });
         assert!(
-            Ask::of_api(both, |_| panic!("spot must not run"))
+            Ask::of_api(missing, |_| panic!("spot must not run"))
                 .unwrap_err()
-                .contains("both")
+                .contains("names no terminal")
         );
 
-        let neither = Asked::CloseView(CloseView {
-            terminal: None,
-            view: None,
+        let worktree_with_browsers = Asked::CloseWorktree(CloseWorktree {
+            worktree: 10,
+            seen: vec![1],
+            seen_browsers: Some(SeenViews { ids: vec![30] }),
+        });
+        assert!(matches!(
+            Ask::of_api(worktree_with_browsers, |_| panic!("spot must not run")).unwrap(),
+            Ask::CloseWorktree {
+                seen_browsers: Some(browsers),
+                ..
+            } if browsers == BTreeSet::from([ViewId::of(30).unwrap()])
+        ));
+
+        let zero_browser = Asked::CloseProject(CloseProject {
+            project: 1,
+            worktrees: vec![10],
+            seen: vec![],
+            seen_browsers: Some(SeenViews { ids: vec![0] }),
         });
         assert!(
-            Ask::of_api(neither, |_| panic!("spot must not run"))
+            Ask::of_api(zero_browser, |_| panic!("spot must not run"))
                 .unwrap_err()
-                .contains("neither a terminal nor a view")
+                .contains("no id is 0")
         );
     }
 }

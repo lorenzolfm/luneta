@@ -11,8 +11,8 @@ use lune_domain::projects::{Opens, Size, ViewId, WorktreeId};
 use lune_waits::{Patience, QUIET, Span, eventually, eventually_showing, shell};
 use luned::Daemon;
 use luned::api::change_projects_request::{
-    Bring, Change, CloseProject, CloseView, CloseWorktree, OpenBrowser, RenameTerminal,
-    open_browser,
+    Bring, Change, CloseBrowser, CloseProject, CloseView, CloseWorktree, OpenBrowser,
+    RenameTerminal, open_browser,
 };
 use luned::api::change_projects_response::Made;
 use luned::api::projects::Held;
@@ -1412,6 +1412,7 @@ fn a_worktree_closes_with_its_terminals_and_ends_the_layouts_of_it() {
         Change::CloseWorktree(CloseWorktree {
             worktree: closing,
             seen: seen.to_vec(),
+            seen_browsers: None,
         })
     };
     let close = || closed(&terminals);
@@ -1558,12 +1559,8 @@ fn a_view_closes_by_its_terminal_s_whole_key_and_the_last_takes_its_worktree() {
     let [stays] = beside.terminals()[..] else {
         panic!("the other holds its first alone")
     };
-    let close = |terminal| {
-        Change::CloseView(CloseView {
-            terminal,
-            view: None,
-        })
-    };
+    let close =
+        |terminal: Option<luned::api::TerminalKey>| Change::CloseView(CloseView { terminal });
 
     let mut before = second_key;
     before
@@ -1660,6 +1657,7 @@ fn a_project_closes_with_each_worktree_s_terminals_and_one_with_none_is_forgotte
             project,
             worktrees,
             seen,
+            seen_browsers: None,
         })
     };
     let close = || closed(made, &[one, two], &terminals);
@@ -1760,11 +1758,11 @@ fn a_close_luned_cannot_keep_is_in_doubt_only_once_the_mux_closed_a_terminal() {
         let close = match closing {
             "view" => Change::CloseView(CloseView {
                 terminal: Some(key),
-                view: None,
             }),
             "worktree" => Change::CloseWorktree(CloseWorktree {
                 worktree,
                 seen: vec![terminal],
+                seen_browsers: None,
             }),
             _ => {
                 let (worktrees, seen) = (vec![worktree, other], vec![terminal, beside]);
@@ -1772,6 +1770,7 @@ fn a_close_luned_cannot_keep_is_in_doubt_only_once_the_mux_closed_a_terminal() {
                     project,
                     worktrees,
                     seen,
+                    seen_browsers: None,
                 })
             }
         };
@@ -1805,6 +1804,7 @@ fn a_close_luned_cannot_keep_is_in_doubt_only_once_the_mux_closed_a_terminal() {
         project,
         worktrees,
         seen: Vec::new(),
+        seen_browsers: None,
     });
     let refused = asked(&owned.host, close).unwrap_err();
     assert_eq!(
@@ -3800,6 +3800,7 @@ fn show_echoes_asked_numbers_on_laid_refused_and_across_stranding() {
         project: first_project,
         worktrees: vec![first.get()],
         seen: vec![view.get()],
+        seen_browsers: None,
     });
     asked(&owned.host, close).unwrap();
     assert_eq!(
@@ -3872,6 +3873,7 @@ fn show_refuses_non_monotonic_asked_numbers_and_awaited_size_while_stranded() {
             project: project_id,
             worktrees: vec![first],
             seen: Vec::new(),
+            seen_browsers: None,
         });
         let request = luned::api::ChangeProjectsRequest {
             on: None,
@@ -3948,12 +3950,13 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
 
     eventually("watch lists terminal and browser in layout order", || {
         let worktree_row = watched_worktree(&owned, worktree)?;
+        let views = &worktree_row.views.as_ref()?.items;
         let legacy_ok =
             worktree_row.terminals.len() == 1 && worktree_row.terminals[0].id == terminal_id;
-        let views_ok = worktree_row.views.len() == 2
-            && matches!(&worktree_row.views[0].kind, Some(Kind::TerminalId(id)) if *id == terminal_id)
+        let views_ok = views.len() == 2
+            && matches!(&views[0].kind, Some(Kind::TerminalId(id)) if *id == terminal_id)
             && matches!(
-                &worktree_row.views[1].kind,
+                &views[1].kind,
                 Some(Kind::Browser(browser))
                     if browser.id == browser_id
                         && browser.url.as_deref() == Some("https://example.com")
@@ -3979,6 +3982,8 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
         let worktree_row = watched_worktree(&owned, worktree)?;
         worktree_row
             .views
+            .as_ref()?
+            .items
             .iter()
             .any(|view| {
                 matches!(
@@ -3991,23 +3996,42 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
             .then_some(())
     });
 
-    let both = asked(
+    let legacy_worktree_close = asked(
         &owned.host,
-        Change::CloseView(CloseView {
-            terminal: Some(terminal_key),
-            view: Some(browser_id),
+        Change::CloseWorktree(CloseWorktree {
+            worktree,
+            seen: vec![terminal_id],
+            seen_browsers: None,
         }),
     )
     .unwrap_err();
-    assert_eq!(both.code(), Code::InvalidArgument, "{both:?}");
+    assert_eq!(
+        legacy_worktree_close.code(),
+        Code::Aborted,
+        "{legacy_worktree_close:?}"
+    );
+    let stale_browsers_worktree_close = asked(
+        &owned.host,
+        Change::CloseWorktree(CloseWorktree {
+            worktree,
+            seen: vec![terminal_id],
+            seen_browsers: Some(luned::api::change_projects_request::SeenViews { ids: Vec::new() }),
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(
+        stale_browsers_worktree_close.code(),
+        Code::Aborted,
+        "{stale_browsers_worktree_close:?}"
+    );
+
+    let missing = asked(&owned.host, Change::CloseView(CloseView { terminal: None })).unwrap_err();
+    assert_eq!(missing.code(), Code::InvalidArgument, "{missing:?}");
 
     assert_eq!(
         asked(
             &owned.host,
-            Change::CloseView(CloseView {
-                terminal: None,
-                view: Some(browser_id)
-            })
+            Change::CloseBrowser(CloseBrowser { view: browser_id })
         )
         .unwrap(),
         None
@@ -4016,19 +4040,19 @@ fn a_browser_view_is_watched_in_layout_order_updates_on_navigate_and_closes_by_v
         "watch removes closed browser view while terminal stays",
         || {
             let worktree_row = watched_worktree(&owned, worktree)?;
-            let only_terminal = worktree_row.views.len() == 1
-                && matches!(&worktree_row.views[0].kind, Some(Kind::TerminalId(id)) if *id == terminal_id);
+            let views = &worktree_row.views.as_ref()?.items;
+            let only_terminal = views.len() == 1
+                && matches!(&views[0].kind, Some(Kind::TerminalId(id)) if *id == terminal_id);
             only_terminal.then_some(())
         },
     );
 
     let again = asked(
         &owned.host,
-        Change::CloseView(CloseView {
-            terminal: None,
-            view: Some(browser_id),
-        }),
+        Change::CloseBrowser(CloseBrowser { view: browser_id }),
     )
     .unwrap_err();
     assert_eq!(again.code(), Code::NotFound, "{again:?}");
+
+    let _ = terminal_key;
 }

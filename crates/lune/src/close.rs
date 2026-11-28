@@ -86,13 +86,90 @@ pub enum Act {
         worktree: WorktreeId,
         views: Vec<TerminalKey>,
         seen: Vec<ViewId>,
+        seen_browsers: Vec<ViewId>,
     },
     Project {
         session: SessionName,
         project: ProjectId,
         worktrees: Vec<WorktreeId>,
         seen: Vec<ViewId>,
+        seen_browsers: Vec<ViewId>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TerminalAct {
+    Terminal(TerminalKey),
+    Worktree {
+        worktree: WorktreeId,
+        views: Vec<TerminalKey>,
+        seen: Vec<ViewId>,
+        seen_browsers: Vec<ViewId>,
+    },
+    Project {
+        session: SessionName,
+        project: ProjectId,
+        worktrees: Vec<WorktreeId>,
+        seen: Vec<ViewId>,
+        seen_browsers: Vec<ViewId>,
+    },
+}
+
+impl From<TerminalAct> for Act {
+    fn from(act: TerminalAct) -> Self {
+        match act {
+            TerminalAct::Terminal(key) => Act::View(ViewKey::Terminal(key)),
+            TerminalAct::Worktree {
+                worktree,
+                views,
+                seen,
+                seen_browsers,
+            } => Act::Worktree {
+                worktree,
+                views,
+                seen,
+                seen_browsers,
+            },
+            TerminalAct::Project {
+                session,
+                project,
+                worktrees,
+                seen,
+                seen_browsers,
+            } => Act::Project {
+                session,
+                project,
+                worktrees,
+                seen,
+                seen_browsers,
+            },
+        }
+    }
+}
+
+impl TerminalAct {
+    fn what(&self) -> String {
+        match self {
+            TerminalAct::Terminal(_) => "Close the view".to_owned(),
+            TerminalAct::Worktree { .. } => "Close the worktree".to_owned(),
+            TerminalAct::Project { session, .. } => format!("Close project {session}"),
+        }
+    }
+
+    fn always_asks(&self) -> bool {
+        match self {
+            TerminalAct::Terminal(_) | TerminalAct::Worktree { .. } => false,
+            TerminalAct::Project { .. } => true,
+        }
+    }
+
+    pub fn takes(&self, terminal: TerminalKey) -> bool {
+        match self {
+            TerminalAct::Terminal(key) => terminal == *key,
+            TerminalAct::Worktree { views, .. } => views.contains(&terminal),
+            TerminalAct::Project { .. } => true,
+        }
+    }
 }
 
 impl Act {
@@ -101,29 +178,6 @@ impl Act {
             Act::View(_) => "view",
             Act::Worktree { .. } => "worktree",
             Act::Project { .. } => "project",
-        }
-    }
-
-    fn what(&self) -> String {
-        match self {
-            Act::View(_) => "Close the view".to_owned(),
-            Act::Worktree { .. } => "Close the worktree".to_owned(),
-            Act::Project { session, .. } => format!("Close project {session}"),
-        }
-    }
-
-    fn always_asks(&self) -> bool {
-        match self {
-            Act::View(_) | Act::Worktree { .. } => false,
-            Act::Project { .. } => true,
-        }
-    }
-
-    pub fn takes(&self, terminal: TerminalKey) -> bool {
-        match self {
-            Act::View(view) => view.terminal_key() == Some(terminal),
-            Act::Worktree { views, .. } => views.contains(&terminal),
-            Act::Project { .. } => true,
         }
     }
 
@@ -142,13 +196,16 @@ impl Act {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Plan {
-    pub act: Act,
-    ending: Result<Ending, Untold>,
+pub enum Plan {
+    Browser(ViewId),
+    Terminals {
+        act: TerminalAct,
+        ending: Result<Ending, Untold>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Ending {
+pub struct Ending {
     agents: usize,
     busy: usize,
     waiting: usize,
@@ -196,28 +253,61 @@ impl Ending {
 
 impl Plan {
     pub fn of(act: Act, agents: Result<&[(TerminalKey, Doing)], Untold>) -> Self {
-        let ending = match &act {
-            Act::View(ViewKey::Browser(_)) => Ok(Ending::default()),
-            Act::View(ViewKey::Terminal(_)) | Act::Worktree { .. } | Act::Project { .. } => agents
-                .map(|agents| {
-                    let taken = agents.iter().filter(|(terminal, _)| act.takes(*terminal));
-                    Ending::of(taken.map(|(_, doing)| *doing))
-                }),
+        let terminal_act = match act {
+            Act::View(ViewKey::Browser(view)) => return Plan::Browser(view),
+            Act::View(ViewKey::Terminal(key)) => TerminalAct::Terminal(key),
+            Act::Worktree {
+                worktree,
+                views,
+                seen,
+                seen_browsers,
+            } => TerminalAct::Worktree {
+                worktree,
+                views,
+                seen,
+                seen_browsers,
+            },
+            Act::Project {
+                session,
+                project,
+                worktrees,
+                seen,
+                seen_browsers,
+            } => TerminalAct::Project {
+                session,
+                project,
+                worktrees,
+                seen,
+                seen_browsers,
+            },
         };
-        let plan = Plan { act, ending };
-        if matches!(plan.act, Act::View(ViewKey::Browser(_))) {
-            assert!(
-                plan.question().is_none(),
-                "closing a browser view never prompts"
-            );
+        let ending = agents.map(|agents| {
+            let taken = agents
+                .iter()
+                .filter(|(terminal, _)| terminal_act.takes(*terminal));
+            Ending::of(taken.map(|(_, doing)| *doing))
+        });
+        Plan::Terminals {
+            act: terminal_act,
+            ending,
         }
-        plan
+    }
+
+    #[must_use]
+    pub fn into_act(self) -> Act {
+        match self {
+            Plan::Browser(view) => Act::View(ViewKey::Browser(view)),
+            Plan::Terminals { act, .. } => act.into(),
+        }
     }
 
     pub fn question(&self) -> Option<String> {
-        let what = self.act.what();
-        match self.ending {
-            Ok(ending) if self.act.always_asks() => Some(format!("{what}? {}", ending.says())),
+        let Plan::Terminals { act, ending } = self else {
+            return None;
+        };
+        let what = act.what();
+        match ending {
+            Ok(ending) if act.always_asks() => Some(format!("{what}? {}", ending.says())),
             Ok(ending) if !ending.at_work() => None,
             Ok(ending) => Some(format!("{what}? {}", ending.says())),
             Err(untold) => Some(format!("{what}? {UNTOLD}: {untold}")),
@@ -260,6 +350,7 @@ mod tests {
             project,
             worktrees,
             seen,
+            seen_browsers: Vec::new(),
         };
         let busy = planned(&act, &[(4, Doing::Busy)]).question();
         assert_eq!(busy.as_deref(), Some("Close project lune? 1 agent, 1 busy"));
@@ -277,6 +368,7 @@ mod tests {
             worktree,
             views: vec![at(4), at(5)],
             seen,
+            seen_browsers: Vec::new(),
         };
         assert_eq!(
             planned(&act, &[(6, Doing::Busy), (4, Doing::Idle)]).question(),
@@ -293,12 +385,13 @@ mod tests {
     fn a_close_takes_a_terminal_only_by_its_whole_key() {
         let made = luned::mux::own::OwnMade::from_nanos(1);
         let again = TerminalKey { made, ..at(4) };
-        let view = Act::View(ViewKey::terminal(4));
+        let view = TerminalAct::Terminal(at(4));
         let worktree = WorktreeId::of(31).unwrap();
-        let views = Act::Worktree {
+        let views = TerminalAct::Worktree {
             worktree,
             views: vec![at(4)],
             seen: Vec::new(),
+            seen_browsers: Vec::new(),
         };
         assert!(view.takes(at(4)) && views.takes(at(4)));
         assert!(
@@ -333,9 +426,12 @@ mod tests {
 
         let browser = ViewKey::browser(30);
         let act = Act::View(browser);
-        assert!(!act.takes(at(4)));
         assert_eq!(planned(&act, &[(4, Doing::Busy)]).question(), None);
         assert_eq!(Plan::of(act.clone(), Err(Untold::Away)).question(), None);
+        assert_eq!(
+            Plan::of(act.clone(), Err(Untold::Away)).into_act(),
+            act.clone()
+        );
 
         let worktree = WorktreeId::of(31).unwrap();
         let other = WorktreeId::of(32).unwrap();
@@ -357,6 +453,7 @@ mod tests {
             worktree,
             views: vec![at(4)],
             seen: vec![ViewId::of(4).unwrap()],
+            seen_browsers: vec![ViewId::of(30).unwrap()],
         };
         assert!(worktree_act.closes(&place_in(worktree, browser)));
         assert!(!worktree_act.closes(&place_in(other, browser)));

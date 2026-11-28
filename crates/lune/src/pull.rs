@@ -9,15 +9,15 @@ use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::reach::{self, Luned};
-use crate::sidebar::ViewPlace;
+use crate::sidebar::TerminalPlace;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worked {
-    pub place: ViewPlace,
+    pub place: TerminalPlace,
     pub works: links::Worked,
 }
 
-pub type Ready = links::Ready<ViewPlace>;
+pub type Ready = links::Ready<TerminalPlace>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
@@ -65,7 +65,7 @@ fn first_found(
 ) -> Result<Found, String> {
     let mut found_on = |on: Machine, worked: Vec<Worked>| {
         let apart = |Worked { place, works }| (place, works);
-        let (views, worked): (Vec<ViewPlace>, Vec<links::Worked>) =
+        let (views, worked): (Vec<TerminalPlace>, Vec<links::Worked>) =
             worked.into_iter().map(apart).unzip();
         let ready = ask(&on, &Pasted::new(work.clone(), worked).wanting(wanted)?)?;
         match ready.placed(&views) {
@@ -166,7 +166,7 @@ mod tests {
             here: false,
         };
         Worked {
-            place: ViewPlace::new_in("main", 1, 1, id),
+            place: TerminalPlace::new_in("main", 1, 1, id),
             works,
         }
     }

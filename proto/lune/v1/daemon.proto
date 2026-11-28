@@ -781,7 +781,11 @@ message Worktree {
   repeated Terminal terminals = 8;
   google.protobuf.Timestamp used_at = 9;
   optional Arrangement arranged = 10;
-  repeated View views = 11;
+  Views views = 11;
+
+  message Views {
+    repeated View items = 1;
+  }
 
   message View {
     oneof kind {
@@ -881,6 +885,7 @@ message ChangeProjectsRequest {
     Bring bring = 15;
     CloseView close_view = 16;
     OpenBrowser open_browser = 17;
+    CloseBrowser close_browser = 18;
   }
 
   message AddProject {
@@ -941,15 +946,21 @@ message ChangeProjectsRequest {
     fixed64 project = 1;
   }
 
+  message SeenViews {
+    repeated fixed64 ids = 1;
+  }
+
   message CloseProject {
     fixed64 project = 1;
     repeated fixed64 worktrees = 2;
     repeated fixed64 seen = 3;
+    SeenViews seen_browsers = 4;
   }
 
   message CloseWorktree {
     fixed64 worktree = 1;
     repeated fixed64 seen = 2;
+    SeenViews seen_browsers = 3;
   }
 
   message Bring {
@@ -959,7 +970,10 @@ message ChangeProjectsRequest {
 
   message CloseView {
     TerminalKey terminal = 1;
-    optional fixed64 view = 2;
+  }
+
+  message CloseBrowser {
+    fixed64 view = 1;
   }
 
   message OpenBrowser {

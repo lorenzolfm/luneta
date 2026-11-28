@@ -684,14 +684,21 @@ impl Layouts {
                 let alone = |made| (made, None);
                 let changed = match change {
                     Ask::Change(change) => self.changed_opening(change),
-                    Ask::CloseWorktree { worktree, seen } => {
-                        self.close_worktree(worktree, &seen).map(alone)
-                    }
+                    Ask::CloseWorktree {
+                        worktree,
+                        seen,
+                        seen_browsers,
+                    } => self
+                        .close_worktree(worktree, &seen, seen_browsers.as_ref())
+                        .map(alone),
                     Ask::CloseProject {
                         project,
                         worktrees,
                         seen,
-                    } => self.close_project(project, &worktrees, &seen).map(alone),
+                        seen_browsers,
+                    } => self
+                        .close_project(project, &worktrees, &seen, seen_browsers.as_ref())
+                        .map(alone),
                     Ask::Bring { worktree, from } => {
                         self.bring(worktree, from).map(|made| alone(Some(made)))
                     }
@@ -1460,20 +1467,26 @@ impl Layouts {
         project: ProjectId,
         seen_worktrees: &BTreeSet<WorktreeId>,
         seen: &BTreeSet<ViewId>,
+        seen_browsers: Option<&BTreeSet<ViewId>>,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no project has the id {project}"));
         let held = projects.project_of(project).ok_or_else(unknown)?;
         let worktrees: Vec<WorktreeId> = held.worktrees().map(Worktree::id).collect();
-        let layouts = held.worktrees().map(Worktree::layout);
-        let terminals = layouts.flat_map(Layout::terminals).map(Terminal::id);
-        let terminals: Vec<TerminalViewId> = terminals.collect();
+        let terminals: Vec<TerminalViewId> = held
+            .worktrees()
+            .flat_map(|worktree| worktree.layout().terminals().map(Terminal::id))
+            .collect();
+        let browsers: BTreeSet<ViewId> = held
+            .worktrees()
+            .flat_map(|worktree| worktree.layout().browsers().map(Browser::id))
+            .collect();
         assert!(
             worktrees.len() <= WORKTREES_MAX,
             "a project holds at most {WORKTREES_MAX}"
         );
         assert!(
-            terminals.len() <= VIEWS_MAX,
+            terminals.len() + browsers.len() <= VIEWS_MAX,
             "a project holds at most {VIEWS_MAX} views"
         );
         let held_worktrees: BTreeSet<WorktreeId> = worktrees.iter().copied().collect();
@@ -1481,6 +1494,18 @@ impl Layouts {
         if held_worktrees != *seen_worktrees || held_terminals != *seen {
             let changed = format!("project {project}'s worktrees or terminals are not those seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
+        }
+        match seen_browsers {
+            Some(expected) if *expected != browsers => {
+                let changed = format!("project {project}'s browsers are not those seen");
+                return Err(Failed::Stale(format!("{changed}: they changed since")));
+            }
+            None if !browsers.is_empty() => {
+                return Err(Failed::Stale(format!(
+                    "project {project} holds browser views this client did not see"
+                )));
+            }
+            Some(_) | None => {}
         }
         let mux_closed = self.close_terminals(&terminals)?;
         let kept = self.store.closed(Closing::Project(project));
@@ -1515,11 +1540,13 @@ impl Layouts {
         &mut self,
         worktree: WorktreeId,
         seen: &BTreeSet<ViewId>,
+        seen_browsers: Option<&BTreeSet<ViewId>>,
     ) -> Result<Option<Made>, Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unknown = || Failed::Refused(format!("no worktree has the id {worktree}"));
         let (_, shown) = projects.find(worktree).ok_or_else(unknown)?;
         let terminals: Vec<TerminalViewId> = shown.layout().terminals().map(Terminal::id).collect();
+        let browsers: BTreeSet<ViewId> = shown.layout().browsers().map(Browser::id).collect();
         if terminals
             .iter()
             .map(|it| it.view())
@@ -1529,10 +1556,22 @@ impl Layouts {
             let changed = format!("worktree {worktree}'s terminals are not the ones seen");
             return Err(Failed::Stale(format!("{changed}: they changed since")));
         }
+        match seen_browsers {
+            Some(expected) if *expected != browsers => {
+                let changed = format!("worktree {worktree}'s browsers are not the ones seen");
+                return Err(Failed::Stale(format!("{changed}: they changed since")));
+            }
+            None if !browsers.is_empty() => {
+                return Err(Failed::Stale(format!(
+                    "worktree {worktree} holds browser views this client did not see"
+                )));
+            }
+            Some(_) | None => {}
+        }
         let most = LAYOUT_VIEWS_MAX;
         assert!(
-            terminals.len() <= most,
-            "a layout holds at most {most} terminals"
+            terminals.len() + browsers.len() <= most,
+            "a layout holds at most {most} views"
         );
         let mux_closed = self.close_terminals(&terminals)?;
         let kept = self.store.closed(Closing::Worktree(worktree));

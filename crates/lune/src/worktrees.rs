@@ -14,7 +14,9 @@ use luned::api::ChangeProjectsResponse;
 use luned::api::change_projects_request::RenameProject;
 use luned::api::change_projects_request::{AddProject, AddWorktree, Change, CloseProject};
 use luned::api::change_projects_request::{Bring, Join, RenameTerminal};
-use luned::api::change_projects_request::{CloseView, CloseWorktree, Pull, Start};
+use luned::api::change_projects_request::{
+    CloseBrowser, CloseView, CloseWorktree, Pull, SeenViews, Start,
+};
 use luned::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
 use luned::api::change_projects_response::Made;
 use luned::api::make_worktree_response::Landed as Answered;
@@ -394,31 +396,35 @@ pub fn closed(
     machine: &Machine,
     worktree: WorktreeId,
     seen: &[ViewId],
+    seen_browsers: &[ViewId],
 ) -> Result<(), Unchanged> {
-    changed_on(path, on(machine), close(worktree, seen)).map(drop)
+    changed_on(path, on(machine), close(worktree, seen, seen_browsers)).map(drop)
 }
 
 pub fn closed_view(path: &Path, machine: &Machine, terminal: TerminalKey) -> Result<(), Unchanged> {
     let (id, made_at) = (terminal.id.get(), Some(terminal.made.into()));
-    let terminal = Some(luned::api::TerminalKey { id, made_at });
+    let terminal = luned::api::TerminalKey { id, made_at };
     let change = Change::CloseView(CloseView {
-        terminal,
-        view: None,
+        terminal: Some(terminal),
     });
     changed_on(path, on(machine), change).map(drop)
 }
 
 pub fn closed_browser_view(path: &Path, machine: &Machine, view: ViewId) -> Result<(), Unchanged> {
-    let change = Change::CloseView(CloseView {
-        terminal: None,
-        view: Some(view.get()),
-    });
+    let change = Change::CloseBrowser(CloseBrowser { view: view.get() });
     changed_on(path, on(machine), change).map(drop)
 }
 
-fn close(worktree: WorktreeId, seen: &[ViewId]) -> Change {
+fn close(worktree: WorktreeId, seen: &[ViewId], seen_browsers: &[ViewId]) -> Change {
     let (worktree, seen) = (worktree.get(), seen.iter().map(|it| it.get()).collect());
-    Change::CloseWorktree(CloseWorktree { worktree, seen })
+    let seen_browsers = Some(SeenViews {
+        ids: seen_browsers.iter().map(|it| it.get()).collect(),
+    });
+    Change::CloseWorktree(CloseWorktree {
+        worktree,
+        seen,
+        seen_browsers,
+    })
 }
 
 pub fn closed_project(
@@ -427,14 +433,19 @@ pub fn closed_project(
     project: ProjectId,
     worktrees: &[WorktreeId],
     seen: &[ViewId],
+    seen_browsers: &[ViewId],
 ) -> Result<(), Unchanged> {
     let project = project.get();
     let worktrees = worktrees.iter().map(|it| it.get()).collect();
     let seen = seen.iter().map(|it| it.get()).collect();
+    let seen_browsers = Some(SeenViews {
+        ids: seen_browsers.iter().map(|it| it.get()).collect(),
+    });
     let change = Change::CloseProject(CloseProject {
         project,
         worktrees,
         seen,
+        seen_browsers,
     });
     changed_on(path, on(machine), change).map(drop)
 }

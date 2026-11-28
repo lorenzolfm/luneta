@@ -18,7 +18,7 @@ use crate::cadence::Cadence;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::{self, Hint, ProjectTarget, Target, ViewRow};
+use crate::menu::{self, Hint, ProjectTarget, Target};
 use crate::moonlight;
 use crate::reach::{self, Luned};
 use crate::sidebar::{self, ACCENT};
@@ -477,8 +477,8 @@ fn highlighted(target: &Target) -> String {
                 row.place.project.listed().name()
             )
         }
-        Target::View(_, ViewRow { place, .. }) => {
-            format!("view {}:{}", place.listed().name(), place.view())
+        Target::View(_, row) => {
+            format!("view {}:{}", row.listed().name(), row.view())
         }
         Target::Machine(_) => "the header of this machine".to_owned(),
     };
@@ -498,7 +498,7 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
-    use crate::menu::{Cwd, Folder, Ran, ViewRow};
+    use crate::menu::{Cwd, Folder, Ran, ViewKind, ViewRow};
     use crate::sidebar::{Listed, ProjectRow, ViewPlace};
 
     fn project_on(on: Machine) -> Target {
@@ -517,9 +517,14 @@ mod tests {
     }
 
     fn view_row_on(machine: Machine) -> Target {
+        let place = ViewPlace::new_in("lune", 3, 1, 4);
         let row = ViewRow {
-            place: ViewPlace::new_in("lune", 3, 1, 4),
-            terminal: None,
+            worktree: place.worktree().clone(),
+            kind: ViewKind::Terminal {
+                key: place.view().terminal_key().unwrap(),
+                id: None,
+                ran: Ran::Unhooked,
+            },
             cwd: Cwd::of(
                 Some(Directory::parse("/w/lune/main".to_owned()).unwrap()),
                 |dir| {
@@ -532,7 +537,6 @@ mod tests {
                     }
                 },
             ),
-            ran: Ran::Unhooked,
             arranged: None,
         };
         Target::View(machine, row)

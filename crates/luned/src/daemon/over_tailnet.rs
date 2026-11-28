@@ -49,6 +49,7 @@ fn served_change(change: Option<&Change>) -> Result<(), Status> {
         Some(Change::CloseProject(_)) => unserved_change("CloseProject"),
         Some(Change::Bring(_)) => unserved_change("Bring"),
         Some(Change::OpenBrowser(_)) => unserved_change("OpenBrowser"),
+        Some(Change::CloseBrowser(_)) => unserved_change("CloseBrowser"),
     }
 }
 
@@ -352,6 +353,10 @@ mod tests {
             (
                 "OpenBrowser",
                 Some(Change::OpenBrowser(change::OpenBrowser::default())),
+            ),
+            (
+                "CloseBrowser",
+                Some(Change::CloseBrowser(change::CloseBrowser::default())),
             ),
             ("with no change", None),
         ];

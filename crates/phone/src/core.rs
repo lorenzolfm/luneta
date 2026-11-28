@@ -597,7 +597,6 @@ impl Core {
         let (on, key) = terminal.to_api();
         let change = Change::CloseView(CloseView {
             terminal: Some(key),
-            view: None,
         });
         self.changed(on, change).await
     }
@@ -610,7 +609,11 @@ impl Core {
     ) -> Result<(), Unanswered> {
         self.changed(
             self::on(on),
-            Change::CloseWorktree(CloseWorktree { worktree, seen }),
+            Change::CloseWorktree(CloseWorktree {
+                worktree,
+                seen,
+                seen_browsers: None,
+            }),
         )
         .await
     }

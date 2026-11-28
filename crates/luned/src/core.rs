@@ -247,6 +247,12 @@ pub enum Command {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldView {
+    pub terminal: Option<TerminalKey>,
+    pub folder: Dir,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Local {
     pub git_statuses: Vec<api::GitStatus>,
@@ -256,6 +262,7 @@ pub struct Local {
     pub unread_files: Vec<api::UnreadFile>,
     pub sayings: Vec<api::Saying>,
     pub projects: api::projects::Held,
+    pub held_views: Result<Vec<HeldView>, String>,
 }
 
 impl Local {
@@ -706,6 +713,7 @@ impl Known {
             unread_files: Vec::new(),
             sayings: Vec::new(),
             projects: api::projects::Held::Unkept(initial_projects.to_owned()),
+            held_views: Err(initial_projects.to_owned()),
         };
         let known = Known {
             found: Scan {
@@ -1217,7 +1225,57 @@ impl Known {
             unread_files,
             sayings: self.sayings.fresh(now),
             projects: self.built_projects(),
+            held_views: self.built_held_views(),
         }
+    }
+
+    fn built_held_views(&self) -> Result<Vec<HeldView>, String> {
+        let projects = match &self.projects {
+            Ok(projects) => projects,
+            Err(why) => return Err(why.clone()),
+        };
+        let mut held = Vec::new();
+        for project in projects.all() {
+            for (folder, worktree) in project.placed() {
+                let mut has_browser = false;
+                for view in worktree.layout().views() {
+                    match view {
+                        View::Terminal(terminal) => {
+                            let (terminal_key, folder) =
+                                match self.terminals.get(&terminal.id().view()) {
+                                    Some(Located::Shown(Shown::Listed { key, cwd, .. })) => (
+                                        Some(*key),
+                                        cwd.clone().unwrap_or_else(|| terminal.folder().clone()),
+                                    ),
+                                    Some(Located::Shown(Shown::Unlisted(key))) => {
+                                        (Some(*key), terminal.folder().clone())
+                                    }
+                                    Some(Located::Lost | Located::Looking) | None => {
+                                        (None, terminal.folder().clone())
+                                    }
+                                };
+                            held.push(HeldView {
+                                terminal: terminal_key,
+                                folder,
+                            });
+                        }
+                        View::Browser(_) => has_browser = true,
+                        View::Welcome(_) | View::Review(_) => {}
+                    }
+                }
+                if has_browser {
+                    held.push(HeldView {
+                        terminal: None,
+                        folder,
+                    });
+                }
+            }
+        }
+        assert!(
+            held.len() <= VIEWS_MAX,
+            "at most {VIEWS_MAX} views are kept"
+        );
+        Ok(held)
     }
 
     fn built_projects(&self) -> api::projects::Held {
@@ -1235,7 +1293,7 @@ impl Known {
                 seen: Some(self.seen(&folder).to_api()),
                 folder: folder.as_str().to_owned(),
                 terminals,
-                views,
+                views: Some(api::worktree::Views { items: views }),
                 used_at: worktree.used().map(|used| used.time().into()),
                 arranged: worktree.layout().arranged().map(|it| it.to_api().into()),
             }
@@ -3063,27 +3121,44 @@ mod tests {
             panic!("projects kept");
         };
         let worktree_row = &kept.projects[0].worktrees().unwrap()[0];
+        let views = &worktree_row
+            .views
+            .as_ref()
+            .expect("views are present")
+            .items;
         assert_eq!(worktree_row.terminals.len(), 1);
         assert_eq!(worktree_row.terminals[0].id, terminal_id.get());
         assert_eq!(
-            worktree_row.views.len(),
+            views.len(),
             3,
             "welcome and review are omitted from sidebar views"
         );
         assert!(matches!(
-            &worktree_row.views[0].kind,
+            &views[0].kind,
             Some(Kind::TerminalId(id)) if *id == terminal_id.get()
         ));
         assert!(matches!(
-            &worktree_row.views[1].kind,
+            &views[1].kind,
             Some(Kind::Browser(browser))
                 if browser.id == browser_a.get()
                     && browser.url.as_deref() == Some("https://example.com")
         ));
         assert!(matches!(
-            &worktree_row.views[2].kind,
+            &views[2].kind,
             Some(Kind::Browser(browser)) if browser.id == browser_b.get() && browser.url.is_none()
         ));
+        let local = ask(&core, Command::HostLocal).unwrap().into_local();
+        let held_views = local.held_views.as_ref().unwrap();
+        assert_eq!(
+            held_views.len(),
+            2,
+            "terminal plus deduplicated browser occupancy for the worktree"
+        );
+        assert!(
+            held_views
+                .iter()
+                .all(|view| view.folder.as_str() == "/w/lune/main")
+        );
 
         let url_next = BrowserUrl::parse("https://lune.dev/docs").unwrap();
         let (projects, _) = projects
@@ -3106,8 +3181,13 @@ mod tests {
             panic!("projects kept");
         };
         let worktree_row = &kept.projects[0].worktrees().unwrap()[0];
+        let views = &worktree_row
+            .views
+            .as_ref()
+            .expect("views are present")
+            .items;
         assert!(matches!(
-            &worktree_row.views[1].kind,
+            &views[1].kind,
             Some(Kind::Browser(browser))
                 if browser.id == browser_a.get()
                     && browser.url.as_deref() == Some("https://lune.dev/docs")

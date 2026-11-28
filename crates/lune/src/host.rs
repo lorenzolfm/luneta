@@ -2980,15 +2980,21 @@ impl App {
                 Act::View(ViewKey::Browser(view)) => {
                     worktrees::closed_browser_view(&luned, &on, *view)
                 }
-                Act::Worktree { worktree, seen, .. } => {
-                    worktrees::closed(&luned, &on, *worktree, seen)
-                }
+                Act::Worktree {
+                    worktree,
+                    seen,
+                    seen_browsers,
+                    ..
+                } => worktrees::closed(&luned, &on, *worktree, seen, seen_browsers),
                 Act::Project {
                     project,
                     worktrees,
                     seen,
+                    seen_browsers,
                     ..
-                } => worktrees::closed_project(&luned, &on, *project, worktrees, seen),
+                } => {
+                    worktrees::closed_project(&luned, &on, *project, worktrees, seen, seen_browsers)
+                }
             };
             if let Err(unchanged) = doubted(CLOSE_PANICKED, asked) {
                 let _ = events.send(Event::Unclosed {
@@ -5251,7 +5257,7 @@ mod tests {
 
     #[test]
     fn browser_views_resolve_in_project_and_keep_their_worktree_open() {
-        use luned::api::worktree::{View as ApiView, view::Kind};
+        use luned::api::worktree::{View as ApiView, Views as ApiViews, view::Kind};
         use luned::api::{self, projects};
 
         let browser = api::Browser {
@@ -5264,9 +5270,11 @@ mod tests {
             folder: "/w/lune/docs".to_owned(),
             seen: Some(api::worktree::Seen::Unread(())),
             terminals: Vec::new(),
-            views: vec![ApiView {
-                kind: Some(Kind::Browser(browser)),
-            }],
+            views: Some(ApiViews {
+                items: vec![ApiView {
+                    kind: Some(Kind::Browser(browser)),
+                }],
+            }),
             arranged: Some(api::Arrangement::Tabs.into()),
             ..api::Worktree::default()
         };

@@ -258,17 +258,19 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
                     row.terminals.len()
                 ));
             }
-            if row.views.len() > LAYOUT_VIEWS_MAX {
+            let said_views = row.views.as_ref().map(|views| views.items.as_slice());
+            if let Some(items) = said_views
+                && items.len() > LAYOUT_VIEWS_MAX
+            {
                 return Err(format!(
                     "worktree {} holds {} views, over the {LAYOUT_VIEWS_MAX} a layout holds",
                     row.name,
-                    row.views.len()
+                    items.len()
                 ));
             }
-            let count = if row.views.is_empty() {
-                row.terminals.len()
-            } else {
-                row.views.len()
+            let count = match said_views {
+                Some(items) => items.len(),
+                None => row.terminals.len(),
             };
             view_count = view_count.saturating_add(count);
             if view_count > VIEWS_MAX {
@@ -290,6 +292,35 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
     );
     let views: usize = worktrees.iter().map(|it| it.views.len()).sum();
     assert_eq!(views, view_count, "parsed views match the counted bound");
+    let mut seen_projects = BTreeSet::new();
+    let mut seen_worktrees = BTreeSet::new();
+    let mut seen_views = BTreeSet::new();
+    for project in &projects {
+        if !seen_projects.insert(project.id) {
+            return Err(format!("two projects have id {}", project.id));
+        }
+        for worktree in project.worktrees() {
+            if !seen_worktrees.insert(worktree.id) {
+                return Err(format!("two worktrees have id {}", worktree.id));
+            }
+            for view in &worktree.views {
+                if !seen_views.insert(view.id()) {
+                    return Err(format!("two views have id {}", view.id()));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen_projects.len(),
+        projects.len(),
+        "every project has a distinct id"
+    );
+    assert_eq!(
+        seen_worktrees.len(),
+        worktrees.len(),
+        "every worktree has a distinct id"
+    );
+    assert_eq!(seen_views.len(), views, "every view has a distinct id");
     let mut keyed = BTreeSet::new();
     for key in worktrees
         .iter()
@@ -410,13 +441,16 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
         "a layout holds at most {LAYOUT_VIEWS_MAX} terminals"
     );
     assert!(
-        worktree.views.len() <= LAYOUT_VIEWS_MAX,
+        worktree
+            .views
+            .as_ref()
+            .is_none_or(|views| views.items.len() <= LAYOUT_VIEWS_MAX),
         "a layout holds at most {LAYOUT_VIEWS_MAX} views"
     );
     let named = &worktree.name;
     let id = WorktreeId::of(worktree.id);
     let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
-    let views = if let said_views @ [_, ..] = worktree.views.as_slice() {
+    let views = if let Some(said_views) = worktree.views.as_ref() {
         let mut terminals = BTreeMap::new();
         for terminal in &worktree.terminals {
             let parsed = parse_terminal(terminal, named)?;
@@ -427,8 +461,8 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
                 ));
             }
         }
-        let mut views = Vec::with_capacity(said_views.len());
-        for view in said_views {
+        let mut views = Vec::with_capacity(said_views.items.len());
+        for view in &said_views.items {
             let parsed = match view.kind.as_ref() {
                 Some(api::worktree::view::Kind::TerminalId(raw)) => {
                     let id = ViewId::of(*raw)
@@ -454,7 +488,11 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
                 "worktree {named} lists terminal {extra} outside its views"
             ));
         }
-        assert_eq!(views.len(), said_views.len(), "every view said is read");
+        assert_eq!(
+            views.len(),
+            said_views.items.len(),
+            "every view said is read"
+        );
         views
     } else {
         let mut views = Vec::with_capacity(worktree.terminals.len());
@@ -545,29 +583,12 @@ fn project(project: &api::Project) -> Result<Project, String> {
         None => return Err(format!("project {named} says not what it holds")),
     };
     let name = ProjectName::parse(&project.name)?;
-    let parsed = Project {
+    Ok(Project {
         id,
         name,
         dir,
         holds,
-    };
-    let mut seen_ids = BTreeSet::new();
-    let mut project_views: usize = 0;
-    for view in parsed.worktrees().iter().flat_map(|it| &it.views) {
-        project_views += 1;
-        if !seen_ids.insert(view.id()) {
-            return Err(format!(
-                "project {named} holds two views with id {}",
-                view.id()
-            ));
-        }
-    }
-    assert_eq!(
-        seen_ids.len(),
-        project_views,
-        "every view of a project has a distinct id"
-    );
-    Ok(parsed)
+    })
 }
 
 #[cfg(test)]
@@ -991,8 +1012,9 @@ mod tests {
 
     #[test]
     fn worktree_views_preserve_mixed_terminal_and_browser_order_and_reject_bad_browsers() {
-        use api::worktree::{View as ApiView, view::Kind};
+        use api::worktree::{View as ApiView, Views as ApiViews, view::Kind};
 
+        let views_of = |items| Some(ApiViews { items });
         let terminal_view = |id| ApiView {
             kind: Some(Kind::TerminalId(id)),
         };
@@ -1003,12 +1025,12 @@ mod tests {
             })),
         };
         let mut mixed = kept();
-        rows(&mut mixed)[0].views = vec![
+        rows(&mut mixed)[0].views = views_of(vec![
             terminal_view(21),
             browser_view(30, Some("https://example.com/docs")),
             browser_view(31, None),
             terminal_view(22),
-        ];
+        ]);
         let project = read(&mixed).unwrap();
         let worktree_row = &project.worktrees()[0];
         let ids: Vec<u64> = worktree_row.views.iter().map(|it| it.id().get()).collect();
@@ -1056,17 +1078,34 @@ mod tests {
         for bad in bad_cases {
             let mut invalid = kept();
             rows(&mut invalid)[0].terminals.clear();
-            rows(&mut invalid)[0].views = vec![bad.clone()];
+            rows(&mut invalid)[0].views = views_of(vec![bad.clone()]);
             assert!(read(&invalid).is_err(), "{bad:?}");
         }
 
+        let mut explicit_empty_with_terminals = kept();
+        rows(&mut explicit_empty_with_terminals)[0].views = views_of(Vec::new());
+        assert!(
+            read(&explicit_empty_with_terminals)
+                .unwrap_err()
+                .contains("outside its views"),
+            "explicit empty views must not silently fall back to terminals"
+        );
+
+        let mut explicit_empty = kept();
+        rows(&mut explicit_empty)[0].terminals.clear();
+        rows(&mut explicit_empty)[0].views = views_of(Vec::new());
+        assert_eq!(read(&explicit_empty).unwrap().worktrees()[0].views, []);
+
         let mut duplicate_terminal_ref = kept();
-        rows(&mut duplicate_terminal_ref)[0].views =
-            vec![terminal_view(21), terminal_view(21), terminal_view(22)];
+        rows(&mut duplicate_terminal_ref)[0].views = views_of(vec![
+            terminal_view(21),
+            terminal_view(21),
+            terminal_view(22),
+        ]);
         assert!(read(&duplicate_terminal_ref).is_err());
 
         let mut unreferenced_terminal = kept();
-        rows(&mut unreferenced_terminal)[0].views = vec![terminal_view(21)];
+        rows(&mut unreferenced_terminal)[0].views = views_of(vec![terminal_view(21)]);
         assert!(
             read(&unreferenced_terminal)
                 .unwrap_err()
@@ -1078,28 +1117,59 @@ mod tests {
             .terminals
             .clear();
         rows(&mut duplicate_browser_same_worktree)[0].views =
-            vec![browser_view(30, None), browser_view(30, None)];
+            views_of(vec![browser_view(30, None), browser_view(30, None)]);
         assert!(
             read(&duplicate_browser_same_worktree)
                 .unwrap_err()
-                .contains("two views with id")
+                .contains("two views have id")
         );
 
         let mut duplicate_across_worktrees = kept();
-        rows(&mut duplicate_across_worktrees)[0].views =
-            vec![terminal_view(21), terminal_view(22), browser_view(23, None)];
+        rows(&mut duplicate_across_worktrees)[0].views = views_of(vec![
+            terminal_view(21),
+            terminal_view(22),
+            browser_view(23, None),
+        ]);
         assert!(
             read(&duplicate_across_worktrees)
                 .unwrap_err()
-                .contains("two views with id")
+                .contains("two views have id")
+        );
+
+        let mut second_project = api::Project {
+            id: 8,
+            name: "other".to_owned(),
+            dir: "/w/other".to_owned(),
+            holds: Some(api::project::Holds::Folder(api::Worktree {
+                id: 99,
+                name: "other".to_owned(),
+                folder: "/w/other".to_owned(),
+                seen: Some(api::worktree::Seen::Unread(())),
+                views: views_of(vec![browser_view(23, None)]),
+                ..api::Worktree::default()
+            })),
+            ..api::Project::default()
+        };
+        assert!(
+            listed(&[kept(), second_project.clone()])
+                .unwrap_err()
+                .contains("two views have id")
+        );
+        second_project.id = 7;
+        assert!(
+            listed(&[kept(), second_project])
+                .unwrap_err()
+                .contains("two projects have id")
         );
 
         let mut over_layout = kept();
         let over_per_layout = u64::try_from(LAYOUT_VIEWS_MAX + 1).unwrap();
         rows(&mut over_layout)[0].terminals.clear();
-        rows(&mut over_layout)[0].views = (1..=over_per_layout)
-            .map(|id| browser_view(id, None))
-            .collect();
+        rows(&mut over_layout)[0].views = views_of(
+            (1..=over_per_layout)
+                .map(|id| browser_view(id, None))
+                .collect(),
+        );
         assert!(
             read(&over_layout)
                 .unwrap_err()
@@ -1117,13 +1187,15 @@ mod tests {
                 } else {
                     LAYOUT_VIEWS_MAX
                 };
-                entry.views = (0..count)
-                    .map(|_| {
-                        let id = next_id;
-                        next_id += 1;
-                        browser_view(id, None)
-                    })
-                    .collect();
+                entry.views = views_of(
+                    (0..count)
+                        .map(|_| {
+                            let id = next_id;
+                            next_id += 1;
+                            browser_view(id, None)
+                        })
+                        .collect(),
+                );
                 entry
             })
             .collect();
