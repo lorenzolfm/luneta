@@ -21,7 +21,7 @@ use crate::machines::Machine;
 use crate::menu::{self, Hint, ProjectTarget, Target, ViewRow};
 use crate::moonlight;
 use crate::reach::{self, Luned};
-use crate::sidebar::{self, ACCENT};
+use crate::sidebar::{self, ACCENT, SpinnerFrame};
 
 const TITLE: &str = "Ask";
 
@@ -391,7 +391,7 @@ impl Ask {
         cadence
     }
 
-    fn lines(&self, inner: usize, frame: usize) -> (Vec<Line<'static>>, Option<usize>) {
+    fn lines(&self, inner: usize, frame: SpinnerFrame) -> (Vec<Line<'static>>, Option<usize>) {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
         let mut lines = Vec::new();

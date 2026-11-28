@@ -38,8 +38,8 @@ use crate::prune;
 use crate::pull::{At, Found, Kind, Link, Readied, Ready, Wanted, Work};
 use crate::rebase;
 use crate::sidebar::{
-    self, ACCENT, LIT, Listed, Mark, NAME, Place, ProjectRow, TAG, ViewKey, ViewPlace,
-    WorktreePlace,
+    self, ACCENT, LIT, Listed, Mark, NAME, Place, ProjectRow, SpinnerFrame, TAG, ViewKey,
+    ViewPlace, WorktreePlace,
 };
 use crate::skills::{Name, Search, Skills};
 use crate::spots::{Drawn, Spots};
@@ -2479,7 +2479,7 @@ impl Menu {
         &self,
         width: usize,
         room: usize,
-        frame: usize,
+        frame: SpinnerFrame,
     ) -> (Vec<Line<'static>>, Spots<Choice>, Option<usize>) {
         let body = room.saturating_sub(2);
         let mut shown = self.shown(width, body, frame);
@@ -2554,7 +2554,7 @@ impl Menu {
         }
     }
 
-    fn shown(&self, width: usize, body_room: usize, frame: usize) -> Shown {
+    fn shown(&self, width: usize, body_room: usize, frame: SpinnerFrame) -> Shown {
         let inner = width.saturating_sub(1);
         let right = self
             .target
@@ -2912,7 +2912,7 @@ fn rebasing(branch: &Said) -> String {
     format!("Rebasing {branch} onto upstream…")
 }
 
-pub fn waiting(doing: &str, width: usize, style: Style, frame: usize) -> Vec<Line<'static>> {
+pub fn waiting(doing: &str, width: usize, style: Style, frame: SpinnerFrame) -> Vec<Line<'static>> {
     let (spinner, turning) = Mark::Busy.glyph(frame);
     let lines = wrap(doing, width.saturating_sub(2), style)
         .into_iter()
@@ -3716,7 +3716,7 @@ mod tests {
         let (menu, wants) = stays(opened(own_view(), Some('n')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ New ───────────── lune/main ─",
                 " v  new view",
@@ -3788,7 +3788,7 @@ mod tests {
         );
         let menu = asked(own_view());
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[..3],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[..3],
             [
                 "─ New worktree ────────────────",
                 " _",
@@ -3828,7 +3828,7 @@ mod tests {
     fn the_first_group_has_lune_s_keys_and_backspace_goes_back_to_it() {
         let (menu, _) = stays(opened(own_view(), None));
         assert_eq!(
-            text(&menu.lines(31, 13, 0).0),
+            text(&menu.lines(31, 13, SpinnerFrame::REST).0),
             [
                 "─ lune ──────────── lune/main ─",
                 " /  Search skills",
@@ -3848,7 +3848,7 @@ mod tests {
         let (menu, _) = stays(menu.key(&char('d')));
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[0],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[0],
             "─ lune ──────────── lune/main ─"
         );
         assert_eq!(
@@ -4010,7 +4010,7 @@ mod tests {
         let (menu, wants) = stays(opened(view_row(), Some('c')));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 10, 0).0),
+            text(&menu.lines(31, 10, SpinnerFrame::REST).0),
             [
                 "─ Skills ────────── lune/main ─",
                 " t  /thermo-nuclear-review",
@@ -4030,7 +4030,7 @@ mod tests {
         let (menu, _) = stays(opened(view_row(), Some('c')));
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
-        let lines = text(&menu.lines(31, 10, 0).0);
+        let lines = text(&menu.lines(31, 10, SpinnerFrame::REST).0);
         assert_eq!(
             [lines[0].as_str(), lines[7].as_str()],
             [
@@ -4047,7 +4047,8 @@ mod tests {
     fn the_agent_line_says_where_the_view_s_agent_picked_the_harness() {
         let pi = Picked::ByView(Harness::Pi);
         let (menu, _) = stays(Menu::open(1, view_row(), Some('c'), pi).unwrap());
-        let line = |menu: &Menu, width| text(&menu.lines(width, 10, 0).0)[7].clone();
+        let line =
+            |menu: &Menu, width| text(&menu.lines(width, 10, SpinnerFrame::REST).0)[7].clone();
         assert_eq!(
             line(&menu, 38),
             " \u{f03ff} pi, the view's  <TAB> another agent"
@@ -4243,7 +4244,7 @@ mod tests {
             }
         );
         assert!(menu.fetching());
-        let body = text(&menu.lines(40, 4, 0).0);
+        let body = text(&menu.lines(40, 4, SpinnerFrame::REST).0);
         assert!(
             body.iter()
                 .any(|line| line.ends_with("Asking gh about the checks of #328…"))
@@ -4314,7 +4315,7 @@ mod tests {
     #[test]
     fn g_r_rebases_a_view_s_branch_and_says_how_it_came_out() {
         let menu = rebasing(view_row());
-        let body = text(&menu.lines(40, 4, 0).0);
+        let body = text(&menu.lines(40, 4, SpinnerFrame::REST).0);
         assert!(
             body.iter()
                 .any(|line| line.ends_with("Rebasing feat/menu onto upstream…"))
@@ -4527,7 +4528,7 @@ mod tests {
                 "{row:?}"
             );
             let (menu, _) = stays(opened(row.clone(), None));
-            let lines = text(&menu.lines(31, 12, 0).0);
+            let lines = text(&menu.lines(31, 12, SpinnerFrame::REST).0);
             assert!(!lines.contains(&" i  File issue".to_owned()), "{lines:?}");
         }
     }
@@ -4536,7 +4537,7 @@ mod tests {
     fn the_brief_group_briefs_you_by_the_row_the_menu_is_for() {
         let (menu, _) = stays(opened(session_row(), Some('b')));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ Brief ───────────────────────",
                 " z  Brief every session",
@@ -4621,7 +4622,7 @@ mod tests {
         assert_eq!(done, Done::Rename(Machine::Local, project));
         let (menu, _) = stays(renamed(session_row(), " "));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[..3],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[..3],
             [
                 "─ Rename ──────────────────────",
                 "  _",
@@ -4663,7 +4664,7 @@ mod tests {
         );
         let (menu, _) = stays(opened(worktree_on(Machine::Local), Some('r')));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[1..3],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1..3],
             [" _", " its new name; with none, it"]
         );
         for target in [view_row(), local_header(), remote_header()] {
@@ -4685,7 +4686,7 @@ mod tests {
                 .fold(menu, |menu, c| stays(menu.key(&char(c))).0);
             let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
             assert_eq!(
-                text(&menu.lines(31, 9, 0).0),
+                text(&menu.lines(31, 9, SpinnerFrame::REST).0),
                 [
                     "─ ssh ─────────────────────────",
                     " me x_",
@@ -4699,7 +4700,7 @@ mod tests {
             });
             let (menu, _) = stays(menu.key(&char('@')));
             let (menu, _) = stays(menu.key(&char('v')));
-            let lines = text(&menu.lines(31, 9, 0).0);
+            let lines = text(&menu.lines(31, 9, SpinnerFrame::REST).0);
             assert_eq!(lines[1..3], [" me@v_", " what you type ssh to it: a"]);
             let added = closed(menu.key(&KeyEvent::from(KeyCode::Enter)));
             assert_eq!(added, Done::Ssh("me@v".parse().unwrap()));
@@ -4721,7 +4722,7 @@ mod tests {
         let vps = || Machine::Remote("me@vps".parse().unwrap());
         let root = |target: Target| {
             let (menu, _) = stays(opened(target, None));
-            text(&menu.lines(40, 13, 0).0)[1..].to_vec()
+            text(&menu.lines(40, 13, SpinnerFrame::REST).0)[1..].to_vec()
         };
         let view = Target::View(vps(), own_row());
         assert_eq!(
@@ -4758,7 +4759,7 @@ mod tests {
         );
         let (menu, _) = stays(opened(view.clone(), Some('n')));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[1..7],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1..7],
             [
                 " v  new view",
                 " h  new welcome view",
@@ -4770,7 +4771,7 @@ mod tests {
         );
         let (menu, _) = stays(opened(view.clone(), Some('d')));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[1..4],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1..4],
             [
                 " d  close the view",
                 " m  delete merged worktrees",
@@ -4837,7 +4838,7 @@ mod tests {
     fn the_merged_worktrees_key_is_on_a_row_in_a_repository_alone() {
         let (menu, _) = stays(opened(view_row(), Some('d')));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ Close ─────────── lune/main ─",
                 " d  close the view",
@@ -4895,7 +4896,7 @@ mod tests {
         assert_eq!(wants, Wants::Nothing);
         assert!(!menu.turning());
         assert_eq!(
-            text(&menu.lines(33, 20, 0).0),
+            text(&menu.lines(33, 20, SpinnerFrame::REST).0),
             [
                 "─ Close ────────────────── lune ─",
                 " Delete 3 merged worktrees?",
@@ -4908,7 +4909,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            text(&menu.lines(33, 7, 0).0),
+            text(&menu.lines(33, 7, SpinnerFrame::REST).0),
             [
                 "─ Close ────────────────── lune ─",
                 " Delete 3 merged worktrees?",
@@ -4931,7 +4932,7 @@ mod tests {
         }
         let (menu, _) = stays(menu.swept(Ok(plan)));
         assert_eq!(
-            text(&menu.lines(33, 6, 0).0),
+            text(&menu.lines(33, 6, SpinnerFrame::REST).0),
             [
                 "─ Close ────────────────── lune ─",
                 " No merged worktree to delete",
@@ -4964,8 +4965,11 @@ mod tests {
             );
             assert!(asked.pruning() && asked.turning());
             assert_eq!(
-                text(&asked.lines(40, 9, 0).0)[1],
-                format!(" {} Deleting 2 merged worktrees…", Mark::Busy.glyph(0).0)
+                text(&asked.lines(40, 9, SpinnerFrame::REST).0)[1],
+                format!(
+                    " {} Deleting 2 merged worktrees…",
+                    Mark::Busy.glyph(SpinnerFrame::REST).0
+                )
             );
         }
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one, two]))));
@@ -4980,15 +4984,21 @@ mod tests {
         );
         assert!(!menu.pruning());
         assert_eq!(
-            text(&menu.lines(40, 9, 0).0)[1],
+            text(&menu.lines(40, 9, SpinnerFrame::REST).0)[1],
             " Delete 1 merged worktree?"
         );
         let (menu, _) = stays(menu.key(&KeyEvent::from(KeyCode::Backspace)));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the view");
+        assert_eq!(
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1],
+            " d  close the view"
+        );
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
         let (menu, _) = stays(menu.key(&char('n')));
-        assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " d  close the view");
+        assert_eq!(
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1],
+            " d  close the view"
+        );
         let (menu, _) = stays(menu.key(&char('m')));
         let (menu, _) = stays(menu.swept(Ok(merged_plan(&[one]))));
         assert_eq!(
@@ -5003,7 +5013,7 @@ mod tests {
             let (menu, _) = stays(opened(view_row(), Some('d')));
             let (menu, _) = stays(menu.key(&char('m')));
             let (menu, _) = stays(menu.swept(Ok(plan)));
-            text(&menu.lines(33, 20, 0).0)[1..3].to_vec()
+            text(&menu.lines(33, 20, SpinnerFrame::REST).0)[1..3].to_vec()
         };
         let on_origin = |branch: &str| {
             prunes::Pushed::Goes(prunes::RemoteBranch {
@@ -5034,7 +5044,7 @@ mod tests {
         assert!(waiting.sweeping());
         let (listed, _) = stays(waiting.swept(Ok(merged_plan(&[]))));
         assert_eq!(
-            text(&listed.lines(33, 9, 0).0),
+            text(&listed.lines(33, 9, SpinnerFrame::REST).0),
             [
                 "─ Close ────────────────── lune ─",
                 " No merged worktree to delete",
@@ -5066,7 +5076,7 @@ mod tests {
     fn a_machine_s_header_has_the_menu_forget_it() {
         let (menu, _) = stays(opened(remote_header(), Some('d')));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ Close ───────────────────────",
                 " d  forget the machine",
@@ -5094,7 +5104,7 @@ mod tests {
     fn the_menu_lists_only_the_keys_that_work_on_its_row() {
         let at = |target: Target, group: Option<char>| {
             let (menu, _) = stays(opened(target, group));
-            text(&menu.lines(40, 14, 0).0)[1..].to_vec()
+            text(&menu.lines(40, 14, SpinnerFrame::REST).0)[1..].to_vec()
         };
         assert_eq!(
             at(session_row(), None),
@@ -5170,7 +5180,10 @@ mod tests {
         let press = |target: &Target, group: Option<char>, key: char| {
             let (menu, _) = stays(opened(target.clone(), group));
             let (menu, wants) = stays(menu.key(&char(key)));
-            (text(&menu.lines(31, 9, 0).0)[0].clone(), wants)
+            (
+                text(&menu.lines(31, 9, SpinnerFrame::REST).0)[0].clone(),
+                wants,
+            )
         };
         let first = || ("─ lune ────────────────────────".to_owned(), Wants::Nothing);
         let new = || ("─ New ─────────────────────────".to_owned(), Wants::Nothing);
@@ -5220,23 +5233,23 @@ mod tests {
             }
         );
         assert_eq!(
-            text(&menu.lines(31, 6, 0).0)[..3],
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[..3],
             ["─ Skills ────────── lune/main ─", " _", " finding skills…"]
         );
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
-        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4]
+        let lit: Vec<_> = menu.lines(31, 6, SpinnerFrame::REST).0[2..4]
             .iter()
             .map(|line| line.style.bg)
             .collect();
         assert_eq!(lit, [Some(LIT), None]);
         assert_eq!(
-            text(&menu.lines(31, 6, 0).0)[4],
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[4],
             " \u{ec82} claude  <TAB> another agent"
         );
         let (menu, _) = stays(menu.key(&char('t')));
         let (menu, _) = stays(menu.key(&char('i')));
         assert_eq!(
-            text(&menu.lines(31, 6, 0).0)[..3],
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[..3],
             [
                 "─ Skills ────────── lune/main ─".to_owned(),
                 " ti_".to_owned(),
@@ -5265,15 +5278,21 @@ mod tests {
             }
         );
         assert_eq!(
-            text(&menu.lines(31, 6, 0).0)[..3],
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[..3],
             ["─ Skills ────────── lune/main ─", " t_", " finding skills…",]
         );
         menu.found(CLAUDE, Ok(skills(&["tigerstyle"])));
-        assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " finding skills…");
-        menu.found(Harness::Pi, Ok(skills(&["tdd", "code-review"])));
-        assert_eq!(text(&menu.lines(31, 6, 0).0)[2], " /tdd  tdd it");
         assert_eq!(
-            text(&menu.lines(31, 6, 0).0)[4],
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[2],
+            " finding skills…"
+        );
+        menu.found(Harness::Pi, Ok(skills(&["tdd", "code-review"])));
+        assert_eq!(
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[2],
+            " /tdd  tdd it"
+        );
+        assert_eq!(
+            text(&menu.lines(31, 6, SpinnerFrame::REST).0)[4],
             " \u{f03ff} pi  <TAB> another agent"
         );
         let (_, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Enter)));
@@ -5289,7 +5308,7 @@ mod tests {
         let (mut menu, _) = stays(opened(view_row(), Some('/')));
         menu.found(CLAUDE, Ok(skills(&["code-review", "tigerstyle"])));
         let skill = |name: &str| Name::new(name.to_owned()).expect("a name");
-        let (_, spots, _) = menu.lines(31, 6, 0);
+        let (_, spots, _) = menu.lines(31, 6, SpinnerFrame::REST);
         assert_eq!(spots.at(Position::new(4, 1)), None);
         assert_eq!(
             spots.at(Position::new(4, 2)),
@@ -5300,7 +5319,7 @@ mod tests {
             Some(&Choice::Skill(skill("tigerstyle")))
         );
         menu.scroll(1);
-        let lit: Vec<_> = menu.lines(31, 6, 0).0[2..4]
+        let lit: Vec<_> = menu.lines(31, 6, SpinnerFrame::REST).0[2..4]
             .iter()
             .map(|line| line.style.bg)
             .collect();
@@ -5315,7 +5334,12 @@ mod tests {
             .words()
             .to_vec();
         assert_eq!(wants, beside_row(command));
-        assert_eq!(menu.lines(31, 6, 0).1.at(Position::new(4, 3)), None);
+        assert_eq!(
+            menu.lines(31, 6, SpinnerFrame::REST)
+                .1
+                .at(Position::new(4, 3)),
+            None
+        );
         let (_, wants) = stays(menu.pick(&skill("tigerstyle")));
         assert_eq!(wants, Wants::Nothing);
     }
@@ -5402,7 +5426,7 @@ mod tests {
         let (menu, wants) = stays(menu.planned(Ok(plan(busy()))));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ Close ─────────── lune/main ─",
                 " Close the view? 1 agent, 1",
@@ -5425,7 +5449,7 @@ mod tests {
         let waiting = || vec![(4, Doing::Waiting)];
         let (menu, wants) = stays(menu.planned(Ok(plan(waiting()))));
         assert_eq!(wants, Wants::Nothing);
-        let asking = text(&menu.lines(31, 9, 0).0);
+        let asking = text(&menu.lines(31, 9, SpinnerFrame::REST).0);
         assert_eq!(asking[1..3], [" Close the view? 1 agent, 1", " waiting"]);
         let (menu, _) = stays(menu.key(&char('y')));
         let act = Act::View(ViewKey::terminal(4));
@@ -5459,7 +5483,7 @@ mod tests {
         let (menu, wants) = stays(menu.planned(Ok(worktree_plan(vec![(5, Doing::Unknown)]))));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[1..4],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1..4],
             [
                 " Close the worktree? 1 agent,",
                 " 1 unknown",
@@ -5494,7 +5518,7 @@ mod tests {
             assert_eq!(wants, Wants::Plan { session, scope });
             let (menu, _) = stays(menu.planned(Ok(planned(vec![(4, Doing::Busy)]))));
             assert_eq!(
-                text(&menu.lines(31, 9, 0).0)[1..3],
+                text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1..3],
                 [" Close project lune? 1 agent,", " 1 busy",]
             );
             let (menu, _) = stays(menu.key(&char('d')));
@@ -5503,7 +5527,7 @@ mod tests {
             let (menu, _) = stays(opened(project_on(on.clone()), Some('d')));
             let (menu, _) = stays(menu.key(&char('d')));
             let (menu, _) = stays(menu.planned(Ok(planned(Vec::new()))));
-            let asks = text(&menu.lines(31, 9, 0).0)[1..3].to_vec();
+            let asks = text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1..3].to_vec();
             assert_eq!(
                 asks,
                 [
@@ -5734,7 +5758,7 @@ mod tests {
     fn the_menu_for_a_pull_request_has_a_key_for_a_worktree_and_one_for_a_review() {
         let menu = Menu::pull(1, view_row(), link(), CLAUDE);
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " r  /thermo-nuclear-review",
@@ -5749,11 +5773,14 @@ mod tests {
         let syncing = Menu::pull(1, view_row(), link(), CLAUDE);
         let (syncing, wants) = stays(syncing.key(&char('r')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AtHead));
-        assert_eq!(text(&syncing.lines(31, 9, 0).0)[1], " ⠋ Syncing #2736…");
+        assert_eq!(
+            text(&syncing.lines(31, 9, SpinnerFrame::REST).0)[1],
+            " ⠋ Syncing #2736…"
+        );
         let (menu, wants) = stays(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " ⠋ Making a worktree of #2736…",
@@ -5761,7 +5788,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            text(&menu.lines(31, 9, 3).0)[1],
+            text(&menu.lines(31, 9, SpinnerFrame::F3).0)[1],
             " ⠸ Making a worktree of #2736…"
         );
         assert!(menu.turning());
@@ -5806,7 +5833,10 @@ mod tests {
                 "no view is in it"
             );
             assert!(menu.opens_pulled());
-            assert_eq!(text(&menu.lines(31, 9, 0).0)[1], " ⠋ Opening #2736…");
+            assert_eq!(
+                text(&menu.lines(31, 9, SpinnerFrame::REST).0)[1],
+                " ⠋ Opening #2736…"
+            );
             assert!(menu.turning());
         }
         let there = || At::There(ViewPlace::new_in("cdk", 2, 1, 9));
@@ -5841,13 +5871,15 @@ mod tests {
         let menu = Menu::pull(1, view_row(), link(), CLAUDE);
         let tab = KeyEvent::from(KeyCode::Tab);
         assert_eq!(
-            menu.lines(31, 9, 0).1.at(Position::new(5, 3)),
+            menu.lines(31, 9, SpinnerFrame::REST)
+                .1
+                .at(Position::new(5, 3)),
             Some(&Choice::Key(tab))
         );
         let (menu, wants) = stays(menu.key(&tab));
         assert_eq!(wants, Wants::Keep(Harness::Pi));
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0)[3],
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0)[3],
             " \u{f03ff} pi  <TAB> another agent"
         );
         let (menu, _) = stays(menu.key(&char('r')));
@@ -5880,7 +5912,7 @@ mod tests {
         let issue = Work::Link(link.clone());
         let menu = Menu::pull(1, view_row(), issue.clone(), CLAUDE);
         assert_eq!(
-            text(&menu.lines(31, 9, 0).0),
+            text(&menu.lines(31, 9, SpinnerFrame::REST).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " t  tackle",
@@ -5938,7 +5970,7 @@ mod tests {
             " opens it",
             " <ESC> - Close",
         ];
-        let (lines, spots, _) = menu.lines(31, 9, 0);
+        let (lines, spots, _) = menu.lines(31, 9, SpinnerFrame::REST);
         assert_eq!(text(&lines), refused);
         assert_eq!(
             spots.at(Position::new(4, 2)),
@@ -5947,7 +5979,7 @@ mod tests {
 
         let (menu, wants) = stays(menu.key(&char('x')));
         assert_eq!(wants, Wants::Nothing);
-        assert_eq!(text(&menu.lines(31, 9, 0).0), refused);
+        assert_eq!(text(&menu.lines(31, 9, SpinnerFrame::REST).0), refused);
 
         let (menu, wants) = stays(menu.key(&char('w')));
         assert_eq!(wants, Wants::Pull(issue, Wanted::AsItIs));
@@ -5966,7 +5998,7 @@ mod tests {
         let (menu, wants) = stays(pulling('r').pulled(Ok(here(ready.clone()))));
         assert_eq!(wants, Wants::Nothing);
         assert_eq!(
-            text(&menu.lines(31, 11, 0).0),
+            text(&menu.lines(31, 11, SpinnerFrame::REST).0),
             [
                 "─ #2736 ──────── cashubtc/cdk ─",
                 " r  /thermo-nuclear-review",
@@ -6005,7 +6037,7 @@ mod tests {
         };
         let menu = Menu::pull(1, view_row(), file(), CLAUDE);
         assert_eq!(
-            text(&menu.lines(38, 9, 0).0),
+            text(&menu.lines(38, 9, SpinnerFrame::REST).0),
             [
                 "─ sync-rework ─ plans/sync-rework.md ─",
                 " t  tackle",
@@ -6019,7 +6051,7 @@ mod tests {
         let (menu, wants) = stays(menu.key(&char('t')));
         assert_eq!(wants, Wants::Pull(file(), Wanted::AsItIs));
         assert_eq!(
-            text(&menu.lines(38, 9, 0).0)[1],
+            text(&menu.lines(38, 9, SpinnerFrame::REST).0)[1],
             " ⠋ Making a worktree of sync-rework…"
         );
         let (folder, real) = (

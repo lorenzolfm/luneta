@@ -38,8 +38,8 @@ use crate::projected::{self, Projected};
 use crate::reach::{self, Luned};
 use crate::screen;
 use crate::sidebar::{
-    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, Place, ProjectRow, ViewKey,
-    ViewPlace, WorktreePlace,
+    self, ACCENT, ERROR, Finder, Fit, Keep, LIT, Listed, Mark, NAME, Place, ProjectRow,
+    SpinnerFrame, ViewKey, ViewPlace, WorktreePlace,
 };
 use crate::spots::{Drawn, Spots};
 use crate::worktrees::Folder;
@@ -2289,7 +2289,13 @@ impl Picker {
         Some((agents.iter().find(|seated| seated.place == *view)?, agents))
     }
 
-    fn row_line(&self, row: &Row, width: usize, frame: usize, now: SystemTime) -> Line<'static> {
+    fn row_line(
+        &self,
+        row: &Row,
+        width: usize,
+        frame: SpinnerFrame,
+        now: SystemTime,
+    ) -> Line<'static> {
         let bold = Style::new().add_modifier(Modifier::BOLD);
         let dim = Style::new().add_modifier(Modifier::DIM);
         let grey = Style::new().fg(moonlight::MUTE);
