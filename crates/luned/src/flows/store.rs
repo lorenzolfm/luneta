@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
-use lune_domain::flows::{FLOWS_MAX, FlowRegistry, SESSION_ID_BYTES_MAX};
+use lune_domain::flows::{FLOWS_MAX, FlowRegistry, SESSION_ID_BYTES_MAX, SessionId};
 use lune_domain::projects::WorktreeId;
 
 use crate::log;
@@ -256,7 +256,7 @@ pub fn forget() -> Result<(), String> {
     forget_in(&folder)
 }
 
-pub fn read_session_out(path: &Path) -> Result<Option<String>, String> {
+pub fn read_session_out(path: &Path) -> Result<Option<SessionId>, String> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -275,7 +275,12 @@ pub fn read_session_out(path: &Path) -> Result<Option<String>, String> {
     }
     let text = String::from_utf8(bytes).map_err(|error| format!("{}: {error}", path.display()))?;
     let trimmed = text.trim();
-    Ok((!trimmed.is_empty()).then(|| trimmed.to_owned()))
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    SessionId::parse(trimmed)
+        .map(Some)
+        .map_err(|why| format!("{}: {why}", path.display()))
 }
 
 pub fn remove_run_files(paths: &[PathBuf]) {
@@ -320,14 +325,21 @@ mod tests {
     }
 
     #[test]
-    fn read_session_out_handles_missing_valid_and_oversized_files() {
+    fn read_session_out_handles_missing_valid_invalid_and_oversized_files() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing.id");
         assert_eq!(read_session_out(&missing), Ok(None));
 
         let valid = dir.path().join("valid.id");
         fs::write(&valid, "sess-42\n").unwrap();
-        assert_eq!(read_session_out(&valid), Ok(Some("sess-42".to_owned())));
+        assert_eq!(
+            read_session_out(&valid),
+            Ok(Some(SessionId::parse("sess-42").unwrap()))
+        );
+
+        let flag_like = dir.path().join("flag.id");
+        fs::write(&flag_like, "-bad\n").unwrap();
+        assert!(read_session_out(&flag_like).is_err());
 
         let oversized = dir.path().join("oversized.id");
         fs::write(&oversized, "a".repeat(SESSION_ID_BYTES_MAX + 1)).unwrap();

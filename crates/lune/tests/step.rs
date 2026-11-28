@@ -87,10 +87,102 @@ fn two_turn_claude_resumes_captured_session_and_emits_divider_and_osc() {
 }
 
 #[test]
+fn two_turn_agy_attaches_prompt_resumes_session_and_renders_stream() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_file = dir.path().join("agy-invocations.log");
+    let session_out = dir.path().join("agy-session.id");
+    let body = format!(
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do printf '%s|' \"$arg\"; done >> \"{}\"\n\
+         printf '\\n' >> \"{}\"\n\
+         case \"$*\" in\n\
+           *--resume*)\n\
+             printf '%s\\n' '{{\"event\":\"init\",\"conversation_id\":\"conv-88\",\"init\":{{\"cwd\":\"/w\",\"permission_mode\":\"always-proceed\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":4,\"state\":\"DONE\",\"step_type\":\"user_input\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":5,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"read_file\",\"tool_info\":{{\"name\":\"read_file\",\"parameters\":{{\"Path\":\"/w/missing.rs\"}}}}}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":5,\"state\":\"ERROR\",\"step_type\":\"tool\",\"tool_name\":\"read_file\",\"tool_info\":{{\"name\":\"read_file\",\"parameters\":{{\"Path\":\"/w/missing.rs\"}},\"error\":{{\"type\":\"TOOL_ERROR\",\"message\":\"file does not exist\"}}}}}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":6,\"state\":\"ACTIVE\",\"step_type\":\"agent_response\",\"text_delta\":\"Fixed and \"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":6,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"pushed.\\n\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"conversation_id\":\"conv-88\",\"status\":\"SUCCESS\",\"response\":\"Fixed and pushed.\\n\",\"num_turns\":2}}}}'\n\
+             ;;\n\
+           *)\n\
+             printf '%s\\n' '{{\"event\":\"init\",\"conversation_id\":\"conv-88\",\"init\":{{\"cwd\":\"/w\",\"permission_mode\":\"always-proceed\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":0,\"state\":\"DONE\",\"step_type\":\"user_input\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":1,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"run_command\",\"tool_info\":{{\"name\":\"run_command\",\"parameters\":{{\"CommandLine\":\"git diff main..HEAD\"}}}}}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"run_command\",\"tool_info\":{{\"name\":\"run_command\",\"parameters\":{{\"CommandLine\":\"git diff main..HEAD\"}},\"output\":\"ok\"}}}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":2,\"state\":\"ACTIVE\",\"step_type\":\"agent_response\",\"text_delta\":\"Found 1 issue.\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"step_update\",\"step_update\":{{\"conversation_id\":\"conv-88\",\"step_index\":2,\"state\":\"DONE\",\"step_type\":\"agent_response\",\"text_delta\":\"\\n\"}}}}'\n\
+             printf '%s\\n' '{{\"event\":\"result\",\"result\":{{\"conversation_id\":\"conv-88\",\"status\":\"SUCCESS\",\"response\":\"Found 1 issue.\\n\",\"num_turns\":1}}}}'\n\
+             ;;\n\
+         esac\n",
+        log_file.display(),
+        log_file.display()
+    );
+    write_script(dir.path(), "agy", &body);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_lune"))
+        .env("PATH", path_with_front(dir.path()))
+        .args([
+            "_step",
+            "--harness",
+            "agy",
+            "--stage",
+            "tigerstyle",
+            "--prompt",
+            "/tigerstyle main..HEAD",
+            "--followup",
+            "Act on findings and push",
+            "--session-out",
+        ])
+        .arg(&session_out)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.matches("▸ run_command: git diff main..HEAD").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("Found 1 issue."), "{stdout}");
+    assert!(stdout.contains(ACTING_DIVIDER), "{stdout}");
+    assert_eq!(
+        stdout.matches("▸ read_file: /w/missing.rs").count(),
+        1,
+        "{stdout}"
+    );
+    assert!(stdout.contains("✗ read_file failed"), "{stdout}");
+    assert!(stdout.contains("Fixed and pushed."), "{stdout}");
+    assert!(
+        stdout.contains("7501;state=working:app=antigravity"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("7501;state=done:app=antigravity"),
+        "{stdout}"
+    );
+    assert_eq!(fs::read_to_string(&session_out).unwrap().trim(), "conv-88");
+    let calls = fs::read_to_string(&log_file).unwrap();
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "--output-format|stream-json|--dangerously-skip-permissions|-p=/tigerstyle main..HEAD|",
+            "--output-format|stream-json|--dangerously-skip-permissions|--resume|conv-88|-p=Act on findings and push|",
+        ]
+    );
+}
+
+#[test]
 fn missing_session_id_fails_before_turn_2_and_emits_osc_error() {
     let dir = tempfile::tempdir().unwrap();
     let body = "#!/bin/sh\n\
-        printf '%s\\n' '{\"type\":\"result\",\"status\":\"SUCCESS\",\"response\":\"No session\"}'\n";
+        printf '%s\\n' '{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"No session\"}}'\n";
     write_script(dir.path(), "agy", body);
 
     let output = Command::new(env!("CARGO_BIN_EXE_lune"))
@@ -294,4 +386,46 @@ fn a_claude_turn_without_a_result_record_fails() {
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("without a result record"), "{stdout}");
+    assert!(stdout.contains("1 lines did not parse"), "{stdout}");
+}
+
+#[test]
+fn deduplicated_agy_records_do_not_count_as_unparsed_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "#!/bin/sh\n\
+        printf '%s\\n' '{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"read_file\"}}'\n\
+        printf '%s\\n' '{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"ACTIVE\",\"step_type\":\"tool\",\"tool_name\":\"read_file\"}}'\n\
+        printf '%s\\n' '{\"event\":\"step_update\",\"step_update\":{\"step_index\":0,\"state\":\"DONE\",\"step_type\":\"user_input\"}}'\n";
+    write_script(dir.path(), "agy", body);
+    let output = step_command(dir.path(), "agy").output().unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0 lines did not parse"), "{stdout}");
+}
+
+#[test]
+fn invalid_pi_session_flags_fail_cleanly_at_cli_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for bad in ["   ", "-flag.jsonl"] {
+        let output = step_command(dir.path(), "pi")
+            .arg(format!("--pi-session={bad}"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("--pi-session"), "{stderr}");
+        assert!(!stderr.contains("panicked"), "{stderr}");
+    }
+
+    let wrong_harness = step_command(dir.path(), "agy")
+        .args(["--pi-session", "/tmp/pi.jsonl"])
+        .output()
+        .unwrap();
+    assert!(!wrong_harness.status.success());
+    let stderr = String::from_utf8_lossy(&wrong_harness.stderr);
+    assert!(
+        stderr.contains("--pi-session is only valid with --harness pi"),
+        "{stderr}"
+    );
 }
