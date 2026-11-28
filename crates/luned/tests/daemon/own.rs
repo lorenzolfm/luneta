@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::convert::Infallible;
 use std::env;
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -9,7 +11,7 @@ use lune_waits::{Span, eventually, eventually_showing};
 use luned::mux::own::api::mux_client::MuxClient;
 use luned::mux::own::api::{self as mux_api, InfoRequest, InfoResponse, ListRequest, Listing};
 use luned::mux::own::server;
-use luned::{ALONE, SWEEP};
+use luned::{ALONE, PeerPid, ProcessExit, SWEEP};
 use tempfile::TempDir;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::Status;
@@ -76,9 +78,10 @@ fn files_in(path: &Path, files: &mut Vec<PathBuf>) {
 }
 
 pub struct Owned {
-    pub host: Host,
     daemon: Option<Daemon>,
+    pub host: Host,
     runtime: tokio::runtime::Runtime,
+    mux_stalled: Cell<bool>,
 }
 
 impl Owned {
@@ -91,9 +94,10 @@ impl Owned {
             .build()
             .unwrap();
         Owned {
-            host,
             daemon: Some(daemon),
+            host,
             runtime,
+            mux_stalled: Cell::new(false),
         }
     }
 
@@ -102,10 +106,8 @@ impl Owned {
     }
 
     pub fn daemon_ended(&mut self, what: &str) -> std::process::ExitStatus {
-        self.daemon
-            .as_mut()
-            .expect("a daemon was started")
-            .ended(what)
+        let mut daemon = self.daemon.take().expect("a daemon was started");
+        daemon.ended(what)
     }
 
     pub fn start_daemon(&mut self) {
@@ -206,32 +208,63 @@ impl Owned {
     }
 
     pub fn kill_mux(&self) {
-        if let Some(pid) = self.mux_pid() {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-        }
-    }
-
-    pub fn stall_mux(&self) -> StalledMux {
-        let pid = self.mux_pid().expect("lune-mux listens");
-        assert_ne!(
-            pid,
-            rustix::process::getpid(),
-            "lune-mux is not the test process"
+        assert!(
+            !self.mux_stalled.get(),
+            "resume StalledMux before killing lune-mux"
         );
-        rustix::process::kill_process(pid, rustix::process::Signal::STOP)
-            .expect("lune-mux takes SIGSTOP");
-        let stalled = StalledMux(pid);
-        eventually_showing("lune-mux stops", || mux_stopped(pid));
-        stalled
+        let Some(pid) = self.mux_pid() else {
+            return;
+        };
+        let Some(exit) = ProcessExit::watch(pid.as_pid())
+            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit watch failed: {error}"))
+        else {
+            return;
+        };
+        match exit.signal(rustix::process::Signal::KILL) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::SRCH) => return,
+            Err(error) => panic!("lune-mux (pid {pid}) did not take SIGKILL: {error}"),
+        }
+        self.runtime
+            .block_on(lune_waits::awaited("lune-mux exits", exit.wait()))
+            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit wait failed: {error}"));
     }
 
-    fn mux_pid(&self) -> Option<rustix::process::Pid> {
+    pub fn stall_mux(&self) -> StalledMux<'_> {
+        assert!(
+            !self.mux_stalled.get(),
+            "lune-mux is already stalled by an active StalledMux guard"
+        );
+        let pid = self.mux_pid().expect("lune-mux listens");
+        let handle = MuxHandle::watch(pid)
+            .unwrap_or_else(|| panic!("lune-mux (pid {pid}) exited before stopping"));
+        let mut pending = PendingStall::begin(self, handle);
+        pending.signal_stop();
+        eventually_showing("lune-mux stops", || match mux_stopped(pending.handle()) {
+            MuxStopCheck::Stopped => Ok(()),
+            MuxStopCheck::Pending(reason) => Err(reason),
+            MuxStopCheck::Ended(ended) => {
+                pending.disarm();
+                panic!("lune-mux (pid {pid}) ended before stopping: {ended}");
+            }
+        });
+        pending.confirm()
+    }
+
+    fn mux_pid(&self) -> Option<MuxPid> {
         let socket = self.socket();
+        let own_uid = rustix::process::getuid().as_raw();
         let listening = self.runtime.block_on(async move {
             let stream = tokio::net::UnixStream::connect(socket).await.ok()?;
-            stream.peer_cred().ok()?.pid()
-        });
-        listening.and_then(rustix::process::Pid::from_raw)
+            let cred = stream.peer_cred().ok()?;
+            assert_eq!(
+                cred.uid(),
+                own_uid,
+                "another user's process listens on mux.sock"
+            );
+            cred.pid()
+        })?;
+        Some(MuxPid::from_raw(listening).expect("lune-mux pid is > 1 and not the test process"))
     }
 
     pub fn stand_in_mux(&self, says: Option<&str>) -> Running {
@@ -245,9 +278,10 @@ impl Owned {
             command.env(STAND_IN_SAYS, says);
         }
         let stand_in = Running::spawn(&mut command);
-        let pid = rustix::process::Pid::from_raw(i32::try_from(stand_in.pid()).unwrap());
+        let pid = MuxPid::from_u32(stand_in.pid())
+            .expect("stand-in lune-mux pid is > 1 and not the test process");
         eventually("the stand-in lune-mux listens", || {
-            (self.mux_pid() == pid).then_some(())
+            (self.mux_pid() == Some(pid)).then_some(())
         });
         stand_in
     }
@@ -343,18 +377,231 @@ impl UnaryService<InfoRequest> for Says {
     }
 }
 
-#[must_use]
-pub struct StalledMux(rustix::process::Pid);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MuxPid(PeerPid);
 
-impl Drop for StalledMux {
+impl MuxPid {
+    fn from_raw(raw: i32) -> Option<Self> {
+        let peer = PeerPid::from_raw(raw)?;
+        (peer.as_pid() != rustix::process::getpid()).then_some(Self(peer))
+    }
+
+    fn from_u32(raw: u32) -> Option<Self> {
+        let peer = PeerPid::new(raw)?;
+        (peer.as_pid() != rustix::process::getpid()).then_some(Self(peer))
+    }
+
+    fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    fn as_pid(self) -> rustix::process::Pid {
+        self.0.as_pid()
+    }
+}
+
+impl fmt::Display for MuxPid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+struct MuxHandle {
+    pid: MuxPid,
+    exit: ProcessExit,
+    #[cfg(target_os = "macos")]
+    start_time: u64,
+}
+
+impl MuxHandle {
+    fn watch(pid: MuxPid) -> Option<Self> {
+        let exit = ProcessExit::watch(pid.as_pid())
+            .unwrap_or_else(|error| panic!("lune-mux (pid {pid}) exit watch failed: {error}"))?;
+        #[cfg(target_os = "macos")]
+        let (start_time, _) = macos_process_info(pid)?;
+        Some(Self {
+            pid,
+            exit,
+            #[cfg(target_os = "macos")]
+            start_time,
+        })
+    }
+
+    fn resume(&self) {
+        #[cfg(target_os = "macos")]
+        if macos_process_info(self.pid).is_none_or(|(start_time, _)| start_time != self.start_time)
+        {
+            return;
+        }
+        match self.exit.signal(rustix::process::Signal::CONT) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(error) if std::thread::panicking() => {
+                eprintln!(
+                    "lune-mux (pid {}) did not take SIGCONT while unwinding: {error}",
+                    self.pid
+                );
+            }
+            Err(error) => panic!("lune-mux (pid {}) did not take SIGCONT: {error}", self.pid),
+        }
+    }
+}
+
+struct PendingStall<'a> {
+    owned: &'a Owned,
+    handle: Option<MuxHandle>,
+}
+
+impl<'a> PendingStall<'a> {
+    fn begin(owned: &'a Owned, handle: MuxHandle) -> Self {
+        owned.mux_stalled.set(true);
+        Self {
+            owned,
+            handle: Some(handle),
+        }
+    }
+
+    fn handle(&self) -> &MuxHandle {
+        self.handle
+            .as_ref()
+            .expect("pending stall holds its handle")
+    }
+
+    fn signal_stop(&mut self) {
+        let handle = self.handle();
+        let pid = handle.pid;
+        match handle.exit.signal(rustix::process::Signal::STOP) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::SRCH) => {
+                self.disarm();
+                panic!("lune-mux (pid {pid}) exited before SIGSTOP");
+            }
+            Err(error) => {
+                self.disarm();
+                panic!("lune-mux (pid {pid}) did not take SIGSTOP: {error}");
+            }
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.handle = None;
+        self.owned.mux_stalled.set(false);
+    }
+
+    fn confirm(mut self) -> StalledMux<'a> {
+        let handle = self.handle.take().expect("pending stall holds its handle");
+        StalledMux {
+            owned: self.owned,
+            handle,
+        }
+    }
+}
+
+impl Drop for PendingStall<'_> {
     fn drop(&mut self) {
-        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::CONT);
+        if let Some(handle) = self.handle.take() {
+            handle.resume();
+            self.owned.mux_stalled.set(false);
+        }
+    }
+}
+
+#[must_use]
+pub struct StalledMux<'a> {
+    owned: &'a Owned,
+    handle: MuxHandle,
+}
+
+impl Drop for StalledMux<'_> {
+    fn drop(&mut self) {
+        self.handle.resume();
+        self.owned.mux_stalled.set(false);
+    }
+}
+
+enum MuxStopCheck {
+    Stopped,
+    Pending(StopPending),
+    Ended(StopEnded),
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskState {
+    Stopped,
+    TracingStopped,
+    Zombie,
+    Dead,
+    Running,
+    Sleeping,
+    DiskSleep,
+    Idle,
+    Waking,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum TaskStatError {
+    MissingCommOpen,
+    MissingCommClose,
+    InvertedComm,
+    InvalidTid,
+    MismatchedTid {
+        expected: std::num::NonZeroU32,
+        actual: u32,
+    },
+    InvalidAfterCommUtf8,
+    MissingState,
+    UnknownState(String),
+}
+
+#[cfg(target_os = "linux")]
+enum StopPending {
+    ThreadVanished(std::io::ErrorKind),
+    ThreadExited(std::num::NonZeroU32),
+    ThreadEnding(std::num::NonZeroU32, TaskState),
+    ThreadActive(std::num::NonZeroU32, TaskState),
+    NoThreads,
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Debug for StopPending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StopPending::ThreadVanished(kind) => {
+                write!(f, "lune-mux thread vanished during scan ({kind:?})")
+            }
+            StopPending::ThreadExited(tid) => write!(f, "lune-mux thread {tid} exited mid-scan"),
+            StopPending::ThreadEnding(tid, state) => {
+                write!(f, "lune-mux thread {tid} is ending in state {state:?}")
+            }
+            StopPending::ThreadActive(tid, state) => {
+                write!(f, "lune-mux thread {tid} is in state {state:?}")
+            }
+            StopPending::NoThreads => f.write_str("/proc task directory held no threads"),
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn mux_stopped(pid: rustix::process::Pid) -> Result<(), String> {
+enum StopEnded {
+    Exited,
+    MainThread(TaskState),
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Display for StopEnded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StopEnded::Exited => f.write_str("exited"),
+            StopEnded::MainThread(state) => write!(f, "main thread in state {state:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
     use std::io::ErrorKind;
+    use std::num::NonZeroU32;
 
     const TASKS_MAX: usize = 256;
     const _: () = assert!(TASKS_MAX > 0);
@@ -363,10 +610,10 @@ fn mux_stopped(pid: rustix::process::Pid) -> Result<(), String> {
         error.kind() == ErrorKind::NotFound
             || rustix::io::Errno::from_io_error(error) == Some(rustix::io::Errno::SRCH)
     };
-    let raw = u32::try_from(pid.as_raw_nonzero().get()).expect("a Unix pid is positive");
+    let raw = handle.pid.get();
     let tasks = match fs::read_dir(format!("/proc/{raw}/task")) {
         Ok(tasks) => tasks,
-        Err(error) if gone(&error) => panic!("lune-mux (pid {raw}) exited before stopping"),
+        Err(error) if gone(&error) => return MuxStopCheck::Ended(StopEnded::Exited),
         Err(error) => panic!("/proc/{raw}/task did not read: {error}"),
     };
     let mut tasks_count = 0;
@@ -378,99 +625,182 @@ fn mux_stopped(pid: rustix::process::Pid) -> Result<(), String> {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) if gone(&error) => {
-                return Err(format!("lune-mux thread vanished during scan: {error}"));
+                return MuxStopCheck::Pending(StopPending::ThreadVanished(error.kind()));
             }
             Err(error) => panic!("/proc/{raw}/task entry did not read: {error}"),
         };
         let tid_name = entry.file_name();
-        let tid: u32 = tid_name
+        let tid: NonZeroU32 = tid_name
             .to_str()
             .and_then(|name| name.parse().ok())
-            .unwrap_or_else(|| panic!("/proc/{raw}/task entry {tid_name:?} is not a numeric tid"));
+            .unwrap_or_else(|| {
+                panic!("/proc/{raw}/task entry {tid_name:?} is not a positive numeric tid")
+            });
         let stat = match fs::read(entry.path().join("stat")) {
             Ok(stat) => stat,
             Err(error) if gone(&error) => {
-                return Err(format!("lune-mux thread {tid} exited mid-scan: {error}"));
+                return MuxStopCheck::Pending(StopPending::ThreadExited(tid));
             }
             Err(error) => panic!("/proc/{raw}/task/{tid}/stat did not read: {error}"),
         };
-        let state = task_stat_state(&stat, raw, tid);
+        let state = parse_task_stat(&stat, tid).unwrap_or_else(|error| {
+            panic!("/proc/{raw}/task/{tid}/stat failed to parse: {error:?}")
+        });
         match state {
-            "T" | "t" => {}
-            "Z" | "X" | "x" => {
-                assert_ne!(
-                    tid, raw,
-                    "lune-mux (pid {raw}) ended in state {state} before stopping"
-                );
-                return Err(format!("lune-mux thread {tid} is ending in state {state}"));
+            TaskState::Stopped | TaskState::TracingStopped => {}
+            TaskState::Zombie | TaskState::Dead => {
+                if tid.get() == raw {
+                    return MuxStopCheck::Ended(StopEnded::MainThread(state));
+                }
+                return MuxStopCheck::Pending(StopPending::ThreadEnding(tid, state));
             }
-            other => return Err(format!("lune-mux thread {tid} is in state {other}")),
+            TaskState::Running
+            | TaskState::Sleeping
+            | TaskState::DiskSleep
+            | TaskState::Idle
+            | TaskState::Waking => {
+                return MuxStopCheck::Pending(StopPending::ThreadActive(tid, state));
+            }
         }
         tasks_count += 1;
     }
     if tasks_count == 0 {
-        return Err(format!("/proc/{raw}/task held no threads"));
+        return MuxStopCheck::Pending(StopPending::NoThreads);
     }
-    Ok(())
+    MuxStopCheck::Stopped
 }
 
 #[cfg(target_os = "linux")]
-fn task_stat_state(stat: &[u8], pid: u32, tid: u32) -> &str {
+fn parse_task_stat(
+    stat: &[u8],
+    expected_tid: std::num::NonZeroU32,
+) -> Result<TaskState, TaskStatError> {
     let comm_start_index = stat
         .iter()
         .position(|byte| *byte == b'(')
-        .unwrap_or_else(|| panic!("/proc/{pid}/task/{tid}/stat has no '('"));
+        .ok_or(TaskStatError::MissingCommOpen)?;
     let comm_end_index = stat
         .iter()
         .rposition(|byte| *byte == b')')
-        .unwrap_or_else(|| panic!("/proc/{pid}/task/{tid}/stat has no ')'"));
-    assert!(
-        comm_start_index < comm_end_index,
-        "/proc/{pid}/task/{tid}/stat has ')' before '('"
-    );
+        .ok_or(TaskStatError::MissingCommClose)?;
+    if comm_start_index >= comm_end_index {
+        return Err(TaskStatError::InvertedComm);
+    }
     let parsed_tid: u32 = std::str::from_utf8(&stat[..comm_start_index])
-        .expect("/proc stat tid prefix is UTF-8")
+        .map_err(|_| TaskStatError::InvalidTid)?
         .trim()
         .parse()
-        .expect("/proc stat tid prefix is a u32");
-    assert_eq!(
-        parsed_tid, tid,
-        "/proc/{pid}/task/{tid}/stat belongs to another thread"
-    );
+        .map_err(|_| TaskStatError::InvalidTid)?;
+    if parsed_tid != expected_tid.get() {
+        return Err(TaskStatError::MismatchedTid {
+            expected: expected_tid,
+            actual: parsed_tid,
+        });
+    }
     let after_comm = stat
         .get(comm_end_index + 1..)
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
-        .expect("/proc stat fields after comm are UTF-8");
-    after_comm
+        .ok_or(TaskStatError::InvalidAfterCommUtf8)?;
+    let state = after_comm
         .split_ascii_whitespace()
         .next()
-        .expect("/proc stat has a state field")
+        .ok_or(TaskStatError::MissingState)?;
+    match state {
+        "T" => Ok(TaskState::Stopped),
+        "t" => Ok(TaskState::TracingStopped),
+        "Z" => Ok(TaskState::Zombie),
+        "X" | "x" => Ok(TaskState::Dead),
+        "R" => Ok(TaskState::Running),
+        "S" => Ok(TaskState::Sleeping),
+        "D" => Ok(TaskState::DiskSleep),
+        "I" => Ok(TaskState::Idle),
+        "W" | "K" | "P" => Ok(TaskState::Waking),
+        other => Err(TaskStatError::UnknownState(other.to_owned())),
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn mux_stopped(pid: rustix::process::Pid) -> Result<(), String> {
-    use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+enum StopPending {
+    State(sysinfo::ProcessStatus),
+}
 
-    let raw = u32::try_from(pid.as_raw_nonzero().get()).expect("a Unix pid is positive");
+#[cfg(target_os = "macos")]
+impl fmt::Debug for StopPending {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let StopPending::State(status) = self;
+        write!(f, "lune-mux is in state {status:?}")
+    }
+}
+
+#[cfg(target_os = "macos")]
+enum StopEnded {
+    Exited,
+    PidReused {
+        expected_start: u64,
+        actual_start: u64,
+    },
+    State(sysinfo::ProcessStatus),
+}
+
+#[cfg(target_os = "macos")]
+impl fmt::Display for StopEnded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StopEnded::Exited => f.write_str("exited"),
+            StopEnded::PidReused {
+                expected_start,
+                actual_start,
+            } => write!(
+                f,
+                "pid reused (expected start {expected_start}, saw {actual_start})"
+            ),
+            StopEnded::State(status) => write!(f, "state {status:?}"),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_info(pid: MuxPid) -> Option<(u64, sysinfo::ProcessStatus)> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
     let mut system = System::new();
-    let target_pid = sysinfo::Pid::from_u32(raw);
+    let target_pid = sysinfo::Pid::from_u32(pid.get());
     let refresh = ProcessRefreshKind::nothing();
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&[target_pid]), true, refresh);
-    let process = system
-        .process(target_pid)
-        .unwrap_or_else(|| panic!("lune-mux (pid {raw}) exited before stopping"));
+    let process = system.process(target_pid)?;
     assert_eq!(
         process.pid(),
         target_pid,
         "sysinfo returned another process"
     );
-    let status = process.status();
+    Some((process.start_time(), process.status()))
+}
+
+#[cfg(target_os = "macos")]
+fn mux_stopped(handle: &MuxHandle) -> MuxStopCheck {
+    use sysinfo::ProcessStatus;
+
+    let Some((start_time, status)) = macos_process_info(handle.pid) else {
+        return MuxStopCheck::Ended(StopEnded::Exited);
+    };
+    if start_time != handle.start_time {
+        return MuxStopCheck::Ended(StopEnded::PidReused {
+            expected_start: handle.start_time,
+            actual_start: start_time,
+        });
+    }
     match status {
-        ProcessStatus::Stop => Ok(()),
+        ProcessStatus::Stop => MuxStopCheck::Stopped,
         ProcessStatus::Zombie | ProcessStatus::Dead => {
-            panic!("lune-mux (pid {raw}) ended before stopping: {status:?}")
+            MuxStopCheck::Ended(StopEnded::State(status))
         }
-        other => Err(format!("lune-mux (pid {raw}) is in state {other:?}")),
+        ProcessStatus::Idle | ProcessStatus::Run | ProcessStatus::Sleep => {
+            MuxStopCheck::Pending(StopPending::State(status))
+        }
+        other => panic!(
+            "lune-mux (pid {}) reported unexpected macOS process status {other:?}",
+            handle.pid
+        ),
     }
 }
 
@@ -644,16 +974,106 @@ pub fn the_daemon_runs_on_while_a_terminal_does(_: Slot) {
     daemon.runs_through(kept, "the daemon ends while a terminal runs");
 }
 
+#[test]
+fn mux_pid_rejects_init_non_positive_and_self() {
+    let self_raw = rustix::process::getpid().as_raw_pid();
+    let self_u32 = std::process::id();
+    assert_eq!(MuxPid::from_raw(-1), None);
+    assert_eq!(MuxPid::from_raw(0), None);
+    assert_eq!(MuxPid::from_raw(1), None);
+    assert_eq!(MuxPid::from_raw(self_raw), None);
+    assert_eq!(MuxPid::from_u32(0), None);
+    assert_eq!(MuxPid::from_u32(1), None);
+    assert_eq!(MuxPid::from_u32(self_u32), None);
+
+    let other_u32 = if self_u32 == 2 { 3 } else { 2 };
+    let other_raw = i32::try_from(other_u32).expect("small test pid fits i32");
+    let pid = MuxPid::from_raw(other_raw).expect("pid > 1 and != self parses");
+    assert_eq!(pid.get(), other_u32);
+    assert_eq!(pid.as_pid().as_raw_pid(), other_raw);
+    assert_eq!(MuxPid::from_u32(other_u32), Some(pid));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
-fn task_stat_state_reads_state_and_rejects_mismatched_or_malformed_stat() {
-    use std::panic::catch_unwind;
+fn parse_task_stat_reads_closed_states_and_rejects_mismatched_or_malformed_stat() {
+    use std::num::NonZeroU32;
 
-    assert_eq!(task_stat_state(b"42 (lune (mux) 1) T 1 42 42", 42, 42), "T");
-    assert_eq!(task_stat_state(b"43 (tokio-rt) t 1 42 42", 42, 43), "t");
-    assert_eq!(task_stat_state(b"43 (tokio-rt) S 1 42 42", 42, 43), "S");
-    assert!(catch_unwind(|| task_stat_state(b"99 (lune-mux) T 1", 42, 43)).is_err());
-    assert!(catch_unwind(|| task_stat_state(b"43 lune-mux T 1", 42, 43)).is_err());
-    assert!(catch_unwind(|| task_stat_state(b"43 )lune-mux( T 1", 42, 43)).is_err());
-    assert!(catch_unwind(|| task_stat_state(b"43 (lune-mux) ", 42, 43)).is_err());
+    let tid = |raw| NonZeroU32::new(raw).expect("test tid is positive");
+
+    assert_eq!(
+        parse_task_stat(b"42 (lune (mux) 1) T 1 42 42", tid(42)),
+        Ok(TaskState::Stopped)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) t 1 42 42", tid(43)),
+        Ok(TaskState::TracingStopped)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) S 1 42 42", tid(43)),
+        Ok(TaskState::Sleeping)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) R 1 42 42", tid(43)),
+        Ok(TaskState::Running)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) D 1 42 42", tid(43)),
+        Ok(TaskState::DiskSleep)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) I 1 42 42", tid(43)),
+        Ok(TaskState::Idle)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) Z 1 42 42", tid(43)),
+        Ok(TaskState::Zombie)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) X 1 42 42", tid(43)),
+        Ok(TaskState::Dead)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) x 1 42 42", tid(43)),
+        Ok(TaskState::Dead)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (tokio-rt) W 1 42 42", tid(43)),
+        Ok(TaskState::Waking)
+    );
+    assert_eq!(
+        parse_task_stat(b"99 (lune-mux) T 1", tid(43)),
+        Err(TaskStatError::MismatchedTid {
+            expected: tid(43),
+            actual: 99,
+        })
+    );
+    assert_eq!(
+        parse_task_stat(b"43 lune-mux T 1", tid(43)),
+        Err(TaskStatError::MissingCommOpen)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (lune-mux T 1", tid(43)),
+        Err(TaskStatError::MissingCommClose)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 )lune-mux( T 1", tid(43)),
+        Err(TaskStatError::InvertedComm)
+    );
+    assert_eq!(
+        parse_task_stat(b"abc (lune-mux) T 1", tid(43)),
+        Err(TaskStatError::InvalidTid)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (lune-mux) \xff", tid(43)),
+        Err(TaskStatError::InvalidAfterCommUtf8)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (lune-mux) ", tid(43)),
+        Err(TaskStatError::MissingState)
+    );
+    assert_eq!(
+        parse_task_stat(b"43 (lune-mux) 1 42 42", tid(43)),
+        Err(TaskStatError::UnknownState("1".to_owned()))
+    );
 }

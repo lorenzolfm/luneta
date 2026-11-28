@@ -134,7 +134,7 @@ fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_pro
             .collect::<Vec<_>>(),
         [says]
     );
-    let _daemon = start(owned.host.vars()).unwrap();
+    owned.start_daemon();
     let held = owned
         .host
         .host()
