@@ -1,8 +1,10 @@
 use std::ffi::OsString;
+use std::fmt;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::ptr;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rustix::event::kqueue::{Event, EventFilter, EventFlags, ProcessEvents, kevent, kqueue};
@@ -93,27 +95,128 @@ pub fn meta(pid: u32) -> Option<ProcessMeta> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StartTime {
+    secs: u64,
+    usecs: u64,
+}
+
+impl fmt::Display for StartTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{:06}", self.secs, self.usecs)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveState {
+    Idle,
+    Run,
+    Sleep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessState {
+    Stopped,
+    Active(ActiveState),
+    Zombie,
+}
+
+#[derive(Debug)]
+pub enum ProcessStateError {
+    Io(io::Error),
+    ShortRead { expected: usize, actual: usize },
+    UnknownStatus(u32),
+}
+
+impl fmt::Display for ProcessStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProcessStateError::Io(error) => write!(f, "proc_pidinfo failed: {error}"),
+            ProcessStateError::ShortRead { expected, actual } => write!(
+                f,
+                "proc_pidinfo returned {actual} bytes, expected {expected}"
+            ),
+            ProcessStateError::UnknownStatus(raw) => {
+                write!(f, "proc_pidinfo returned unknown process status {raw}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProcessStateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ProcessStateError::Io(error) => Some(error),
+            ProcessStateError::ShortRead { .. } | ProcessStateError::UnknownStatus(_) => None,
+        }
+    }
+}
+
+pub fn state(pid: Pid) -> Result<Option<(StartTime, ProcessState)>, ProcessStateError> {
+    let Some(bsd) = bsd_info_including_zombie(pid)? else {
+        return Ok(None);
+    };
+    let start = StartTime {
+        secs: bsd.pbi_start_tvsec,
+        usecs: bsd.pbi_start_tvusec,
+    };
+    let state = match bsd.pbi_status {
+        libc::SSTOP => ProcessState::Stopped,
+        libc::SZOMB => ProcessState::Zombie,
+        libc::SIDL => ProcessState::Active(ActiveState::Idle),
+        libc::SRUN => ProcessState::Active(ActiveState::Run),
+        libc::SSLEEP => ProcessState::Active(ActiveState::Sleep),
+        other => return Err(ProcessStateError::UnknownStatus(other)),
+    };
+    Ok(Some((start, state)))
+}
+
 fn bsd_info(pid: u32) -> Option<libc::proc_bsdinfo> {
-    let native = libc::c_int::try_from(pid).ok()?;
-    let size = libc::c_int::try_from(size_of::<libc::proc_bsdinfo>()).expect("it fits a c_int");
+    let pid = i32::try_from(pid).ok().and_then(Pid::from_raw)?;
+    bsd_info_including_zombie(pid)
+        .ok()?
+        .filter(|bsd| bsd.pbi_status != libc::SZOMB)
+}
+
+fn bsd_info_including_zombie(pid: Pid) -> Result<Option<libc::proc_bsdinfo>, ProcessStateError> {
+    let native: libc::c_int = pid.as_raw_pid();
+    let expected = size_of::<libc::proc_bsdinfo>();
+    let size = libc::c_int::try_from(expected).expect("it fits a c_int");
     #[expect(
         unsafe_code,
-        reason = "proc_pidinfo writes at most the size it is given into a proc_bsdinfo of that size"
+        reason = "errno is cleared before calling proc_pidinfo, which writes at most `size` bytes \
+                  into a proc_bsdinfo of that size"
     )]
-    let (read, bsd) = unsafe {
+    let (read, bsd, error) = unsafe {
+        *libc::__error() = 0;
         let mut bsd: libc::proc_bsdinfo = std::mem::zeroed();
         let into = (&raw mut bsd).cast();
         let read = libc::proc_pidinfo(native, libc::PROC_PIDTBSDINFO, 0, into, size);
-        (read, bsd)
+        let error = (read <= 0).then(io::Error::last_os_error);
+        (read, bsd, error)
     };
-    if read != size {
-        return None;
+    if let Some(error) = error {
+        if Errno::from_io_error(&error) == Some(Errno::SRCH) {
+            return Ok(None);
+        }
+        if error.raw_os_error() == Some(0) {
+            return Err(ProcessStateError::ShortRead {
+                expected,
+                actual: 0,
+            });
+        }
+        return Err(ProcessStateError::Io(error));
     }
-    assert_eq!(bsd.pbi_pid, pid, "proc_pidinfo said another process");
-    if bsd.pbi_status == libc::SZOMB {
-        return None;
+    let actual = usize::try_from(read).expect("positive proc_pidinfo byte count fits usize");
+    if actual != expected {
+        return Err(ProcessStateError::ShortRead { expected, actual });
     }
-    Some(bsd)
+    let expected_pid = u32::try_from(pid.as_raw_pid()).expect("Pid is positive");
+    assert_eq!(
+        bsd.pbi_pid, expected_pid,
+        "proc_pidinfo said another process"
+    );
+    Ok(Some(bsd))
 }
 
 #[must_use]
@@ -420,9 +523,52 @@ const WATCH_INTR_MAX: usize = 64;
 
 const _: () = assert!(WATCH_INTR_MAX > 0);
 
+enum ExitState {
+    Watching(OwnedFd),
+    Exited,
+}
+
 pub struct Exit {
-    queue: OwnedFd,
+    state: Mutex<ExitState>,
     pid: Pid,
+}
+
+#[expect(
+    unsafe_code,
+    reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
+)]
+fn poll_kqueue_exit(queue: &OwnedFd) -> Result<bool, Errno> {
+    let blank = Event::new(
+        EventFilter::Proc {
+            pid: Pid::INIT,
+            flags: ProcessEvents::EXIT,
+        },
+        EventFlags::empty(),
+        ptr::null_mut(),
+    );
+    let mut heard = [blank];
+    for _ in 0..WATCH_INTR_MAX {
+        match unsafe { kevent(queue, &[], &mut heard[..], Some(Duration::ZERO)) } {
+            Ok(0) => return Ok(false),
+            Ok(count) => {
+                assert_eq!(count, 1, "kevent filled at most one event slot");
+                if !heard[0].flags().contains(EventFlags::ERROR) {
+                    return Ok(true);
+                }
+                let failure =
+                    i32::try_from(heard[0].data()).map_or(Errno::INVAL, Errno::from_raw_os_error);
+                return if failure == Errno::SRCH {
+                    Ok(true)
+                } else {
+                    Err(failure)
+                };
+            }
+            Err(Errno::INTR) => {}
+            Err(Errno::SRCH) => return Ok(true),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Errno::INTR)
 }
 
 impl Exit {
@@ -441,7 +587,12 @@ impl Exit {
         let mut unheard: [Event; 0] = [];
         for _ in 0..WATCH_INTR_MAX {
             match unsafe { kevent(&queue, &[end], &mut unheard[..], Some(Duration::ZERO)) } {
-                Ok(_) => return Ok(Some(Exit { queue, pid })),
+                Ok(_) => {
+                    return Ok(Some(Exit {
+                        state: Mutex::new(ExitState::Watching(queue)),
+                        pid,
+                    }));
+                }
                 Err(Errno::INTR) => {}
                 Err(Errno::SRCH) => return Ok(None),
                 Err(error) => return Err(error.into()),
@@ -450,46 +601,47 @@ impl Exit {
         Err(Errno::INTR.into())
     }
 
+    fn poll_exited(&self) -> Result<bool, Errno> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &*state {
+            ExitState::Exited => Ok(true),
+            ExitState::Watching(queue) => {
+                let exited = poll_kqueue_exit(queue)?;
+                if exited {
+                    *state = ExitState::Exited;
+                }
+                Ok(exited)
+            }
+        }
+    }
+
+    pub fn has_exited(&self) -> io::Result<bool> {
+        self.poll_exited().map_err(io::Error::from)
+    }
+
     pub fn signal(&self, signal: Signal) -> Result<(), Errno> {
+        if self.poll_exited()? {
+            return Err(Errno::SRCH);
+        }
         kill_process(self.pid, signal)
     }
 
-    #[expect(
-        unsafe_code,
-        reason = "rustix's kevent is unsafe for the files an event may name, and this one names none"
-    )]
     pub async fn wait(self) -> io::Result<()> {
-        let ready = readable_fd(self.queue)?;
+        let queue = match self
+            .state
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            ExitState::Exited => return Ok(()),
+            ExitState::Watching(queue) => queue,
+        };
+        let ready = readable_fd(queue)?;
         for _ in 0..SPURIOUS_WAKES_MAX {
             let mut guard = ready.readable().await?;
-            let blank = Event::new(
-                EventFilter::Proc {
-                    pid: Pid::INIT,
-                    flags: ProcessEvents::EXIT,
-                },
-                EventFlags::empty(),
-                ptr::null_mut(),
-            );
-            let mut heard = [blank];
-            match unsafe { kevent(ready.get_ref(), &[], &mut heard[..], Some(Duration::ZERO)) } {
-                Ok(0) => guard.clear_ready(),
-                Ok(count) => {
-                    assert_eq!(count, 1, "kevent filled at most one event slot");
-                    if !heard[0].flags().contains(EventFlags::ERROR) {
-                        return Ok(());
-                    }
-                    let failure = i32::try_from(heard[0].data())
-                        .map_or(Errno::INVAL, Errno::from_raw_os_error);
-                    return if failure == Errno::SRCH {
-                        Ok(())
-                    } else {
-                        Err(failure.into())
-                    };
-                }
-                Err(Errno::INTR) => {}
-                Err(Errno::SRCH) => return Ok(()),
-                Err(error) => return Err(error.into()),
+            if poll_kqueue_exit(ready.get_ref()).map_err(io::Error::from)? {
+                return Ok(());
             }
+            guard.clear_ready();
         }
         Err(io::Error::other(
             "kqueue woke too many times without an exit event",
