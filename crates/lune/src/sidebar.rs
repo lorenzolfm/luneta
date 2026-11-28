@@ -1545,7 +1545,8 @@ pub struct Sidebar {
     tickets: u64,
     here_key: Option<Key>,
     finished: HashMap<Key, SystemTime>,
-    view_titles: HashMap<(Machine, WorktreeId), BTreeMap<ViewId, String>>,
+    view_titles: HashMap<Machine, HashMap<WorktreeId, BTreeMap<ViewId, String>>>,
+    view_titles_revision: u64,
     rows: Vec<Row>,
     counts: Counts,
     refused: Vec<String>,
@@ -1894,6 +1895,7 @@ impl Sidebar {
             here_key: None,
             finished: HashMap::new(),
             view_titles: HashMap::new(),
+            view_titles_revision: 0,
             rows: Vec::new(),
             counts: Counts::default(),
             refused: Vec::new(),
@@ -2400,8 +2402,17 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn view_titles(&self, on: &Machine, worktree: WorktreeId) -> BTreeMap<ViewId, String> {
-        self.view_titles.get(&(on.clone(), worktree)).cloned().unwrap_or_default()
+    pub fn view_titles(
+        &self,
+        on: &Machine,
+        worktree: WorktreeId,
+    ) -> Option<&BTreeMap<ViewId, String>> {
+        self.view_titles.get(on)?.get(&worktree)
+    }
+
+    #[must_use]
+    pub fn view_titles_revision(&self) -> u64 {
+        self.view_titles_revision
     }
 
     fn listed_of(&self, project: ProjectId) -> Option<Listed> {
@@ -2800,7 +2811,7 @@ impl Sidebar {
         };
         let finder = term.map(|term| Finder::new(term, typos));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
-        let mut view_titles: HashMap<(Machine, WorktreeId), BTreeMap<ViewId, String>> =
+        let mut view_titles: HashMap<Machine, HashMap<WorktreeId, BTreeMap<ViewId, String>>> =
             HashMap::new();
         let mut counts = Counts::default();
         let mut rows = Vec::new();
@@ -2829,6 +2840,7 @@ impl Sidebar {
             }
             let machine_folded = finder.is_none() && self.folds.contains(Fold::Machine(&machine));
             let mut machine_rows = Vec::new();
+            let mut machine_titles: HashMap<WorktreeId, BTreeMap<ViewId, String>> = HashMap::new();
             let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
             let statuses: HashMap<&str, &luned::api::GitStatus> = heard
@@ -2881,9 +2893,13 @@ impl Sidebar {
                         let label = ran.flatten().unwrap_or_else(|| label(None, view));
                         by_view.push(Shows { view, marked, label, unread });
                     }
-                    let titles: BTreeMap<ViewId, String> =
-                        by_view.iter().map(|shows| (shows.view.id, shows.label.clone())).collect();
-                    view_titles.insert((machine.clone(), worktree.place.worktree), titles);
+                    let mut titles = BTreeMap::new();
+                    for shows in &by_view {
+                        let replaced = titles.insert(shows.view.id, shows.label.clone());
+                        assert!(replaced.is_none(), "each view in a worktree has a distinct id");
+                    }
+                    let replaced = machine_titles.insert(worktree.place.worktree, titles);
+                    assert!(replaced.is_none(), "each worktree on a machine has a distinct id");
                     let tally = Tally::of(&by_view);
                     counts.waiting += tally.waiting;
                     counts.new += tally.dots;
@@ -3027,6 +3043,8 @@ impl Sidebar {
                 });
                 machine_rows.append(&mut project_rows);
             }
+            let replaced = view_titles.insert(machine.clone(), machine_titles);
+            assert!(replaced.is_none(), "each machine appears once in listed");
             if finder.is_some() && machine_rows.is_empty() {
                 continue;
             }
@@ -3064,7 +3082,10 @@ impl Sidebar {
             self.lit = Some(Lit::On(kin));
         }
         self.rows = rows;
-        self.view_titles = view_titles;
+        if self.view_titles != view_titles {
+            self.view_titles = view_titles;
+            self.view_titles_revision = self.view_titles_revision.wrapping_add(1);
+        }
         self.counts = counts;
         self.refused = refused;
         self.unlisted_machines = unlisted_machines;
@@ -5410,23 +5431,29 @@ fn transcript(agent: &Agent) -> Transcript {
 }
 
 fn label(agent: Option<&Agent>, view: &KnownView) -> String {
-    if let Some(agent) = agent {
-        let topic =
-            agent.topic.as_deref().or(view.topic.as_deref()).or_else(|| auto_name(agent));
+    let label = if let Some(agent) = agent {
+        let view_topic = view.topic.as_deref().map(str::trim).filter(|topic| !topic.is_empty());
+        let topic = agent.live_topic().or(view_topic).or_else(|| auto_name(agent));
         let name = given_name(agent).or(topic);
-        return name.map_or_else(|| short_cwd(view.cwd.as_str()), str::to_owned);
-    }
-    let mut words = view.command.iter().flat_map(|command| command.split_whitespace());
-    let program = words.next().map(|program| {
-        let program = program.rsplit('/').next().unwrap_or(program);
-        program.strip_prefix('-').unwrap_or(program)
-    });
-    match program {
-        Some(program) if !icons::SHELLS.contains(&program) => {
-            [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
-        },
-        _ => short_cwd(view.cwd.as_str()),
-    }
+        name.map_or_else(|| short_cwd(view.cwd.as_str()), str::to_owned)
+    } else {
+        let mut words = view.command.iter().flat_map(|command| command.split_whitespace());
+        let program = words
+            .next()
+            .map(|program| {
+                let program = program.rsplit('/').next().unwrap_or(program);
+                program.strip_prefix('-').unwrap_or(program)
+            })
+            .filter(|program| !program.is_empty());
+        match program {
+            Some(program) if !icons::SHELLS.contains(&program) => {
+                [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
+            },
+            _ => short_cwd(view.cwd.as_str()),
+        }
+    };
+    assert!(!label.trim().is_empty(), "a view label is non-empty");
+    label
 }
 
 fn agent_marked(news: &News, agent: &Agent, key: Key, here: bool) -> (Marked, Option<SystemTime>) {
@@ -7588,6 +7615,11 @@ mod tests {
         assert_eq!(label(Some(&kept(&unnamed)), &topic), "Session folds");
         assert_eq!(label(Some(&kept(&derived)), &titled(None)), "Session folds");
         assert_eq!(label(Some(&kept(&auto)), &titled(None)), "Session folds");
+        let blank_topic =
+            |agent: &Agent| Agent { topic: Some("   ".to_owned()), ..agent.clone() };
+        assert_eq!(label(Some(&blank_topic(&auto)), &titled(None)), "Feature parity");
+        assert_eq!(label(Some(&blank_topic(&auto)), &topic), "Fix the fold");
+        assert_eq!(label(Some(&blank_topic(&unnamed)), &titled(None)), "w/x");
     }
 
     #[test]
@@ -7629,7 +7661,7 @@ mod tests {
             vec![renamed_agent, agy_auto, agy_live],
         ));
 
-        let titles = sidebar.view_titles(&Machine::Local, worktree_id);
+        let titles = sidebar.view_titles(&Machine::Local, worktree_id).expect("worktree titles");
         let at = |id: u64| titles.get(&ViewId::of(id).unwrap()).map(String::as_str);
         assert_eq!(at(1), Some("fold"));
         assert_eq!(at(2), Some("Initial agy title"));

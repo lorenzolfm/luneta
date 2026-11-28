@@ -1,14 +1,14 @@
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::Write as _;
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use lune_waits::{eventually, Span};
 use luned::api::{self, remote::Reached, ClientWaiter, Harness, WatchChangesRequest};
 use luned::SWEEP;
 use serde_json::{json, Value};
 
-use crate::agents::{file_for, process, MADE_NANOS};
+use crate::agents::{file_for, process};
+use crate::agy::Agy;
 use crate::host::{folder_in, script, side_by_side, start, Host, Running, Slot, Waits, PATIENT};
 use crate::remote::{hosts, FakeSsh};
 
@@ -184,17 +184,6 @@ fn a_window_here_has_another_machine_name_its_agents_topics(_: Slot) {
     });
 }
 
-const FAKE_AGY: &str = r#"
-import { createInterface } from "node:readline";
-import { execSync } from "node:child_process";
-
-const [, cmd] = process.argv;
-for await (const line of createInterface({ input: process.stdin })) {
-  const out = execSync(cmd, { input: line, encoding: "utf8" });
-  console.log(JSON.stringify(out));
-}
-"#;
-
 fn agy_prompted(host: &Host, step: usize, words: &str) {
     let path = host
         .home
@@ -227,28 +216,14 @@ fn a_window_has_the_daemon_name_an_agy_agent_s_topic_on_each_new_prompt(_: Slot)
         value["title"]["command"].as_str().map(str::to_owned)
     });
 
-    let mut command = host.vars().command("node");
-    command
-        .args(["--input-type=module", "--eval", FAKE_AGY])
-        .arg(&cmd)
-        .env("LUNE_MUX_TERMINAL", "4")
-        .env("LUNE_MUX_TERMINAL_MADE", MADE_NANOS.to_string())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
-    let mut running = Running::spawn(&mut command);
-    let (mut events, told) = running.piped();
-    let mut told = BufReader::new(told);
-    let mut send = |payload: &Value| {
-        writeln!(events, "{payload}").unwrap();
-        let mut line = String::new();
-        told.read_line(&mut line).unwrap();
-    };
-    send(&json!({
+    let mut agy = Agy::start(host.vars(), &cmd);
+    let printed = agy.sends(&json!({
         "cwd": "/home/you/work",
         "conversation_id": ID,
         "conversation_title": "Initial agy title",
         "agent_state": "working"
     }));
+    assert_eq!(printed, "");
     eventually("the agy agent appears", || {
         host.host().agents.into_iter().find(|agent| {
             agent.session_id.as_deref() == Some(ID) && agent.runs_in() == Harness::Antigravity

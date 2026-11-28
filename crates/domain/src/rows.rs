@@ -156,12 +156,21 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
     if views > VIEWS_MAX {
         return Err(format!("they hold {views} views, over the {VIEWS_MAX} kept"));
     }
+    let mut worktree_ids = BTreeSet::new();
+    for worktree in &worktrees {
+        if !worktree_ids.insert(worktree.id) {
+            return Err(format!("two worktrees share id {}", worktree.id));
+        }
+    }
     let mut keyed = BTreeSet::new();
-    for key in worktrees.iter().flat_map(|it| &it.terminals).filter_map(Terminal::key) {
-        if !keyed.insert(key) {
+    for terminal in worktrees.iter().flat_map(|it| &it.terminals) {
+        if let Some(key) = terminal.key()
+            && !keyed.insert(key)
+        {
             return Err(format!("two views hold terminal {}", key.id));
         }
     }
+    assert_eq!(worktree_ids.len(), count, "every worktree has a distinct id");
     assert!(keyed.len() <= views, "each view holds at most one terminal");
     Ok(projects)
 }
@@ -238,15 +247,20 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
     let id = WorktreeId::of(worktree.id);
     let id = id.ok_or_else(|| format!("worktree {named} of project {of} has id 0"))?;
     let mut terminals = Vec::with_capacity(worktree.terminals.len());
+    let mut view_ids = BTreeSet::new();
     for terminal in &worktree.terminals {
         let held = ViewId::of(terminal.id);
         let id = held.ok_or_else(|| format!("a terminal of worktree {named} has id 0"))?;
+        if !view_ids.insert(id) {
+            return Err(format!("worktree {named} has two views with id {id}"));
+        }
         let found = found_of(terminal).map_err(|why| format!("terminal {id}: {why}"))?;
         let cwd = Dir::parse(&terminal.folder);
         let cwd = cwd.map_err(|why| format!("terminal {id}'s folder: {why}"))?;
         terminals.push(Terminal { id, cwd, found });
     }
     assert_eq!(terminals.len(), worktree.terminals.len(), "every terminal said is read");
+    assert_eq!(view_ids.len(), terminals.len(), "every view in a worktree has a distinct id");
     let folder = Dir::parse(&worktree.folder);
     let folder = folder.map_err(|why| format!("worktree {named}'s folder: {why}"))?;
     let used = worktree.used_at.map(Used::of_api).transpose();
@@ -409,6 +423,23 @@ mod tests {
         let mut kept = kept();
         rows(&mut kept)[1].terminals.push(terminal(24, terminal::Found::Key(key(4)), None));
         assert_eq!(read(&kept), Err("two views hold terminal 4".to_owned()));
+    }
+
+    #[test]
+    fn projects_that_duplicate_a_worktree_or_view_id_are_refused() {
+        let mut duplicate_worktree = kept();
+        rows(&mut duplicate_worktree)[1].id = 11;
+        assert_eq!(
+            read(&duplicate_worktree),
+            Err("two worktrees share id 000000000000000b".to_owned())
+        );
+
+        let mut duplicate_view = kept();
+        rows(&mut duplicate_view)[0].terminals.push(terminal(21, terminal::Found::Lost(()), None));
+        assert_eq!(
+            read(&duplicate_view),
+            Err("worktree main has two views with id 0000000000000015".to_owned())
+        );
     }
 
     #[test]

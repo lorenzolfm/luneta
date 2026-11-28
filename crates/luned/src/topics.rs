@@ -23,6 +23,9 @@ const WRITING: Duration = Duration::from_mins(1);
 
 const CALLS_MAX: usize = 4;
 
+const KEPT_MAX: usize = crate::statuses::AGENTS_MAX;
+const _: () = assert!(KEPT_MAX >= CALLS_MAX);
+
 const STEPS: StepsMax = StepsMax::constant::<8>();
 const _: () = assert!(STEPS.get() > 0);
 
@@ -84,6 +87,11 @@ impl TopicKey {
     pub fn id(&self) -> &SessionId {
         &self.id
     }
+
+    #[must_use]
+    pub fn into_id(self) -> SessionId {
+        self.id
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -118,6 +126,7 @@ impl Kept {
 
     fn grown(&mut self, folders: &Folders, key: &TopicKey) -> io::Result<Option<Digest>> {
         let tail = if let Some(tail) = &mut self.transcript {
+            assert_eq!(tail.harness(), key.harness(), "cached tail matches topic harness");
             tail
         } else {
             let Some(path) = folders.find(key.harness(), key.id()) else {
@@ -137,12 +146,27 @@ impl Kept {
     }
 }
 
+fn evict_oldest_left(kept: &mut HashMap<TopicKey, Kept>) -> bool {
+    let oldest = kept
+        .iter()
+        .filter_map(|(key, entry)| Some((entry.left?, key)))
+        .min_by_key(|(left, _)| *left)
+        .map(|(_, key)| key.clone());
+    let Some(key) = oldest else {
+        return false;
+    };
+    let removed = kept.remove(&key);
+    assert!(removed.is_some(), "selected oldest departed session exists");
+    true
+}
+
 struct Topics {
     folders: Folders,
     began: SystemTime,
     kept: HashMap<TopicKey, Kept>,
     writing: HashSet<TopicKey>,
-    troubles: Troubles,
+    write_troubles: Troubles,
+    read_troubles: Troubles,
 }
 
 impl Topics {
@@ -152,25 +176,43 @@ impl Topics {
             began,
             kept: HashMap::new(),
             writing: HashSet::new(),
-            troubles: Troubles::default(),
+            write_troubles: Troubles::default(),
+            read_troubles: Troubles::default(),
         }
     }
 
     fn look(&mut self, agents: &[Agent], shown: bool) -> Vec<Due> {
+        assert!(agents.len() <= crate::statuses::AGENTS_MAX, "agents fit within AGENTS_MAX");
+        assert!(self.kept.len() <= KEPT_MAX, "kept sessions stay within KEPT_MAX");
         let named: Vec<(TopicKey, &Agent)> =
             agents.iter().filter_map(|agent| Some((topical(agent)?, agent))).collect();
         self.forget_gone(&named, Instant::now());
         let folders = &self.folders;
         for (key, agent) in named {
-            let kept = self.kept.entry(key.clone()).or_insert_with(|| {
+            if !self.kept.contains_key(&key) {
+                if self.kept.len() == KEPT_MAX && !evict_oldest_left(&mut self.kept) {
+                    self.read_troubles.say(format!("topics: keeping at most {KEPT_MAX} sessions"));
+                    continue;
+                }
                 let mut kept = Kept::default();
                 kept.went_unread();
                 if agent.started_at.is_none_or(|started| started < self.began) {
-                    let digest = kept.grown(folders, &key).ok().flatten();
-                    kept.asked = digest.and_then(|digest| digest.asked);
+                    match kept.grown(folders, &key) {
+                        Ok(Some(digest)) => kept.asked = digest.asked,
+                        Ok(None) => {},
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                        Err(error) => {
+                            self.read_troubles.say(format!(
+                                "topics: could not read {} transcript: {error}",
+                                key.id().as_str()
+                            ));
+                        },
+                    }
                 }
-                kept
-            });
+                let replaced = self.kept.insert(key.clone(), kept);
+                assert!(replaced.is_none(), "new topic key was not already kept");
+            }
+            let kept = self.kept.get_mut(&key).expect("topic key was just ensured in kept");
             kept.auto_title = agent
                 .name
                 .as_ref()
@@ -187,8 +229,16 @@ impl Topics {
             if !kept.read_due {
                 continue;
             }
-            let Ok(grown) = kept.grown(folders, &key) else {
-                continue;
+            let grown = match kept.grown(folders, &key) {
+                Ok(grown) => grown,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    self.read_troubles.say(format!(
+                        "topics: could not read {} transcript: {error}",
+                        key.id().as_str()
+                    ));
+                    continue;
+                },
             };
             kept.read_due = false;
             let Some(digest) = grown else {
@@ -206,6 +256,8 @@ impl Topics {
                 }
             }
         }
+        self.read_troubles.done();
+        assert!(self.kept.len() <= KEPT_MAX, "kept sessions stay within KEPT_MAX");
         if shown {
             self.due()
         } else {
@@ -222,6 +274,7 @@ impl Topics {
             kept.went_unread();
             now.duration_since(*kept.left.get_or_insert(now)) < REMEMBERED
         });
+        assert!(self.kept.len() <= KEPT_MAX, "kept sessions stay within KEPT_MAX");
     }
 
     fn due(&mut self) -> Vec<Due> {
@@ -237,14 +290,15 @@ impl Topics {
                 continue;
             };
             self.writing.insert(key.clone());
-            let prompt = prompt(
-                kept.topic.as_ref().map(Said::as_str),
-                kept.auto_title.as_ref().map(Said::as_str),
-                digest,
-            );
+            let title = RowTitle {
+                current_topic: kept.topic.as_ref().map(Said::as_str),
+                auto_title: kept.auto_title.as_ref().map(Said::as_str),
+            };
+            let prompt = prompt(&title, digest);
             due.push(Due { key: key.clone(), prompt });
         }
         assert!(self.writing.len() <= CALLS_MAX);
+        assert!(due.len() <= CALLS_MAX);
         due
     }
 
@@ -252,9 +306,9 @@ impl Topics {
         let started = self.writing.remove(&key);
         assert!(started, "a call that ended had started");
         if let Err(why) = &said {
-            self.troubles.say(format!("the model named no topic: {why}"));
+            self.write_troubles.say(format!("the model named no topic: {why}"));
         }
-        self.troubles.done();
+        self.write_troubles.done();
         let Some(kept) = self.kept.get_mut(&key) else {
             return;
         };
@@ -266,16 +320,22 @@ impl Topics {
 
     fn topics(&self) -> HashMap<TopicKey, Said> {
         let here = self.kept.iter().filter(|(_, kept)| kept.left.is_none());
-        here.filter_map(|(key, kept)| Some((key.clone(), kept.topic.clone()?))).collect()
+        let topics: HashMap<TopicKey, Said> =
+            here.filter_map(|(key, kept)| Some((key.clone(), kept.topic.clone()?))).collect();
+        assert!(topics.len() <= self.kept.len());
+        topics
     }
 }
 
 fn topical(agent: &Agent) -> Option<TopicKey> {
     let harness = TranscriptHarness::of(agent.harness)?;
-    let word = agent.harness.to_api().prompt_word();
-    let at_prompt = agent.entrypoint.as_ref().map(Said::as_str) == word;
-    let given = agent.name.as_ref().is_some_and(Name::given);
-    if agent.terminal.is_none() || !at_prompt || given {
+    assert_eq!(harness.harness(), agent.harness);
+    assert!(agent.harness.topics().has_transcript());
+    agent.terminal?;
+    if !agent.at_a_prompt() {
+        return None;
+    }
+    if agent.name.as_ref().and_then(Name::given).is_some() {
         return None;
     }
     let id = SessionId::parse(agent.session_id.as_ref()?.as_str())?;
@@ -293,13 +353,22 @@ fn names_no_subject(asked: &Asked) -> bool {
     words.all(|word| ROUTINE_WORDS.contains(&word.trim_end_matches(MARKS)))
 }
 
-fn prompt(current: Option<&str>, auto_title: Option<&str>, digest: Digest) -> String {
-    let current = match current.or(digest.title.as_deref()).or(auto_title) {
-        Some(topic) => format!("The topic the row goes by now: {topic}"),
+struct RowTitle<'a> {
+    current_topic: Option<&'a str>,
+    auto_title: Option<&'a str>,
+}
+
+fn prompt(title: &RowTitle<'_>, digest: Digest) -> String {
+    let RowTitle { current_topic, auto_title } = *title;
+    let current_line = match current_topic.or(digest.title.as_deref()).or(auto_title) {
+        Some(topic) => {
+            assert!(!topic.trim().is_empty(), "prompt topic line is non-empty");
+            format!("The topic the row goes by now: {topic}")
+        },
         None => "The row has no topic yet.".to_owned(),
     };
     let told = Digest { title: None, ..digest }.lines().join("\n");
-    format!("<session>\n{current}\n{told}\n</session>")
+    format!("<session>\n{current_line}\n{told}\n</session>")
 }
 
 fn topic_of(said: &[u8]) -> Result<Said, String> {
@@ -1127,5 +1196,56 @@ mod tests {
         assert_eq!(topic("The topic:\nSession folds"), Err("it said more than a line".to_owned()));
         let long = format!("it said more than {TOPIC_CHARS} characters");
         assert_eq!(topic(&"é".repeat(TOPIC_CHARS + 1)), Err(long));
+    }
+
+    #[test]
+    fn evict_oldest_left_drops_earliest_departed_session_and_preserves_active_ones() {
+        let now = Instant::now();
+        let active = claude_key("00000001-0000-4000-8000-000000000000");
+        let newer = claude_key("00000002-0000-4000-8000-000000000000");
+        let oldest = claude_key("00000003-0000-4000-8000-000000000000");
+        let mut kept = HashMap::from([
+            (active.clone(), Kept::default()),
+            (newer.clone(), Kept { left: Some(now + Duration::from_secs(5)), ..Kept::default() }),
+            (oldest.clone(), Kept { left: Some(now), ..Kept::default() }),
+        ]);
+
+        assert!(evict_oldest_left(&mut kept));
+        assert!(!kept.contains_key(&oldest));
+        assert!(kept.contains_key(&newer));
+        assert!(kept.contains_key(&active));
+
+        assert!(evict_oldest_left(&mut kept));
+        assert!(!kept.contains_key(&newer));
+        assert!(kept.contains_key(&active));
+
+        assert!(!evict_oldest_left(&mut kept));
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn prompt_prefers_current_topic_then_digest_title_then_auto_title() {
+        let digest = Digest {
+            title: Some(Said::new("Digest title".to_owned()).unwrap()),
+            asked: Some(Asked::Whole("fix tabs".to_owned())),
+            steps: Vec::new(),
+        };
+        let both = prompt(
+            &RowTitle { current_topic: Some("Live topic"), auto_title: Some("Auto title") },
+            Digest { title: digest.title.clone(), asked: digest.asked.clone(), steps: Vec::new() },
+        );
+        assert!(both.contains("The topic the row goes by now: Live topic"), "{both}");
+
+        let from_digest = prompt(
+            &RowTitle { current_topic: None, auto_title: Some("Auto title") },
+            Digest { title: digest.title.clone(), asked: digest.asked.clone(), steps: Vec::new() },
+        );
+        assert!(from_digest.contains("The topic the row goes by now: Digest title"), "{from_digest}");
+
+        let from_auto = prompt(
+            &RowTitle { current_topic: None, auto_title: Some("Auto title") },
+            Digest { title: None, asked: digest.asked, steps: Vec::new() },
+        );
+        assert!(from_auto.contains("The topic the row goes by now: Auto title"), "{from_auto}");
     }
 }

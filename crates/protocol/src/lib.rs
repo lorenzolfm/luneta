@@ -151,6 +151,12 @@ impl v1::Agent {
     pub fn is_finished_turn(&self) -> bool {
         agent_status::AgentStatus::of_api(self).is_finished_turn()
     }
+
+    #[must_use]
+    pub fn live_topic(&self) -> Option<&str> {
+        let topic = self.topic.as_deref()?.trim();
+        (!topic.is_empty()).then_some(topic)
+    }
 }
 
 impl v1::Project {
@@ -193,7 +199,11 @@ impl v1::Name {
     pub fn auto(&self) -> Option<&str> {
         let source = self.source.map(v1::NameSource::try_from);
         let auto = matches!(source, Some(Ok(v1::NameSource::Auto)));
-        Some(self.text.trim()).filter(|text| auto && !text.is_empty())
+        let result = Some(self.text.trim()).filter(|text| auto && !text.is_empty());
+        if result.is_some() {
+            assert!(self.given().is_none(), "an auto name is not user-given");
+        }
+        result
     }
 }
 
@@ -259,5 +269,20 @@ mod tests {
         assert_eq!(named("fold", None).auto(), None);
         assert_eq!(named("fold", Some(NameSource::User)).auto(), None);
         assert_eq!(named("fold", Some(NameSource::Derived)).auto(), None);
+        let unknown = Name { text: "fold".to_owned(), source: Some(99) };
+        assert_eq!(unknown.given(), None);
+        assert_eq!(unknown.auto(), None);
+    }
+
+    #[test]
+    fn agent_live_topic_trims_and_ignores_blank_wire_values() {
+        let with_topic = |topic: Option<&str>| Agent {
+            topic: topic.map(str::to_owned),
+            ..Agent::default()
+        };
+        assert_eq!(with_topic(None).live_topic(), None);
+        assert_eq!(with_topic(Some("")).live_topic(), None);
+        assert_eq!(with_topic(Some("   \n\t  ")).live_topic(), None);
+        assert_eq!(with_topic(Some("  View tabs  ")).live_topic(), Some("View tabs"));
     }
 }

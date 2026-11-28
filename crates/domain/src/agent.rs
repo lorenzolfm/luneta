@@ -208,7 +208,7 @@ impl TopicSource {
     const fn gap_explained(self) -> bool {
         match self {
             TopicSource::Transcript { .. } | TopicSource::TerminalTitle => true,
-            TopicSource::No { why } => !why.is_empty(),
+            TopicSource::No { why } => !why.trim_ascii().is_empty(),
         }
     }
 }
@@ -656,5 +656,7 @@ mod tests {
         assert!(!Harness::Antigravity.topics().has_terminal_title());
         assert!(!Harness::Pi.topics().has_transcript());
         assert!(!Harness::Pi.topics().has_terminal_title());
+        assert!(!TopicSource::No { why: "" }.gap_explained());
+        assert!(!TopicSource::No { why: "   \t\n" }.gap_explained());
     }
 }

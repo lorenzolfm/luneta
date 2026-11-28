@@ -345,7 +345,10 @@ impl Payload {
 
     fn name(&self) -> Option<Name> {
         let text = Said::new(self.conversation_title.as_deref()?.trim().to_owned())?;
-        Some(Name { text, source: Some(Source::Auto) })
+        let name = Name { text, source: Some(Source::Auto) };
+        assert_eq!(name.given(), None);
+        assert!(name.auto().is_some());
+        Some(name)
     }
 }
 
@@ -1140,7 +1143,7 @@ mod tests {
         };
         let name = payload.name().expect("non-empty title produces a Name");
         assert_eq!(name.source, Some(Source::Auto));
-        assert!(!name.given());
+        assert_eq!(name.given(), None);
         assert_eq!(name.auto(), Some("Feature parity"));
     }
 

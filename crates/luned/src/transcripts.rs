@@ -77,19 +77,25 @@ impl Folders {
 
     #[must_use]
     pub fn folder(&self, harness: TranscriptHarness) -> Option<&Path> {
-        match harness {
+        let path = match harness {
             TranscriptHarness::Claude => self.claude.as_deref(),
             TranscriptHarness::Antigravity => self.agy.as_deref(),
-        }
+        }?;
+        assert!(!path.as_os_str().is_empty(), "a configured transcript folder is non-empty");
+        Some(path)
     }
 
     #[must_use]
     pub fn find(&self, harness: TranscriptHarness, id: &SessionId) -> Option<PathBuf> {
         let root = self.folder(harness)?;
-        match harness {
+        let found = match harness {
             TranscriptHarness::Claude => find(&root.join("projects"), id),
             TranscriptHarness::Antigravity => agy_file(root, id),
+        };
+        if let Some(path) = &found {
+            assert!(!path.as_os_str().is_empty(), "a found transcript has a non-empty path");
         }
+        found
     }
 }
 
@@ -102,6 +108,14 @@ pub enum TranscriptHarness {
 impl TranscriptHarness {
     pub const ALL: [TranscriptHarness; 2] =
         [TranscriptHarness::Claude, TranscriptHarness::Antigravity];
+
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            TranscriptHarness::Claude => 0,
+            TranscriptHarness::Antigravity => 1,
+        }
+    }
 
     #[must_use]
     pub const fn harness(self) -> Harness {
@@ -138,6 +152,22 @@ impl TranscriptHarness {
         }
     }
 }
+
+const fn transcript_harness_indices_match_all() -> bool {
+    let mut index = 0;
+    while index < TranscriptHarness::ALL.len() {
+        if TranscriptHarness::ALL[index].index() != index {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(
+    transcript_harness_indices_match_all(),
+    "TranscriptHarness::index matches its slot in TranscriptHarness::ALL"
+);
 
 const fn every_transcript_harness_has_one_reader() -> bool {
     let mut harness = 0;
@@ -314,8 +344,10 @@ impl Reading {
 
     #[must_use]
     pub(crate) fn ends(&self, folders: &Folders) -> HashMap<SessionId, TranscriptEnd> {
-        let claude_dirs =
-            folders.claude.as_deref().map(|claude| project_dirs(&claude.join("projects")));
+        assert!(self.ids.len() <= IDS_MAX, "reading stays within IDS_MAX");
+        let claude_dirs = folders
+            .folder(TranscriptHarness::Claude)
+            .map(|claude| project_dirs(&claude.join("projects")));
         let mut ends = HashMap::new();
         for id in &self.ids {
             for harness in TranscriptHarness::ALL {
@@ -323,18 +355,26 @@ impl Reading {
                     TranscriptHarness::Claude => {
                         claude_dirs.as_deref().and_then(|dirs| found_in(dirs, id))
                     },
-                    TranscriptHarness::Antigravity => {
-                        folders.agy.as_deref().and_then(|agy| agy_file(agy, id))
-                    },
+                    TranscriptHarness::Antigravity => folders
+                        .folder(TranscriptHarness::Antigravity)
+                        .and_then(|agy| agy_file(agy, id)),
                 };
-                if let Some(path) = path
-                    && let Ok(tail) = end(&path, self.share, harness.kinds())
-                {
-                    ends.insert(id.clone(), TranscriptEnd::of(harness, tail));
-                    break;
+                let Some(path) = path else {
+                    continue;
+                };
+                match end(&path, self.share, harness.kinds()) {
+                    Ok(tail) => {
+                        ends.insert(id.clone(), TranscriptEnd::of(harness, tail));
+                        break;
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                    Err(error) => {
+                        crate::log::say(&format!("{}: {error}", path.display()));
+                    },
                 }
             }
         }
+        assert!(ends.len() <= self.ids.len(), "at most one transcript end per requested id");
         ends
     }
 }
@@ -581,6 +621,11 @@ impl Tail {
             return Err("a tail reads a named path");
         }
         Ok(Tail { path, harness, limits, state: TailState::Unread })
+    }
+
+    #[must_use]
+    pub const fn harness(&self) -> TranscriptHarness {
+        self.harness
     }
 
     pub fn grown(&mut self) -> io::Result<Option<Digest>> {

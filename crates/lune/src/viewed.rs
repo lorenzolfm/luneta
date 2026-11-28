@@ -1801,12 +1801,31 @@ impl Viewed {
     pub fn tabs(
         &mut self,
         worktree_tabs: Option<WorktreeTabs>,
-        titles: BTreeMap<ViewId, String>,
+        titles: Option<&BTreeMap<ViewId, String>>,
     ) -> bool {
-        let changed = self.layout.worktree_tabs != worktree_tabs || self.layout.titles != titles;
-        self.layout.worktree_tabs = worktree_tabs;
-        self.layout.titles = titles;
-        changed
+        let tabs_changed = self.layout.worktree_tabs != worktree_tabs;
+        if tabs_changed {
+            self.layout.worktree_tabs = worktree_tabs;
+        }
+        let titles_changed = match titles {
+            Some(titles) => {
+                if self.layout.titles == *titles {
+                    false
+                } else {
+                    self.layout.titles.clone_from(titles);
+                    true
+                }
+            },
+            None => {
+                if self.layout.titles.is_empty() {
+                    false
+                } else {
+                    self.layout.titles.clear();
+                    true
+                }
+            },
+        };
+        tabs_changed || titles_changed
     }
 
     pub fn resize(&mut self, columns: NonZeroU16, rows: NonZeroU16) {

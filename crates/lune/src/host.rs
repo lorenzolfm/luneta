@@ -602,12 +602,23 @@ impl Pacing {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SyncedTabs {
+    viewed: u64,
+    on: Machine,
+    worktree: WorktreeId,
+    projected_revision: u64,
+    titles_revision: u64,
+}
+
 pub struct App {
     right: Option<Right>,
     homes: home::Homes,
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
+    projected_revision: u64,
+    tabs_synced: Option<SyncedTabs>,
     luned: PathBuf,
     movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
@@ -999,6 +1010,8 @@ impl App {
             shown_number_dropped: 0,
             runs_in,
             projected: Projected::default(),
+            projected_revision: 0,
+            tabs_synced: None,
             luned,
             movers: HashMap::new(),
             sidebar,
@@ -1321,10 +1334,14 @@ impl App {
                 dirty
             },
             Event::Daemon(Ok(host)) => {
-                self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
+                let projected = Projected::adapted(&host).unwrap_or_else(|why| {
                     log::say(&format!("luned's projects: {why}"));
                     Projected::default()
                 });
+                if self.projected != projected {
+                    self.projected = projected;
+                    self.projected_revision = self.projected_revision.wrapping_add(1);
+                }
                 let mut changed = false;
                 match self.name_home() {
                     Some(Homed::Named { changed: named }) => changed |= named,
@@ -1339,7 +1356,6 @@ impl App {
                 let review_status = self.review_git_status(&host);
                 self.sidebar.heard(host, now.system);
                 self.seat();
-                changed |= self.sync_tabs();
                 if review_status != self.diff.git_status {
                     self.diff.git_status = review_status;
                     self.maybe_fetch_diff(true);
@@ -1652,13 +1668,30 @@ impl App {
     #[must_use]
     fn sync_tabs(&mut self) -> bool {
         let Some(Right::Worktree(right)) = &mut self.right else {
+            self.tabs_synced = None;
             return false;
         };
-        let on = right.machine().clone();
+        let viewed = right.number();
+        let on = right.machine();
         let worktree = right.worktree();
+        let projected_revision = self.projected_revision;
+        let titles_revision = self.sidebar.view_titles_revision();
+        if let Some(synced) = &self.tabs_synced
+            && synced.viewed == viewed
+            && synced.on == *on
+            && synced.worktree == worktree
+            && synced.projected_revision == projected_revision
+            && synced.titles_revision == titles_revision
+        {
+            return false;
+        }
+        let on = on.clone();
         let tabs = self.projected.tabs(&on, worktree);
         let titles = self.sidebar.view_titles(&on, worktree);
-        right.tabs(tabs, titles)
+        let changed = right.tabs(tabs, titles);
+        self.tabs_synced =
+            Some(SyncedTabs { viewed, on, worktree, projected_revision, titles_revision });
+        changed
     }
 
     fn hover(&self) -> Hover {
@@ -3312,11 +3345,7 @@ impl App {
     fn heeded(&mut self, heeded: Heeded) -> bool {
         let dirty = match heeded {
             Heeded::Quiet => return false,
-            Heeded::Changed => true,
-            Heeded::Followed => {
-                let _ = self.sync_tabs();
-                true
-            },
+            Heeded::Changed | Heeded::Followed => true,
             Heeded::Edged(across) => self.cross(across),
             Heeded::Sent(worktree) => {
                 let Some(right) = self.viewed() else {
@@ -3360,7 +3389,7 @@ impl App {
             },
         };
         self.seat();
-        dirty
+        dirty | self.sync_tabs()
     }
 
     fn make_worktree(
@@ -4619,7 +4648,10 @@ mod tests {
         app.go_worktree(&Machine::Local, worktree_id, None);
         app.give(Focus::on(Side::Collapsed));
         assert_eq!(
-            app.sidebar.view_titles(&Machine::Local, worktree_id).get(&view_id).map(String::as_str),
+            app.sidebar
+                .view_titles(&Machine::Local, worktree_id)
+                .and_then(|titles| titles.get(&view_id))
+                .map(String::as_str),
             Some("Initial agy title")
         );
         app.tick(at(Duration::ZERO));
@@ -4634,7 +4666,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            app.sidebar.view_titles(&Machine::Local, worktree_id).get(&view_id).map(String::as_str),
+            app.sidebar
+                .view_titles(&Machine::Local, worktree_id)
+                .and_then(|titles| titles.get(&view_id))
+                .map(String::as_str),
             Some("Session folds")
         );
         app.tick(at(first));
@@ -4649,7 +4684,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            app.sidebar.view_titles(&Machine::Local, worktree_id).get(&view_id).map(String::as_str),
+            app.sidebar
+                .view_titles(&Machine::Local, worktree_id)
+                .and_then(|titles| titles.get(&view_id))
+                .map(String::as_str),
             Some("View tab titles")
         );
         app.tick(at(second));

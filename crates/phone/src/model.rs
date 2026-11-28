@@ -412,10 +412,19 @@ fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
 
 fn name_of(agent: &api::Agent) -> String {
     let given = agent.name.as_ref().and_then(api::Name::given);
-    let topic = || agent.topic.as_deref().map(str::trim).filter(|topic| !topic.is_empty());
+    let topic = || agent.live_topic();
     let auto = || agent.name.as_ref().and_then(api::Name::auto);
     let folder = || agent.cwd.rsplit('/').find(|part| !part.is_empty());
-    given.or_else(topic).or_else(auto).or_else(folder).unwrap_or(agent.cwd.as_str()).to_owned()
+    let name = given
+        .or_else(topic)
+        .or_else(auto)
+        .or_else(folder)
+        .unwrap_or(agent.cwd.as_str())
+        .to_owned();
+    if !agent.cwd.is_empty() {
+        assert!(!name.is_empty(), "an agent with a cwd gets a non-empty name");
+    }
+    name
 }
 
 fn status_of(agent: &api::Agent) -> Status {
@@ -536,6 +545,7 @@ mod tests {
 
         let mut auto_only = agent(3, api::Status::Idle, 3, None);
         auto_only.name = named("Initial title", api::NameSource::Auto);
+        auto_only.topic = Some("   ".to_owned());
         assert_eq!(name_of(&auto_only), "Initial title");
 
         let mut derived_only = agent(4, api::Status::Idle, 4, None);
