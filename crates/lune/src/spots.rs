@@ -28,6 +28,10 @@ impl<S> Default for Spots<S> {
 }
 
 impl<S> Spots<S> {
+    pub const fn empty() -> Self {
+        Spots(Vec::new())
+    }
+
     pub fn add(&mut self, line: usize, columns: Range<usize>, spot: S) {
         let (Ok(y), Ok(x)) = (u16::try_from(line), u16::try_from(columns.start)) else {
             return;

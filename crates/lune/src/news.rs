@@ -13,6 +13,12 @@ use crate::state;
 
 const DWELL: Duration = Duration::from_secs(1);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dwell {
+    pub rows: bool,
+    pub lost: bool,
+}
+
 #[derive(Default)]
 pub struct News {
     seen: Ledger<Key>,
@@ -71,13 +77,13 @@ impl News {
     }
 
     pub fn mark_unread(&mut self, key: Key, now: SystemTime) {
-        self.unread.set(key, Some(now));
+        let _ = self.unread.set(key, Some(now));
     }
 
     pub fn read(&mut self, key: Key, finished: Option<SystemTime>, now: SystemTime) {
-        self.saw(key, finished, now);
+        let _ = self.saw(key, finished, now);
         if self.is_unread(key) {
-            self.unread.set(key, None);
+            let _ = self.unread.set(key, None);
         }
     }
 
@@ -87,19 +93,21 @@ impl News {
         finished: impl Fn(Key) -> Option<SystemTime>,
         now: SystemTime,
         at: Instant,
-    ) -> bool {
+    ) -> Dwell {
         let (left, dwelling) = match (self.dwelling.take(), here) {
             (Some(was), Some(here)) if was.0 == here => (None, Some(was)),
             (was, here) => (was, here.map(|here| (here, now, at))),
         };
-        let mut changed = false;
+        let mut dwell = Dwell::default();
         for (key, since, from) in left.into_iter().chain(dwelling) {
             if at.duration_since(from) >= DWELL {
-                changed |= self.visit(key, since, finished(key), now);
+                let visited = self.visit(key, since, finished(key), now);
+                dwell.rows |= visited.rows;
+                dwell.lost |= visited.lost;
             }
         }
         self.dwelling = dwelling;
-        changed
+        dwell
     }
 
     fn visit(
@@ -108,39 +116,44 @@ impl News {
         since: SystemTime,
         finished: Option<SystemTime>,
         now: SystemTime,
-    ) -> bool {
+    ) -> Dwell {
+        let mut lost = false;
         if self
             .stayed
             .get(key.session)
             .is_none_or(|stayed| stayed < since)
         {
-            self.stayed.set(key.session, Some(now));
+            lost |= self.stayed.set(key.session, Some(now));
         }
-        let mut changed = self.saw(key, finished, now);
+        let mut dwell = self.saw(key, finished, now);
+        dwell.lost |= lost;
         if self.unread.get(key).is_some_and(|marked| marked < since) {
-            self.unread.set(key, None);
-            changed = true;
+            dwell.lost |= self.unread.set(key, None);
+            dwell.rows = true;
         }
-        changed
+        dwell
     }
 
-    fn saw(&mut self, key: Key, finished: Option<SystemTime>, now: SystemTime) -> bool {
+    fn saw(&mut self, key: Key, finished: Option<SystemTime>, now: SystemTime) -> Dwell {
         if !self.is_new(key, finished) {
-            return false;
+            return Dwell::default();
         }
-        self.seen
+        let lost = self
+            .seen
             .set(key, finished.map(|finished| finished.max(now)));
-        true
+        Dwell { rows: true, lost }
     }
 
-    pub fn listed(&mut self, live: Option<&Lists>, at: Instant) {
+    pub fn listed(&mut self, live: Option<&Lists>, at: Instant) -> bool {
+        let mut lost = false;
         let kept: BTreeSet<Session> = self.stayed.kept().collect();
         let gone = self.projects_missing.gone(&kept, live, at);
-        self.stayed.forget(&gone);
+        lost |= self.stayed.forget(&gone);
         let kept: BTreeSet<Key> = self.seen.kept().chain(self.unread.kept()).collect();
         let gone = self.views_missing.gone(&kept, live, at);
-        self.seen.forget(&gone);
-        self.unread.forget(&gone);
+        lost |= self.seen.forget(&gone);
+        lost |= self.unread.forget(&gone);
+        lost
     }
 
     fn dirs(&self) -> Vec<&Path> {
@@ -178,7 +191,7 @@ mod tests {
     }
 
     fn dwell(news: &mut News, here: Option<Key>, now: SystemTime) -> bool {
-        news.dwell(here, finished, now, steady(now))
+        news.dwell(here, finished, now, steady(now)).rows
     }
 
     fn session(project: u64) -> Session {
