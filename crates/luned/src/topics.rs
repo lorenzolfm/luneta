@@ -11,8 +11,8 @@ use tokio::sync::watch::Receiver;
 use crate::agent::{Agent, Name};
 use crate::core::{self, Command};
 use crate::transcripts::{
-    self, one_line, Asked, Digest, Folders, SessionId, ShareBytes, StepsMax, Tail, TailLimits,
-    TranscriptHarness, TITLE_CHARS,
+    self, Asked, Digest, Folders, SessionId, ShareBytes, StepsMax, TITLE_CHARS, Tail, TailLimits,
+    TranscriptHarness, one_line,
 };
 use crate::watch::Troubles;
 use crate::{claude, program};
@@ -58,12 +58,69 @@ const SYSTEM: &str = "You name the topic of a developer's coding session, for it
     Answer with the topic alone, on one line, and nothing else.";
 
 const ROUTINE_WORDS: &[&str] = &[
-    "a", "after", "against", "ahead", "all", "an", "and", "both", "ci", "commit", "continue",
-    "description", "do", "done", "everything", "finding", "findings", "finishes", "fix", "for",
-    "go", "green", "here", "in", "is", "it", "link", "merge", "merged", "no", "ok", "okay", "on",
-    "once", "open", "pass", "passes", "please", "pr", "proceed", "push", "rebase", "recommendation",
-    "recommendations", "sure", "sync", "thank", "thanks", "that", "the", "then", "these", "this",
-    "those", "update", "upstream", "when", "with", "yeah", "yep", "yes", "you", "your",
+    "a",
+    "after",
+    "against",
+    "ahead",
+    "all",
+    "an",
+    "and",
+    "both",
+    "ci",
+    "commit",
+    "continue",
+    "description",
+    "do",
+    "done",
+    "everything",
+    "finding",
+    "findings",
+    "finishes",
+    "fix",
+    "for",
+    "go",
+    "green",
+    "here",
+    "in",
+    "is",
+    "it",
+    "link",
+    "merge",
+    "merged",
+    "no",
+    "ok",
+    "okay",
+    "on",
+    "once",
+    "open",
+    "pass",
+    "passes",
+    "please",
+    "pr",
+    "proceed",
+    "push",
+    "rebase",
+    "recommendation",
+    "recommendations",
+    "sure",
+    "sync",
+    "thank",
+    "thanks",
+    "that",
+    "the",
+    "then",
+    "these",
+    "this",
+    "those",
+    "update",
+    "upstream",
+    "when",
+    "with",
+    "yeah",
+    "yep",
+    "yes",
+    "you",
+    "your",
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -126,7 +183,11 @@ impl Kept {
 
     fn grown(&mut self, folders: &Folders, key: &TopicKey) -> io::Result<Option<Digest>> {
         let tail = if let Some(tail) = &mut self.transcript {
-            assert_eq!(tail.harness(), key.harness(), "cached tail matches topic harness");
+            assert_eq!(
+                tail.harness(),
+                key.harness(),
+                "cached tail matches topic harness"
+            );
             tail
         } else {
             let Some(path) = folders.find(key.harness(), key.id()) else {
@@ -182,16 +243,25 @@ impl Topics {
     }
 
     fn look(&mut self, agents: &[Agent], shown: bool) -> Vec<Due> {
-        assert!(agents.len() <= crate::statuses::AGENTS_MAX, "agents fit within AGENTS_MAX");
-        assert!(self.kept.len() <= KEPT_MAX, "kept sessions stay within KEPT_MAX");
-        let named: Vec<(TopicKey, &Agent)> =
-            agents.iter().filter_map(|agent| Some((topical(agent)?, agent))).collect();
+        assert!(
+            agents.len() <= crate::statuses::AGENTS_MAX,
+            "agents fit within AGENTS_MAX"
+        );
+        assert!(
+            self.kept.len() <= KEPT_MAX,
+            "kept sessions stay within KEPT_MAX"
+        );
+        let named: Vec<(TopicKey, &Agent)> = agents
+            .iter()
+            .filter_map(|agent| Some((topical(agent)?, agent)))
+            .collect();
         self.forget_gone(&named, Instant::now());
         let folders = &self.folders;
         for (key, agent) in named {
             if !self.kept.contains_key(&key) {
                 if self.kept.len() == KEPT_MAX && !evict_oldest_left(&mut self.kept) {
-                    self.read_troubles.say(format!("topics: keeping at most {KEPT_MAX} sessions"));
+                    self.read_troubles
+                        .say(format!("topics: keeping at most {KEPT_MAX} sessions"));
                     continue;
                 }
                 let mut kept = Kept::default();
@@ -199,20 +269,23 @@ impl Topics {
                 if agent.started_at.is_none_or(|started| started < self.began) {
                     match kept.grown(folders, &key) {
                         Ok(Some(digest)) => kept.asked = digest.asked,
-                        Ok(None) => {},
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                        Ok(None) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                         Err(error) => {
                             self.read_troubles.say(format!(
                                 "topics: could not read {} transcript: {error}",
                                 key.id().as_str()
                             ));
-                        },
+                        }
                     }
                 }
                 let replaced = self.kept.insert(key.clone(), kept);
                 assert!(replaced.is_none(), "new topic key was not already kept");
             }
-            let kept = self.kept.get_mut(&key).expect("topic key was just ensured in kept");
+            let kept = self
+                .kept
+                .get_mut(&key)
+                .expect("topic key was just ensured in kept");
             kept.auto_title = agent
                 .name
                 .as_ref()
@@ -238,15 +311,16 @@ impl Topics {
                         key.id().as_str()
                     ));
                     continue;
-                },
+                }
             };
             kept.read_due = false;
             let Some(digest) = grown else {
                 continue;
             };
-            let new = digest.asked.as_ref().is_some_and(|asked| {
-                kept.asked.as_ref().is_none_or(|was| !was.same(asked))
-            });
+            let new = digest
+                .asked
+                .as_ref()
+                .is_some_and(|asked| kept.asked.as_ref().is_none_or(|was| !was.same(asked)));
             if new {
                 kept.asked.clone_from(&digest.asked);
                 let routine = digest.asked.as_ref().is_some_and(names_no_subject);
@@ -257,12 +331,11 @@ impl Topics {
             }
         }
         self.read_troubles.done();
-        assert!(self.kept.len() <= KEPT_MAX, "kept sessions stay within KEPT_MAX");
-        if shown {
-            self.due()
-        } else {
-            Vec::new()
-        }
+        assert!(
+            self.kept.len() <= KEPT_MAX,
+            "kept sessions stay within KEPT_MAX"
+        );
+        if shown { self.due() } else { Vec::new() }
     }
 
     fn forget_gone(&mut self, named: &[(TopicKey, &Agent)], now: Instant) {
@@ -274,7 +347,10 @@ impl Topics {
             kept.went_unread();
             now.duration_since(*kept.left.get_or_insert(now)) < REMEMBERED
         });
-        assert!(self.kept.len() <= KEPT_MAX, "kept sessions stay within KEPT_MAX");
+        assert!(
+            self.kept.len() <= KEPT_MAX,
+            "kept sessions stay within KEPT_MAX"
+        );
     }
 
     fn due(&mut self) -> Vec<Due> {
@@ -295,7 +371,10 @@ impl Topics {
                 auto_title: kept.auto_title.as_ref().map(Said::as_str),
             };
             let prompt = prompt(&title, digest);
-            due.push(Due { key: key.clone(), prompt });
+            due.push(Due {
+                key: key.clone(),
+                prompt,
+            });
         }
         assert!(self.writing.len() <= CALLS_MAX);
         assert!(due.len() <= CALLS_MAX);
@@ -306,7 +385,8 @@ impl Topics {
         let started = self.writing.remove(&key);
         assert!(started, "a call that ended had started");
         if let Err(why) = &said {
-            self.write_troubles.say(format!("the model named no topic: {why}"));
+            self.write_troubles
+                .say(format!("the model named no topic: {why}"));
         }
         self.write_troubles.done();
         let Some(kept) = self.kept.get_mut(&key) else {
@@ -320,8 +400,9 @@ impl Topics {
 
     fn topics(&self) -> HashMap<TopicKey, Said> {
         let here = self.kept.iter().filter(|(_, kept)| kept.left.is_none());
-        let topics: HashMap<TopicKey, Said> =
-            here.filter_map(|(key, kept)| Some((key.clone(), kept.topic.clone()?))).collect();
+        let topics: HashMap<TopicKey, Said> = here
+            .filter_map(|(key, kept)| Some((key.clone(), kept.topic.clone()?)))
+            .collect();
         assert!(topics.len() <= self.kept.len());
         topics
     }
@@ -349,7 +430,10 @@ fn names_no_subject(asked: &Asked) -> bool {
     };
     let text = text.to_lowercase();
     let mut words = text.split_whitespace().peekable();
-    words.next_if(|word| word.strip_prefix('/').is_some_and(|name| !name.contains('/')));
+    words.next_if(|word| {
+        word.strip_prefix('/')
+            .is_some_and(|name| !name.contains('/'))
+    });
     words.all(|word| ROUTINE_WORDS.contains(&word.trim_end_matches(MARKS)))
 }
 
@@ -359,15 +443,23 @@ struct RowTitle<'a> {
 }
 
 fn prompt(title: &RowTitle<'_>, digest: Digest) -> String {
-    let RowTitle { current_topic, auto_title } = *title;
+    let RowTitle {
+        current_topic,
+        auto_title,
+    } = *title;
     let current_line = match current_topic.or(digest.title.as_deref()).or(auto_title) {
         Some(topic) => {
             assert!(!topic.trim().is_empty(), "prompt topic line is non-empty");
             format!("The topic the row goes by now: {topic}")
-        },
+        }
         None => "The row has no topic yet.".to_owned(),
     };
-    let told = Digest { title: None, ..digest }.lines().join("\n");
+    let told = Digest {
+        title: None,
+        ..digest
+    }
+    .lines()
+    .join("\n");
     format!("<session>\n{current_line}\n{told}\n</session>")
 }
 
@@ -403,7 +495,10 @@ fn written(prompt: &str) -> Result<Said, String> {
         claude.current_dir(home);
     }
     let ran = program::run_reading(&mut claude, WRITING, told).map_err(not_run)?;
-    topic_of(&ran.answer_why_on_either().map_err(|why| format!("claude: {why}"))?)
+    topic_of(
+        &ran.answer_why_on_either()
+            .map_err(|why| format!("claude: {why}"))?,
+    )
 }
 
 fn start(Due { key, prompt }: Due, wrote: &Sender<Wrote>) -> io::Result<()> {
@@ -423,36 +518,41 @@ pub fn follow(
     began: SystemTime,
     sweep: Duration,
 ) -> io::Result<()> {
-    assert!(folders.any(), "topics follow starts only when a transcript folder is set");
-    thread::Builder::new().name("topics".to_owned()).spawn(move || {
-        let (wrote, ended) = mpsc::channel();
-        let mut topics = Topics::new(folders, began);
-        let mut told = HashMap::new();
-        loop {
-            let Some(agents) = core::ask(&core, Command::AllAgents) else {
-                return;
-            };
-            let shown = *shown.borrow();
-            for due in topics.look(&agents, shown) {
-                let key = due.key.clone();
-                if let Err(error) = start(due, &wrote) {
-                    let said = Err(format!("no thread to ask it on: {error}"));
-                    topics.wrote(Wrote { key, said });
-                }
-            }
-            match ended.recv_timeout(sweep) {
-                Ok(ended) => topics.wrote(ended),
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {},
-            }
-            let now = topics.topics();
-            if now != told {
-                if core.send(Command::Topics(now.clone())).is_err() {
+    assert!(
+        folders.any(),
+        "topics follow starts only when a transcript folder is set"
+    );
+    thread::Builder::new()
+        .name("topics".to_owned())
+        .spawn(move || {
+            let (wrote, ended) = mpsc::channel();
+            let mut topics = Topics::new(folders, began);
+            let mut told = HashMap::new();
+            loop {
+                let Some(agents) = core::ask(&core, Command::AllAgents) else {
                     return;
+                };
+                let shown = *shown.borrow();
+                for due in topics.look(&agents, shown) {
+                    let key = due.key.clone();
+                    if let Err(error) = start(due, &wrote) {
+                        let said = Err(format!("no thread to ask it on: {error}"));
+                        topics.wrote(Wrote { key, said });
+                    }
                 }
-                told = now;
+                match ended.recv_timeout(sweep) {
+                    Ok(ended) => topics.wrote(ended),
+                    Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {}
+                }
+                let now = topics.topics();
+                if now != told {
+                    if core.send(Command::Topics(now.clone())).is_err() {
+                        return;
+                    }
+                    told = now;
+                }
             }
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -478,7 +578,7 @@ mod tests {
     use crate::process::AgentPid;
     use crate::statuses::tests::decided;
     use crate::statuses::{ActiveStatus, BlockedReason};
-    use crate::{agy, claude, Directory};
+    use crate::{Directory, agy, claude};
 
     const ID: &str = "0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60";
 
@@ -508,7 +608,10 @@ mod tests {
             started_at: Some(began() + Duration::from_secs(1)),
             name: None,
             entrypoint: Some(Said::new("cli".to_owned()).unwrap()),
-            terminal: Some(TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(60) }),
+            terminal: Some(TerminalKey {
+                id: NonZeroU32::MIN,
+                made: OwnMade::from_nanos(60),
+            }),
         }
     }
 
@@ -525,10 +628,16 @@ mod tests {
             ),
             started_at: Some(began() + Duration::from_secs(1)),
             name: title.and_then(|text| {
-                Some(Name { text: Said::new(text.to_owned())?, source: Some(Source::Auto) })
+                Some(Name {
+                    text: Said::new(text.to_owned())?,
+                    source: Some(Source::Auto),
+                })
             }),
             entrypoint: Some(Said::new("tui".to_owned()).unwrap()),
-            terminal: Some(TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(60) }),
+            terminal: Some(TerminalKey {
+                id: NonZeroU32::MIN,
+                made: OwnMade::from_nanos(60),
+            }),
         }
     }
 
@@ -542,7 +651,13 @@ mod tests {
         }
 
         fn topics(&self) -> Topics {
-            Topics::new(Folders { claude: Some(self.0.path().to_owned()), agy: None }, began())
+            Topics::new(
+                Folders {
+                    claude: Some(self.0.path().to_owned()),
+                    agy: None,
+                },
+                began(),
+            )
         }
 
         fn transcript(&self, id: &str) -> PathBuf {
@@ -551,7 +666,11 @@ mod tests {
 
         fn add(&self, id: &str, record: &serde_json::Value) {
             let path = self.transcript(id);
-            let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
             writeln!(file, "{record}").unwrap();
         }
 
@@ -574,7 +693,10 @@ mod tests {
     }
 
     fn failed() -> Wrote {
-        Wrote { key: claude_key(ID), said: Err("it did not answer in time".to_owned()) }
+        Wrote {
+            key: claude_key(ID),
+            said: Err("it did not answer in time".to_owned()),
+        }
     }
 
     fn with_a_topic(projects: &Projects, agents: &[Agent]) -> Topics {
@@ -592,21 +714,33 @@ mod tests {
         let busy = [agent(ID, ActiveStatus::Working, 2)];
         assert_eq!(topics.look(&busy, true), []);
 
-        projects.add(ID, &json!({"type": "ai-title", "aiTitle": "The first prompt"}));
+        projects.add(
+            ID,
+            &json!({"type": "ai-title", "aiTitle": "The first prompt"}),
+        );
         projects.prompted(ID, "fold the sessions");
         let due = topics.look(&busy, true);
         let [Due { key, prompt }] = due.as_slice() else {
             panic!("{due:?}");
         };
         assert_eq!(key.id().as_str(), ID);
-        assert!(prompt.contains("The topic the row goes by now: The first prompt"), "{prompt}");
-        assert!(prompt.contains("The developer last asked it: fold the sessions"), "{prompt}");
+        assert!(
+            prompt.contains("The topic the row goes by now: The first prompt"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The developer last asked it: fold the sessions"),
+            "{prompt}"
+        );
         topics.wrote(said(ID, "Session folds"));
         assert_eq!(topics.topics(), only(ID, "Session folds"));
 
         let step = json!({"content": [{"type": "text", "text": "Looking."}]});
         projects.add(ID, &json!({"type": "assistant", "message": step}));
-        projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}));
+        projects.add(
+            ID,
+            &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}),
+        );
         assert_eq!(topics.look(&busy, true), []);
 
         projects.prompted(ID, "now the tabs");
@@ -614,8 +748,14 @@ mod tests {
         let [Due { prompt, .. }] = due.as_slice() else {
             panic!("{due:?}");
         };
-        assert!(prompt.contains("The topic the row goes by now: Session folds"), "{prompt}");
-        assert!(prompt.contains("The developer last asked it: now the tabs"), "{prompt}");
+        assert!(
+            prompt.contains("The topic the row goes by now: Session folds"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The developer last asked it: now the tabs"),
+            "{prompt}"
+        );
     }
 
     #[test]
@@ -627,7 +767,12 @@ mod tests {
         assert_eq!(topics.look(&busy, true).len(), 1);
         topics.wrote(said(ID, "Session folds"));
 
-        for routine in ["yes, go ahead", "merge once CI passes", "/compact", "/tigerstyle this pr"] {
+        for routine in [
+            "yes, go ahead",
+            "merge once CI passes",
+            "/compact",
+            "/tigerstyle this pr",
+        ] {
             projects.prompted(ID, routine);
             assert_eq!(topics.look(&busy, true), [], "{routine}");
             assert_eq!(topics.topics(), only(ID, "Session folds"));
@@ -650,7 +795,10 @@ mod tests {
         projects.prompted(ID, "yes");
         assert_eq!(topics.look(&busy, true).len(), 1);
 
-        topics.wrote(Wrote { key: claude_key(ID), said: Err("it did not answer in time".to_owned()) });
+        topics.wrote(Wrote {
+            key: claude_key(ID),
+            said: Err("it did not answer in time".to_owned()),
+        });
         projects.prompted(ID, "continue");
         assert_eq!(topics.look(&busy, true).len(), 1);
     }
@@ -728,7 +876,10 @@ mod tests {
     #[test]
     fn a_prompt_that_names_no_subject_makes_the_call_after_an_agent_was_away() {
         let busy = [agent(ID, ActiveStatus::Working, 2)];
-        let unseated = [Agent { terminal: None, ..agent(ID, ActiveStatus::Working, 2) }];
+        let unseated = [Agent {
+            terminal: None,
+            ..agent(ID, ActiveStatus::Working, 2)
+        }];
         let projects = Projects::new();
         let mut topics = with_a_topic(&projects, &busy);
         assert_eq!(topics.look(&unseated, true), []);
@@ -800,8 +951,9 @@ mod tests {
     fn a_prompt_that_names_no_subject_takes_no_place_from_one_waiting_for_room() {
         let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
         let projects = Projects::new();
-        let mut agents: Vec<Agent> =
-            (0..CALLS_MAX).map(|n| agent(&id(n), ActiveStatus::Working, 2)).collect();
+        let mut agents: Vec<Agent> = (0..CALLS_MAX)
+            .map(|n| agent(&id(n), ActiveStatus::Working, 2))
+            .collect();
         for n in 0..CALLS_MAX {
             projects.prompted(&id(n), "fold the sessions");
         }
@@ -852,7 +1004,9 @@ mod tests {
         for text in subject {
             assert!(!names_no_subject(&whole(text)), "{text}");
         }
-        assert!(!names_no_subject(&Asked::Cut("merge once ci passes".to_owned())));
+        assert!(!names_no_subject(&Asked::Cut(
+            "merge once ci passes".to_owned()
+        )));
     }
 
     #[test]
@@ -864,7 +1018,20 @@ mod tests {
         assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true), []);
         let finished = [agent(ID, ActiveStatus::Idle, 3)];
         assert_eq!(topics.look(&finished, true).len(), 1);
-        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Blocked { reason: BlockedReason::Unspecified, message: None }, 4)], true), []);
+        assert_eq!(
+            topics.look(
+                &[agent(
+                    ID,
+                    ActiveStatus::Blocked {
+                        reason: BlockedReason::Unspecified,
+                        message: None
+                    },
+                    4
+                )],
+                true
+            ),
+            []
+        );
     }
 
     #[test]
@@ -874,7 +1041,10 @@ mod tests {
         projects.prompted(asked, "fold the sessions");
         projects.prompted(quiet, "sort the tabs");
         let mut topics = projects.topics();
-        let agents = [agent(asked, ActiveStatus::Working, 2), agent(quiet, ActiveStatus::Idle, 2)];
+        let agents = [
+            agent(asked, ActiveStatus::Working, 2),
+            agent(quiet, ActiveStatus::Idle, 2),
+        ];
         let shown = topics.look(&agents, true);
         assert_eq!(shown.len(), 2);
         topics.wrote(said(asked, "Session folds"));
@@ -884,14 +1054,20 @@ mod tests {
         projects.prompted(asked, "and the views");
         assert_eq!(topics.look(&agents, false), []);
         assert_eq!(topics.look(&agents, false), []);
-        projects.add(quiet, &json!({"type": "last-prompt", "lastPrompt": "sort the tabs"}));
+        projects.add(
+            quiet,
+            &json!({"type": "last-prompt", "lastPrompt": "sort the tabs"}),
+        );
 
         let due = topics.look(&agents, true);
         let [Due { key, prompt }] = due.as_slice() else {
             panic!("{due:?}");
         };
         assert_eq!(key.id().as_str(), asked);
-        assert!(prompt.contains("The developer last asked it: and the views"), "{prompt}");
+        assert!(
+            prompt.contains("The developer last asked it: and the views"),
+            "{prompt}"
+        );
     }
 
     #[test]
@@ -906,7 +1082,10 @@ mod tests {
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], false), []);
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], true), []);
         assert_eq!(topics.topics(), HashMap::new());
-        projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}));
+        projects.add(
+            ID,
+            &json!({"type": "last-prompt", "lastPrompt": "fold the sessions"}),
+        );
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], true), []);
         projects.prompted(ID, "now the tabs");
         assert_eq!(topics.look(&[before(ActiveStatus::Working)], true).len(), 1);
@@ -916,8 +1095,9 @@ mod tests {
     fn no_more_calls_run_than_the_most_and_the_rest_wait() {
         let id = |n: usize| format!("{n:08x}-0000-4000-8000-000000000000");
         let projects = Projects::new();
-        let agents: Vec<Agent> =
-            (0..CALLS_MAX + 2).map(|n| agent(&id(n), ActiveStatus::Working, 2)).collect();
+        let agents: Vec<Agent> = (0..CALLS_MAX + 2)
+            .map(|n| agent(&id(n), ActiveStatus::Working, 2))
+            .collect();
         for n in 0..CALLS_MAX + 2 {
             projects.prompted(&id(n), "fold the sessions");
         }
@@ -951,10 +1131,16 @@ mod tests {
         assert!(prompt.contains("goes by now: Session folds"), "{prompt}");
         assert!(prompt.contains("last asked it: now the tabs"), "{prompt}");
 
-        topics.wrote(Wrote { key: claude_key(ID), said: Err("it did not answer in time".to_owned()) });
+        topics.wrote(Wrote {
+            key: claude_key(ID),
+            said: Err("it did not answer in time".to_owned()),
+        });
         assert_eq!(topics.topics(), only(ID, "Session folds"));
         assert_eq!(topics.look(&busy, true), []);
-        projects.add(ID, &json!({"type": "last-prompt", "lastPrompt": "now the tabs"}));
+        projects.add(
+            ID,
+            &json!({"type": "last-prompt", "lastPrompt": "now the tabs"}),
+        );
         assert_eq!(topics.look(&busy, true), []);
     }
 
@@ -963,7 +1149,10 @@ mod tests {
         let projects = Projects::new();
         projects.prompted(ID, "fold the sessions");
         let mut topics = projects.topics();
-        assert_eq!(topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true).len(), 1);
+        assert_eq!(
+            topics.look(&[agent(ID, ActiveStatus::Idle, 2)], true).len(),
+            1
+        );
         topics.wrote(said(ID, "Session folds"));
 
         assert_eq!(topics.look(&[], true), []);
@@ -989,7 +1178,10 @@ mod tests {
 
         let before = Instant::now();
         assert_eq!(topics.look(&[], true), []);
-        topics.forget_gone(&[], before + REMEMBERED.saturating_sub(Duration::from_secs(1)));
+        topics.forget_gone(
+            &[],
+            before + REMEMBERED.saturating_sub(Duration::from_secs(1)),
+        );
         assert_eq!(topics.kept.len(), 1);
         topics.forget_gone(&[], Instant::now() + REMEMBERED);
         assert_eq!(topics.kept.len(), 0);
@@ -1069,7 +1261,10 @@ mod tests {
         assert!(topics.kept[&claude_key(ID)].transcript.is_none());
 
         fs::create_dir(projects.0.path().join("projects/-other")).unwrap();
-        let relocated = projects.0.path().join(format!("projects/-other/{ID}.jsonl"));
+        let relocated = projects
+            .0
+            .path()
+            .join(format!("projects/-other/{ID}.jsonl"));
         let record = json!({"type": "user", "message": {"content": "now the tabs"}});
         fs::write(&relocated, format!("{record}\n")).unwrap();
         assert_eq!(topics.look(&busy, true).len(), 1);
@@ -1078,18 +1273,71 @@ mod tests {
 
     #[test]
     fn a_call_is_made_only_for_an_agent_a_row_goes_by_the_topic_of() {
-        let named = |source| Some(Name { text: Said::new("fold".to_owned()).unwrap(), source });
+        let named = |source| {
+            Some(Name {
+                text: Said::new("fold".to_owned()).unwrap(),
+                source,
+            })
+        };
         let word = |word: &str| Some(Said::new(word.to_owned()).unwrap());
         let cases = [
-            (Agent { name: named(Some(Source::User)), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { name: named(Some(Source::Peer)), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { name: named(None), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { terminal: None, ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { entrypoint: word("sdk-cli"), ..agent(ID, ActiveStatus::Working, 2) }, false),
-            (Agent { entrypoint: None, ..agent(ID, ActiveStatus::Working, 2) }, false),
+            (
+                Agent {
+                    name: named(Some(Source::User)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    name: named(Some(Source::Peer)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    name: named(None),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    terminal: None,
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    entrypoint: word("sdk-cli"),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
+            (
+                Agent {
+                    entrypoint: None,
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                false,
+            ),
             (agent("no-uuid-here", ActiveStatus::Working, 2), false),
-            (Agent { name: named(Some(Source::Derived)), ..agent(ID, ActiveStatus::Working, 2) }, true),
-            (Agent { name: named(Some(Source::Auto)), ..agent(ID, ActiveStatus::Working, 2) }, true),
+            (
+                Agent {
+                    name: named(Some(Source::Derived)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                true,
+            ),
+            (
+                Agent {
+                    name: named(Some(Source::Auto)),
+                    ..agent(ID, ActiveStatus::Working, 2)
+                },
+                true,
+            ),
         ];
         for (agent, called) in cases {
             let projects = Projects::new();
@@ -1106,17 +1354,31 @@ mod tests {
     fn an_antigravity_agent_seeds_its_auto_title_and_updates_topic_on_new_prompts() {
         let scratch = tempfile::tempdir().unwrap();
         let agy_dir = scratch.path().join("agy");
-        let transcript =
-            agy_dir.join("brain").join(ID).join(".system_generated/logs/transcript.jsonl");
+        let transcript = agy_dir
+            .join("brain")
+            .join(ID)
+            .join(".system_generated/logs/transcript.jsonl");
         fs::create_dir_all(transcript.parent().unwrap()).unwrap();
         let write = |record: &serde_json::Value| {
-            let mut file = OpenOptions::new().create(true).append(true).open(&transcript).unwrap();
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&transcript)
+                .unwrap();
             writeln!(file, "{record}").unwrap();
         };
 
-        let folders = Folders { claude: None, agy: Some(agy_dir) };
+        let folders = Folders {
+            claude: None,
+            agy: Some(agy_dir),
+        };
         let mut topics = Topics::new(folders, began());
-        let busy = [agy_agent(ID, ActiveStatus::Working, 2, Some("Initial\nauto  title"))];
+        let busy = [agy_agent(
+            ID,
+            ActiveStatus::Working,
+            2,
+            Some("Initial\nauto  title"),
+        )];
         write(&json!({
             "step_index": 0,
             "source": "USER_EXPLICIT",
@@ -1128,8 +1390,14 @@ mod tests {
             panic!("{due:?}");
         };
         assert_eq!(*key, key_of(TranscriptHarness::Antigravity, ID));
-        assert!(prompt.contains("The topic the row goes by now: Initial auto title"), "{prompt}");
-        assert!(prompt.contains("The developer last asked it: fold the sessions"), "{prompt}");
+        assert!(
+            prompt.contains("The topic the row goes by now: Initial auto title"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("The developer last asked it: fold the sessions"),
+            "{prompt}"
+        );
 
         let agy_key = key_of(TranscriptHarness::Antigravity, ID);
         topics.wrote(Wrote {
@@ -1138,7 +1406,10 @@ mod tests {
         });
         assert_eq!(
             topics.topics(),
-            HashMap::from([(agy_key.clone(), Said::new("Session folds".to_owned()).unwrap())])
+            HashMap::from([(
+                agy_key.clone(),
+                Said::new("Session folds".to_owned()).unwrap()
+            )])
         );
 
         write(&json!({
@@ -1156,7 +1427,13 @@ mod tests {
             "content": "<USER_REQUEST>\nnow the view tabs\n</USER_REQUEST>"
         }));
         let next = topics.look(&busy, true);
-        let [Due { key: next_key, prompt: next_prompt }] = next.as_slice() else {
+        let [
+            Due {
+                key: next_key,
+                prompt: next_prompt,
+            },
+        ] = next.as_slice()
+        else {
             panic!("{next:?}");
         };
         assert_eq!(*next_key, agy_key);
@@ -1174,11 +1451,17 @@ mod tests {
     fn a_topic_is_one_short_line() {
         let topic = |said: &str| topic_of(said.as_bytes()).map(String::from);
         assert_eq!(topic("Session folds\n"), Ok("Session folds".to_owned()));
-        assert_eq!(topic("\n  \"Session   folds.\"\n\n"), Ok("Session folds".to_owned()));
+        assert_eq!(
+            topic("\n  \"Session   folds.\"\n\n"),
+            Ok("Session folds".to_owned())
+        );
         assert_eq!(topic("\"Session folds\"."), Ok("Session folds".to_owned()));
         assert_eq!(topic("**`lune.rs`**"), Ok("lune.rs".to_owned()));
         assert_eq!(topic("CI for PR #310."), Ok("CI for PR #310".to_owned()));
-        assert_eq!(topic("Session\u{1b}[31m folds"), Ok("Session[31m folds".to_owned()));
+        assert_eq!(
+            topic("Session\u{1b}[31m folds"),
+            Ok("Session[31m folds".to_owned())
+        );
         assert_eq!(topic(&"é".repeat(TOPIC_CHARS)), Ok("é".repeat(TOPIC_CHARS)));
         let own = [
             ".gitignore rules",
@@ -1191,9 +1474,16 @@ mod tests {
             assert_eq!(topic(own), Ok(own.to_owned()));
         }
         for nothing in ["", " \n \n", "\"\"", "."] {
-            assert_eq!(topic(nothing), Err("it said nothing".to_owned()), "{nothing:?}");
+            assert_eq!(
+                topic(nothing),
+                Err("it said nothing".to_owned()),
+                "{nothing:?}"
+            );
         }
-        assert_eq!(topic("The topic:\nSession folds"), Err("it said more than a line".to_owned()));
+        assert_eq!(
+            topic("The topic:\nSession folds"),
+            Err("it said more than a line".to_owned())
+        );
         let long = format!("it said more than {TOPIC_CHARS} characters");
         assert_eq!(topic(&"é".repeat(TOPIC_CHARS + 1)), Err(long));
     }
@@ -1206,8 +1496,20 @@ mod tests {
         let oldest = claude_key("00000003-0000-4000-8000-000000000000");
         let mut kept = HashMap::from([
             (active.clone(), Kept::default()),
-            (newer.clone(), Kept { left: Some(now + Duration::from_secs(5)), ..Kept::default() }),
-            (oldest.clone(), Kept { left: Some(now), ..Kept::default() }),
+            (
+                newer.clone(),
+                Kept {
+                    left: Some(now + Duration::from_secs(5)),
+                    ..Kept::default()
+                },
+            ),
+            (
+                oldest.clone(),
+                Kept {
+                    left: Some(now),
+                    ..Kept::default()
+                },
+            ),
         ]);
 
         assert!(evict_oldest_left(&mut kept));
@@ -1231,21 +1533,51 @@ mod tests {
             steps: Vec::new(),
         };
         let both = prompt(
-            &RowTitle { current_topic: Some("Live topic"), auto_title: Some("Auto title") },
-            Digest { title: digest.title.clone(), asked: digest.asked.clone(), steps: Vec::new() },
+            &RowTitle {
+                current_topic: Some("Live topic"),
+                auto_title: Some("Auto title"),
+            },
+            Digest {
+                title: digest.title.clone(),
+                asked: digest.asked.clone(),
+                steps: Vec::new(),
+            },
         );
-        assert!(both.contains("The topic the row goes by now: Live topic"), "{both}");
+        assert!(
+            both.contains("The topic the row goes by now: Live topic"),
+            "{both}"
+        );
 
         let from_digest = prompt(
-            &RowTitle { current_topic: None, auto_title: Some("Auto title") },
-            Digest { title: digest.title.clone(), asked: digest.asked.clone(), steps: Vec::new() },
+            &RowTitle {
+                current_topic: None,
+                auto_title: Some("Auto title"),
+            },
+            Digest {
+                title: digest.title.clone(),
+                asked: digest.asked.clone(),
+                steps: Vec::new(),
+            },
         );
-        assert!(from_digest.contains("The topic the row goes by now: Digest title"), "{from_digest}");
+        assert!(
+            from_digest.contains("The topic the row goes by now: Digest title"),
+            "{from_digest}"
+        );
 
         let from_auto = prompt(
-            &RowTitle { current_topic: None, auto_title: Some("Auto title") },
-            Digest { title: None, asked: digest.asked, steps: Vec::new() },
+            &RowTitle {
+                current_topic: None,
+                auto_title: Some("Auto title"),
+            },
+            Digest {
+                title: None,
+                asked: digest.asked,
+                steps: Vec::new(),
+            },
         );
-        assert!(from_auto.contains("The topic the row goes by now: Auto title"), "{from_auto}");
+        assert!(
+            from_auto.contains("The topic the row goes by now: Auto title"),
+            "{from_auto}"
+        );
     }
 }

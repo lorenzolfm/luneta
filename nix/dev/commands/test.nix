@@ -14,8 +14,7 @@ let
     builtins.split "[[:space:]]+and[[:space:]]+" quickFilter
   );
   quickExcluded = builtins.filter (
-    part:
-    builtins.match "[[:space:]]*not[[:space:]]+test\\(=[a-zA-Z0-9_:]+\\)[[:space:]]*" part != null
+    part: builtins.match "[[:space:]]*not[[:space:]]+test\\(=[a-zA-Z0-9_:]+\\)[[:space:]]*" part != null
   ) quickParts;
   quickCount =
     if quickParts == [ ] || builtins.length quickExcluded != builtins.length quickParts then

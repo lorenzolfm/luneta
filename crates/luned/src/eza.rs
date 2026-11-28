@@ -2,7 +2,7 @@ use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{program, Directory};
+use crate::{Directory, program};
 
 const ANSWER: Duration = Duration::from_secs(2);
 
@@ -21,7 +21,12 @@ pub(crate) fn listed(path: &Directory) -> Result<String, String> {
     let mut eza = Command::new("eza");
     eza.args(LIST).arg("--").arg(path);
     let ran = program::run(&mut eza, ANSWER).map_err(|error| unrun(&error))?;
-    let program::Ran::Ended { status, stdout, stderr } = ran else {
+    let program::Ran::Ended {
+        status,
+        stdout,
+        stderr,
+    } = ran
+    else {
         return Err("eza: it did not answer in time".to_owned());
     };
     let listed = String::from_utf8_lossy(&stdout).into_owned();

@@ -36,8 +36,15 @@ impl From<Failure> for String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Runs<'a> {
     Shell(&'a shells::Shell),
-    Command { program: &'a str, args: &'a [String] },
-    ResumeInShell { shell: &'a shells::Shell, kind: ShellKind, argv: &'a ResumeArgv },
+    Command {
+        program: &'a str,
+        args: &'a [String],
+    },
+    ResumeInShell {
+        shell: &'a shells::Shell,
+        kind: ShellKind,
+        argv: &'a ResumeArgv,
+    },
 }
 
 pub fn terminal_of(id: &process::Id) -> Result<Option<TerminalKey>, String> {
@@ -48,7 +55,7 @@ pub fn terminal_of(id: &process::Id) -> Result<Option<TerminalKey>, String> {
             Err(process::Unread::Gone) => Ok(None),
             Err(process::Unread::Failed(why)) => {
                 Err(format!("its environment does not read: {why}"))
-            },
+            }
         }
     } else {
         Ok(None)
@@ -57,7 +64,10 @@ pub fn terminal_of(id: &process::Id) -> Result<Option<TerminalKey>, String> {
 
 fn value_in<'a>(environ: &'a [OsString], name: &str) -> Option<&'a [u8]> {
     environ.iter().find_map(|entry| {
-        entry.as_bytes().strip_prefix(name.as_bytes())?.strip_prefix(b"=")
+        entry
+            .as_bytes()
+            .strip_prefix(name.as_bytes())?
+            .strip_prefix(b"=")
     })
 }
 
@@ -81,7 +91,10 @@ mod tests {
     #[test]
     fn a_terminal_is_named_by_its_variables() {
         let terminal = ["LUNE_MUX_TERMINAL=7", "LUNE_MUX_TERMINAL_MADE=60"];
-        let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
+        let key = TerminalKey {
+            id: NonZeroU32::new(7).unwrap(),
+            made: OwnMade::from_nanos(60),
+        };
         assert_eq!(own::terminal_in(&environ(&terminal)), Ok(Some(key)));
         let old = ["LUNE_MUX_SESSION=3", "LUNE_MUX_MADE=60", "LUNE_MUX_PANE=12"];
         let old = own::terminal_in(&environ(&old));
@@ -92,7 +105,10 @@ mod tests {
     fn a_variable_set_twice_reads_as_its_first() {
         let twice = ["LUNE_MUX_TERMINAL=7", "LUNE_MUX_TERMINAL_MADE=60"];
         let twice = [&twice[..], &["LUNE_MUX_TERMINAL=8"]].concat();
-        let key = TerminalKey { id: NonZeroU32::new(7).unwrap(), made: OwnMade::from_nanos(60) };
+        let key = TerminalKey {
+            id: NonZeroU32::new(7).unwrap(),
+            made: OwnMade::from_nanos(60),
+        };
         assert_eq!(own::terminal_in(&environ(&twice)), Ok(Some(key)));
     }
 
@@ -112,14 +128,28 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let sh = scratch.path().join("sh");
         let path = env::var_os("PATH").expect("the tests run with a PATH");
-        let found = env::split_paths(&path).map(|dir| dir.join("sh")).find(|it| it.is_file());
+        let found = env::split_paths(&path)
+            .map(|dir| dir.join("sh"))
+            .find(|it| it.is_file());
         let found = found.expect("sh is on the PATH");
-        let installed = Command::new("install").arg("-m111").arg(found).arg(&sh).status();
+        let installed = Command::new("install")
+            .arg("-m111")
+            .arg(found)
+            .arg(&sh)
+            .status();
         assert!(installed.unwrap().success());
         let mut waits = Command::new(&sh);
-        waits.args(["-c", "echo; read -r line"]).stdin(Stdio::piped()).stdout(Stdio::piped());
+        waits
+            .args(["-c", "echo; read -r line"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
         let mut child = waits.spawn().unwrap();
-        child.stdout.as_mut().unwrap().read_exact(&mut [0; 1]).expect("it says it runs");
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut [0; 1])
+            .expect("it says it runs");
         let pid = child.id();
         let start = process::start(pid).expect("a process that runs has a start");
         let unread = process::Id { pid, start };

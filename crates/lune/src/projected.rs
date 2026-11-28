@@ -4,10 +4,10 @@ use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{ProjectId, WorktreeId};
 use lune_domain::rows::{self, Project, Worktree};
 
-use luned::api::projects::Held;
-use luned::api::{self, remote, Host};
-use luned::log;
 use luned::Destination;
+use luned::api::projects::Held;
+use luned::api::{self, Host, remote};
+use luned::log;
 
 use crate::host::NOT_YET;
 use crate::machines::{self, Machine};
@@ -51,7 +51,10 @@ impl Projected {
             }
         }
         let here = held(host.projects.as_ref())?;
-        Ok(Projected { here, far: far_projects })
+        Ok(Projected {
+            here,
+            far: far_projects,
+        })
     }
 
     fn held_on(&self, on: &Machine) -> Option<&Holding> {
@@ -89,11 +92,7 @@ impl Projected {
     }
 
     #[must_use]
-    pub fn holding(
-        &self,
-        on: &Machine,
-        worktree: WorktreeId,
-    ) -> Option<(&Project, &Worktree)> {
+    pub fn holding(&self, on: &Machine, worktree: WorktreeId) -> Option<(&Project, &Worktree)> {
         self.projects(on).iter().find_map(|project| {
             let found = project.worktrees().iter().find(|it| it.id == worktree)?;
             Some((project, found))
@@ -107,7 +106,13 @@ impl Projected {
         worktree: WorktreeId,
     ) -> (Option<WorktreeId>, Option<WorktreeId>) {
         let held = self.projects(on).iter().find_map(|project| {
-            Some((project, project.worktrees().iter().position(|it| it.id == worktree)?))
+            Some((
+                project,
+                project
+                    .worktrees()
+                    .iter()
+                    .position(|it| it.id == worktree)?,
+            ))
         });
         let Some((project, at)) = held else {
             return (None, None);
@@ -122,7 +127,9 @@ impl Projected {
         if let Machine::Remote(_) = on {
             return Err(NOT_YET.to_owned());
         }
-        let project = self.project(on, session.project()).ok_or("luned keeps no such project")?;
+        let project = self
+            .project(on, session.project())
+            .ok_or("luned keeps no such project")?;
         let unshown = || format!("{} has no terminal to show", project.name);
         project.first_keyed().ok_or_else(unshown)
     }
@@ -130,10 +137,19 @@ impl Projected {
     #[must_use]
     pub fn tabs(&self, on: &Machine, worktree: WorktreeId) -> Option<WorktreeTabs> {
         let (project, _) = self.holding(on, worktree)?;
-        let tab = |it: &Worktree| Tab { worktree: it.id, name: it.name.clone() };
+        let tab = |it: &Worktree| Tab {
+            worktree: it.id,
+            name: it.name.clone(),
+        };
         let tabs: Vec<Tab> = project.worktrees().iter().map(tab).collect();
-        assert!(tabs.iter().any(|tab| tab.worktree == worktree), "the tabs hold the worktree held");
-        Some(WorktreeTabs { project: project.id, tabs })
+        assert!(
+            tabs.iter().any(|tab| tab.worktree == worktree),
+            "the tabs hold the worktree held"
+        );
+        Some(WorktreeTabs {
+            project: project.id,
+            tabs,
+        })
     }
 }
 
@@ -152,7 +168,10 @@ mod tests {
     use super::*;
 
     fn key(id: u32) -> api::TerminalKey {
-        api::TerminalKey { id, made_at: Some(prost_types::Timestamp::default()) }
+        api::TerminalKey {
+            id,
+            made_at: Some(prost_types::Timestamp::default()),
+        }
     }
 
     fn keyed(id: u32) -> TerminalKey {
@@ -165,7 +184,9 @@ mod tests {
 
     fn terminal(id: u64, found: terminal::Found, topic: Option<&str>) -> api::Terminal {
         let keyed = matches!(found, terminal::Found::Key(_));
-        let titled = topic.map(|topic| api::Titled { topic: Some(topic.to_owned()) });
+        let titled = topic.map(|topic| api::Titled {
+            topic: Some(topic.to_owned()),
+        });
         api::Terminal {
             id,
             found: Some(found),
@@ -209,9 +230,15 @@ mod tests {
             })),
             ..api::Project::default()
         };
-        let kept = Held::Kept(Kept { projects: vec![project], version: None });
+        let kept = Held::Kept(Kept {
+            projects: vec![project],
+            version: None,
+        });
         let projects = Some(api::Projects { held: Some(kept) });
-        api::Host { projects, ..Host::default() }
+        api::Host {
+            projects,
+            ..Host::default()
+        }
     }
 
     fn worktree(id: u64) -> WorktreeId {
@@ -223,22 +250,34 @@ mod tests {
         use lune_domain::projects::ViewId;
 
         let mut host = host();
-        let far =
-            api::remote::Host { projects: host.projects.clone(), ..api::remote::Host::default() };
+        let far = api::remote::Host {
+            projects: host.projects.clone(),
+            ..api::remote::Host::default()
+        };
         let reached = Some(remote::Reached::Host(far));
-        host.remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
+        host.remotes = vec![api::Remote {
+            destination: "nixos".to_owned(),
+            reached,
+        }];
         let projected = Projected::adapted(&host).unwrap();
         let (here, nixos) = (Machine::Local, Machine::Remote("nixos".parse().unwrap()));
         let five = |on| projected.project(on, seven())?.view_of(keyed(5));
         let held = Some((worktree(12), ViewId::of(23).unwrap()));
         assert_eq!((five(&here), five(&nixos)), (held, held));
         let names = |on| -> Vec<&str> {
-            projected.projects(on).iter().map(|it| it.name.as_str()).collect()
+            projected
+                .projects(on)
+                .iter()
+                .map(|it| it.name.as_str())
+                .collect()
         };
         let both = (vec!["bitwarden backup"], vec!["bitwarden backup"]);
         assert_eq!((names(&here), names(&nixos)), both);
         let gone = Machine::Remote("gone".parse().unwrap());
-        assert!(projected.projects(&gone).is_empty(), "a machine not reached holds no project");
+        assert!(
+            projected.projects(&gone).is_empty(),
+            "a machine not reached holds no project"
+        );
         assert!(projected.reaches(&here), "this machine is reached");
         assert!(projected.reaches(&nixos), "nixos is reached");
         assert!(!projected.reaches(&gone), "gone is not reached");
@@ -248,7 +287,10 @@ mod tests {
     fn a_project_row_s_tabs_are_its_worktrees() {
         let projected = Projected::adapted(&host()).unwrap();
         assert!(projected.project(&Machine::Local, seven()).is_some());
-        assert_eq!(projected.project(&Machine::Local, ProjectId::of(8).unwrap()), None);
+        assert_eq!(
+            projected.project(&Machine::Local, ProjectId::of(8).unwrap()),
+            None
+        );
         let bar = projected.tabs(&Machine::Local, worktree(11)).unwrap();
         let names: Vec<&str> = bar.tabs.iter().map(|tab| tab.name.as_str()).collect();
         assert_eq!(names, ["main", "docs"]);
@@ -265,11 +307,18 @@ mod tests {
         assert_eq!(projected.tabs_beside(&here, docs), (Some(main), None));
         assert_eq!(projected.tabs_beside(&here, worktree(99)), (None, None));
         let far = Machine::Remote("far".parse().unwrap());
-        assert_eq!(projected.tabs_beside(&far, main), (None, None), "far keeps no project");
+        assert_eq!(
+            projected.tabs_beside(&far, main),
+            (None, None),
+            "far keeps no project"
+        );
     }
 
     fn kept(host: &mut Host) -> &mut api::Project {
-        let held = host.projects.as_mut().and_then(|projects| projects.held.as_mut());
+        let held = host
+            .projects
+            .as_mut()
+            .and_then(|projects| projects.held.as_mut());
         let Some(Held::Kept(kept)) = held else {
             panic!("the host keeps projects");
         };
@@ -289,7 +338,11 @@ mod tests {
         let (here, project) = (Machine::Local, Listed::new_project("bitwarden backup", 7));
         let unlisted = ViewKey::Terminal(keyed(9));
         assert_eq!(route(&here, unlisted), Ok(keyed(9)));
-        assert_eq!(projected.whole(&here, &project), Ok(keyed(4)), "the first one keyed");
+        assert_eq!(
+            projected.whole(&here, &project),
+            Ok(keyed(4)),
+            "the first one keyed"
+        );
         let far = Machine::Remote("far".parse().unwrap());
         assert_eq!(route(&far, unlisted), Err(NOT_YET.to_owned()));
         assert_eq!(projected.whole(&far, &project), Err(NOT_YET.to_owned()));
@@ -317,17 +370,42 @@ mod tests {
     fn a_machine_that_lists_a_project_lune_cannot_read_is_reached_with_none_of_them() {
         let mut far = host();
         let readable = kept(&mut far).clone();
-        let unread = api::Project { id: 0, ..readable.clone() };
-        let held = Held::Kept(Kept { projects: vec![readable, unread], version: None });
+        let unread = api::Project {
+            id: 0,
+            ..readable.clone()
+        };
+        let held = Held::Kept(Kept {
+            projects: vec![readable, unread],
+            version: None,
+        });
         let projects = Some(api::Projects { held: Some(held) });
-        let far = api::remote::Host { projects, ..Default::default() };
+        let far = api::remote::Host {
+            projects,
+            ..Default::default()
+        };
         let reached = Some(remote::Reached::Host(far));
-        let remotes = vec![api::Remote { destination: "nixos".to_owned(), reached }];
-        let projected = Projected::adapted(&Host { remotes, ..Host::default() }).unwrap();
+        let remotes = vec![api::Remote {
+            destination: "nixos".to_owned(),
+            reached,
+        }];
+        let projected = Projected::adapted(&Host {
+            remotes,
+            ..Host::default()
+        })
+        .unwrap();
         let nixos = Machine::Remote("nixos".parse().unwrap());
-        assert!(projected.reaches(&nixos), "a machine lune cannot read is reached still");
-        assert!(projected.projects(&nixos).is_empty(), "with none of its projects, not some");
-        assert!(!projected.lacks(&nixos, seven()), "and none it is known to lack");
+        assert!(
+            projected.reaches(&nixos),
+            "a machine lune cannot read is reached still"
+        );
+        assert!(
+            projected.projects(&nixos).is_empty(),
+            "with none of its projects, not some"
+        );
+        assert!(
+            !projected.lacks(&nixos, seven()),
+            "and none it is known to lack"
+        );
     }
 
     #[test]
@@ -337,15 +415,20 @@ mod tests {
         assert!(!read.lacks(&here, seven()), "it holds 7");
         assert!(read.lacks(&here, eight), "and lacks 8");
         let unkept = Held::Unkept("it changed since luned read it".to_owned());
-        let unkept = Host { projects: Some(api::Projects { held: Some(unkept) }), ..Host::default() };
+        let unkept = Host {
+            projects: Some(api::Projects { held: Some(unkept) }),
+            ..Host::default()
+        };
         let unheld = [Projected::default(), Projected::adapted(&unkept).unwrap()];
         let unsaid = Projected::adapted(&Host::default()).unwrap();
         for unread in unheld.iter().chain([&unsaid]) {
             assert!(unread.projects(&here).is_empty(), "{unread:?}");
-            assert!(!unread.lacks(&here, eight), "nothing is lacked where nothing was read: {unread:?}");
+            assert!(
+                !unread.lacks(&here, eight),
+                "nothing is lacked where nothing was read: {unread:?}"
+            );
         }
         let far = Machine::Remote("nixos".parse().unwrap());
         assert!(!read.lacks(&far, eight), "nor on a machine not reached");
     }
-
 }

@@ -25,8 +25,11 @@ pub const TERMINAL_MADE_VAR: &str = "LUNE_MUX_TERMINAL_MADE";
 
 pub const TERMINAL_BROWSER_SOCKET_VAR: &str = "TERMINAL_BROWSER_TERMINAL_SOCKET";
 
-const OWN_VARS: [&str; 3] =
-    [TERMINAL_VAR, TERMINAL_MADE_VAR, lune_protocol::program_resume::TOKEN_VAR];
+const OWN_VARS: [&str; 3] = [
+    TERMINAL_VAR,
+    TERMINAL_MADE_VAR,
+    lune_protocol::program_resume::TOKEN_VAR,
+];
 
 pub const ZELLIJ_VARS: [&str; 3] = ["ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID"];
 
@@ -51,7 +54,11 @@ static FILES_FOUND: OnceLock<Rlimit> = OnceLock::new();
 pub fn raise_files_limit() -> io::Result<()> {
     let found = rustix::process::getrlimit(Resource::Nofile);
     let most = if cfg!(target_os = "macos") {
-        Some(found.maximum.map_or(OPEN_MAX, |maximum| maximum.min(OPEN_MAX)))
+        Some(
+            found
+                .maximum
+                .map_or(OPEN_MAX, |maximum| maximum.min(OPEN_MAX)),
+        )
     } else {
         found.maximum
     };
@@ -63,8 +70,17 @@ pub fn raise_files_limit() -> io::Result<()> {
     if !higher {
         return Ok(());
     }
-    rustix::process::setrlimit(Resource::Nofile, Rlimit { current: most, maximum: found.maximum })?;
-    assert!(FILES_FOUND.set(found).is_ok(), "the limit of open files was raised twice");
+    rustix::process::setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: most,
+            maximum: found.maximum,
+        },
+    )?;
+    assert!(
+        FILES_FOUND.set(found).is_ok(),
+        "the limit of open files was raised twice"
+    );
     Ok(())
 }
 
@@ -90,7 +106,12 @@ impl Pty {
         let mut modes = termios::tcgetattr(&far)?;
         modes.input_modes.set(InputModes::IUTF8, true);
         termios::tcsetattr(&far, OptionalActions::Now, &modes)?;
-        let pty = Pty { near: File::from(near), far, tty, device };
+        let pty = Pty {
+            near: File::from(near),
+            far,
+            tty,
+            device,
+        };
         pty.resize(size)?;
         let flags = rustix::fs::fcntl_getfl(&pty.near)?;
         rustix::fs::fcntl_setfl(&pty.near, flags | OFlags::NONBLOCK)?;
@@ -125,7 +146,9 @@ impl Pty {
             return Ok(None);
         }
         let flushes = !modes.local_modes.contains(LocalModes::NOFLSH);
-        let signal = KeySignal::ALL.into_iter().find(|key| modes.special_codes[key.code()] == byte);
+        let signal = KeySignal::ALL
+            .into_iter()
+            .find(|key| modes.special_codes[key.code()] == byte);
         Ok(signal.map(|signal| SignalKey { signal, flushes }))
     }
 
@@ -137,7 +160,10 @@ impl Pty {
     }
 
     pub fn raise(&self, key: SignalKey) -> Raise {
-        let unraised = |error: io::Error| Raise { queue: Queue::Kept, signalled: Err(error) };
+        let unraised = |error: io::Error| Raise {
+            queue: Queue::Kept,
+            signalled: Err(error),
+        };
         let group = match termios::tcgetpgrp(&self.near) {
             Ok(group) => group,
             Err(error) => return unraised(error.into()),
@@ -151,7 +177,10 @@ impl Pty {
             Queue::Kept
         };
         let signalled = rustix::process::kill_process_group(group, key.signal.signal());
-        Raise { queue, signalled: signalled.map_err(io::Error::from) }
+        Raise {
+            queue,
+            signalled: signalled.map_err(io::Error::from),
+        }
     }
 
     fn flush(&self) -> io::Result<()> {
@@ -171,7 +200,9 @@ impl Pty {
         let mut command = Command::new(&spec.program);
         command.args(&spec.args);
         command.current_dir(&spec.cwd);
-        command.stdin(self.far.try_clone()?).stdout(self.far.try_clone()?);
+        command
+            .stdin(self.far.try_clone()?)
+            .stdout(self.far.try_clone()?);
         command.stderr(self.far.try_clone()?);
         for name in ZELLIJ_VARS.iter().chain(&OWN_VARS) {
             command.env_remove(name);
@@ -267,7 +298,10 @@ pub struct Modes {
 impl Modes {
     pub fn of(terminal: impl AsFd) -> io::Result<Modes> {
         let modes = termios::tcgetattr(terminal)?.local_modes;
-        let (lines, echo) = (modes.contains(LocalModes::ICANON), modes.contains(LocalModes::ECHO));
+        let (lines, echo) = (
+            modes.contains(LocalModes::ICANON),
+            modes.contains(LocalModes::ECHO),
+        );
         Ok(Modes { lines, echo })
     }
 }
@@ -296,7 +330,9 @@ pub fn device_of(terminal: impl AsFd) -> rustix::io::Result<u64> {
 
 #[cfg(target_os = "macos")]
 pub fn device_of(terminal: impl AsFd) -> rustix::io::Result<u64> {
-    Ok(u64::from(rustix::fs::fstat(terminal)?.st_rdev.cast_unsigned()))
+    Ok(u64::from(
+        rustix::fs::fstat(terminal)?.st_rdev.cast_unsigned(),
+    ))
 }
 
 #[expect(
@@ -364,17 +400,31 @@ mod tests {
     #[test]
     fn a_signal_key_is_one_byte_the_terminal_signals_on() {
         let pty = opened();
-        assert_eq!(pty.signal_key(0x03).unwrap(), Some(key(KeySignal::Interrupt, true)));
-        assert_eq!(pty.signal_key(0x1c).unwrap(), Some(key(KeySignal::Quit, true)));
-        assert_eq!(pty.signal_key(0x1a).unwrap(), Some(key(KeySignal::Suspend, true)));
+        assert_eq!(
+            pty.signal_key(0x03).unwrap(),
+            Some(key(KeySignal::Interrupt, true))
+        );
+        assert_eq!(
+            pty.signal_key(0x1c).unwrap(),
+            Some(key(KeySignal::Quit, true))
+        );
+        assert_eq!(
+            pty.signal_key(0x1a).unwrap(),
+            Some(key(KeySignal::Suspend, true))
+        );
         assert_eq!(pty.signal_key(b'c').unwrap(), None);
     }
 
     #[test]
     fn a_signal_key_under_noflsh_keeps_what_waits() {
         let pty = opened();
-        changed(&pty, |modes| modes.local_modes.set(LocalModes::NOFLSH, true));
-        assert_eq!(pty.signal_key(0x03).unwrap(), Some(key(KeySignal::Interrupt, false)));
+        changed(&pty, |modes| {
+            modes.local_modes.set(LocalModes::NOFLSH, true);
+        });
+        assert_eq!(
+            pty.signal_key(0x03).unwrap(),
+            Some(key(KeySignal::Interrupt, false))
+        );
     }
 
     #[test]
@@ -388,10 +438,15 @@ mod tests {
     #[test]
     fn a_key_turned_off_is_a_byte_like_any_other() {
         let pty = opened();
-        changed(&pty, |modes| modes.special_codes[SpecialCodeIndex::VINTR] = KEY_TURNED_OFF);
+        changed(&pty, |modes| {
+            modes.special_codes[SpecialCodeIndex::VINTR] = KEY_TURNED_OFF;
+        });
         assert_eq!(pty.signal_key(KEY_TURNED_OFF).unwrap(), None);
         assert_eq!(pty.signal_key(0x03).unwrap(), None);
-        assert_eq!(pty.signal_key(0x1c).unwrap(), Some(key(KeySignal::Quit, true)));
+        assert_eq!(
+            pty.signal_key(0x1c).unwrap(),
+            Some(key(KeySignal::Quit, true))
+        );
     }
 
     #[test]
@@ -431,7 +486,11 @@ mod tests {
         let spec = SpawnSpec {
             cwd: crate::asked::AbsoluteCwd::of_path("/".to_owned()).unwrap(),
             program: "/bin/sh".to_owned(),
-            args: vec!["-c".to_owned(), script.to_owned(), written.to_str().unwrap().to_owned()],
+            args: vec![
+                "-c".to_owned(),
+                script.to_owned(),
+                written.to_str().unwrap().to_owned(),
+            ],
         };
         let mut child = pty.spawned(&spec, &[]).unwrap().child();
         let output_written = || written.exists().then_some(());
@@ -469,7 +528,9 @@ mod tests {
         });
         assert!(!pty.line_full().unwrap());
         typed_far(&pty, 1000);
-        lune_waits::eventually("the kernel's line fills", || pty.line_full().unwrap().then_some(()));
+        lune_waits::eventually("the kernel's line fills", || {
+            pty.line_full().unwrap().then_some(())
+        });
         pty.flush().unwrap();
         assert!(!pty.line_full().unwrap());
     }

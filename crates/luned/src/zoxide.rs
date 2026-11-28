@@ -2,7 +2,7 @@ use std::io;
 use std::process::Command;
 use std::time::Duration;
 
-use crate::{program, Directory};
+use crate::{Directory, program};
 
 const ANSWER: Duration = Duration::from_secs(2);
 
@@ -16,7 +16,10 @@ pub fn visited() -> Result<Vec<Directory>, String> {
 
 fn dirs_in(listed: &[u8]) -> Vec<Directory> {
     let dir = |line: &[u8]| Directory::parse(std::str::from_utf8(line).ok()?.to_owned()).ok();
-    listed.split(|byte| *byte == b'\n').filter_map(dir).collect()
+    listed
+        .split(|byte| *byte == b'\n')
+        .filter_map(dir)
+        .collect()
 }
 
 fn unrun(error: &io::Error) -> String {

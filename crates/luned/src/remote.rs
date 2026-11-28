@@ -18,19 +18,19 @@ use std::time::{Duration, SystemTime};
 
 use lune_protocol::watch::{LocalVersion, WatchedLocalAfter};
 use notify::RecursiveMode;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc as wakes;
 use tokio::sync::oneshot;
 use tokio::sync::watch::{self as latest, Receiver};
-use tokio::sync::Semaphore;
 use tonic::{Code, Status};
 
-use crate::api::remote::{self, unreached};
 use crate::api;
+use crate::api::remote::{self, unreached};
 use crate::client::{self, Unbridged};
 use crate::core::Command;
 use crate::log::{self, causes};
-use crate::{release, state, tasks};
 use crate::watch::{self, Troubles};
+use crate::{release, state, tasks};
 
 pub const FILE: &str = "hosts";
 
@@ -91,7 +91,7 @@ impl Destination {
         match status.code() {
             Code::Unimplemented => {
                 format!("{self}: its luned, or this one, is older than what lune asked of it")
-            },
+            }
             _ if status.message().is_empty() => format!("{self}: luned: {}", status.code()),
             _ => format!("{self}: {}", status.message()),
         }
@@ -117,13 +117,23 @@ impl Destination {
 
     fn host(&self) -> &str {
         let Some(uri) = self.0.strip_prefix("ssh://") else {
-            let host = self.0.rsplit_once('@').map_or(self.0.as_str(), |(_, host)| host);
-            return host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host);
+            let host = self
+                .0
+                .rsplit_once('@')
+                .map_or(self.0.as_str(), |(_, host)| host);
+            return host
+                .strip_prefix('[')
+                .and_then(|host| host.strip_suffix(']'))
+                .unwrap_or(host);
         };
         let authority = uri.split('/').next().unwrap_or_default();
-        let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        let host = authority
+            .rsplit_once('@')
+            .map_or(authority, |(_, host)| host);
         match host.strip_prefix('[') {
-            Some(bracketed) => bracketed.split_once(']').map_or(bracketed, |(host, _)| host),
+            Some(bracketed) => bracketed
+                .split_once(']')
+                .map_or(bracketed, |(host, _)| host),
             None => host.split_once(':').map_or(host, |(host, _)| host),
         }
     }
@@ -138,9 +148,14 @@ impl FromStr for Destination {
             return Err("a destination is not blank".to_owned());
         }
         if text.starts_with('-') {
-            return Err(format!("{text:?} is led by a '-', which ssh would take for an option"));
+            return Err(format!(
+                "{text:?} is led by a '-', which ssh would take for an option"
+            ));
         }
-        if text.chars().any(|char| char.is_whitespace() || char.is_control()) {
+        if text
+            .chars()
+            .any(|char| char.is_whitespace() || char.is_control())
+        {
             return Err(format!("{text:?} is more than one word"));
         }
         Ok(Destination(text.to_owned()))
@@ -161,7 +176,11 @@ pub enum Line {
 
 impl Line {
     fn of(destination: Destination, node: &str) -> Line {
-        if destination.is_on(node) { Line::Here(destination) } else { Line::Far(destination) }
+        if destination.is_on(node) {
+            Line::Here(destination)
+        } else {
+            Line::Far(destination)
+        }
     }
 
     #[must_use]
@@ -173,22 +192,36 @@ impl Line {
 }
 
 fn node() -> String {
-    rustix::system::uname().nodename().to_string_lossy().into_owned()
+    rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned()
 }
 
 pub enum Reached {
     Reaching,
     Host(remote::Host),
-    Unreached { since: SystemTime, failed: Failed, projects: Option<api::Projects> },
+    Unreached {
+        since: SystemTime,
+        failed: Failed,
+        projects: Option<api::Projects>,
+    },
 }
 
 impl Reached {
     pub fn into_api(self, destination: &Destination) -> api::Remote {
-        assert!(!destination.0.is_empty(), "a remote destination is not blank");
+        assert!(
+            !destination.0.is_empty(),
+            "a remote destination is not blank"
+        );
         let reached = match self {
             Reached::Reaching => remote::Reached::Reaching(()),
             Reached::Host(host) => remote::Reached::Host(host),
-            Reached::Unreached { since, failed, projects } => {
+            Reached::Unreached {
+                since,
+                failed,
+                projects,
+            } => {
                 let (stopped, ssh_said) = failed.stopped.to_api();
                 remote::Reached::Unreached(remote::Unreached {
                     since: Some(since.into()),
@@ -197,9 +230,12 @@ impl Reached {
                     projects,
                     ssh_said,
                 })
-            },
+            }
         };
-        let remote = api::Remote { destination: destination.0.clone(), reached: Some(reached) };
+        let remote = api::Remote {
+            destination: destination.0.clone(),
+            reached: Some(reached),
+        };
         assert!(remote.reached.is_some());
         remote
     }
@@ -236,9 +272,15 @@ impl Bridges {
             }
             (bridge.daemon.subscribe(), Arc::clone(&bridge.held))
         };
-        let kept = kept.wait_for(|kept| !matches!(kept, Kept::Coming)).await.ok()?;
+        let kept = kept
+            .wait_for(|kept| !matches!(kept, Kept::Coming))
+            .await
+            .ok()?;
         match &*kept {
-            Kept::Daemon(daemon) => Some(Bridging { daemon: daemon.clone(), held }),
+            Kept::Daemon(daemon) => Some(Bridging {
+                daemon: daemon.clone(),
+                held,
+            }),
             Kept::None | Kept::Coming => None,
         }
     }
@@ -254,14 +296,29 @@ struct Bridged {
 impl Bridged {
     fn new(bridges: Arc<Bridges>, destination: Destination, watch: u64) -> Self {
         let (wake, woken) = wakes::channel(1);
-        let (daemon, held) = (latest::Sender::new(Kept::None), Arc::new(Semaphore::new(HELD_MAX)));
-        let bridge = Bridge { watch, daemon, wake, held };
+        let (daemon, held) = (
+            latest::Sender::new(Kept::None),
+            Arc::new(Semaphore::new(HELD_MAX)),
+        );
+        let bridge = Bridge {
+            watch,
+            daemon,
+            wake,
+            held,
+        };
         locked(&bridges.0).insert(destination.clone(), bridge);
-        Bridged { bridges, destination, watch, woken }
+        Bridged {
+            bridges,
+            destination,
+            watch,
+            woken,
+        }
     }
 
     fn own<'a>(&self, bridges: &'a mut HashMap<Destination, Bridge>) -> Option<&'a mut Bridge> {
-        bridges.get_mut(&self.destination).filter(|bridge| bridge.watch == self.watch)
+        bridges
+            .get_mut(&self.destination)
+            .filter(|bridge| bridge.watch == self.watch)
     }
 
     fn agree(&self, seen: &Seen, daemon: Option<&client::Daemon>) {
@@ -321,7 +378,11 @@ pub fn sharing(folder: &Path, destination: &Destination) -> Vec<OsString> {
     }
     let mut path = Vec::new();
     for &byte in folder {
-        path.extend_from_slice(if byte == b'%' { b"%%" } else { std::slice::from_ref(&byte) });
+        path.extend_from_slice(if byte == b'%' {
+            b"%%"
+        } else {
+            std::slice::from_ref(&byte)
+        });
     }
     path.extend_from_slice(name.as_bytes());
     let mut control = OsString::from("ControlPath=");
@@ -333,7 +394,10 @@ pub fn sharing(folder: &Path, destination: &Destination) -> Vec<OsString> {
         OsString::from(format!("ServerAliveInterval={ALIVE_EVERY}")),
         OsString::from(format!("ServerAliveCountMax={ALIVE_MISSES}")),
     ];
-    options.into_iter().flat_map(|option| [OsString::from("-o"), option]).collect()
+    options
+        .into_iter()
+        .flat_map(|option| [OsString::from("-o"), option])
+        .collect()
 }
 
 fn misread(byte: u8) -> bool {
@@ -360,12 +424,18 @@ impl Named {
 
     #[must_use]
     pub fn unread(unread: u32) -> Self {
-        Self { lines: Vec::new(), unread }
+        Self {
+            lines: Vec::new(),
+            unread,
+        }
     }
 
     #[must_use]
     pub fn with_unread(&self, unread: u32) -> Self {
-        Self { lines: self.lines.clone(), unread }
+        Self {
+            lines: self.lines.clone(),
+            unread,
+        }
     }
 
     #[must_use]
@@ -432,7 +502,7 @@ impl Stopped {
         match self {
             Stopped::Unbridged(ssh, said) => {
                 (ssh.to_api(), said.as_ref().map(|said| said.0.clone()))
-            },
+            }
             Stopped::Lost => (unreached::Stopped::Lost(()), None),
             Stopped::Unmatched => (unreached::Stopped::Unmatched(()), None),
         }
@@ -461,7 +531,10 @@ impl SshSaid {
             said.pop();
             said.push('…');
         }
-        assert!(said.chars().count() <= SSH_SAID_CHARS_MAX, "{said:?} is past the bound");
+        assert!(
+            said.chars().count() <= SSH_SAID_CHARS_MAX,
+            "{said:?} is past the bound"
+        );
         Some(SshSaid(said))
     }
 }
@@ -528,9 +601,12 @@ pub fn follow(
             log::say(&format!("no other machine is watched: {unset}"));
             let _ = core.send(Command::Hosts(Named::unread(1)));
             return Ok(());
-        },
+        }
     };
-    let dir = file.parent().expect("a file in lune's state folder").to_owned();
+    let dir = file
+        .parent()
+        .expect("a file in lune's state folder")
+        .to_owned();
     let mut troubles = Troubles::default();
     let read = move || {
         let named = named(&file, &mut troubles);
@@ -565,7 +641,15 @@ pub fn follow(
         true
     };
     let wanted = |path: &Path| path.file_name() == Some(OsStr::new(FILE));
-    watch::watch("hosts", dir, RecursiveMode::NonRecursive, wanted, sweep, read, tell)
+    watch::watch(
+        "hosts",
+        dir,
+        RecursiveMode::NonRecursive,
+        wanted,
+        sweep,
+        read,
+        tell,
+    )
 }
 
 fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
@@ -575,7 +659,7 @@ fn named(path: &Path, troubles: &mut Troubles) -> Option<Named> {
         Err(error) => {
             troubles.say(format!("{}: {error}", path.display()));
             return None;
-        },
+        }
     };
     Some(named_by(&text, |what| {
         troubles.say(format!("{}: {what}", path.display()));
@@ -600,8 +684,8 @@ fn parsed_on(text: &str, node: &str) -> Parsed {
         match line.parse::<Destination>() {
             Ok(destination) if seen.insert(destination.clone()) => {
                 parsed.lines.push(Line::of(destination, node));
-            },
-            Ok(_) => {},
+            }
+            Ok(_) => {}
             Err(why) => parsed.unread.push(why),
         }
     }
@@ -616,16 +700,23 @@ pub fn named_by(text: &str, mut trouble: impl FnMut(String)) -> Named {
         named.unread = named.unread.saturating_add(1);
     }
     if named.lines.len() > HOSTS_MAX {
-        let past = named.lines.drain(HOSTS_MAX..).map(|line| line.destination().to_string());
+        let past = named
+            .lines
+            .drain(HOSTS_MAX..)
+            .map(|line| line.destination().to_string());
         let past: Vec<String> = past.collect();
         let many = u32::try_from(past.len()).unwrap_or(u32::MAX);
         named.unread = named.unread.saturating_add(many);
         let past = past.join(", ");
-        trouble(format!("{past} are left out, as the daemon watches {HOSTS_MAX} at the most"));
+        trouble(format!(
+            "{past} are left out, as the daemon watches {HOSTS_MAX} at the most"
+        ));
     }
     for line in &named.lines {
         if let Line::Here(destination) = line {
-            trouble(format!("{destination}: {THIS_MACHINE}, so no ssh runs to it"));
+            trouble(format!(
+                "{destination}: {THIS_MACHINE}, so no ssh runs to it"
+            ));
         }
     }
     named
@@ -655,11 +746,15 @@ async fn watched(
 ) {
     let destination = bridged.destination.clone();
     let mut connected: Option<client::Daemon> = None;
-    let mut seen = Seen::Initial(InitialSeen::Reaching { since: SystemTime::now() });
+    let mut seen = Seen::Initial(InitialSeen::Reaching {
+        since: SystemTime::now(),
+    });
     let said = Arc::default();
     loop {
         let current = {
-            let Ok(standing) = standing.wait_for(|standing| *standing != Standing::Idle).await
+            let Ok(standing) = standing
+                .wait_for(|standing| *standing != Standing::Idle)
+                .await
             else {
                 return;
             };
@@ -674,7 +769,7 @@ async fn watched(
                     return;
                 }
                 continue;
-            },
+            }
         };
         let mut host = match seen {
             Seen::Initial(initial) => {
@@ -696,7 +791,7 @@ async fn watched(
                         bridged.agree(&seen, Some(&daemon));
                         connected = Some(daemon);
                         host
-                    },
+                    }
                     Err(failed) => {
                         seen = Seen::Initial(initial);
                         if !handle_failure(&destination, &mut seen, failed, &mut bridged, &core)
@@ -705,20 +800,21 @@ async fn watched(
                             return;
                         }
                         continue;
-                    },
+                    }
                 }
-            },
+            }
             Seen::Following(following) => {
                 let after = following.after();
                 let question = current.question(Some(after));
-                match ask_watch(&mut daemon, question, |response| response.read_after(after)).await {
+                match ask_watch(&mut daemon, question, |response| response.read_after(after)).await
+                {
                     Ok(WatchedLocalAfter::Unchanged) => {
                         seen = Seen::Following(following.unchanged(SystemTime::now()));
                         bridged.agree(&seen, Some(&daemon));
                         connected = Some(daemon);
                         tokio::time::sleep_until(asked_at + WATCH_PACE).await;
                         continue;
-                    },
+                    }
                     Ok(WatchedLocalAfter::Host(local)) => {
                         let (version, host) = local.into_parts();
                         let told_already = after == version;
@@ -734,7 +830,7 @@ async fn watched(
                             continue;
                         }
                         host
-                    },
+                    }
                     Err(failed) => {
                         seen = Seen::Following(following);
                         if !handle_failure(&destination, &mut seen, failed, &mut bridged, &core)
@@ -743,9 +839,9 @@ async fn watched(
                             return;
                         }
                         continue;
-                    },
+                    }
                 }
-            },
+            }
         };
         lune_protocol::program_status::bound_fair(
             &mut host.agents,
@@ -772,7 +868,9 @@ async fn handle_failure(
     };
     let next = std::mem::replace(
         seen,
-        Seen::Initial(InitialSeen::Reaching { since: SystemTime::now() }),
+        Seen::Initial(InitialSeen::Reaching {
+            since: SystemTime::now(),
+        }),
     )
     .failed(failed);
     *seen = next;
@@ -797,13 +895,28 @@ enum Seen {
 }
 
 enum InitialSeen {
-    Reaching { since: SystemTime },
-    Unreached { since: SystemTime, failures: NonZeroU32, failed: Failed, projects: Option<api::Projects> },
+    Reaching {
+        since: SystemTime,
+    },
+    Unreached {
+        since: SystemTime,
+        failures: NonZeroU32,
+        failed: Failed,
+        projects: Option<api::Projects>,
+    },
 }
 
 enum FollowingSeen {
-    Answered { after: LocalVersion, at: SystemTime, projects: Option<api::Projects> },
-    Broke { after: LocalVersion, at: SystemTime, projects: Option<api::Projects> },
+    Answered {
+        after: LocalVersion,
+        at: SystemTime,
+        projects: Option<api::Projects>,
+    },
+    Broke {
+        after: LocalVersion,
+        at: SystemTime,
+        projects: Option<api::Projects>,
+    },
 }
 
 impl FollowingSeen {
@@ -815,10 +928,18 @@ impl FollowingSeen {
 
     fn unchanged(self, at: SystemTime) -> FollowingSeen {
         let (after, projects) = match self {
-            FollowingSeen::Answered { after, projects, .. }
-            | FollowingSeen::Broke { after, projects, .. } => (after, projects),
+            FollowingSeen::Answered {
+                after, projects, ..
+            }
+            | FollowingSeen::Broke {
+                after, projects, ..
+            } => (after, projects),
         };
-        FollowingSeen::Answered { after, at, projects }
+        FollowingSeen::Answered {
+            after,
+            at,
+            projects,
+        }
     }
 }
 
@@ -834,9 +955,15 @@ impl Seen {
 
     fn failed(self, failed: Failed) -> Seen {
         match self {
-            Seen::Following(FollowingSeen::Answered { after, at, projects }) => {
-                Seen::Following(FollowingSeen::Broke { after, at, projects })
-            },
+            Seen::Following(FollowingSeen::Answered {
+                after,
+                at,
+                projects,
+            }) => Seen::Following(FollowingSeen::Broke {
+                after,
+                at,
+                projects,
+            }),
             Seen::Initial(InitialSeen::Reaching { since }) => {
                 Seen::Initial(InitialSeen::Unreached {
                     since,
@@ -844,29 +971,61 @@ impl Seen {
                     failed,
                     projects: None,
                 })
-            },
-            Seen::Following(FollowingSeen::Broke { at: since, projects, .. }) => {
+            }
+            Seen::Following(FollowingSeen::Broke {
+                at: since,
+                projects,
+                ..
+            }) => {
                 let failures = NonZeroU32::MIN.saturating_add(1);
-                Seen::Initial(InitialSeen::Unreached { since, failures, failed, projects })
-            },
-            Seen::Initial(InitialSeen::Unreached { since, failures, projects, .. }) => {
+                Seen::Initial(InitialSeen::Unreached {
+                    since,
+                    failures,
+                    failed,
+                    projects,
+                })
+            }
+            Seen::Initial(InitialSeen::Unreached {
+                since,
+                failures,
+                projects,
+                ..
+            }) => {
                 let failures = failures.saturating_add(1);
-                Seen::Initial(InitialSeen::Unreached { since, failures, failed, projects })
-            },
+                Seen::Initial(InitialSeen::Unreached {
+                    since,
+                    failures,
+                    failed,
+                    projects,
+                })
+            }
         }
     }
 
     fn unreached(&self) -> Option<Reached> {
-        let Seen::Initial(InitialSeen::Unreached { since, failed, projects, .. }) = self else {
+        let Seen::Initial(InitialSeen::Unreached {
+            since,
+            failed,
+            projects,
+            ..
+        }) = self
+        else {
             return None;
         };
         let (since, failed, projects) = (*since, failed.clone(), projects.clone());
-        Some(Reached::Unreached { since, failed, projects })
+        Some(Reached::Unreached {
+            since,
+            failed,
+            projects,
+        })
     }
 }
 
 fn told(core: &SyncSender<Command>, destination: &Destination, reached: Reached) -> bool {
-    let command = Command::Remote { destination: destination.clone(), reached };
+    let command = Command::Remote {
+        destination: destination.clone(),
+        reached,
+    };
     tokio::task::block_in_place(|| core.send(command)).is_ok()
 }
 
@@ -891,9 +1050,16 @@ async fn ask_watch<T>(
     question: api::WatchLocalChangesRequest,
     read: impl FnOnce(api::WatchLocalResponse) -> Result<T, &'static str>,
 ) -> Result<T, Failed> {
-    let response = daemon.watch_local_changes(question).await.map_err(|status| unreached(&status))?;
-    read(response.into_inner())
-        .map_err(|why| Failed::of(format!("{why}, which this luned does not read"), Stopped::Lost))
+    let response = daemon
+        .watch_local_changes(question)
+        .await
+        .map_err(|status| unreached(&status))?;
+    read(response.into_inner()).map_err(|why| {
+        Failed::of(
+            format!("{why}, which this luned does not read"),
+            Stopped::Lost,
+        )
+    })
 }
 
 async fn matched(
@@ -919,15 +1085,19 @@ async fn matched(
                 }
             }
             return Err(failed);
-        },
+        }
     };
-    let info = daemon.info(()).await.map_err(|status| unreached(&status))?.into_inner();
+    let info = daemon
+        .info(())
+        .await
+        .map_err(|status| unreached(&status))?
+        .into_inner();
     match release::of(&info.version, info.built) {
         release::Of::Own => Ok(daemon),
         release::Of::Other(other) => {
             let pid = client::PeerPid::new(info.pid);
             Err(Failed::of(unmatched(&other, pid), Stopped::Unmatched))
-        },
+        }
     }
 }
 
@@ -943,7 +1113,8 @@ fn ssh(
     folder: &Path,
 ) -> (Process, Option<oneshot::Receiver<SshSaid>>) {
     let mut ssh = Process::new("ssh");
-    ssh.args(["-T", "-o", "BatchMode=yes"]).args(sharing(folder, destination));
+    ssh.args(["-T", "-o", "BatchMode=yes"])
+        .args(sharing(folder, destination));
     ssh.args([&destination.0, "lune", "bridge"]);
     let Ok((saying, last)) = heard(&destination.0, said) else {
         return (ssh, None);
@@ -967,40 +1138,42 @@ fn heard(
     let (says_last, last) = oneshot::channel();
     let before = locked(said).last.replace(ended);
     let (destination, said) = (destination.to_owned(), Arc::clone(said));
-    thread::Builder::new().name(format!("ssh {destination}")).spawn(move || {
-        if let Some(before) = before {
-            let _ = before.recv_timeout(HEARD_BEFORE);
-        }
-        let mut heard = BufReader::new(heard);
-        let mut line = Vec::new();
-        let mut lines = HashSet::new();
-        let mut last = None;
-        loop {
-            line.clear();
-            match (&mut heard).take(SAID_MAX).read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {},
+    thread::Builder::new()
+        .name(format!("ssh {destination}"))
+        .spawn(move || {
+            if let Some(before) = before {
+                let _ = before.recv_timeout(HEARD_BEFORE);
             }
-            let line = String::from_utf8_lossy(&line).trim_end().to_owned();
-            if line.is_empty() {
-                continue;
+            let mut heard = BufReader::new(heard);
+            let mut line = Vec::new();
+            let mut lines = HashSet::new();
+            let mut last = None;
+            loop {
+                line.clear();
+                match (&mut heard).take(SAID_MAX).read_until(b'\n', &mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let line = String::from_utf8_lossy(&line).trim_end().to_owned();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(said) = SshSaid::of(&line) {
+                    last = Some(said);
+                }
+                if !lines.insert(line.clone()) {
+                    continue;
+                }
+                if !locked(&said).lines.contains(&line) {
+                    log::say(&format!("{destination}: {line}"));
+                }
             }
-            if let Some(said) = SshSaid::of(&line) {
-                last = Some(said);
+            locked(&said).lines = lines;
+            if let Some(last) = last {
+                let _ = says_last.send(last);
             }
-            if !lines.insert(line.clone()) {
-                continue;
-            }
-            if !locked(&said).lines.contains(&line) {
-                log::say(&format!("{destination}: {line}"));
-            }
-        }
-        locked(&said).lines = lines;
-        if let Some(last) = last {
-            let _ = says_last.send(last);
-        }
-        drop(ends);
-    })?;
+            drop(ends);
+        })?;
     Ok((saying, last))
 }
 
@@ -1037,7 +1210,11 @@ mod tests {
 
     fn answered_with(projects: Option<api::Projects>) -> Seen {
         let after = LocalVersion::new(NonZeroU32::new(1).unwrap(), 1);
-        Seen::Following(FollowingSeen::Answered { after, at: SystemTime::now(), projects })
+        Seen::Following(FollowingSeen::Answered {
+            after,
+            at: SystemTime::now(),
+            projects,
+        })
     }
 
     fn refused() -> Failed {
@@ -1059,7 +1236,14 @@ mod tests {
         let file = scratch.path().join(FILE);
         fs::write(&file, text).unwrap();
         let named = named(&file, &mut Troubles::default()).unwrap();
-        (named.lines.iter().map(|line| line.destination().to_string()).collect(), named.unread)
+        (
+            named
+                .lines
+                .iter()
+                .map(|line| line.destination().to_string())
+                .collect(),
+            named.unread,
+        )
     }
 
     #[test]
@@ -1105,7 +1289,10 @@ mod tests {
         ];
         for destination in elsewhere {
             let named: Destination = destination.parse().unwrap();
-            assert!(!named.is_on("nixos.lan"), "{destination} is another machine");
+            assert!(
+                !named.is_on("nixos.lan"),
+                "{destination} is another machine"
+            );
         }
         assert!(!"x".parse::<Destination>().unwrap().is_on(""));
         for destination in ["nixos", "me@nixos", "NIXOS."] {
@@ -1129,7 +1316,10 @@ mod tests {
 
     #[test]
     fn a_line_naming_this_machine_is_parsed_apart_from_the_others() {
-        let parsed = parsed_on("me@nixos\nvps\nlocalhost\nnixos\nNIXOS\ntwo words\n", "nixos.lan");
+        let parsed = parsed_on(
+            "me@nixos\nvps\nlocalhost\nnixos\nNIXOS\ntwo words\n",
+            "nixos.lan",
+        );
         let machine = |name: &str| name.parse::<Destination>().unwrap();
         let lines = [
             Line::Here(machine("me@nixos")),
@@ -1146,9 +1336,15 @@ mod tests {
     fn a_line_naming_this_machine_is_said_and_is_no_line_left_out() {
         let mut said = Vec::new();
         let named = named_by("localhost\nvps\n", |what| said.push(what));
-        assert_eq!(named.far().collect::<Vec<_>>(), [&"vps".parse::<Destination>().unwrap()]);
+        assert_eq!(
+            named.far().collect::<Vec<_>>(),
+            [&"vps".parse::<Destination>().unwrap()]
+        );
         assert_eq!(named.unread, 0);
-        assert_eq!(said, [format!("localhost: {THIS_MACHINE}, so no ssh runs to it")]);
+        assert_eq!(
+            said,
+            [format!("localhost: {THIS_MACHINE}, so no ssh runs to it")]
+        );
     }
 
     #[test]
@@ -1159,7 +1355,10 @@ mod tests {
         assert_eq!(shown("\u{1b}\u{7}"), None);
         for long in [SSH_SAID_CHARS_MAX + 1, SSH_SAID_CHARS_MAX + 9] {
             let cut = shown(&"a".repeat(long));
-            assert_eq!(cut, Some(format!("{}…", "a".repeat(SSH_SAID_CHARS_MAX - 1))));
+            assert_eq!(
+                cut,
+                Some(format!("{}…", "a".repeat(SSH_SAID_CHARS_MAX - 1)))
+            );
         }
         let most = "é".repeat(SSH_SAID_CHARS_MAX);
         assert_eq!(shown(&most), Some(most));
@@ -1169,14 +1368,22 @@ mod tests {
     fn the_line_ssh_said_last_is_the_last_with_something_shown_in_it() {
         let said = Arc::new(Mutex::new(Said::default()));
         let (mut saying, last) = heard("nixos", &said).unwrap();
-        saying.write_all(b"Warning: added\r\nPermission denied (publickey).\r\n\x1b\n\n").unwrap();
+        saying
+            .write_all(b"Warning: added\r\nPermission denied (publickey).\r\n\x1b\n\n")
+            .unwrap();
         drop(saying);
-        assert_eq!(last.blocking_recv().unwrap().0, "Permission denied (publickey).");
+        assert_eq!(
+            last.blocking_recv().unwrap().0,
+            "Permission denied (publickey)."
+        );
 
         let (mut saying, last) = heard("nixos", &said).unwrap();
         saying.write_all(b"\x07\n").unwrap();
         drop(saying);
-        assert!(last.blocking_recv().is_err(), "a line of controls alone is no line");
+        assert!(
+            last.blocking_recv().is_err(),
+            "a line of controls alone is no line"
+        );
     }
 
     #[test]
@@ -1193,7 +1400,10 @@ mod tests {
 
     #[test]
     fn a_watch_that_ends_leaves_a_later_one_s_bridge() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let _entered = runtime.enter();
         let daemon = unreached_daemon();
         let bridges = Arc::new(Bridges::default());
@@ -1205,7 +1415,9 @@ mod tests {
         ending.agree(&answered(), Some(&daemon));
         ending.agree(&lost(), None);
         drop(ending);
-        let watch = locked(&bridges.0).get(&destination).map(|bridge| bridge.watch);
+        let watch = locked(&bridges.0)
+            .get(&destination)
+            .map(|bridge| bridge.watch);
         assert_eq!(watch, Some(2));
         assert!(runtime.block_on(bridges.to(&destination)).is_some());
         drop(later);
@@ -1214,7 +1426,10 @@ mod tests {
 
     #[test]
     fn a_question_for_a_machine_not_reached_wakes_its_watch_once() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let _entered = runtime.enter();
         let bridges = Arc::new(Bridges::default());
         let destination: Destination = "nixos".parse().unwrap();
@@ -1231,26 +1446,44 @@ mod tests {
 
         assert!(runtime.block_on(bridges.to(&destination)).is_none());
         watch.awake();
-        assert!(watch.woken.is_empty(), "a watch awake takes the wake it was given");
+        assert!(
+            watch.woken.is_empty(),
+            "a watch awake takes the wake it was given"
+        );
 
         let daemon = unreached_daemon();
         watch.agree(&answered(), Some(&daemon));
         assert!(runtime.block_on(bridges.to(&destination)).is_some());
-        assert!(watch.woken.is_empty(), "a question for a machine reached wakes no watch");
+        assert!(
+            watch.woken.is_empty(),
+            "a question for a machine reached wakes no watch"
+        );
     }
 
     #[test]
     fn a_machine_lost_keeps_the_projects_last_heard_and_one_never_reached_has_none() {
         let shown = |seen: &Seen| {
-            let reached = seen.unreached()?.into_api(&"nixos".parse().unwrap()).reached;
+            let reached = seen
+                .unreached()?
+                .into_api(&"nixos".parse().unwrap())
+                .reached;
             let Some(remote::Reached::Unreached(unreached)) = reached else {
                 panic!("{reached:?} is not unreached");
             };
             Some(unreached.projects)
         };
-        let project = api::Project { id: 7, name: "lune".to_owned(), ..api::Project::default() };
-        let kept = api::projects::Kept { projects: vec![project], version: None };
-        let heard = Some(api::Projects { held: Some(api::projects::Held::Kept(kept)) });
+        let project = api::Project {
+            id: 7,
+            name: "lune".to_owned(),
+            ..api::Project::default()
+        };
+        let kept = api::projects::Kept {
+            projects: vec![project],
+            version: None,
+        };
+        let heard = Some(api::Projects {
+            held: Some(api::projects::Held::Kept(kept)),
+        });
 
         let broke = answered_with(heard.clone()).failed(refused());
         assert_eq!(shown(&broke), None);
@@ -1258,7 +1491,10 @@ mod tests {
         assert_eq!(shown(&unreached), Some(heard.clone()));
         assert_eq!(shown(&unreached.failed(refused())), Some(heard.clone()));
 
-        let never = Seen::Initial(InitialSeen::Reaching { since: SystemTime::now() }).failed(refused());
+        let never = Seen::Initial(InitialSeen::Reaching {
+            since: SystemTime::now(),
+        })
+        .failed(refused());
         assert_eq!(shown(&never), Some(None));
         assert_eq!(shown(&never.failed(refused())), Some(None));
 
@@ -1266,7 +1502,10 @@ mod tests {
             panic!("first failure after answering moves to broke");
         };
         let recovered = broke.unchanged(SystemTime::now());
-        let FollowingSeen::Answered { after, projects, .. } = recovered else {
+        let FollowingSeen::Answered {
+            after, projects, ..
+        } = recovered
+        else {
             panic!("an unchanged watch recovers a broke watch to answered");
         };
         assert_eq!(after, LocalVersion::new(NonZeroU32::new(1).unwrap(), 1));
@@ -1277,9 +1516,13 @@ mod tests {
     fn each_ssh_to_a_machine_shares_a_socket_where_there_is_room_for_one() {
         let path = |folder: &str, destination: &str| -> Option<String> {
             let options = sharing(Path::new(folder), &destination.parse().unwrap());
-            let options: Vec<String> =
-                options.into_iter().map(|it| it.into_string().unwrap()).collect();
-            options.iter().find_map(|it| it.strip_prefix("ControlPath=").map(str::to_owned))
+            let options: Vec<String> = options
+                .into_iter()
+                .map(|it| it.into_string().unwrap())
+                .collect();
+            options
+                .iter()
+                .find_map(|it| it.strip_prefix("ControlPath=").map(str::to_owned))
         };
         let tmpdir = "/var/folders/7k/h0b8qt5x1y9b0b1k1q3j2n5h0000gn/T/lune";
         let nixos = path(tmpdir, "nixos").unwrap();
@@ -1304,7 +1547,8 @@ mod tests {
         for (folder, shares) in folders {
             let mut ssh = Process::new("ssh");
             ssh.args(["-G", "-F", "/dev/null"]);
-            ssh.args(sharing(Path::new(folder), &destination)).arg("nixos");
+            ssh.args(sharing(Path::new(folder), &destination))
+                .arg("nixos");
             let read = match ssh.output() {
                 Ok(read) => read,
                 Err(error) if error.kind() == ErrorKind::NotFound => return,
@@ -1313,7 +1557,9 @@ mod tests {
             let said = String::from_utf8_lossy(&read.stderr);
             assert!(read.status.success(), "{folder:?}: {said}");
             let options = String::from_utf8(read.stdout).unwrap();
-            let socket = options.lines().find_map(|line| line.strip_prefix("controlpath "));
+            let socket = options
+                .lines()
+                .find_map(|line| line.strip_prefix("controlpath "));
             let ours = format!("{folder}/ssh-");
             if shares {
                 let in_folder = socket.is_some_and(|socket| socket.starts_with(&ours));

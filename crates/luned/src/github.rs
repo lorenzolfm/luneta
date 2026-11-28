@@ -24,7 +24,10 @@ const LIMIT: Duration = Duration::from_secs(30);
 
 const ASKS_AT_ONCE: usize = 4;
 
-const NONE: [&str; 2] = ["no pull requests found", "GraphQL: Could not resolve to a PullRequest"];
+const NONE: [&str; 2] = [
+    "no pull requests found",
+    "GraphQL: Could not resolve to a PullRequest",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
@@ -87,8 +90,16 @@ impl RepositoryName {
     #[must_use]
     pub fn of_page(page: &PullPage) -> RepositoryName {
         let mut parts = page.repository().split('/').map(str::to_owned);
-        let mut part = || parts.next().expect("a pull request's page is of host/owner/name");
-        RepositoryName { host: part(), owner: part(), name: part() }
+        let mut part = || {
+            parts
+                .next()
+                .expect("a pull request's page is of host/owner/name")
+        };
+        RepositoryName {
+            host: part(),
+            owner: part(),
+            name: part(),
+        }
     }
 
     #[must_use]
@@ -104,7 +115,11 @@ impl fmt::Display for RepositoryName {
 }
 
 fn host_of(url: &str) -> Option<&str> {
-    url.split_once("://")?.1.split('/').next().filter(|host| !host.is_empty())
+    url.split_once("://")?
+        .1
+        .split('/')
+        .next()
+        .filter(|host| !host.is_empty())
 }
 
 fn parse(said: &[u8]) -> Result<Pulled, String> {
@@ -122,7 +137,7 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
     let head_repository = match (owner, name) {
         (Some(owner), Some(name)) if !owner.is_empty() && !name.is_empty() => {
             Some(RepositoryName { host, owner, name })
-        },
+        }
         _ => None,
     };
     Ok(Pulled {
@@ -135,7 +150,10 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         base_name: viewed.base_ref_name,
         head_name: viewed.head_ref_name,
         head: viewed.head_ref_oid,
-        author: viewed.author.map(|author| author.login).filter(|login| !login.is_empty()),
+        author: viewed
+            .author
+            .map(|author| author.login)
+            .filter(|login| !login.is_empty()),
         head_repository,
     })
 }
@@ -183,7 +201,11 @@ impl Fork {
 
 fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     let repository: Repository = serde_json::from_slice(said).map_err(|error| error.to_string())?;
-    let Some(Parent { name, owner: Owner { login } }) = repository.parent else {
+    let Some(Parent {
+        name,
+        owner: Owner { login },
+    }) = repository.parent
+    else {
         return Ok(None);
     };
     if !links::named(&login) || !links::named(&name) {
@@ -191,17 +213,18 @@ fn fork_of(said: &[u8]) -> Result<Option<Fork>, String> {
     }
     let host = host_of(&repository.url).ok_or_else(|| format!("{} is no page", repository.url))?;
     Ok(Some(Fork {
-        parent: RepositoryName { host: host.to_owned(), owner: login, name },
+        parent: RepositoryName {
+            host: host.to_owned(),
+            owner: login,
+            name,
+        },
         default_branch: repository.default_branch_ref.name,
     }))
 }
 
 enum Answer {
     Stayed(Option<Pulled>),
-    Partly {
-        own: Option<Pulled>,
-        why: String,
-    },
+    Partly { own: Option<Pulled>, why: String },
     Moved,
 }
 
@@ -212,7 +235,7 @@ fn find(dir: &str, base: Option<&str>) -> Result<Option<Pulled>, String> {
         Some(base) => {
             gh.env("GH_REPO", base);
             format!("gh pr view of {base} in {dir}")
-        },
+        }
         None => format!("gh pr view in {dir}"),
     };
     let ran = program::run(&mut gh, LIMIT)
@@ -240,13 +263,21 @@ fn fork(dir: &str, repository: &Directory, forks: &Forks) -> Result<Option<Fork>
         return Ok(known.fork.clone());
     }
     let mut gh = Command::new("gh");
-    git::local(gh.args(["repo", "view", "--json", REPOSITORY]).current_dir(dir));
+    git::local(
+        gh.args(["repo", "view", "--json", REPOSITORY])
+            .current_dir(dir),
+    );
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh repo view in {dir} could not be run: {error}"))?;
-    let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
+    let said = ran
+        .answer()
+        .map_err(|why| format!("gh repo view in {dir}: {why}"))?;
     let fork = fork_of(&said)
         .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
-    *lineage = Some(Lineage { remotes, fork: fork.clone() });
+    *lineage = Some(Lineage {
+        remotes,
+        fork: fork.clone(),
+    });
     Ok(fork)
 }
 
@@ -259,7 +290,8 @@ fn in_parent(
     let Some(head) = git::named_head(dir, branch)? else {
         return Ok(None);
     };
-    let Some(fork) = fork(dir, repository, forks)?.filter(|fork| fork.parent_may_have(&head)) else {
+    let Some(fork) = fork(dir, repository, forks)?.filter(|fork| fork.parent_may_have(&head))
+    else {
         return Ok(None);
     };
     let done = |found: &Pulled| matches!(found.pull_request.state, State::Merged | State::Closed);
@@ -269,8 +301,14 @@ fn in_parent(
 
 fn view(dir: &str, (repository, branch): &Branch, forks: &Forks) -> Result<Answer, String> {
     let own = find(dir, None)?;
-    let settled = own.as_ref().is_some_and(|found| found.pull_request.state != State::Closed);
-    let beyond = if settled { Ok(None) } else { in_parent(dir, repository, branch, forks) };
+    let settled = own
+        .as_ref()
+        .is_some_and(|found| found.pull_request.state != State::Closed);
+    let beyond = if settled {
+        Ok(None)
+    } else {
+        in_parent(dir, repository, branch, forks)
+    };
     if git::branch(dir)?.as_deref() != Some(branch.as_str()) {
         return Ok(Answer::Moved);
     }
@@ -317,16 +355,23 @@ impl Asker {
     ) -> Result<Option<u32>, String> {
         let found = in_parent(dir, repository, branch, &self.forks)?;
         let open = |found: &Pulled| matches!(found.pull_request.state, State::Open | State::Draft);
-        Ok(found.filter(open).map(|found| found.pull_request.number().get()))
+        Ok(found
+            .filter(open)
+            .map(|found| found.pull_request.number().get()))
     }
 }
 
 pub fn default_branch(dir: &str) -> Result<String, String> {
     let mut gh = Command::new("gh");
-    git::local(gh.args(["repo", "view", "--json", REPOSITORY]).current_dir(dir));
+    git::local(
+        gh.args(["repo", "view", "--json", REPOSITORY])
+            .current_dir(dir),
+    );
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh repo view in {dir} could not be run: {error}"))?;
-    let said = ran.answer().map_err(|why| format!("gh repo view in {dir}: {why}"))?;
+    let said = ran
+        .answer()
+        .map_err(|why| format!("gh repo view in {dir}: {why}"))?;
     let repository: Repository = serde_json::from_slice(&said)
         .map_err(|why| format!("gh repo view in {dir} said what does not read: {why}"))?;
     Ok(repository.default_branch_ref.name)
@@ -348,16 +393,24 @@ pub enum Based {
 pub fn based_on(dir: &str, repository: &RepositoryName, branch: &str) -> Result<Based, String> {
     let asked = format!("gh pr list of {repository} based on {branch}");
     let mut gh = Command::new("gh");
-    gh.args(["pr", "list", "--base", branch, "--state", "all", "--limit", "100"]);
-    gh.args(["--json", "number,state"]).current_dir(dir).env("GH_REPO", repository.to_string());
+    gh.args([
+        "pr", "list", "--base", branch, "--state", "all", "--limit", "100",
+    ]);
+    gh.args(["--json", "number,state"])
+        .current_dir(dir)
+        .env("GH_REPO", repository.to_string());
     git::local(&mut gh);
-    let ran =
-        program::run(&mut gh, LIMIT).map_err(|error| format!("{asked} could not be run: {error}"))?;
+    let ran = program::run(&mut gh, LIMIT)
+        .map_err(|error| format!("{asked} could not be run: {error}"))?;
     let said = ran.answer().map_err(|why| format!("{asked}: {why}"))?;
     let listed: Vec<Numbered> = serde_json::from_slice(&said)
         .map_err(|why| format!("{asked} said what does not read: {why}"))?;
-    let open = listed.iter().find(|pull| matches!(pull.state, Stands::Open));
-    let merged = listed.iter().find(|pull| matches!(pull.state, Stands::Merged));
+    let open = listed
+        .iter()
+        .find(|pull| matches!(pull.state, Stands::Open));
+    let merged = listed
+        .iter()
+        .find(|pull| matches!(pull.state, Stands::Merged));
     Ok(match (open, merged) {
         (Some(open), _) => Based::Open(open.number),
         (None, Some(merged)) => Based::Merged(merged.number),
@@ -431,7 +484,10 @@ struct Asked {
 impl Asked {
     fn found(&self) -> Option<PullRequest> {
         let found = self.said.as_ref()?.found.clone()?;
-        Some(PullRequest { stale: self.failed > 0, ..found })
+        Some(PullRequest {
+            stale: self.failed > 0,
+            ..found
+        })
     }
 }
 
@@ -494,17 +550,26 @@ fn answered(was: Option<Asked>, said: Result<Answer, String>, rests: Rests) -> A
             } else {
                 (before, Some(why), failed.saturating_add(1), false)
             }
-        },
+        }
         Err(why) => (before, Some(why), failed.saturating_add(1), false),
     };
     let found = said.as_ref().and_then(|said| said.found.as_ref());
     let pending = found.is_some_and(|found| found.verdict() == Some(Verdict::Pending));
     let rest = match rested {
         _ if !pending => rests.settled,
-        Some(rested) if !new => rested.saturating_mul(2).max(rests.pending).min(rests.settled),
+        Some(rested) if !new => rested
+            .saturating_mul(2)
+            .max(rests.pending)
+            .min(rests.settled),
         _ => rests.pending,
     };
-    Asked { next: now + rest, rest, said, failed, trouble }
+    Asked {
+        next: now + rest,
+        rest,
+        said,
+        failed,
+        trouble,
+    }
 }
 
 fn checks_changed(
@@ -537,7 +602,9 @@ fn checks_changed(
     };
     let (before, after) = (word(before), word(after));
     let said = format!(", {said}s after gh last said them");
-    Some(format!("the checks of {named} went from {before} to {after}{said}{failed}"))
+    Some(format!(
+        "the checks of {named} went from {before} to {after}{said}{failed}"
+    ))
 }
 
 pub fn follow(
@@ -546,78 +613,90 @@ pub fn follow(
     woken: Receiver<()>,
     rests: Rests,
 ) -> io::Result<()> {
-    thread::Builder::new().name("gh".to_owned()).spawn(move || {
-        let mut asked: HashMap<Branch, Ask> = HashMap::new();
-        let forks = Arc::new(Forks::default());
-        let (answer, answers) = mpsc::channel();
-        let mut troubles = Troubles::default();
-        let mut seen = None;
-        let mut on = BTreeMap::new();
-        loop {
-            let Some(branches) = core::ask(&core, core::Command::Branches) else {
-                return;
-            };
-            while let Ok(Answered { branch, said }) = answers.try_recv() {
-                let was = asked.remove(&branch).and_then(Ask::into_asked);
-                asked.insert(branch, Ask::Resting(answered(was, said, rests)));
-            }
-            let now = Instant::now();
-            let due = |asked: &HashMap<Branch, Ask>, branch: &Branch| {
-                asked.get(branch).is_none_or(|ask| ask.next().is_some_and(|next| next <= now))
-            };
-            if seen.as_ref() != Some(&branches) || on.keys().any(|branch| due(&asked, branch)) {
-                on = located(&branches);
-                seen = Some(branches);
-            }
-            let asking = |ask: &Ask| matches!(ask, Ask::Asking(_));
-            asked.retain(|branch, ask| on.contains_key(branch) || asking(ask));
-            forks.retain(|repository| on.keys().any(|(of, _)| of == repository));
-            if !tell(&core, &on, &asked) {
-                return;
-            }
-            let mut due: Vec<&Branch> = on.keys().filter(|branch| due(&asked, branch)).collect();
-            due.sort_by_key(|branch| asked.get(*branch).and_then(Ask::next));
-            let free = |asked: &HashMap<Branch, Ask>| {
-                ASKS_AT_ONCE.saturating_sub(asked.values().filter(|ask| asking(ask)).count())
-            };
-            for branch in due.into_iter().take(free(&asked)) {
-                let dir = on[branch][0].clone();
-                let (of, forks) = (branch.clone(), Arc::clone(&forks));
-                let (answer, wake) = (answer.clone(), wake.clone());
-                let asks = thread::Builder::new().name("gh ask".to_owned()).spawn(move || {
-                    let said = panics::contained(|| view(&dir, &of, &forks))
-                        .unwrap_or_else(|Panicked| Err(format!("gh's ask about {} panicked", of.1)));
-                    if answer.send(Answered { branch: of, said }).is_ok() {
-                        let _ = wake.try_send(());
-                    }
-                });
-                let was = asked.remove(branch).and_then(Ask::into_asked);
-                let ask = match asks {
-                    Ok(_) => Ask::Asking(was),
-                    Err(error) => {
-                        let why = format!("gh could not be asked about {}: {error}", branch.1);
-                        Ask::Resting(answered(was, Err(why), rests))
-                    },
+    thread::Builder::new()
+        .name("gh".to_owned())
+        .spawn(move || {
+            let mut asked: HashMap<Branch, Ask> = HashMap::new();
+            let forks = Arc::new(Forks::default());
+            let (answer, answers) = mpsc::channel();
+            let mut troubles = Troubles::default();
+            let mut seen = None;
+            let mut on = BTreeMap::new();
+            loop {
+                let Some(branches) = core::ask(&core, core::Command::Branches) else {
+                    return;
                 };
-                asked.insert(branch.clone(), ask);
+                while let Ok(Answered { branch, said }) = answers.try_recv() {
+                    let was = asked.remove(&branch).and_then(Ask::into_asked);
+                    asked.insert(branch, Ask::Resting(answered(was, said, rests)));
+                }
+                let now = Instant::now();
+                let due = |asked: &HashMap<Branch, Ask>, branch: &Branch| {
+                    asked
+                        .get(branch)
+                        .is_none_or(|ask| ask.next().is_some_and(|next| next <= now))
+                };
+                if seen.as_ref() != Some(&branches) || on.keys().any(|branch| due(&asked, branch)) {
+                    on = located(&branches);
+                    seen = Some(branches);
+                }
+                let asking = |ask: &Ask| matches!(ask, Ask::Asking(_));
+                asked.retain(|branch, ask| on.contains_key(branch) || asking(ask));
+                forks.retain(|repository| on.keys().any(|(of, _)| of == repository));
+                if !tell(&core, &on, &asked) {
+                    return;
+                }
+                let mut due: Vec<&Branch> =
+                    on.keys().filter(|branch| due(&asked, branch)).collect();
+                due.sort_by_key(|branch| asked.get(*branch).and_then(Ask::next));
+                let free = |asked: &HashMap<Branch, Ask>| {
+                    ASKS_AT_ONCE.saturating_sub(asked.values().filter(|ask| asking(ask)).count())
+                };
+                for branch in due.into_iter().take(free(&asked)) {
+                    let dir = on[branch][0].clone();
+                    let (of, forks) = (branch.clone(), Arc::clone(&forks));
+                    let (answer, wake) = (answer.clone(), wake.clone());
+                    let asks = thread::Builder::new()
+                        .name("gh ask".to_owned())
+                        .spawn(move || {
+                            let said = panics::contained(|| view(&dir, &of, &forks))
+                                .unwrap_or_else(|Panicked| {
+                                    Err(format!("gh's ask about {} panicked", of.1))
+                                });
+                            if answer.send(Answered { branch: of, said }).is_ok() {
+                                let _ = wake.try_send(());
+                            }
+                        });
+                    let was = asked.remove(branch).and_then(Ask::into_asked);
+                    let ask = match asks {
+                        Ok(_) => Ask::Asking(was),
+                        Err(error) => {
+                            let why = format!("gh could not be asked about {}: {error}", branch.1);
+                            Ask::Resting(answered(was, Err(why), rests))
+                        }
+                    };
+                    asked.insert(branch.clone(), ask);
+                }
+                for trouble in asked
+                    .values()
+                    .filter_map(|ask| ask.asked()?.trouble.clone())
+                {
+                    troubles.say(trouble);
+                }
+                troubles.done();
+                let now = Instant::now();
+                let next = if free(&asked) > 0 {
+                    let next = asked.values().filter_map(Ask::next);
+                    next.map(|next| next.saturating_duration_since(now)).min()
+                } else {
+                    None
+                };
+                match woken.recv_timeout(next.unwrap_or(rests.settled)) {
+                    Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
             }
-            for trouble in asked.values().filter_map(|ask| ask.asked()?.trouble.clone()) {
-                troubles.say(trouble);
-            }
-            troubles.done();
-            let now = Instant::now();
-            let next = if free(&asked) > 0 {
-                let next = asked.values().filter_map(Ask::next);
-                next.map(|next| next.saturating_duration_since(now)).min()
-            } else {
-                None
-            };
-            match woken.recv_timeout(next.unwrap_or(rests.settled)) {
-                Ok(()) | Err(RecvTimeoutError::Timeout) => {},
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-        }
-    })?;
+        })?;
     Ok(())
 }
 
@@ -625,7 +704,9 @@ fn located(branches: &BTreeMap<String, String>) -> BTreeMap<Branch, Vec<String>>
     let mut on: BTreeMap<Branch, Vec<String>> = BTreeMap::new();
     for (dir, branch) in branches {
         if let git::Common::Of(repository) = git::common(dir) {
-            on.entry((repository, branch.clone())).or_default().push(dir.clone());
+            on.entry((repository, branch.clone()))
+                .or_default()
+                .push(dir.clone());
         }
     }
     on
@@ -638,11 +719,17 @@ fn tell(
 ) -> bool {
     let mut found = BTreeMap::new();
     for (branch, dirs) in on {
-        let Some(pull_request) = asked.get(branch).and_then(Ask::asked).and_then(Asked::found)
+        let Some(pull_request) = asked
+            .get(branch)
+            .and_then(Ask::asked)
+            .and_then(Asked::found)
         else {
             continue;
         };
-        let of = Found { branch: branch.1.clone(), pull_request };
+        let of = Found {
+            branch: branch.1.clone(),
+            pull_request,
+        };
         found.extend(dirs.iter().map(|dir| (dir.clone(), of.clone())));
     }
     core.send(core::Command::PullRequests(found)).is_ok()
@@ -657,8 +744,8 @@ mod tests {
     use lune_protocol::github::{Checks, PullPage, PullRequest, State};
 
     use super::{
-        answered, checks_changed, fork_of, parse, standing, unpoisoned, Answer, Asked, Lineage,
-        Pulled, RepositoryName, Rests, Said,
+        Answer, Asked, Lineage, Pulled, RepositoryName, Rests, Said, answered, checks_changed,
+        fork_of, parse, standing, unpoisoned,
     };
 
     #[test]
@@ -666,18 +753,29 @@ mod tests {
         let lineage = Mutex::new(None);
         let torn = panic::catch_unwind(|| {
             let mut known = unpoisoned(&lineage);
-            *known = Some(Lineage { remotes: "origin".to_owned(), fork: None });
+            *known = Some(Lineage {
+                remotes: "origin".to_owned(),
+                fork: None,
+            });
             panic!("gh's answer about the fork does not read");
         });
         assert!(torn.is_err(), "the ask panicked");
         assert!(lineage.is_poisoned(), "and left its lineage poisoned");
-        assert!(unpoisoned(&lineage).is_none(), "what it left is not read as known");
+        assert!(
+            unpoisoned(&lineage).is_none(),
+            "what it left is not read as known"
+        );
         assert!(!lineage.is_poisoned(), "and the next ask finds it whole");
     }
 
     fn pull(repository: &str, number: u32, state: State, checks: Option<Checks>) -> PullRequest {
         let page = PullPage::parse(&format!("https://github.com/{repository}/pull/{number}"));
-        PullRequest { page: page.unwrap(), state, checks, stale: false }
+        PullRequest {
+            page: page.unwrap(),
+            state,
+            checks,
+            stale: false,
+        }
     }
 
     fn pulled(pull_request: PullRequest) -> Pulled {
@@ -693,41 +791,81 @@ mod tests {
 
     #[test]
     fn what_gh_failed_to_say_again_stands_as_stale() {
-        let rests = Rests { pending: Duration::from_secs(1), settled: Duration::from_hours(1) };
-        let pending = Some(Checks { pending: 1, failed: 0, passed: 0 });
+        let rests = Rests {
+            pending: Duration::from_secs(1),
+            settled: Duration::from_hours(1),
+        };
+        let pending = Some(Checks {
+            pending: 1,
+            failed: 0,
+            passed: 0,
+        });
         let parent_s = pull("upstream/repo", 5, State::Open, pending);
         let at = Instant::now();
         let was = |found: &PullRequest| Asked {
             next: at,
             rest: rests.pending,
-            said: Some(Said { at, found: Some(found.clone()) }),
+            said: Some(Said {
+                at,
+                found: Some(found.clone()),
+            }),
             failed: 1,
             trouble: None,
         };
-        let partly = |own| Ok(Answer::Partly { own, why: "the parent did not say".to_owned() });
+        let partly = |own| {
+            Ok(Answer::Partly {
+                own,
+                why: "the parent did not say".to_owned(),
+            })
+        };
         let said = |asked: &Asked| asked.said.as_ref().map(|said| said.at);
 
         let asked = answered(Some(was(&parent_s)), partly(None), rests);
-        let stale = PullRequest { stale: true, ..parent_s.clone() };
-        assert_eq!((asked.found(), said(&asked), asked.failed), (Some(stale), Some(at), 2));
+        let stale = PullRequest {
+            stale: true,
+            ..parent_s.clone()
+        };
+        assert_eq!(
+            (asked.found(), said(&asked), asked.failed),
+            (Some(stale), Some(at), 2)
+        );
         assert_eq!(asked.trouble.as_deref(), Some("the parent did not say"));
 
         let closed = pull("owner/repo", 4, State::Closed, None);
         let fork_s = pull("owner/repo", 4, State::Open, pending);
-        let asked = answered(Some(was(&fork_s)), partly(Some(pulled(closed.clone()))), rests);
+        let asked = answered(
+            Some(was(&fork_s)),
+            partly(Some(pulled(closed.clone()))),
+            rests,
+        );
         assert_eq!((asked.found(), asked.failed), (Some(closed), 0));
         assert!(said(&asked).is_some_and(|now| now > at));
         assert_eq!(asked.rest, rests.settled);
 
         let asked = answered(Some(was(&fork_s)), Ok(Answer::Moved), rests);
-        let stale = PullRequest { stale: true, ..fork_s };
-        assert_eq!((asked.found(), asked.trouble, asked.failed), (Some(stale), None, 1));
+        let stale = PullRequest {
+            stale: true,
+            ..fork_s
+        };
+        assert_eq!(
+            (asked.found(), asked.trouble, asked.failed),
+            (Some(stale), None, 1)
+        );
     }
 
     #[test]
     fn checks_that_stay_pending_are_asked_about_less_and_less_often() {
-        let rests = Rests { pending: Duration::from_secs(15), settled: Duration::from_mins(2) };
-        let checks = |pending, passed| Some(Checks { pending, failed: 0, passed });
+        let rests = Rests {
+            pending: Duration::from_secs(15),
+            settled: Duration::from_mins(2),
+        };
+        let checks = |pending, passed| {
+            Some(Checks {
+                pending,
+                failed: 0,
+                passed,
+            })
+        };
         let stayed = |checks| {
             let pull_request = pull("owner/repo", 7, State::Open, checks);
             Ok(Answer::Stayed(Some(pulled(pull_request))))
@@ -755,17 +893,28 @@ mod tests {
 
     #[test]
     fn a_change_in_the_checks_says_how_long_gh_took_to_see_it() {
-        let checks = |pending, failed, passed| Some(Checks { pending, failed, passed });
+        let checks = |pending, failed, passed| {
+            Some(Checks {
+                pending,
+                failed,
+                passed,
+            })
+        };
         let open = |checks| pull("owner/repo", 7, State::Open, checks);
         let at = Instant::now();
-        let said = |found| Said { at: at.checked_sub(Duration::from_secs(62)).unwrap(), found };
+        let said = |found| Said {
+            at: at.checked_sub(Duration::from_secs(62)).unwrap(),
+            found,
+        };
         let changed = |was: &PullRequest, now: &PullRequest, failed| {
             checks_changed(&said(Some(was.clone())), Some(now), failed, at)
         };
         let of = "the checks of https://github.com/owner/repo/pull/7 went from";
         assert_eq!(
             changed(&open(checks(1, 0, 2)), &open(checks(0, 0, 3)), 0),
-            Some(format!("{of} pending to passing, 62s after gh last said them"))
+            Some(format!(
+                "{of} pending to passing, 62s after gh last said them"
+            ))
         );
         assert_eq!(
             changed(&open(checks(0, 0, 0)), &open(checks(0, 1, 0)), 3),
@@ -773,7 +922,10 @@ mod tests {
                 "{of} no checks to failing, 62s after gh last said them, failing 3 times in between"
             ))
         );
-        assert_eq!(changed(&open(checks(2, 0, 1)), &open(checks(1, 0, 2)), 0), None);
+        assert_eq!(
+            changed(&open(checks(2, 0, 1)), &open(checks(1, 0, 2)), 0),
+            None
+        );
         let other = pull("owner/repo", 8, State::Open, checks(0, 0, 3));
         assert_eq!(changed(&open(checks(1, 0, 0)), &other, 0), None);
         assert_eq!(checks_changed(&said(None), Some(&other), 0, at), None);
@@ -785,7 +937,10 @@ mod tests {
         let fork_s = |state| pull("owner/repo", 5, state);
         let parent_s = || pull("upstream/repo", 5, State::Open);
         let closed = || fork_s(State::Closed);
-        assert_eq!(standing(Some(fork_s(State::Open)), Some(closed())), Some(closed()));
+        assert_eq!(
+            standing(Some(fork_s(State::Open)), Some(closed())),
+            Some(closed())
+        );
         assert_eq!(standing(Some(parent_s()), None), Some(parent_s()));
         assert_eq!(standing(Some(parent_s()), Some(closed())), Some(parent_s()));
         assert_eq!(standing(None, Some(closed())), Some(closed()));
@@ -801,7 +956,10 @@ mod tests {
         let parent_of =
             |said: &str| read(said).map(|fork| fork.map(|fork| fork.parent.to_string()));
         let on = |host: &str| Ok(Some(format!("{host}/cashubtc/cdk")));
-        assert_eq!(parent_of(&forked("https://github.com/lorenzolfm/cdk")), on("github.com"));
+        assert_eq!(
+            parent_of(&forked("https://github.com/lorenzolfm/cdk")),
+            on("github.com")
+        );
         assert_eq!(
             parent_of(&forked("https://git.example.com/lorenzolfm/cdk")),
             on("git.example.com")
@@ -809,7 +967,8 @@ mod tests {
         let default_branch = read(&forked("https://github.com/lorenzolfm/cdk"))
             .map(|fork| fork.map(|fork| fork.default_branch));
         assert_eq!(default_branch, Ok(Some("trunk".to_owned())));
-        let none = format!(r#"{{{default},"parent":null,"url":"https://github.com/lorenzolfm/lune"}}"#);
+        let none =
+            format!(r#"{{{default},"parent":null,"url":"https://github.com/lorenzolfm/lune"}}"#);
         assert_eq!(read(&none), Ok(None));
         let unnamed = |name: &str, login: &str| {
             let parent = format!(r#"{{"name":"{name}","owner":{{"login":"{login}"}}}}"#);
@@ -842,7 +1001,13 @@ mod tests {
         };
         let me = r#"{"id":"U","is_bot":false,"login":"me","name":"Me"}"#;
         let repository = r#"{"id":"R","name":"repo"}"#;
-        let Pulled { head_name, head, author, head_repository, .. } = viewed(me, repository, me);
+        let Pulled {
+            head_name,
+            head,
+            author,
+            head_repository,
+            ..
+        } = viewed(me, repository, me);
         assert_eq!((head_name.as_str(), head.as_str()), ("fix", "abc"));
         assert_eq!(author.as_deref(), Some("me"));
         let name = |host: &str, owner: &str, name: &str| RepositoryName {

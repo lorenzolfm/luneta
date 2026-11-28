@@ -15,9 +15,11 @@ use crate::reach::{self, Luned};
 pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
     let cannot = "with an exit status my shell cannot say";
     let (how, after, line) = match ended.ending {
-        Some(Ending::Exited(status)) => {
-            (format!("ended with exit status {status}"), "", "the line I ran it on")
-        },
+        Some(Ending::Exited(status)) => (
+            format!("ended with exit status {status}"),
+            "",
+            "the line I ran it on",
+        ),
         None => (format!("ended, {cannot}"), "", "the line I ran it on"),
         Some(Ending::Resumed) => (
             format!("ended once I brought it back with `fg`, {cannot}"),
@@ -25,22 +27,35 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
             "the `fg` I brought it back with",
         ),
     };
-    let screen = |Kept { file, lines, left_out }: &Kept| {
+    let screen = |Kept {
+                      file,
+                      lines,
+                      left_out,
+                  }: &Kept| {
         let holds = if *left_out == 0 {
             "all my screen has".to_owned()
         } else {
-            format!("the last {lines} of the {} lines my screen has", lines + left_out)
+            format!(
+                "the last {lines} of the {} lines my screen has",
+                lines + left_out
+            )
         };
         format!("{file} holds {holds}")
     };
     let printed = match printed {
-        Printed::After(Kept { file, left_out: 0, .. }) => {
+        Printed::After(Kept {
+            file, left_out: 0, ..
+        }) => {
             format!("What it printed{after} is in {file}.")
-        },
-        Printed::After(Kept { file, lines, left_out }) => {
+        }
+        Printed::After(Kept {
+            file,
+            lines,
+            left_out,
+        }) => {
             let of = lines + left_out;
             format!("The last {lines} of the {of} lines it printed{after} are in {file}.")
-        },
+        }
         Printed::Nothing => format!("It printed nothing{after}."),
         Printed::Unsure(kept) => format!(
             "Nothing follows the last line on my screen that looks like {line}, which may \
@@ -53,7 +68,10 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
             screen(kept)
         ),
     };
-    format!("{asks} In my shell, `{}` {how}. {printed}", ended.command.as_str())
+    format!(
+        "{asks} In my shell, `{}` {how}. {printed}",
+        ended.command.as_str()
+    )
 }
 
 pub fn read(
@@ -85,13 +103,20 @@ mod tests {
     use super::*;
 
     fn ended(command: &str, ending: Option<Ending>) -> Ended {
-        Ended { command: Said::new(command.to_owned()).unwrap(), ending, at: UNIX_EPOCH }
+        Ended {
+            command: Said::new(command.to_owned()).unwrap(),
+            ending,
+            at: UNIX_EPOCH,
+        }
     }
 
     #[test]
     fn a_job_brought_back_was_typed_as_fg() {
         let typed = |ended: Ended| typed(&ended).as_str().to_owned();
-        assert_eq!(typed(ended("cargo test", Some(Ending::Exited(101)))), "cargo test");
+        assert_eq!(
+            typed(ended("cargo test", Some(Ending::Exited(101)))),
+            "cargo test"
+        );
         assert_eq!(typed(ended("vim", None)), "vim");
         assert_eq!(typed(ended("cargo build", Some(Ending::Resumed))), "fg");
         assert_eq!(typed(ended("fg %1", Some(Ending::Resumed))), "fg");
@@ -100,7 +125,11 @@ mod tests {
     #[test]
     fn the_agent_is_told_the_command_how_it_ended_and_where_what_it_printed_is() {
         let file = "/run/lune/printed/1.txt".to_owned();
-        let kept = |lines, left_out| Kept { file: file.clone(), lines, left_out };
+        let kept = |lines, left_out| Kept {
+            file: file.clone(),
+            lines,
+            left_out,
+        };
         let failed = ended("cargo test", Some(Ending::Exited(101)));
         let told = |printed: Printed| prompt(&printed, "Fix this.", &failed);
         let ran = "Fix this. In my shell, `cargo test` ended with exit status 101.";
@@ -139,7 +168,10 @@ mod tests {
                  my screen has, which may begin before what it printed."
             )
         );
-        assert_eq!(told(Printed::Top(None)), format!("{ran} {gone}, nor anything else."));
+        assert_eq!(
+            told(Printed::Top(None)),
+            format!("{ran} {gone}, nor anything else.")
+        );
         assert_eq!(
             prompt(&Printed::Nothing, "Explain this.", &ended("vim", None)),
             "Explain this. In my shell, `vim` ended, with an exit status my shell cannot say. It \
@@ -161,7 +193,10 @@ mod tests {
                  /run/lune/printed/1.txt."
             )
         );
-        assert_eq!(told(Printed::Nothing), format!("{ran} It printed nothing after `fg`."));
+        assert_eq!(
+            told(Printed::Nothing),
+            format!("{ran} It printed nothing after `fg`.")
+        );
         assert_eq!(
             told(Printed::Top(None)),
             format!(

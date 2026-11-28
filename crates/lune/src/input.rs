@@ -4,9 +4,9 @@ use std::io::{self, IsTerminal as _, Read as _};
 use std::num::NonZeroU16;
 use std::os::fd::AsFd as _;
 use std::str;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::thread;
 
 use crossterm::event::{
@@ -75,7 +75,10 @@ fn resizes(events: Sender<Event>) {
             let Ok((columns, rows)) = crossterm::terminal::size() else {
                 continue;
             };
-            if events.send(Event::Input(Input::Resize(columns, rows))).is_err() {
+            if events
+                .send(Event::Input(Input::Resize(columns, rows)))
+                .is_err()
+            {
                 return;
             }
         }
@@ -99,7 +102,11 @@ impl Ends {
 
     pub fn after<T>(&mut self, step: impl FnOnce() -> T) -> Result<T, Ended> {
         let done = step();
-        self.signals.pending().next().map(Ended::by).map_or(Ok(done), Err)
+        self.signals
+            .pending()
+            .next()
+            .map(Ended::by)
+            .map_or(Ok(done), Err)
     }
 
     fn tell(mut self, events: Sender<Event>) {
@@ -117,7 +124,10 @@ pub struct Ended(i32);
 
 impl Ended {
     fn by(signal: i32) -> Ended {
-        assert!(END_SIGNALS.contains(&signal), "signal {signal} is not one lune ends by");
+        assert!(
+            END_SIGNALS.contains(&signal),
+            "signal {signal} is not one lune ends by"
+        );
         Ended(signal)
     }
 }
@@ -161,8 +171,10 @@ impl Parser {
             self.take(bytes, more, sent);
             return;
         }
-        let typed: Vec<u8> =
-            bytes.iter().map(|&byte| if byte == b'\n' { b'\r' } else { byte }).collect();
+        let typed: Vec<u8> = bytes
+            .iter()
+            .map(|&byte| if byte == b'\n' { b'\r' } else { byte })
+            .collect();
         self.take(&typed, more, sent);
     }
 
@@ -175,18 +187,18 @@ impl Parser {
     fn push(&mut self, byte: u8, more: bool, sent: &mut impl FnMut(Sent)) {
         self.pending.push(byte);
         match parse(&self.pending, more) {
-            Parsed::Partial => {},
+            Parsed::Partial => {}
             Parsed::Unknown => self.pending.clear(),
             Parsed::Whole(said) => {
                 self.pending.clear();
                 sent(said);
-            },
+            }
             Parsed::Split(said, taken) => {
                 let rest = self.pending.split_off(taken);
                 self.pending.clear();
                 sent(said);
                 self.take(&rest, more, sent);
-            },
+            }
         }
     }
 }
@@ -206,12 +218,14 @@ fn parse(bytes: &[u8], more: bool) -> Parsed {
         [b'\t'] => key(KeyCode::Tab, KeyModifiers::NONE),
         [0x7f] => key(KeyCode::Backspace, KeyModifiers::NONE),
         [0] => key(KeyCode::Char(' '), KeyModifiers::CONTROL),
-        [byte @ 0x01..=0x1a] => {
-            key(KeyCode::Char(char::from(byte - 1 + b'a')), KeyModifiers::CONTROL)
-        },
-        [byte @ 0x1c..=0x1f] => {
-            key(KeyCode::Char(char::from(byte - 0x1c + b'4')), KeyModifiers::CONTROL)
-        },
+        [byte @ 0x01..=0x1a] => key(
+            KeyCode::Char(char::from(byte - 1 + b'a')),
+            KeyModifiers::CONTROL,
+        ),
+        [byte @ 0x1c..=0x1f] => key(
+            KeyCode::Char(char::from(byte - 0x1c + b'4')),
+            KeyModifiers::CONTROL,
+        ),
         _ => character(bytes),
     }
 }
@@ -225,7 +239,7 @@ fn alt(parsed: Parsed) -> Parsed {
         Parsed::Whole(Sent::Input(Input::Key(mut key))) => {
             key.modifiers |= KeyModifiers::ALT;
             Parsed::Whole(Sent::Input(Input::Key(key)))
-        },
+        }
         parsed => parsed,
     }
 }
@@ -240,12 +254,23 @@ fn character(bytes: &[u8]) -> Parsed {
     };
     if bytes.len() < length {
         let going_on = bytes[1..].iter().all(|byte| byte & 0xc0 == 0x80);
-        return if going_on { Parsed::Partial } else { Parsed::Unknown };
+        return if going_on {
+            Parsed::Partial
+        } else {
+            Parsed::Unknown
+        };
     }
-    let Some(c) = str::from_utf8(bytes).ok().and_then(|text| text.chars().next()) else {
+    let Some(c) = str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| text.chars().next())
+    else {
         return Parsed::Unknown;
     };
-    let modifiers = if c.is_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
+    let modifiers = if c.is_uppercase() {
+        KeyModifiers::SHIFT
+    } else {
+        KeyModifiers::NONE
+    };
     key(KeyCode::Char(c), modifiers)
 }
 
@@ -293,7 +318,7 @@ fn csi(bytes: &[u8]) -> Parsed {
                 Some(&last @ b'A'..=b'E') => key(KeyCode::F(1 + last - b'A'), KeyModifiers::NONE),
                 Some(_) => Parsed::Unknown,
             };
-        },
+        }
         b'0'..=b'9' | b';' | b'<' | b'?' => return sequence(bytes),
         _ => return Parsed::Unknown,
     };
@@ -409,12 +434,18 @@ fn modified_key(parameters: &str, last: u8) -> Parsed {
     };
     let (modifiers, _, kind) = match parameters.split(';').nth(1).and_then(held) {
         Some(held) => held,
-        None => match parameters.chars().last().and_then(|digit| digit.to_digit(10)) {
+        None => match parameters
+            .chars()
+            .last()
+            .and_then(|digit| digit.to_digit(10))
+        {
             Some(digit) => held(&digit.to_string()).unwrap_or(UNHELD),
             None => return Parsed::Unknown,
         },
     };
-    Parsed::Whole(Sent::Input(Input::Key(KeyEvent::new_with_kind(code, modifiers, kind))))
+    Parsed::Whole(Sent::Input(Input::Key(KeyEvent::new_with_kind(
+        code, modifiers, kind,
+    ))))
 }
 
 fn special_key(parameters: &str) -> Parsed {
@@ -464,7 +495,10 @@ fn kitty_key(parameters: &str) -> Parsed {
         (code, KeyEventState::NONE)
     };
     if modifiers.contains(KeyModifiers::SHIFT)
-        && let Some(shifted) = codes.next().and_then(|code| code.parse().ok()).and_then(char::from_u32)
+        && let Some(shifted) = codes
+            .next()
+            .and_then(|code| code.parse().ok())
+            .and_then(char::from_u32)
     {
         code = KeyCode::Char(shifted);
         modifiers.remove(KeyModifiers::SHIFT);
@@ -525,7 +559,10 @@ fn rxvt_mouse(parameters: &str) -> Parsed {
     else {
         return Parsed::Unknown;
     };
-    let Some(code) = code.checked_sub(32).and_then(|code| u8::try_from(code).ok()) else {
+    let Some(code) = code
+        .checked_sub(32)
+        .and_then(|code| u8::try_from(code).ok())
+    else {
         return Parsed::Unknown;
     };
     mouse(code, column, row, false)
@@ -535,9 +572,11 @@ fn x10_mouse(bytes: &[u8]) -> Parsed {
     let [_, _, _, code, column, row] = *bytes else {
         return Parsed::Partial;
     };
-    let (Some(code), Some(column), Some(row)) =
-        (code.checked_sub(32), column.checked_sub(32), row.checked_sub(32))
-    else {
+    let (Some(code), Some(column), Some(row)) = (
+        code.checked_sub(32),
+        column.checked_sub(32),
+        row.checked_sub(32),
+    ) else {
         return Parsed::Unknown;
     };
     mouse(code, column.into(), row.into(), false)
@@ -566,9 +605,11 @@ fn mouse(code: u8, column: u16, row: u16, released: bool) -> Parsed {
         kind => kind,
     };
     let mut modifiers = KeyModifiers::NONE;
-    for (bit, modifier) in
-        [(4, KeyModifiers::SHIFT), (8, KeyModifiers::ALT), (16, KeyModifiers::CONTROL)]
-    {
+    for (bit, modifier) in [
+        (4, KeyModifiers::SHIFT),
+        (8, KeyModifiers::ALT),
+        (16, KeyModifiers::CONTROL),
+    ] {
         if code & bit != 0 {
             modifiers |= modifier;
         }
@@ -576,15 +617,24 @@ fn mouse(code: u8, column: u16, row: u16, released: bool) -> Parsed {
     let (Some(column), Some(row)) = (column.checked_sub(1), row.checked_sub(1)) else {
         return Parsed::Unknown;
     };
-    Parsed::Whole(Sent::Input(Input::Mouse(MouseEvent { kind, column, row, modifiers })))
+    Parsed::Whole(Sent::Input(Input::Mouse(MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers,
+    })))
 }
 
 fn paste(bytes: &[u8]) -> Parsed {
-    let Some(text) = bytes.strip_prefix(PASTE_START).and_then(|rest| rest.strip_suffix(PASTE_END))
+    let Some(text) = bytes
+        .strip_prefix(PASTE_START)
+        .and_then(|rest| rest.strip_suffix(PASTE_END))
     else {
         return Parsed::Partial;
     };
-    Parsed::Whole(Sent::Input(Input::Paste(String::from_utf8_lossy(text).into_owned())))
+    Parsed::Whole(Sent::Input(Input::Paste(
+        String::from_utf8_lossy(text).into_owned(),
+    )))
 }
 
 fn osc(bytes: &[u8]) -> Parsed {
@@ -607,7 +657,7 @@ fn osc(bytes: &[u8]) -> Parsed {
                 _ => Answer::Background(colour),
             };
             Parsed::Whole(Sent::Answer(answer))
-        },
+        }
         [.., ESC] => Parsed::Partial,
         [.., ESC, _] => typed(),
         [.., last] if !last.is_ascii_graphic() || spelled.len() > COLOUR_LONGEST => typed(),
@@ -635,7 +685,7 @@ fn apc(bytes: &[u8]) -> Parsed {
             } else {
                 Parsed::Unknown
             }
-        },
+        }
         [.., ESC] => Parsed::Partial,
         [.., ESC, _] => {
             if payload.contains(&b';') {
@@ -643,16 +693,14 @@ fn apc(bytes: &[u8]) -> Parsed {
             } else {
                 typed()
             }
-        },
-        [.., last]
-            if (!last.is_ascii_graphic() && last != b' ') || payload.len() > APC_LONGEST =>
-        {
+        }
+        [.., last] if (!last.is_ascii_graphic() && last != b' ') || payload.len() > APC_LONGEST => {
             if payload.contains(&b';') {
                 Parsed::Unknown
             } else {
                 typed()
             }
-        },
+        }
         _ => Parsed::Partial,
     }
 }
@@ -692,35 +740,53 @@ mod tests {
 
     #[test]
     fn an_answer_is_heard_as_one_wherever_it_comes_among_the_keys() {
-        let foreground = Rgb { r: 0xc0, g: 0xca, b: 0xf5 };
-        let background = Rgb { r: 0x1e, g: 0x1e, b: 0x2e };
+        let foreground = Rgb {
+            r: 0xc0,
+            g: 0xca,
+            b: 0xf5,
+        };
+        let background = Rgb {
+            r: 0x1e,
+            g: 0x1e,
+            b: 0x2e,
+        };
         let all = sent(&[
             b"l\x1b]10;rgb:c0c0/caca/f5f5\x1b\\s\x1b[?1u\x1b[?62;22c\r",
             b"\x1b]11;rgb:1e/1e/2e\x07x",
         ]);
-        assert_eq!(all, [
-            typed('l'),
-            Sent::Answer(Answer::Foreground(foreground)),
-            typed('s'),
-            Sent::Answer(Answer::Kitty),
-            Sent::Answer(Answer::Device),
-            pressed(KeyCode::Enter, KeyModifiers::NONE),
-            Sent::Answer(Answer::Background(background)),
-            typed('x'),
-        ]);
+        assert_eq!(
+            all,
+            [
+                typed('l'),
+                Sent::Answer(Answer::Foreground(foreground)),
+                typed('s'),
+                Sent::Answer(Answer::Kitty),
+                Sent::Answer(Answer::Device),
+                pressed(KeyCode::Enter, KeyModifiers::NONE),
+                Sent::Answer(Answer::Background(background)),
+                typed('x'),
+            ]
+        );
     }
 
     #[test]
     fn an_enter_typed_before_lune_took_the_terminal_raw_is_an_enter() {
         let enter = pressed(KeyCode::Enter, KeyModifiers::NONE);
         let control_j = pressed(KeyCode::Char('j'), KeyModifiers::CONTROL);
-        assert_eq!(sent(&[b"ls\n", b"\n"]), [typed('l'), typed('s'), enter, control_j]);
+        assert_eq!(
+            sent(&[b"ls\n", b"\n"]),
+            [typed('l'), typed('s'), enter, control_j]
+        );
     }
 
     #[test]
     fn an_answer_split_between_reads_is_one() {
         let all = sent(&[b"\x1b]11;rgb:1e1e/", b"1e1e/2e2e\x1b", b"\\"]);
-        let background = Rgb { r: 0x1e, g: 0x1e, b: 0x2e };
+        let background = Rgb {
+            r: 0x1e,
+            g: 0x1e,
+            b: 0x2e,
+        };
         assert_eq!(all, [Sent::Answer(Answer::Background(background))]);
     }
 
@@ -729,22 +795,31 @@ mod tests {
         let alt = pressed(KeyCode::Char(']'), KeyModifiers::ALT);
         assert_eq!(sent(&[b"\x1b]"]), std::slice::from_ref(&alt));
         assert_eq!(sent(&[b"\x1b]x"]), [alt.clone(), typed('x')]);
-        assert_eq!(sent(&[b"\x1b]11;ab\r"]), [
-            alt.clone(),
-            typed('1'),
-            typed('1'),
-            typed(';'),
-            typed('a'),
-            typed('b'),
-            pressed(KeyCode::Enter, KeyModifiers::NONE),
-        ]);
+        assert_eq!(
+            sent(&[b"\x1b]11;ab\r"]),
+            [
+                alt.clone(),
+                typed('1'),
+                typed('1'),
+                typed(';'),
+                typed('a'),
+                typed('b'),
+                pressed(KeyCode::Enter, KeyModifiers::NONE),
+            ]
+        );
         assert_eq!(sent(&[b"\x1b]1", b"2"]), [alt, typed('1'), typed('2')]);
     }
 
     #[test]
     fn a_turn_to_dark_or_light_is_heard_and_other_reports_go_whole() {
-        assert_eq!(sent(&[b"\x1b[?997;1n"]), [Sent::Answer(Answer::Turned(Theme::Dark))]);
-        assert_eq!(sent(&[b"\x1b[?997;2n"]), [Sent::Answer(Answer::Turned(Theme::Light))]);
+        assert_eq!(
+            sent(&[b"\x1b[?997;1n"]),
+            [Sent::Answer(Answer::Turned(Theme::Dark))]
+        );
+        assert_eq!(
+            sent(&[b"\x1b[?997;2n"]),
+            [Sent::Answer(Answer::Turned(Theme::Light))]
+        );
         assert_eq!(sent(&[b"\x1b[?2026;2$yx"]), [typed('x')]);
     }
 
@@ -756,14 +831,23 @@ mod tests {
             b"\x1b_Gi=31;EINVAL: invalid data\x1b\\w",
         ]);
         let nz = |value| NonZeroU16::new(value).unwrap();
-        assert_eq!(all, [
-            Sent::Answer(Answer::Graphics),
-            Sent::Answer(Answer::CellSize(CellPixels { width: nz(10), height: nz(20) })),
-            Sent::Answer(Answer::WindowPixels(WindowPixels { width: nz(1600), height: nz(1000) })),
-            typed('x'),
-            typed('y'),
-            typed('w'),
-        ]);
+        assert_eq!(
+            all,
+            [
+                Sent::Answer(Answer::Graphics),
+                Sent::Answer(Answer::CellSize(CellPixels {
+                    width: nz(10),
+                    height: nz(20)
+                })),
+                Sent::Answer(Answer::WindowPixels(WindowPixels {
+                    width: nz(1600),
+                    height: nz(1000)
+                })),
+                typed('x'),
+                typed('y'),
+                typed('w'),
+            ]
+        );
         assert_eq!(sent(&[b"\x1b[6;0;10tz"]), [typed('z')]);
         let alt_underscore = pressed(KeyCode::Char('_'), KeyModifiers::ALT);
         assert_eq!(sent(&[b"\x1b_"]), std::slice::from_ref(&alt_underscore));
@@ -836,10 +920,16 @@ mod tests {
             row: 3,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(sent(&[b"\x1b[", b"<35;3;4M"]), [Sent::Input(Input::Mouse(moved))]);
+        assert_eq!(
+            sent(&[b"\x1b[", b"<35;3;4M"]),
+            [Sent::Input(Input::Mouse(moved))]
+        );
         let paste = Sent::Input(Input::Paste("ls\r".to_owned()));
         assert_eq!(sent(&[b"\x1b[", b"200~ls\r\x1b[201~"]), [paste]);
-        assert_eq!(sent(&[b"\x1bO", b"A"]), [pressed(KeyCode::Up, KeyModifiers::NONE)]);
+        assert_eq!(
+            sent(&[b"\x1bO", b"A"]),
+            [pressed(KeyCode::Up, KeyModifiers::NONE)]
+        );
         assert_eq!(
             sent(&[b"\x1b_Gi=31;", b"OK\x1b\\"]),
             [Sent::Answer(Answer::Graphics)]
@@ -861,20 +951,54 @@ mod tests {
     #[test]
     fn the_mouse_the_focus_and_pastes_are_read() {
         let at = |kind, column, row, modifiers| {
-            Sent::Input(Input::Mouse(MouseEvent { kind, column, row, modifiers }))
+            Sent::Input(Input::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers,
+            }))
         };
         let left = MouseButton::Left;
         let cases: &[(&[u8], Sent)] = &[
-            (b"\x1b[<0;5;10M", at(MouseEventKind::Down(left), 4, 9, KeyModifiers::NONE)),
-            (b"\x1b[<0;5;10m", at(MouseEventKind::Up(left), 4, 9, KeyModifiers::NONE)),
-            (b"\x1b[<18;1;1M", at(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::CONTROL)),
-            (b"\x1b[<32;3;4M", at(MouseEventKind::Drag(left), 2, 3, KeyModifiers::NONE)),
-            (b"\x1b[<35;3;4M", at(MouseEventKind::Moved, 2, 3, KeyModifiers::NONE)),
-            (b"\x1b[<65;1;1M", at(MouseEventKind::ScrollDown, 0, 0, KeyModifiers::NONE)),
-            (b"\x1b[M !!", at(MouseEventKind::Down(left), 0, 0, KeyModifiers::NONE)),
+            (
+                b"\x1b[<0;5;10M",
+                at(MouseEventKind::Down(left), 4, 9, KeyModifiers::NONE),
+            ),
+            (
+                b"\x1b[<0;5;10m",
+                at(MouseEventKind::Up(left), 4, 9, KeyModifiers::NONE),
+            ),
+            (
+                b"\x1b[<18;1;1M",
+                at(
+                    MouseEventKind::Down(MouseButton::Right),
+                    0,
+                    0,
+                    KeyModifiers::CONTROL,
+                ),
+            ),
+            (
+                b"\x1b[<32;3;4M",
+                at(MouseEventKind::Drag(left), 2, 3, KeyModifiers::NONE),
+            ),
+            (
+                b"\x1b[<35;3;4M",
+                at(MouseEventKind::Moved, 2, 3, KeyModifiers::NONE),
+            ),
+            (
+                b"\x1b[<65;1;1M",
+                at(MouseEventKind::ScrollDown, 0, 0, KeyModifiers::NONE),
+            ),
+            (
+                b"\x1b[M !!",
+                at(MouseEventKind::Down(left), 0, 0, KeyModifiers::NONE),
+            ),
             (b"\x1b[I", Sent::Input(Input::FocusGained)),
             (b"\x1b[O", Sent::Input(Input::FocusLost)),
-            (b"\x1b[200~ls\x1b[A\r\x1b[201~", Sent::Input(Input::Paste("ls\x1b[A\r".to_owned()))),
+            (
+                b"\x1b[200~ls\x1b[A\r\x1b[201~",
+                Sent::Input(Input::Paste("ls\x1b[A\r".to_owned())),
+            ),
         ];
         for (bytes, expected) in cases {
             assert_eq!(sent(&[*bytes]), std::slice::from_ref(expected), "{bytes:?}");

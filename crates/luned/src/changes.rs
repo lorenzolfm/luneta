@@ -65,7 +65,7 @@ impl Unadded {
         match unasked {
             crate::Unasked::Unsent(unsent) => {
                 Unadded::Unchanged(Unchanged::Refused(unsent.to_string()))
-            },
+            }
             crate::Unasked::Asked(status) => Unadded::of(status),
         }
     }
@@ -109,7 +109,7 @@ mod tests {
             Failed::Nests(_) => Unadded::Nests,
             Failed::Unclosed(_) | Failed::Unopened(_) | Failed::KeptUntold => {
                 |why| Unadded::Unchanged(Unchanged::InDoubt(why))
-            },
+            }
         }
     }
 
@@ -136,7 +136,11 @@ mod tests {
                 Unadded::Nests(why) => Unchanged::Refused(why),
                 Unadded::Unchanged(unchanged) => unchanged,
             };
-            assert_eq!(Unchanged::of(&sent), unchanged, "a change that adds nothing: {sent:?}");
+            assert_eq!(
+                Unchanged::of(&sent),
+                unchanged,
+                "a change that adds nothing: {sent:?}"
+            );
         }
     }
 
@@ -153,10 +157,17 @@ mod tests {
             Code::DataLoss,
         ];
         for code in unanswered {
-            assert_eq!(Unchanged::of(&Status::new(code, why())), Unchanged::InDoubt(why()));
+            assert_eq!(
+                Unchanged::of(&Status::new(code, why())),
+                Unchanged::InDoubt(why())
+            );
         }
         let older = Status::unimplemented(why());
-        assert_eq!(Unchanged::of(&older), Unchanged::Refused(why()), "a luned older than it");
+        assert_eq!(
+            Unchanged::of(&older),
+            Unchanged::Refused(why()),
+            "a luned older than it"
+        );
     }
 
     #[test]
@@ -171,6 +182,9 @@ mod tests {
     fn only_what_kept_nothing_is_said_unchanged() {
         let said = |unchanged: Unchanged| unchanged.said("not closed", "it may be closed");
         assert_eq!(said(Unchanged::Refused("w".to_owned())), "not closed: w");
-        assert_eq!(said(Unchanged::InDoubt("w".to_owned())), "w, so it may be closed");
+        assert_eq!(
+            said(Unchanged::InDoubt("w".to_owned())),
+            "w, so it may be closed"
+        );
     }
 }

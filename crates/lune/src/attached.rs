@@ -31,7 +31,9 @@ const fn colour(colour: Option<frames::Colour>) -> Color {
 }
 
 const fn styled(style: &frames::Style) -> Style {
-    let mut drawn = Style::new().fg(colour(style.foreground)).bg(colour(style.background));
+    let mut drawn = Style::new()
+        .fg(colour(style.foreground))
+        .bg(colour(style.background));
     if let Some(underline) = style.underline_colour {
         drawn = drawn.underline_color(colour(Some(underline)));
     }
@@ -70,12 +72,19 @@ pub(crate) struct Clean<'a> {
 impl<'a> Clean<'a> {
     pub(crate) fn of_frame(frame: &'a mut ratatui::Frame<'_>) -> Clean<'a> {
         let area = frame.area();
-        Clean { buffer: frame.buffer_mut(), area }
+        Clean {
+            buffer: frame.buffer_mut(),
+            area,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn of_empty(buffer: &'a mut Buffer, area: Rect) -> Clean<'a> {
-        assert_eq!(buffer.area.intersection(area), area, "a clean region lies inside its buffer");
+        assert_eq!(
+            buffer.area.intersection(area),
+            area,
+            "a clean region lies inside its buffer"
+        );
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 assert_eq!(
@@ -90,7 +99,11 @@ impl<'a> Clean<'a> {
 
     #[cfg(test)]
     pub(crate) fn unchecked(buffer: &'a mut Buffer, area: Rect) -> Clean<'a> {
-        assert_eq!(buffer.area.intersection(area), area, "a region lies inside its buffer");
+        assert_eq!(
+            buffer.area.intersection(area),
+            area,
+            "a region lies inside its buffer"
+        );
         Clean { buffer, area }
     }
 
@@ -112,7 +125,13 @@ impl<'a> Clean<'a> {
             self.area.height,
         );
         let drawn = draw(self.buffer, left);
-        (drawn, Clean { buffer: self.buffer, area: right })
+        (
+            drawn,
+            Clean {
+                buffer: self.buffer,
+                area: right,
+            },
+        )
     }
 
     pub(crate) fn into_buffer(self) -> (&'a mut Buffer, Rect) {
@@ -180,7 +199,10 @@ impl Row {
         let count = glyphs.len();
         self.glyphs.clear();
         self.glyphs.reserve(count);
-        assert!(self.glyphs.capacity() >= count, "a row holds space for every glyph");
+        assert!(
+            self.glyphs.capacity() >= count,
+            "a row holds space for every glyph"
+        );
         let mut last = (frames::Style::PLAIN, PLAIN);
         for glyph in glyphs {
             let style = if glyph.style == last.0 {
@@ -190,16 +212,27 @@ impl Row {
                 last = (glyph.style, drawn);
                 drawn
             };
-            self.glyphs.push(Glyph { shows: glyph.shows, style });
+            self.glyphs.push(Glyph {
+                shows: glyph.shows,
+                style,
+            });
         }
-        assert_eq!(self.glyphs.len(), count, "every glyph of the line becomes a painted glyph");
+        assert_eq!(
+            self.glyphs.len(),
+            count,
+            "every glyph of the line becomes a painted glyph"
+        );
         self.ending = ending;
     }
 }
 
 impl From<Line> for Row {
     fn from(line: Line) -> Row {
-        let mut row = Row { glyphs: Vec::new(), ending: Ending::Here, columns: line.columns() };
+        let mut row = Row {
+            glyphs: Vec::new(),
+            ending: Ending::Here,
+            columns: line.columns(),
+        };
         row.replace(line);
         row
     }
@@ -249,7 +282,13 @@ impl Screen {
         screens: &mut BTreeMap<TerminalKey, Screen>,
         frame: Frame,
     ) -> Result<Applied, String> {
-        let Parts { terminal, size, rows, cursor, tracks_mouse } = frame.into_parts();
+        let Parts {
+            terminal,
+            size,
+            rows,
+            cursor,
+            tracks_mouse,
+        } = frame.into_parts();
         match rows {
             Rows::Whole(lines) => {
                 if let Some(previous) = screens.get(&terminal)
@@ -257,15 +296,28 @@ impl Screen {
                     && previous.cursor == cursor
                     && previous.tracks_mouse == tracks_mouse
                     && previous.lines.len() == lines.len()
-                    && previous.lines.iter().zip(&lines).all(|(row, line)| row.matches(line))
+                    && previous
+                        .lines
+                        .iter()
+                        .zip(&lines)
+                        .all(|(row, line)| row.matches(line))
                 {
                     return Ok(Applied::Unchanged);
                 }
                 let lines: Vec<Row> = lines.into_iter().map(Row::from).collect();
-                let screen = Screen { size, lines, cursor, tracks_mouse };
+                let screen = Screen {
+                    size,
+                    lines,
+                    cursor,
+                    tracks_mouse,
+                };
                 let was = screens.insert(terminal, screen).map(|old| old.size);
-                Ok(if was == Some(size) { Applied::Kept } else { Applied::Resized })
-            },
+                Ok(if was == Some(size) {
+                    Applied::Kept
+                } else {
+                    Applied::Resized
+                })
+            }
             Rows::Changed(rows) => {
                 let Some(screen) = screens.get_mut(&terminal) else {
                     return Ok(Applied::Ignored);
@@ -275,15 +327,18 @@ impl Screen {
                     let (had, sides) = (sides(screen.size), sides(size));
                     return Err(format!("a frame of {sides} changes the rows of {had}"));
                 }
-                let mut changed =
-                    screen.cursor != cursor || screen.tracks_mouse != tracks_mouse;
+                let mut changed = screen.cursor != cursor || screen.tracks_mouse != tracks_mouse;
                 for (index, line) in rows {
                     changed |= screen.lines[usize::from(index)].replace_if_changed(line);
                 }
                 screen.cursor = cursor;
                 screen.tracks_mouse = tracks_mouse;
-                Ok(if changed { Applied::Kept } else { Applied::Unchanged })
-            },
+                Ok(if changed {
+                    Applied::Kept
+                } else {
+                    Applied::Unchanged
+                })
+            }
         }
     }
 }
@@ -349,7 +404,10 @@ impl Pointer {
 
 pub(crate) const TAB_BAR_ROWS: u16 = 1;
 pub(crate) const TAB_PAD: u16 = 2;
-const _: () = assert!(TAB_PAD >= 1, "a focused view tab's dot takes a column of its pad");
+const _: () = assert!(
+    TAB_PAD >= 1,
+    "a focused view tab's dot takes a column of its pad"
+);
 const PILL_LEFT: &str = "\u{e0b6}";
 const PILL_RIGHT: &str = "\u{e0b4}";
 
@@ -380,7 +438,10 @@ pub(crate) fn screen_rect(outer: Rect) -> Rect {
 }
 
 pub(crate) fn spot_in(inner: Rect, at: Position) -> At {
-    assert!(!inner.is_empty(), "a spot is on a screen of at least one cell");
+    assert!(
+        !inner.is_empty(),
+        "a spot is on a screen of at least one cell"
+    );
     let row = at.y.saturating_sub(inner.y).min(inner.height - 1);
     let column = at.x.saturating_sub(inner.x).min(inner.width - 1);
     At { row, column }
@@ -392,7 +453,9 @@ pub(crate) fn span_under<T: Copy>(spans: &[TabSpan<T>], column: u16) -> Option<T
 }
 
 pub(crate) fn printable(text: &str) -> String {
-    text.chars().filter(|character| !character.is_control()).collect()
+    text.chars()
+        .filter(|character| !character.is_control())
+        .collect()
 }
 
 pub(crate) fn tab_spans<'a, T: Copy>(
@@ -417,12 +480,20 @@ pub(crate) fn tab_spans_capped<'a, T: Copy>(
             break;
         }
         let name = fitted(&name, columns.saturating_sub(2 * TAB_PAD));
-        spans.push(TabSpan { id, column, columns, name });
+        spans.push(TabSpan {
+            id,
+            column,
+            columns,
+            name,
+        });
         column = column.saturating_add(columns).saturating_add(1);
     }
     let end = |span: &TabSpan<T>| u32::from(span.column) + u32::from(span.columns);
     for pair in spans.windows(2) {
-        assert!(end(&pair[0]) < u32::from(pair[1].column), "tab spans keep a gap between them");
+        assert!(
+            end(&pair[0]) < u32::from(pair[1].column),
+            "tab spans keep a gap between them"
+        );
     }
     if let Some(last) = spans.last() {
         assert!(end(last) <= u32::from(width), "tab spans fit the bar");
@@ -460,17 +531,25 @@ fn fitted(text: &str, room: u16) -> String {
         taken <= usize::from(room)
     });
     let kept: String = kept.collect();
-    assert!(kept.width() <= usize::from(room), "a tab's name fits between its pads");
+    assert!(
+        kept.width() <= usize::from(room),
+        "a tab's name fits between its pads"
+    );
     kept
 }
 
 fn tab_columns(name: &str) -> u16 {
-    u16::try_from(name.width()).unwrap_or(u16::MAX).saturating_add(2 * TAB_PAD)
+    u16::try_from(name.width())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2 * TAB_PAD)
 }
 
 pub(crate) fn tab_style(current: bool, colour: Color) -> Style {
     if current {
-        Style::new().fg(moonlight::INK).bg(colour).add_modifier(Modifier::BOLD)
+        Style::new()
+            .fg(moonlight::INK)
+            .bg(colour)
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(moonlight::MUTE)
     }
@@ -480,7 +559,11 @@ fn paint_tab(buffer: &mut Buffer, tab: Rect, name: &str, current: bool, colour: 
     if tab.is_empty() {
         return;
     }
-    assert_eq!(buffer.area.intersection(tab), tab, "a tab is painted inside the buffer");
+    assert_eq!(
+        buffer.area.intersection(tab),
+        tab,
+        "a tab is painted inside the buffer"
+    );
     let style = tab_style(current, colour);
     let width = usize::from(tab.width);
     buffer.set_stringn(tab.x, tab.y, " ".repeat(width), width, style);
@@ -545,7 +628,13 @@ pub(crate) fn border(
     let title = printable(title);
     let (start, end) = (left + 1, right.min(views.right()));
     if !title.is_empty() && start < end && views.contains(Position::new(start, top)) {
-        buffer.set_stringn(start, top, format!(" {title} "), usize::from(end - start), named);
+        buffer.set_stringn(
+            start,
+            top,
+            format!(" {title} "),
+            usize::from(end - start),
+            named,
+        );
     }
 }
 
@@ -586,12 +675,21 @@ pub(crate) fn selects(tracks: bool, mouse: MouseEvent) -> bool {
 }
 
 pub(crate) fn within(at: At, size: Size) -> At {
-    At { row: at.row.min(size.rows.get() - 1), column: at.column.min(size.columns.get() - 1) }
+    At {
+        row: at.row.min(size.rows.get() - 1),
+        column: at.column.min(size.columns.get() - 1),
+    }
 }
 
 fn paint(buffer: &mut Buffer, area: Rect, at: At, glyph: &Glyph, lit: Modifier) {
-    assert!(at.row < area.height, "a glyph is painted within the screen's rows");
-    assert!(at.column < area.width, "a glyph is painted within the screen's columns");
+    assert!(
+        at.row < area.height,
+        "a glyph is painted within the screen's rows"
+    );
+    assert!(
+        at.column < area.width,
+        "a glyph is painted within the screen's columns"
+    );
     let style = glyph.style.add_modifier(lit);
     if matches!(glyph.shows, Shows::Blank) && style == PLAIN {
         return;
@@ -605,7 +703,7 @@ fn paint(buffer: &mut Buffer, area: Rect, at: At, glyph: &Glyph, lit: Modifier) 
         Shows::Narrow(grapheme) => {
             cell.set_symbol(grapheme.as_str());
             cell.set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
-        },
+        }
         Shows::Wide(grapheme) if area.width - at.column >= 2 => {
             cell.set_symbol(grapheme.as_str());
             cell.set_diff_option(CellDiffOption::ForcedWidth(TWO));
@@ -614,10 +712,10 @@ fn paint(buffer: &mut Buffer, area: Rect, at: At, glyph: &Glyph, lit: Modifier) 
                 spacer.set_style(style);
                 spacer.set_diff_option(CellDiffOption::Skip);
             }
-        },
+        }
         Shows::Blank | Shows::Wide(_) => {
             cell.set_symbol(" ");
-        },
+        }
     }
 }
 
@@ -629,7 +727,11 @@ pub(crate) fn text(screen: &Screen, selection: Selection) -> String {
             break;
         };
         let from = if row == first.row { first.column } else { 0 };
-        let to = if row == last.row { last.column } else { u16::MAX };
+        let to = if row == last.row {
+            last.column
+        } else {
+            u16::MAX
+        };
         let mut said = String::new();
         let mut column: u16 = 0;
         for glyph in line.glyphs() {
@@ -639,7 +741,7 @@ pub(crate) fn text(screen: &Screen, selection: Selection) -> String {
                     Shows::Blank => said.push(' '),
                     Shows::Narrow(grapheme) | Shows::Wide(grapheme) => {
                         said.push_str(grapheme.as_str());
-                    },
+                    }
                 }
             }
             column = end + 1;
@@ -666,11 +768,20 @@ const PAIRS: [(&str, &str); 3] = [("(", ")"), ("[", "]"), ("{", "}")];
 pub(crate) fn link(screen: &Screen, at: At) -> Option<(Selection, Excerpt)> {
     let (word, clicked) = word(screen, at)?;
     let (first, end) = url(&word, clicked).or_else(|| path(&word, clicked))?;
-    assert!(first <= clicked, "a link starts at or before the cell clicked");
+    assert!(
+        first <= clicked,
+        "a link starts at or before the cell clicked"
+    );
     assert!(clicked < end, "a link ends after the cell clicked");
-    let selection = Selection { from: word[first].at, to: word[end - 1].at };
+    let selection = Selection {
+        from: word[first].at,
+        to: word[end - 1].at,
+    };
     let text: String = word[first..end].iter().map(|letter| letter.text).collect();
-    Some((selection, Excerpt::of(text).expect("a link shows something")))
+    Some((
+        selection,
+        Excerpt::of(text).expect("a link shows something"),
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -696,8 +807,14 @@ fn word(screen: &Screen, at: At) -> Option<(Vec<Letter<'_>>, usize)> {
     let mut word: Vec<Letter> = before.into_iter().rev().collect();
     word.push(own);
     word.extend(after);
-    assert!(word.len() <= LINK_CELLS_MAX, "a word is cut at {LINK_CELLS_MAX} cells");
-    assert!(word.windows(2).all(|pair| pair[0].at < pair[1].at), "a word reads forward");
+    assert!(
+        word.len() <= LINK_CELLS_MAX,
+        "a word is cut at {LINK_CELLS_MAX} cells"
+    );
+    assert!(
+        word.windows(2).all(|pair| pair[0].at < pair[1].at),
+        "a word reads forward"
+    );
     Some((word, clicked))
 }
 
@@ -706,8 +823,15 @@ fn under(line: &Row, at: At) -> Option<Place> {
     for (index, glyph) in line.glyphs().iter().enumerate() {
         let columns = glyph.shows.columns();
         if at.column < column + columns {
-            assert!(column <= at.column, "the glyph under a spot starts at or before it");
-            return Some(Place { row: at.row, index, column });
+            assert!(
+                column <= at.column,
+                "the glyph under a spot starts at or before it"
+            );
+            return Some(Place {
+                row: at.row,
+                index,
+                column,
+            });
         }
         column += columns;
     }
@@ -723,7 +847,13 @@ fn letter(screen: &Screen, place: Place) -> Option<Letter<'_>> {
     if text.chars().all(char::is_whitespace) {
         return None;
     }
-    Some(Letter { at: At { row: place.row, column: place.column }, text })
+    Some(Letter {
+        at: At {
+            row: place.row,
+            column: place.column,
+        },
+        text,
+    })
 }
 
 fn letters(
@@ -755,13 +885,20 @@ fn left(screen: &Screen, place: Place) -> Option<Place> {
         let index = place.index - 1;
         let column = place.column.checked_sub(glyphs[index].shows.columns());
         let column = column.expect("a glyph starts after the glyphs before it");
-        return Some(Place { row: place.row, index, column });
+        return Some(Place {
+            row: place.row,
+            index,
+            column,
+        });
     }
     let row = place.row.checked_sub(1)?;
     let line = &screen.lines[usize::from(row)];
     if line.wraps() {
         let index = line.glyphs().len().checked_sub(1)?;
-        let column = line.glyphs()[..index].iter().map(|glyph| glyph.shows.columns()).sum();
+        let column = line.glyphs()[..index]
+            .iter()
+            .map(|glyph| glyph.shows.columns())
+            .sum();
         Some(Place { row, index, column })
     } else {
         None
@@ -773,13 +910,21 @@ fn right(screen: &Screen, place: Place) -> Option<Place> {
     let index = place.index + 1;
     if index < line.glyphs().len() {
         let column = place.column + line.glyphs()[place.index].shows.columns();
-        return Some(Place { row: place.row, index, column });
+        return Some(Place {
+            row: place.row,
+            index,
+            column,
+        });
     }
     if line.wraps() {
         let row = place.row.checked_add(1)?;
         let below = screen.lines.get(usize::from(row))?;
         below.glyphs().first()?;
-        Some(Place { row, index: 0, column: 0 })
+        Some(Place {
+            row,
+            index: 0,
+            column: 0,
+        })
     } else {
         None
     }
@@ -795,10 +940,15 @@ fn url(word: &[Letter], clicked: usize) -> Option<(usize, usize)> {
     let text = |at: usize| word[at].text;
     let scheme = |at: usize| {
         let text = text(at);
-        text.len() == 1 && text.chars().all(|it| it.is_ascii_alphanumeric() || "+.-".contains(it))
+        text.len() == 1
+            && text
+                .chars()
+                .all(|it| it.is_ascii_alphanumeric() || "+.-".contains(it))
     };
     let marked = |at: usize| {
-        let three = word.get(at..at + 3).map(|three| three.iter().map(|letter| letter.text));
+        let three = word
+            .get(at..at + 3)
+            .map(|three| three.iter().map(|letter| letter.text));
         three.is_some_and(|three| three.eq([":", "/", "/"]))
     };
     let mut scanned = 0;
@@ -864,7 +1014,10 @@ fn untrailed(word: &[Letter], from: usize, end: usize) -> usize {
             break;
         }
     }
-    assert!(from <= kept, "a url keeps what follows its scheme, or none of it");
+    assert!(
+        from <= kept,
+        "a url keeps what follows its scheme, or none of it"
+    );
     assert!(kept <= end, "a url only loses its tail");
     kept
 }
@@ -892,7 +1045,9 @@ fn path(word: &[Letter], clicked: usize) -> Option<(usize, usize)> {
     let held = &word[first..end];
     let holds_click = (first..end).contains(&clicked);
     let folders = held.iter().any(|letter| letter.text == "/");
-    let named = held.iter().any(|letter| letter.text.chars().any(char::is_alphanumeric));
+    let named = held
+        .iter()
+        .any(|letter| letter.text.chars().any(char::is_alphanumeric));
     (holds_click && folders && named).then_some((first, end))
 }
 
@@ -922,14 +1077,17 @@ pub(crate) fn key_said(key: &KeyEvent) -> Option<api::Key> {
                 (Some(lower), None) => lower,
                 _ => typed,
             };
-            (api::key::Key::Character(unshifted.into()), typed.to_string())
-        },
+            (
+                api::key::Key::Character(unshifted.into()),
+                typed.to_string(),
+            )
+        }
         KeyCode::Enter => named(Named::Enter)?,
         KeyCode::Tab => named(Named::Tab)?,
         KeyCode::BackTab => {
             modifiers.shift = true;
             named(Named::Tab)?
-        },
+        }
         KeyCode::Backspace => named(Named::Backspace)?,
         KeyCode::Esc => named(Named::Escape)?,
         KeyCode::Insert => named(Named::Insert)?,
@@ -952,7 +1110,12 @@ pub(crate) fn key_said(key: &KeyEvent) -> Option<api::Key> {
         KeyCode::Modifier(modifier) => named(modifier_named(modifier)?)?,
         KeyCode::Null | KeyCode::KeypadBegin | KeyCode::Media(_) => return None,
     };
-    Some(api::Key { press: press.into(), modifiers: Some(modifiers), key: Some(said), text })
+    Some(api::Key {
+        press: press.into(),
+        modifiers: Some(modifiers),
+        key: Some(said),
+        text,
+    })
 }
 
 fn function(number: u8) -> Option<api::Named> {
@@ -1003,7 +1166,9 @@ pub(crate) fn mouse_said(mouse: MouseEvent, at: At) -> Option<api::Mouse> {
     let does = match mouse.kind {
         MouseEventKind::Down(pressed) => Some(Does::Press(button(pressed))),
         MouseEventKind::Up(released) => Some(Does::Release(button(released))),
-        MouseEventKind::Drag(held) => Some(Does::Motion(api::Motion { held: Some(button(held)) })),
+        MouseEventKind::Drag(held) => Some(Does::Motion(api::Motion {
+            held: Some(button(held)),
+        })),
         MouseEventKind::Moved => Some(Does::Motion(api::Motion { held: None })),
         MouseEventKind::ScrollUp => wheel(api::Wheel::Up),
         MouseEventKind::ScrollDown => wheel(api::Wheel::Down),
@@ -1025,7 +1190,10 @@ mod tests {
     use super::*;
 
     fn glyph(shows: Shows) -> frames::Glyph {
-        frames::Glyph { shows, style: frames::Style::PLAIN }
+        frames::Glyph {
+            shows,
+            style: frames::Style::PLAIN,
+        }
     }
 
     fn grapheme(grapheme: &str) -> Grapheme {
@@ -1058,11 +1226,24 @@ mod tests {
     fn a_selection_reads_as_the_text_from_its_first_cell_to_its_last() {
         let blank = || glyph(Shows::Blank);
         let rows = vec![
-            line(vec![narrow("a"), narrow("b"), glyph(Shows::Wide(grapheme("日"))), blank()]),
+            line(vec![
+                narrow("a"),
+                narrow("b"),
+                glyph(Shows::Wide(grapheme("日"))),
+                blank(),
+            ]),
             line(vec![narrow("c"), blank(), blank(), blank(), blank()]),
         ];
-        let size = Size { columns: side(5), rows: side(2) };
-        let screen = Screen { size, lines: rows, cursor: None, tracks_mouse: false };
+        let size = Size {
+            columns: side(5),
+            rows: side(2),
+        };
+        let screen = Screen {
+            size,
+            lines: rows,
+            cursor: None,
+            tracks_mouse: false,
+        };
         let selection = |from, to| Selection { from, to };
         assert_eq!(text(&screen, selection(spot(0, 1), spot(1, 0))), "b日\nc");
         assert_eq!(text(&screen, selection(spot(1, 0), spot(0, 1))), "b日\nc");
@@ -1071,12 +1252,26 @@ mod tests {
     }
 
     fn typed_ending(rows: &[&str], ending: impl Fn(usize) -> Ending) -> Screen {
-        let cell = |it: char| if it == ' ' { glyph(Shows::Blank) } else { narrow(&it.to_string()) };
+        let cell = |it: char| {
+            if it == ' ' {
+                glyph(Shows::Blank)
+            } else {
+                narrow(&it.to_string())
+            }
+        };
         let lines = rows.iter().enumerate();
         let lines = lines.map(|(index, row)| ended(row.chars().map(cell).collect(), ending(index)));
         let columns = side(u16::try_from(rows[0].chars().count()).unwrap());
-        let size = Size { columns, rows: side(u16::try_from(rows.len()).unwrap()) };
-        Screen { size, lines: lines.collect(), cursor: None, tracks_mouse: false }
+        let size = Size {
+            columns,
+            rows: side(u16::try_from(rows.len()).unwrap()),
+        };
+        Screen {
+            size,
+            lines: lines.collect(),
+            cursor: None,
+            tracks_mouse: false,
+        }
     }
 
     fn typed(rows: &[&str]) -> Screen {
@@ -1085,7 +1280,13 @@ mod tests {
 
     fn wrapping(rows: &[&str]) -> Screen {
         let last = rows.len() - 1;
-        typed_ending(rows, |index| if index < last { Ending::Wraps } else { Ending::Here })
+        typed_ending(rows, |index| {
+            if index < last {
+                Ending::Wraps
+            } else {
+                Ending::Here
+            }
+        })
     }
 
     fn clicked(rows: &[&str], row: u16, column: u16) -> Option<(At, At, String)> {
@@ -1096,20 +1297,39 @@ mod tests {
     #[test]
     fn a_click_takes_the_whole_url_it_lands_on_and_not_the_punctuation_around_it() {
         let said = "see (https://e.io/a_(b)?q=1#x), ok.";
-        let url = Some((spot(0, 5), spot(0, 28), "https://e.io/a_(b)?q=1#x".to_owned()));
+        let url = Some((
+            spot(0, 5),
+            spot(0, 28),
+            "https://e.io/a_(b)?q=1#x".to_owned(),
+        ));
         assert_eq!(clicked(&[said], 0, 5), url);
         assert_eq!(clicked(&[said], 0, 16), url);
         assert_eq!(clicked(&[said], 0, 28), url);
-        assert_eq!(clicked(&[said], 0, 29), None, "the bracket closes what the url is in");
+        assert_eq!(
+            clicked(&[said], 0, 29),
+            None,
+            "the bracket closes what the url is in"
+        );
         assert_eq!(clicked(&[said], 0, 4), None);
         assert_eq!(clicked(&[said], 0, 1), None, "a word is not a link");
         assert_eq!(clicked(&[said], 0, 3), None, "nor is a blank");
         let quoted = r#"at "git+ssh://h/r.git"."#;
         assert_eq!(clicked(&[quoted], 0, 9).unwrap().2, "git+ssh://h/r.git");
-        assert_eq!(clicked(&["[doc](http://x.y/z)"], 0, 8).unwrap().2, "http://x.y/z");
+        assert_eq!(
+            clicked(&["[doc](http://x.y/z)"], 0, 8).unwrap().2,
+            "http://x.y/z"
+        );
         let nested = "https://a.io/?u=http://b";
-        assert_eq!(clicked(&[nested], 0, 20).unwrap().2, nested, "a url in a url is the outer one");
-        assert_eq!(clicked(&["://x"], 0, 2).unwrap().2, "//x", "with no scheme it is a path");
+        assert_eq!(
+            clicked(&[nested], 0, 20).unwrap().2,
+            nested,
+            "a url in a url is the outer one"
+        );
+        assert_eq!(
+            clicked(&["://x"], 0, 2).unwrap().2,
+            "//x",
+            "with no scheme it is a path"
+        );
     }
 
     #[test]
@@ -1120,10 +1340,22 @@ mod tests {
         assert_eq!(clicked(&[said], 0, 2), None, "the call is no path");
         assert_eq!(clicked(&[said], 0, 21).unwrap().2, "~/b/c.txt");
         assert_eq!(clicked(&[said], 0, 33).unwrap().2, "src/m.rs:12:5");
-        assert_eq!(clicked(&[said], 0, 46).unwrap().2, "and/or", "what has a slash may be a path");
-        assert_eq!(clicked(&["a / b"], 0, 2), None, "a slash alone names nothing");
+        assert_eq!(
+            clicked(&[said], 0, 46).unwrap().2,
+            "and/or",
+            "what has a slash may be a path"
+        );
+        assert_eq!(
+            clicked(&["a / b"], 0, 2),
+            None,
+            "a slash alone names nothing"
+        );
         assert_eq!(clicked(&["../up"], 0, 0).unwrap().2, "../up");
-        assert_eq!(clicked(&["README.md"], 0, 0), None, "a name with no folder is a word");
+        assert_eq!(
+            clicked(&["README.md"], 0, 0),
+            None,
+            "a name with no folder is a word"
+        );
     }
 
     #[test]
@@ -1136,29 +1368,72 @@ mod tests {
         };
         assert_eq!(wrapped(0, 4), url);
         assert_eq!(wrapped(1, 1), url);
-        assert_eq!(wrapped(1, 8), None, "a row that ends in a blank ends its word");
+        assert_eq!(
+            wrapped(1, 8),
+            None,
+            "a row that ends in a blank ends its word"
+        );
         let cut = clicked(&rows[..2], 0, 4).unwrap().2;
-        assert_eq!(cut, "https://e", "a row the program ended at the edge ends its word");
+        assert_eq!(
+            cut, "https://e",
+            "a row the program ended at the edge ends its word"
+        );
         let wide = || glyph(Shows::Wide(grapheme("日")));
         let blank = || glyph(Shows::Blank);
         let screen = |columns: u16, lines: Vec<Row>| {
-            let size = Size { columns: side(columns), rows: side(2) };
-            Screen { size, lines, cursor: None, tracks_mouse: false }
+            let size = Size {
+                columns: side(columns),
+                rows: side(2),
+            };
+            Screen {
+                size,
+                lines,
+                cursor: None,
+                tracks_mouse: false,
+            }
         };
         let ends_wide = screen(
             5,
             vec![
-                ended(vec![narrow("a"), narrow("b"), narrow("/"), wide()], Ending::Wraps),
-                line(vec![narrow("x"), narrow("/"), narrow("y"), blank(), blank()]),
+                ended(
+                    vec![narrow("a"), narrow("b"), narrow("/"), wide()],
+                    Ending::Wraps,
+                ),
+                line(vec![
+                    narrow("x"),
+                    narrow("/"),
+                    narrow("y"),
+                    blank(),
+                    blank(),
+                ]),
             ],
         );
-        assert_eq!(&*link(&ends_wide, spot(0, 4)).unwrap().1, "ab/日x/y", "either half of it");
-        assert_eq!(&*link(&ends_wide, spot(1, 0)).unwrap().1, "ab/日x/y", "from either row");
-        let early = ended(vec![narrow("a"), narrow("b"), narrow("/")], Ending::WrapsWide);
+        assert_eq!(
+            &*link(&ends_wide, spot(0, 4)).unwrap().1,
+            "ab/日x/y",
+            "either half of it"
+        );
+        assert_eq!(
+            &*link(&ends_wide, spot(1, 0)).unwrap().1,
+            "ab/日x/y",
+            "from either row"
+        );
+        let early = ended(
+            vec![narrow("a"), narrow("b"), narrow("/")],
+            Ending::WrapsWide,
+        );
         let wrapped = screen(4, vec![early, line(vec![wide(), narrow("y"), blank()])]);
         let (span, text) = link(&wrapped, spot(0, 0)).unwrap();
-        assert_eq!((span.to, &*text), (spot(1, 2), "ab/日y"), "a wide glyph wrapped early");
-        assert_eq!(link(&wrapped, spot(0, 3)), None, "the padding it left shows nothing");
+        assert_eq!(
+            (span.to, &*text),
+            (spot(1, 2), "ab/日y"),
+            "a wide glyph wrapped early"
+        );
+        assert_eq!(
+            link(&wrapped, spot(0, 3)),
+            None,
+            "the padding it left shows nothing"
+        );
     }
 
     #[test]
@@ -1173,20 +1448,36 @@ mod tests {
         assert_eq!(link(&wrapping(&longer), spot(10, 3)), None);
         let marks = "://".repeat(21) + "/";
         let marks = wrapping(&vec![marks.as_str(); 64]);
-        assert_eq!(link(&marks, spot(63, 63)), None, "marks with no scheme and no name");
+        assert_eq!(
+            link(&marks, spot(63, 63)),
+            None,
+            "marks with no scheme and no name"
+        );
         let closers = format!("a://{}", ")".repeat(60));
         let mut rows = vec![closers.as_str()];
         let tail = ")".repeat(64);
         rows.extend(vec![tail.as_str(); 62]);
-        assert_eq!(link(&wrapping(&rows), spot(30, 5)), None, "a scheme and only closers after it");
+        assert_eq!(
+            link(&wrapping(&rows), spot(30, 5)),
+            None,
+            "a scheme and only closers after it"
+        );
     }
 
     #[test]
     fn a_glyph_is_drawn_as_wide_as_the_server_says() {
         let wide = glyph(Shows::Wide(grapheme("👍🏽")));
         let rows = vec![line(vec![narrow("a"), wide, narrow("b")])];
-        let size = Size { columns: side(4), rows: side(1) };
-        let screen = Screen { size, lines: rows, cursor: None, tracks_mouse: false };
+        let size = Size {
+            columns: side(4),
+            rows: side(1),
+        };
+        let screen = Screen {
+            size,
+            lines: rows,
+            cursor: None,
+            tracks_mouse: false,
+        };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
         draw_screen(&mut buffer, Rect::new(1, 0, 5, 1), &screen, None, None);
         assert_eq!(buffer[(2, 0)].symbol(), "👍🏽");
@@ -1224,24 +1515,49 @@ mod tests {
         };
         let glyphs = vec![
             glyph(Shows::Blank),
-            frames::Glyph { shows: Shows::Blank, style: tinted },
+            frames::Glyph {
+                shows: Shows::Blank,
+                style: tinted,
+            },
             glyph(Shows::Blank),
-            frames::Glyph { shows: Shows::Narrow(grapheme("a")), style: rich },
-            frames::Glyph { shows: Shows::Narrow(grapheme("b")), style: rich },
-            frames::Glyph { shows: Shows::Narrow(grapheme("c")), style: red },
+            frames::Glyph {
+                shows: Shows::Narrow(grapheme("a")),
+                style: rich,
+            },
+            frames::Glyph {
+                shows: Shows::Narrow(grapheme("b")),
+                style: rich,
+            },
+            frames::Glyph {
+                shows: Shows::Narrow(grapheme("c")),
+                style: red,
+            },
         ];
         let screen = Screen {
-            size: Size { columns: side(6), rows: side(1) },
+            size: Size {
+                columns: side(6),
+                rows: side(1),
+            },
             lines: vec![line(glyphs)],
             cursor: None,
             tracks_mouse: false,
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
         buffer[(0, 0)].set_symbol("!");
-        let selected = Some(Selection { from: spot(0, 2), to: spot(0, 2) });
+        let selected = Some(Selection {
+            from: spot(0, 2),
+            to: spot(0, 2),
+        });
         draw_screen(&mut buffer, Rect::new(0, 0, 6, 1), &screen, selected, None);
-        assert_eq!(buffer[(0, 0)].symbol(), "!", "a plain blank leaves a cleared cell untouched");
-        assert_eq!((buffer[(1, 0)].symbol(), buffer[(1, 0)].bg), (" ", Color::Indexed(4)));
+        assert_eq!(
+            buffer[(0, 0)].symbol(),
+            "!",
+            "a plain blank leaves a cleared cell untouched"
+        );
+        assert_eq!(
+            (buffer[(1, 0)].symbol(), buffer[(1, 0)].bg),
+            (" ", Color::Indexed(4))
+        );
         assert_eq!(buffer[(2, 0)].symbol(), " ");
         assert!(buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
         let all = Modifier::BOLD
@@ -1254,7 +1570,10 @@ mod tests {
             | Modifier::CROSSED_OUT;
         for column in [3, 4] {
             let cell = &buffer[(column, 0)];
-            assert_eq!((cell.fg, cell.bg), (Color::Indexed(12), Color::Rgb(1, 2, 3)));
+            assert_eq!(
+                (cell.fg, cell.bg),
+                (Color::Indexed(12), Color::Rgb(1, 2, 3))
+            );
             assert_eq!(cell.underline_color, Color::Indexed(9));
             assert_eq!(cell.modifier, all);
         }
@@ -1277,7 +1596,10 @@ mod tests {
         let four_narrow = |style| {
             ["a", "b", "c", "d"]
                 .into_iter()
-                .map(|letter| frames::Glyph { shows: Shows::Narrow(grapheme(letter)), style })
+                .map(|letter| frames::Glyph {
+                    shows: Shows::Narrow(grapheme(letter)),
+                    style,
+                })
                 .collect()
         };
         let mut row = ended(four_narrow(bold), Ending::Wraps);
@@ -1285,15 +1607,31 @@ mod tests {
         assert_eq!(row.glyphs().len(), 4);
 
         let two_wide = vec![
-            frames::Glyph { shows: Shows::Wide(grapheme("日")), style: italic },
-            frames::Glyph { shows: Shows::Wide(grapheme("本")), style: italic },
+            frames::Glyph {
+                shows: Shows::Wide(grapheme("日")),
+                style: italic,
+            },
+            frames::Glyph {
+                shows: Shows::Wide(grapheme("本")),
+                style: italic,
+            },
         ];
         row.replace(Line::new(two_wide, Ending::Here, side(4)).unwrap());
-        assert!(!row.wraps(), "replacing a wrapping row with Ending::Here clears wraps");
-        assert_eq!(row.glyphs().len(), 2, "replacing with fewer glyphs drops stale trailing ones");
+        assert!(
+            !row.wraps(),
+            "replacing a wrapping row with Ending::Here clears wraps"
+        );
+        assert_eq!(
+            row.glyphs().len(),
+            2,
+            "replacing with fewer glyphs drops stale trailing ones"
+        );
 
         let screen = Screen {
-            size: Size { columns: side(4), rows: side(1) },
+            size: Size {
+                columns: side(4),
+                rows: side(1),
+            },
             lines: vec![row],
             cursor: None,
             tracks_mouse: false,
@@ -1310,7 +1648,10 @@ mod tests {
         let mut row = screen.lines.into_iter().next().unwrap();
         let blanks = vec![glyph(Shows::Blank); 4];
         row.replace(Line::new(blanks, Ending::Wraps, side(4)).unwrap());
-        assert!(row.wraps(), "replacing a non-wrapping row with Ending::Wraps sets wraps");
+        assert!(
+            row.wraps(),
+            "replacing a non-wrapping row with Ending::Wraps sets wraps"
+        );
         assert_eq!(row.ending, Ending::Wraps);
         assert_eq!(row.columns, side(4));
         assert_eq!(row.glyphs().len(), 4);
@@ -1323,13 +1664,28 @@ mod tests {
 
         use luned::mux::own::OwnMade;
 
-        let key = TerminalKey { id: NonZeroU32::MIN, made: OwnMade::from_nanos(0) };
+        let key = TerminalKey {
+            id: NonZeroU32::MIN,
+            made: OwnMade::from_nanos(0),
+        };
         let mut screens = BTreeMap::new();
         let one = |letter: &str| Line::new(vec![narrow(letter)], Ending::Here, side(1)).unwrap();
-        let size = |columns, rows| Size { columns: side(columns), rows: side(rows) };
+        let size = |columns, rows| Size {
+            columns: side(columns),
+            rows: side(rows),
+        };
 
-        let early = Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("a"))]), None, false);
-        assert_eq!(Screen::apply(&mut screens, early.unwrap()), Ok(Applied::Ignored));
+        let early = Frame::new(
+            key,
+            size(1, 1),
+            Rows::Changed(vec![(0, one("a"))]),
+            None,
+            false,
+        );
+        assert_eq!(
+            Screen::apply(&mut screens, early.unwrap()),
+            Ok(Applied::Ignored)
+        );
         assert!(screens.is_empty());
 
         let whole = Frame::new(key, size(1, 1), Rows::Whole(vec![one("a")]), None, false).unwrap();
@@ -1341,20 +1697,47 @@ mod tests {
 
         let same_whole =
             Frame::new(key, size(1, 1), Rows::Whole(vec![one("b")]), None, false).unwrap();
-        assert_eq!(Screen::apply(&mut screens, same_whole), Ok(Applied::Unchanged));
+        assert_eq!(
+            Screen::apply(&mut screens, same_whole),
+            Ok(Applied::Unchanged)
+        );
 
-        let same_delta =
-            Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("b"))]), None, false).unwrap();
-        assert_eq!(Screen::apply(&mut screens, same_delta), Ok(Applied::Unchanged));
+        let same_delta = Frame::new(
+            key,
+            size(1, 1),
+            Rows::Changed(vec![(0, one("b"))]),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            Screen::apply(&mut screens, same_delta),
+            Ok(Applied::Unchanged)
+        );
 
-        let delta =
-            Frame::new(key, size(1, 1), Rows::Changed(vec![(0, one("c"))]), None, true).unwrap();
+        let delta = Frame::new(
+            key,
+            size(1, 1),
+            Rows::Changed(vec![(0, one("c"))]),
+            None,
+            true,
+        )
+        .unwrap();
         assert_eq!(Screen::apply(&mut screens, delta), Ok(Applied::Kept));
         assert!(screens[&key].tracks_mouse());
-        assert_eq!(screens[&key].lines()[0].glyphs()[0].shows, Shows::Narrow(grapheme("c")));
+        assert_eq!(
+            screens[&key].lines()[0].glyphs()[0].shows,
+            Shows::Narrow(grapheme("c"))
+        );
 
-        let wrong_size =
-            Frame::new(key, size(1, 2), Rows::Changed(vec![(0, one("d"))]), None, false).unwrap();
+        let wrong_size = Frame::new(
+            key,
+            size(1, 2),
+            Rows::Changed(vec![(0, one("d"))]),
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             Screen::apply(&mut screens, wrong_size).unwrap_err(),
             "a frame of 1x2 changes the rows of 1x1"
@@ -1377,8 +1760,8 @@ mod tests {
         assert_eq!(right_area, Rect::new(6, 1, 6, 4));
 
         let mut narrow = Buffer::empty(Rect::new(0, 0, 3, 2));
-        let (left, right) = Clean::of_empty(&mut narrow, Rect::new(0, 0, 3, 2))
-            .paint_left(10, |_, left| left);
+        let (left, right) =
+            Clean::of_empty(&mut narrow, Rect::new(0, 0, 3, 2)).paint_left(10, |_, left| left);
         assert_eq!(left, Rect::new(0, 0, 3, 2));
         assert!(right.area().is_empty());
     }
@@ -1389,13 +1772,25 @@ mod tests {
         let named = |named: api::Named| Some(api::key::Key::Named(named.into()));
         let shifted = said(KeyCode::Char('A'), KeyModifiers::SHIFT).unwrap();
         assert_eq!(shifted.key, Some(api::key::Key::Character('a'.into())));
-        assert_eq!((shifted.text.as_str(), shifted.modifiers.unwrap().shift), ("A", true));
+        assert_eq!(
+            (shifted.text.as_str(), shifted.modifiers.unwrap().shift),
+            ("A", true)
+        );
         let control = said(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
-        assert_eq!((control.text.as_str(), control.modifiers.unwrap().ctrl), ("c", true));
+        assert_eq!(
+            (control.text.as_str(), control.modifiers.unwrap().ctrl),
+            ("c", true)
+        );
         let back = said(KeyCode::BackTab, KeyModifiers::NONE).unwrap();
         assert_eq!(back.key, named(api::Named::Tab));
-        assert_eq!((back.text.as_str(), back.modifiers.unwrap().shift), ("", true));
-        assert_eq!(said(KeyCode::F(12), KeyModifiers::NONE).unwrap().key, named(api::Named::F12));
+        assert_eq!(
+            (back.text.as_str(), back.modifiers.unwrap().shift),
+            ("", true)
+        );
+        assert_eq!(
+            said(KeyCode::F(12), KeyModifiers::NONE).unwrap().key,
+            named(api::Named::F12)
+        );
         assert_eq!(said(KeyCode::F(13), KeyModifiers::NONE), None);
         assert_eq!(said(KeyCode::Char('\u{7}'), KeyModifiers::NONE), None);
     }

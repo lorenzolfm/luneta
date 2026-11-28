@@ -20,7 +20,9 @@ impl Turn {
 
     pub fn new(key: u64, before: Option<u64>) -> Result<Turn, String> {
         if before == Some(key) {
-            return Err(format!("turn: {key:016x} is the key of the turn before it too"));
+            return Err(format!(
+                "turn: {key:016x} is the key of the turn before it too"
+            ));
         }
         Ok(Turn { key, before })
     }
@@ -54,7 +56,7 @@ impl Turn {
             (Some(key), before) => {
                 let before = before.map(|before| read(BEFORE_VAR, before)).transpose()?;
                 Turn::new(read(TURN_VAR, key)?, before).map(Some)
-            },
+            }
         }
     }
 }
@@ -75,7 +77,13 @@ mod tests {
 
     #[test]
     fn the_agent_s_commands_read_no_turn_the_box_could_not_name() {
-        assert_eq!(Turn::read(Some("ff"), Some("0a")), Ok(Some(Turn { key: 255, before: Some(10) })));
+        assert_eq!(
+            Turn::read(Some("ff"), Some("0a")),
+            Ok(Some(Turn {
+                key: 255,
+                before: Some(10)
+            }))
+        );
         for (key, before) in [
             (Some(""), None),
             (Some("forged"), None),

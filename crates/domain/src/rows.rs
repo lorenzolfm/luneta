@@ -6,7 +6,7 @@ use lune_protocol::v1::{self as api, terminal};
 
 use crate::mux::TerminalKey;
 use crate::projects::{Arranged, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId};
-use crate::projects::{WorktreeId, CLONE_WORKTREES_MAX, VIEWS_MAX, WORKTREES_MAX};
+use crate::projects::{CLONE_WORKTREES_MAX, VIEWS_MAX, WORKTREES_MAX, WorktreeId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worktree {
@@ -32,7 +32,7 @@ impl Titled {
             Some(topic) => {
                 let topic = Said::new(topic.clone()).ok_or("titled: an empty topic")?;
                 Some(topic)
-            },
+            }
         };
         Ok(Titled { topic })
     }
@@ -82,7 +82,10 @@ impl Told {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Holds {
     Folder(Worktree),
-    Clone { worktrees: Vec<Worktree>, unopened: Unopened },
+    Clone {
+        worktrees: Vec<Worktree>,
+        unopened: Unopened,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,7 +108,7 @@ impl Terminal {
         match &self.found {
             Found::Running { key, .. } | Found::Ended { key, .. } | Found::Unlisted(key) => {
                 Some(*key)
-            },
+            }
             Found::Lost | Found::Looking => None,
         }
     }
@@ -139,22 +142,32 @@ impl Project {
     #[must_use]
     pub fn view_of(&self, terminal: TerminalKey) -> Option<(WorktreeId, ViewId)> {
         self.worktrees().iter().find_map(|worktree| {
-            let held = worktree.terminals.iter().find(|it| it.key() == Some(terminal))?;
+            let held = worktree
+                .terminals
+                .iter()
+                .find(|it| it.key() == Some(terminal))?;
             Some((worktree.id, held.id))
         })
     }
 }
 
 pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
-    let projects = kept.iter().map(project).collect::<Result<Vec<Project>, String>>()?;
+    let projects = kept
+        .iter()
+        .map(project)
+        .collect::<Result<Vec<Project>, String>>()?;
     let worktrees: Vec<&Worktree> = projects.iter().flat_map(Project::worktrees).collect();
     let count = worktrees.len();
     if count > WORKTREES_MAX {
-        return Err(format!("they hold {count} worktrees, over the {WORKTREES_MAX} kept"));
+        return Err(format!(
+            "they hold {count} worktrees, over the {WORKTREES_MAX} kept"
+        ));
     }
     let views: usize = worktrees.iter().map(|it| it.terminals.len()).sum();
     if views > VIEWS_MAX {
-        return Err(format!("they hold {views} views, over the {VIEWS_MAX} kept"));
+        return Err(format!(
+            "they hold {views} views, over the {VIEWS_MAX} kept"
+        ));
     }
     let mut worktree_ids = BTreeSet::new();
     for worktree in &worktrees {
@@ -170,7 +183,11 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
             return Err(format!("two views hold terminal {}", key.id));
         }
     }
-    assert_eq!(worktree_ids.len(), count, "every worktree has a distinct id");
+    assert_eq!(
+        worktree_ids.len(),
+        count,
+        "every worktree has a distinct id"
+    );
     assert!(keyed.len() <= views, "each view holds at most one terminal");
     Ok(projects)
 }
@@ -178,7 +195,9 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
 fn command_of(command: Option<&String>) -> Result<Option<Said>, String> {
     match command {
         None => Ok(None),
-        Some(command) => Said::new(command.clone()).map(Some).ok_or_else(|| "an empty command".to_owned()),
+        Some(command) => Said::new(command.clone())
+            .map(Some)
+            .ok_or_else(|| "an empty command".to_owned()),
     }
 }
 
@@ -191,14 +210,19 @@ fn found_of(terminal: &api::Terminal) -> Result<Found, String> {
                 let command = command_of(running.command.as_ref())?;
                 let titled = running.titled.as_ref().map(Titled::of_api).transpose()?;
                 let told = Told::of(running.shell.as_ref());
-                Ok(Found::Running { key, command, titled, told })
-            },
+                Ok(Found::Running {
+                    key,
+                    command,
+                    titled,
+                    told,
+                })
+            }
             terminal::State::Ended(ended) => {
                 let key = ended.key.as_ref().ok_or("ended terminal has no key")?;
                 let key = TerminalKey::of(key)?;
                 let titled = ended.titled.as_ref().map(Titled::of_api).transpose()?;
                 Ok(Found::Ended { key, titled })
-            },
+            }
             terminal::State::Unlisted(key) => Ok(Found::Unlisted(TerminalKey::of(key)?)),
             terminal::State::StateLost(()) => Ok(Found::Lost),
             terminal::State::StateLooking(()) => Ok(Found::Looking),
@@ -227,17 +251,22 @@ fn found_of(terminal: &api::Terminal) -> Result<Found, String> {
             } else {
                 let command = command_of(terminal.command.as_ref())?;
                 let told = Told::of(terminal.shell.as_ref());
-                Ok(Found::Running { key, command, titled, told })
+                Ok(Found::Running {
+                    key,
+                    command,
+                    titled,
+                    told,
+                })
             }
-        },
+        }
         Some(terminal::Found::Lost(())) => {
             reject_unfound_fields("lost")?;
             Ok(Found::Lost)
-        },
+        }
         Some(terminal::Found::Looking(())) => {
             reject_unfound_fields("looking")?;
             Ok(Found::Looking)
-        },
+        }
         None => Err("says not whether it is found".to_owned()),
     }
 }
@@ -259,8 +288,16 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
         let cwd = cwd.map_err(|why| format!("terminal {id}'s folder: {why}"))?;
         terminals.push(Terminal { id, cwd, found });
     }
-    assert_eq!(terminals.len(), worktree.terminals.len(), "every terminal said is read");
-    assert_eq!(view_ids.len(), terminals.len(), "every view in a worktree has a distinct id");
+    assert_eq!(
+        terminals.len(),
+        worktree.terminals.len(),
+        "every terminal said is read"
+    );
+    assert_eq!(
+        view_ids.len(),
+        terminals.len(),
+        "every view in a worktree has a distinct id"
+    );
     let folder = Dir::parse(&worktree.folder);
     let folder = folder.map_err(|why| format!("worktree {named}'s folder: {why}"))?;
     let used = worktree.used_at.map(Used::of_api).transpose();
@@ -270,14 +307,19 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
     let arranged = worktree.arranged.map(Arranged::said).transpose();
     let arranged = arranged.map_err(|why| format!("worktree {named}'s arrangement: {why}"))?;
     let name = named.clone();
-    Ok(Worktree { id, name, folder, tab, terminals, used, seen, arranged })
+    Ok(Worktree {
+        id,
+        name,
+        folder,
+        tab,
+        terminals,
+        used,
+        seen,
+        arranged,
+    })
 }
 
-fn unopened(
-    clone: &api::project::Clone,
-    dir: &Dir,
-    open: &[Worktree],
-) -> Result<Unopened, String> {
+fn unopened(clone: &api::project::Clone, dir: &Dir, open: &[Worktree]) -> Result<Unopened, String> {
     use api::project::clone::Listing;
     let listed = match &clone.listing {
         Some(Listing::Unopened(listed)) => &listed.subfolders,
@@ -286,7 +328,9 @@ fn unopened(
     };
     let (count, max) = (listed.len(), CLONE_WORKTREES_MAX);
     if count > max {
-        return Err(format!("it lists {count} worktrees not open, over the {max} a clone holds"));
+        return Err(format!(
+            "it lists {count} worktrees not open, over the {max} a clone holds"
+        ));
     }
     let open: BTreeSet<&Dir> = open.iter().map(|it| &it.folder).collect();
     let mut unopened = Vec::new();
@@ -294,11 +338,17 @@ fn unopened(
         let subfolder = Subfolder::parse(said).map_err(|why| format!("{said}: {why}"))?;
         let folder = dir.at(&subfolder);
         if open.contains(&folder) {
-            return Err(format!("{said} is said not open, and a worktree is open there"));
+            return Err(format!(
+                "{said} is said not open, and a worktree is open there"
+            ));
         }
         unopened.push(folder);
     }
-    assert_eq!(unopened.len(), count, "each subfolder said is a folder not open");
+    assert_eq!(
+        unopened.len(),
+        count,
+        "each subfolder said is a folder not open"
+    );
     Ok(Unopened::Listed(unopened))
 }
 
@@ -309,16 +359,28 @@ fn project(project: &api::Project) -> Result<Project, String> {
     let holds = match project.holds.as_ref() {
         Some(api::project::Holds::Folder(own)) => Holds::Folder(worktree(own, 0, named)?),
         Some(api::project::Holds::Clone(clone)) => {
-            let rows = clone.worktrees.iter().zip(0..).map(|(it, tab)| worktree(it, tab, named));
+            let rows = clone
+                .worktrees
+                .iter()
+                .zip(0..)
+                .map(|(it, tab)| worktree(it, tab, named));
             let worktrees = rows.collect::<Result<Vec<_>, String>>()?;
             let unopened = unopened(clone, &dir, &worktrees);
             let unopened = unopened.map_err(|why| format!("project {named}'s clone: {why}"))?;
-            Holds::Clone { worktrees, unopened }
-        },
+            Holds::Clone {
+                worktrees,
+                unopened,
+            }
+        }
         None => return Err(format!("project {named} says not what it holds")),
     };
     let name = ProjectName::parse(&project.name)?;
-    Ok(Project { id, name, dir, holds })
+    Ok(Project {
+        id,
+        name,
+        dir,
+        holds,
+    })
 }
 
 #[cfg(test)]
@@ -326,7 +388,10 @@ mod tests {
     use super::*;
 
     fn key(id: u32) -> api::TerminalKey {
-        api::TerminalKey { id, made_at: Some(prost_types::Timestamp::default()) }
+        api::TerminalKey {
+            id,
+            made_at: Some(prost_types::Timestamp::default()),
+        }
     }
 
     fn keyed(id: u32) -> TerminalKey {
@@ -335,7 +400,9 @@ mod tests {
 
     fn terminal(id: u64, found: terminal::Found, topic: Option<&str>) -> api::Terminal {
         let keyed = matches!(found, terminal::Found::Key(_));
-        let titled = topic.map(|topic| api::Titled { topic: Some(topic.to_owned()) });
+        let titled = topic.map(|topic| api::Titled {
+            topic: Some(topic.to_owned()),
+        });
         api::Terminal {
             id,
             found: Some(found),
@@ -402,16 +469,25 @@ mod tests {
         let terminal = ViewId::of(21).unwrap();
         assert_eq!(project.view_of(keyed(4)), Some((worktree(11), terminal)));
         assert_eq!(project.terminal_key(terminal), Some(keyed(4)));
-        assert_eq!(project.terminal_key(ViewId::of(22).unwrap()), None, "a lost one is no view");
+        assert_eq!(
+            project.terminal_key(ViewId::of(22).unwrap()),
+            None,
+            "a lost one is no view"
+        );
         assert_eq!(project.first_keyed(), Some(keyed(4)));
     }
 
     #[test]
     fn a_terminal_made_again_under_an_id_in_use_leads_to_its_own_view() {
         let mut kept = kept();
-        let made_at = Some(prost_types::Timestamp { seconds: 1, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 1,
+            nanos: 0,
+        });
         let remade = api::TerminalKey { id: 5, made_at };
-        rows(&mut kept)[1].terminals.push(terminal(25, terminal::Found::Key(remade), None));
+        rows(&mut kept)[1]
+            .terminals
+            .push(terminal(25, terminal::Found::Key(remade), None));
         let project = read(&kept).unwrap();
         let view = |id| Some((worktree(12), ViewId::of(id).unwrap()));
         assert_eq!(project.view_of(keyed(5)), view(23));
@@ -421,7 +497,9 @@ mod tests {
     #[test]
     fn projects_that_list_one_terminal_in_two_views_are_refused() {
         let mut kept = kept();
-        rows(&mut kept)[1].terminals.push(terminal(24, terminal::Found::Key(key(4)), None));
+        rows(&mut kept)[1]
+            .terminals
+            .push(terminal(24, terminal::Found::Key(key(4)), None));
         assert_eq!(read(&kept), Err("two views hold terminal 4".to_owned()));
     }
 
@@ -435,7 +513,9 @@ mod tests {
         );
 
         let mut duplicate_view = kept();
-        rows(&mut duplicate_view)[0].terminals.push(terminal(21, terminal::Found::Lost(()), None));
+        rows(&mut duplicate_view)[0]
+            .terminals
+            .push(terminal(21, terminal::Found::Lost(()), None));
         assert_eq!(
             read(&duplicate_view),
             Err("worktree main has two views with id 0000000000000015".to_owned())
@@ -456,7 +536,10 @@ mod tests {
             assert!(refused.contains("has id 0"), "{refused}");
         }
         let mut kept = kept();
-        let unmade = api::TerminalKey { id: 4, made_at: None };
+        let unmade = api::TerminalKey {
+            id: 4,
+            made_at: None,
+        };
         rows(&mut kept)[0].terminals[0].found = Some(terminal::Found::Key(unmade));
         let refused = read(&kept).unwrap_err();
         assert!(refused.starts_with("terminal "), "{refused}");
@@ -470,9 +553,15 @@ mod tests {
             *rows(&mut kept) = (1..=count).map(each).collect();
             read(&kept)
         };
-        assert_eq!(listing(WORKTREES_MAX).unwrap().worktrees().len(), WORKTREES_MAX);
+        assert_eq!(
+            listing(WORKTREES_MAX).unwrap().worktrees().len(),
+            WORKTREES_MAX
+        );
         let refused = listing(WORKTREES_MAX + 1).unwrap_err();
-        assert!(refused.contains(&format!("over the {WORKTREES_MAX} kept")), "{refused}");
+        assert!(
+            refused.contains(&format!("over the {WORKTREES_MAX} kept")),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -484,8 +573,14 @@ mod tests {
             read(&kept)
         };
         let most = u64::try_from(VIEWS_MAX).unwrap() - 1;
-        assert!(listing(most).is_ok(), "{VIEWS_MAX} views, with the second worktree's one");
-        let over = format!("they hold {} views, over the {VIEWS_MAX} kept", VIEWS_MAX + 1);
+        assert!(
+            listing(most).is_ok(),
+            "{VIEWS_MAX} views, with the second worktree's one"
+        );
+        let over = format!(
+            "they hold {} views, over the {VIEWS_MAX} kept",
+            VIEWS_MAX + 1
+        );
         assert_eq!(listing(most + 1), Err(over));
     }
 
@@ -499,7 +594,9 @@ mod tests {
                 state: Some(terminal::State::Running(terminal::Running {
                     key: Some(key(8)),
                     command: Some("claude".to_owned()),
-                    titled: Some(api::Titled { topic: Some("Fixing".to_owned()) }),
+                    titled: Some(api::Titled {
+                        topic: Some("Fixing".to_owned()),
+                    }),
                     shell: Some(Doing::Ready.to_api()),
                 })),
                 ..api::Terminal::default()
@@ -509,7 +606,9 @@ mod tests {
                 folder: "/w/a".to_owned(),
                 state: Some(terminal::State::Ended(terminal::Ended {
                     key: Some(key(9)),
-                    titled: Some(api::Titled { topic: Some("Done".to_owned()) }),
+                    titled: Some(api::Titled {
+                        topic: Some("Done".to_owned()),
+                    }),
                 })),
                 ..api::Terminal::default()
             },
@@ -553,7 +652,11 @@ mod tests {
         assert_eq!(terminals[4].found, Found::Looking);
 
         let refused = [
-            api::Terminal { id: 40, folder: "/w/a".to_owned(), ..api::Terminal::default() },
+            api::Terminal {
+                id: 40,
+                folder: "/w/a".to_owned(),
+                ..api::Terminal::default()
+            },
             api::Terminal {
                 id: 40,
                 found: Some(terminal::Found::Lost(())),
@@ -580,7 +683,9 @@ mod tests {
                 id: 40,
                 found: Some(terminal::Found::Key(key(11))),
                 folder: "/w/a".to_owned(),
-                titled: Some(api::Titled { topic: Some(String::new()) }),
+                titled: Some(api::Titled {
+                    topic: Some(String::new()),
+                }),
                 ..api::Terminal::default()
             },
         ];
@@ -596,7 +701,10 @@ mod tests {
         let mut unrooted = kept();
         unrooted.dir = "w".to_owned();
         let refused = read(&unrooted).unwrap_err();
-        assert_eq!(refused, "project bitwarden backup's folder: \"w\" is no absolute path");
+        assert_eq!(
+            refused,
+            "project bitwarden backup's folder: \"w\" is no absolute path"
+        );
         assert_eq!(read(&kept()).unwrap().dir.as_str(), "/w");
     }
 
@@ -614,7 +722,10 @@ mod tests {
         let ids: Vec<WorktreeId> = clone.worktrees().iter().map(|it| it.id).collect();
         assert_eq!(ids, [worktree(11), worktree(12)]);
         folder.holds = None;
-        assert_eq!(read(&folder), Err("project bitwarden backup says not what it holds".to_owned()));
+        assert_eq!(
+            read(&folder),
+            Err("project bitwarden backup says not what it holds".to_owned())
+        );
     }
 
     #[test]
@@ -674,9 +785,15 @@ mod tests {
             unopened
         };
         let spike = listing(vec!["spike".to_owned()]).map(unopened);
-        assert_eq!(spike, Ok(Unopened::Listed(vec![Dir::parse("/w/spike").unwrap()])));
+        assert_eq!(
+            spike,
+            Ok(Unopened::Listed(vec![Dir::parse("/w/spike").unwrap()]))
+        );
         let unsaid = unopened(read(&kept()).unwrap().holds);
-        assert_eq!(unsaid, Unopened::Unlisted("luned says nothing of them".to_owned()));
+        assert_eq!(
+            unsaid,
+            Unopened::Unlisted("luned says nothing of them".to_owned())
+        );
         let clone = "project bitwarden backup's clone";
         let open = format!("{clone}: docs is said not open, and a worktree is open there");
         assert_eq!(listing(vec!["docs".to_owned()]), Err(open));

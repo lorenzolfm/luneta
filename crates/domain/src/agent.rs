@@ -67,7 +67,7 @@ impl Harness {
             Some(Ok(api::Harness::Antigravity)) => Ok(Harness::Antigravity),
             Some(Ok(api::Harness::Unspecified) | Err(_)) => {
                 Err("a harness this luned does not know".to_owned())
-            },
+            }
         }
     }
 
@@ -116,7 +116,9 @@ impl Harness {
     }
 
     pub fn rungs(self) -> impl Iterator<Item = Rung> {
-        Rung::ALL.into_iter().filter(move |&rung| self.ladder().declares(rung))
+        Rung::ALL
+            .into_iter()
+            .filter(move |&rung| self.ladder().declares(rung))
     }
 
     #[must_use]
@@ -129,8 +131,9 @@ impl Harness {
 
     #[must_use]
     pub fn from_osc_7501_app(app: &str) -> Option<OscReads> {
-        let harness =
-            Harness::ALL.into_iter().find(|harness| harness.osc_7501_app() == Some(app))?;
+        let harness = Harness::ALL
+            .into_iter()
+            .find(|harness| harness.osc_7501_app() == Some(app))?;
         Some(OscReads::of(harness))
     }
 
@@ -202,7 +205,12 @@ impl TopicSource {
 
     #[must_use]
     pub const fn has_terminal_title(self) -> bool {
-        matches!(self, TopicSource::Transcript { terminal_title: true } | TopicSource::TerminalTitle)
+        matches!(
+            self,
+            TopicSource::Transcript {
+                terminal_title: true
+            } | TopicSource::TerminalTitle
+        )
     }
 
     const fn gap_explained(self) -> bool {
@@ -413,7 +421,10 @@ impl Declared {
 
     #[must_use]
     pub const fn steps(self) -> &'static Steps {
-        self.harness.ladder().steps(self.rung).expect("a declared rung has its steps")
+        self.harness
+            .ladder()
+            .steps(self.rung)
+            .expect("a declared rung has its steps")
     }
 }
 
@@ -441,11 +452,15 @@ const NO_FINISH_IN_SESSIONS: Tells = Tells::No {
     why: "Claude Code's sessions file says idle when a turn ends, finished or not",
 };
 
-const NO_ERROR_IN_SESSIONS: Tells =
-    Tells::No { why: "Claude Code's sessions file has no word for a turn that failed" };
+const NO_ERROR_IN_SESSIONS: Tells = Tells::No {
+    why: "Claude Code's sessions file has no word for a turn that failed",
+};
 
 const CLAUDE_CODE: Ladder = Ladder {
-    osc_7501: Some(Osc7501 { app: "claude-code", steps: Steps::EVERY }),
+    osc_7501: Some(Osc7501 {
+        app: "claude-code",
+        steps: Steps::EVERY,
+    }),
     feed: Some(Steps {
         finish: NO_FINISH_IN_SESSIONS,
         error: NO_ERROR_IN_SESSIONS,
@@ -457,12 +472,17 @@ const CLAUDE_CODE: Ladder = Ladder {
     screen: None,
 };
 
-const NO_PERMISSION_IN_PI: Tells = Tells::No { why: "pi asks no permission before a tool runs" };
+const NO_PERMISSION_IN_PI: Tells = Tells::No {
+    why: "pi asks no permission before a tool runs",
+};
 
-const NO_REJECT_IN_PI: Tells =
-    Tells::No { why: "pi asks no permission before a tool runs, so there is none to reject" };
+const NO_REJECT_IN_PI: Tells = Tells::No {
+    why: "pi asks no permission before a tool runs, so there is none to reject",
+};
 
-const NO_QUESTION_IN_PI: Tells = Tells::No { why: "pi has no tool that asks the user a question" };
+const NO_QUESTION_IN_PI: Tells = Tells::No {
+    why: "pi has no tool that asks the user a question",
+};
 
 const PI_STEPS: Steps = Steps {
     permission: NO_PERMISSION_IN_PI,
@@ -472,7 +492,10 @@ const PI_STEPS: Steps = Steps {
 };
 
 const PI: Ladder = Ladder {
-    osc_7501: Some(Osc7501 { app: "pi", steps: PI_STEPS }),
+    osc_7501: Some(Osc7501 {
+        app: "pi",
+        steps: PI_STEPS,
+    }),
     feed: None,
     extension: Some(PI_STEPS),
     hook: None,
@@ -484,8 +507,12 @@ const ANTIGRAVITY_HOOK: Steps = Steps {
     question: Tells::No {
         why: "agy's title hook says tool_use while its ask_question tool waits for an answer",
     },
-    finish: Tells::No { why: "agy's title hook says idle when a turn ends, finished or not" },
-    error: Tells::No { why: "agy's title hook says idle after a turn that failed" },
+    finish: Tells::No {
+        why: "agy's title hook says idle when a turn ends, finished or not",
+    },
+    error: Tells::No {
+        why: "agy's title hook says idle after a turn that failed",
+    },
     exit: Tells::No {
         why: "agy leaves its title file behind when it exits, so the process's end drops the agent",
     },
@@ -493,7 +520,10 @@ const ANTIGRAVITY_HOOK: Steps = Steps {
 };
 
 const ANTIGRAVITY: Ladder = Ladder {
-    osc_7501: Some(Osc7501 { app: "antigravity", steps: Steps::EVERY }),
+    osc_7501: Some(Osc7501 {
+        app: "antigravity",
+        steps: Steps::EVERY,
+    }),
     feed: None,
     extension: None,
     hook: Some(ANTIGRAVITY_HOOK),
@@ -501,12 +531,17 @@ const ANTIGRAVITY: Ladder = Ladder {
     screen: None,
 };
 
-const CLAUDE_CODE_TOPICS: TopicSource = TopicSource::Transcript { terminal_title: true };
+const CLAUDE_CODE_TOPICS: TopicSource = TopicSource::Transcript {
+    terminal_title: true,
+};
 
-const PI_TOPICS: TopicSource =
-    TopicSource::No { why: "pi's session transcripts are not read by luned yet" };
+const PI_TOPICS: TopicSource = TopicSource::No {
+    why: "pi's session transcripts are not read by luned yet",
+};
 
-const ANTIGRAVITY_TOPICS: TopicSource = TopicSource::Transcript { terminal_title: false };
+const ANTIGRAVITY_TOPICS: TopicSource = TopicSource::Transcript {
+    terminal_title: false,
+};
 
 const fn every_topic_gap_explained() -> bool {
     let mut index = 0;
@@ -561,25 +596,37 @@ const fn same_app(one: Harness, other: Harness) -> bool {
                 index += 1;
             }
             true
-        },
+        }
         _ => false,
     }
 }
 
-const _: () = assert!(every_ladder(Sound::RungDeclared), "each harness's ladder declares a rung");
+const _: () = assert!(
+    every_ladder(Sound::RungDeclared),
+    "each harness's ladder declares a rung"
+);
 
-const _: () = assert!(every_ladder(Sound::StepTold), "each declared rung tells at least one step");
+const _: () = assert!(
+    every_ladder(Sound::StepTold),
+    "each declared rung tells at least one step"
+);
 
 const _: () = assert!(
     every_ladder(Sound::GapExplained),
     "each step a declared rung does not tell says why in Tells::No"
 );
 
-const _: () = assert!(every_ladder(Sound::AppNamed), "each OSC 7501 app has a name");
+const _: () = assert!(
+    every_ladder(Sound::AppNamed),
+    "each OSC 7501 app has a name"
+);
 
 const _: () = assert!(every_ladder(Sound::AppAscii), "each OSC 7501 app is ASCII");
 
-const _: () = assert!(apps_are_distinct(), "no two harnesses share an OSC 7501 app");
+const _: () = assert!(
+    apps_are_distinct(),
+    "no two harnesses share an OSC 7501 app"
+);
 
 const _: () = assert!(
     every_topic_gap_explained(),
@@ -609,7 +656,10 @@ mod tests {
             .map(|said| Harness::said(Some(said.into())).unwrap())
             .collect();
         for harness in &named {
-            assert!(Harness::ALL.contains(harness), "{harness:?} is missing from Harness::ALL");
+            assert!(
+                Harness::ALL.contains(harness),
+                "{harness:?} is missing from Harness::ALL"
+            );
         }
         assert_eq!(named.len(), Harness::ALL.len());
     }
@@ -619,11 +669,17 @@ mod tests {
         for harness in Harness::ALL {
             let rungs: Vec<Rung> = harness.rungs().collect();
             assert_ne!(rungs.len(), 0, "{harness:?}");
-            assert!(rungs.windows(2).all(|pair| pair[0] < pair[1]), "{harness:?}: {rungs:?}");
+            assert!(
+                rungs.windows(2).all(|pair| pair[0] < pair[1]),
+                "{harness:?}: {rungs:?}"
+            );
             if let Some(app) = harness.osc_7501_app() {
                 assert_eq!(rungs[0], Rung::Osc7501, "{harness:?}");
                 let declared = Harness::from_osc_7501_app(app).unwrap().declared();
-                assert_eq!((declared.harness(), declared.rung()), (harness, Rung::Osc7501));
+                assert_eq!(
+                    (declared.harness(), declared.rung()),
+                    (harness, Rung::Osc7501)
+                );
             } else {
                 assert!(!rungs.contains(&Rung::Osc7501), "{harness:?}");
             }
@@ -644,10 +700,13 @@ mod tests {
     fn each_harness_declares_its_topic_source_or_explains_its_gap() {
         for harness in Harness::ALL {
             match harness.topics() {
-                TopicSource::Transcript { .. } | TopicSource::TerminalTitle => {},
+                TopicSource::Transcript { .. } | TopicSource::TerminalTitle => {}
                 TopicSource::No { why } => {
-                    assert!(!why.trim().is_empty(), "{harness:?}: gap has no explanation");
-                },
+                    assert!(
+                        !why.trim().is_empty(),
+                        "{harness:?}: gap has no explanation"
+                    );
+                }
             }
         }
         assert!(Harness::ClaudeCode.topics().has_transcript());

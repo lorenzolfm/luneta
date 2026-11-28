@@ -195,11 +195,19 @@ mod tests {
         let read = process(child_pid).expect("the child reads");
         assert_eq!(read.parent, Some(pid(std::process::id())));
         assert!(["sh", "bash"].contains(&read.name.as_str()), "{read:?}");
-        let raw = rustix::process::Pid::from_raw(child_pid.get().cast_signed()).expect("a pid is not 0");
+        let raw =
+            rustix::process::Pid::from_raw(child_pid.get().cast_signed()).expect("a pid is not 0");
         rustix::process::kill_process(raw, rustix::process::Signal::STOP).expect("it stops");
-        eventually("it reads as stopped", || process(child_pid).filter(|read| read.stopped));
+        eventually("it reads as stopped", || {
+            process(child_pid).filter(|read| read.stopped)
+        });
         rustix::process::kill_process(raw, rustix::process::Signal::CONT).expect("it goes on");
-        child.stdin.take().expect("its stdin").write_all(b"\n").expect("it reads a line");
+        child
+            .stdin
+            .take()
+            .expect("its stdin")
+            .write_all(b"\n")
+            .expect("it reads a line");
         child.wait().expect("it ends");
     }
 
@@ -212,12 +220,25 @@ mod tests {
             .spawn()
             .expect("sh starts");
         let script = b"echo x\n";
-        child.stdin.as_mut().expect("its stdin").write_all(script).expect("it reads its script");
-        child.stdout.as_mut().expect("its stdout").read_exact(&mut [0; 2]).expect("it runs");
+        child
+            .stdin
+            .as_mut()
+            .expect("its stdin")
+            .write_all(script)
+            .expect("it reads its script");
+        child
+            .stdout
+            .as_mut()
+            .expect("its stdout")
+            .read_exact(&mut [0; 2])
+            .expect("it runs");
         let read = argv(pid(child.id()));
         drop(child.stdin.take());
         child.wait().expect("it ends");
-        assert_eq!(read.map(|it| it.as_slice().to_vec()), Some(vec![String::new()]));
+        assert_eq!(
+            read.map(|it| it.as_slice().to_vec()),
+            Some(vec![String::new()])
+        );
     }
 
     #[test]
@@ -242,12 +263,19 @@ mod tests {
             .stdin(Stdio::piped())
             .spawn()
             .expect("sh starts");
-        let argv = sh_ran(pid(child.id()), |argv| argv.map(|args| args.as_slice().len()));
+        let argv = sh_ran(pid(child.id()), |argv| {
+            argv.map(|args| args.as_slice().len())
+        });
         let argv = argv.as_slice();
         assert_eq!(argv[..4], ["sh", "-c", "read line", ""]);
         assert_eq!(argv[4], long[..ARGV_BYTES_MAX - 18]);
         assert_eq!(argv.len(), 5);
-        child.stdin.take().expect("its stdin").write_all(b"\n").expect("it reads a line");
+        child
+            .stdin
+            .take()
+            .expect("its stdin")
+            .write_all(b"\n")
+            .expect("it reads a line");
         child.wait().expect("it ends");
     }
 

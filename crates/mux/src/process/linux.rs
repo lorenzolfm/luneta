@@ -22,7 +22,13 @@ pub fn process(pid: ProcessId) -> Option<Process> {
 fn stat_of(stat: &[u8]) -> Option<Process> {
     let open = stat.iter().position(|byte| *byte == b'(')?;
     let close = stat.iter().rposition(|byte| *byte == b')')?;
-    let pid = ProcessId::new(std::str::from_utf8(&stat[..open]).ok()?.trim().parse().ok()?)?;
+    let pid = ProcessId::new(
+        std::str::from_utf8(&stat[..open])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?,
+    )?;
     let name = String::from_utf8_lossy(stat.get(open + 1..close)?).into_owned();
     let rest = std::str::from_utf8(stat.get(close + 1..)?).ok()?;
     let mut fields = rest.split_ascii_whitespace();
@@ -74,7 +80,10 @@ pub fn argv(pid: ProcessId) -> Option<Vec<String>> {
     let most = u64::try_from(ARGV_BYTES_MAX).expect("16 KiB fit a u64");
     cmdline.take(most).read_to_end(&mut line).ok()?;
     let args = arguments(&line)?.into_iter();
-    Some(args.map(|arg| String::from_utf8_lossy(arg).into_owned()).collect())
+    Some(
+        args.map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
 }
 
 pub fn owner_info(pid: u32) -> Option<OwnerInfo> {
@@ -127,7 +136,11 @@ struct StatDetail {
 fn stat_detail_of(stat: &[u8]) -> Option<StatDetail> {
     let open = stat.iter().position(|byte| *byte == b'(')?;
     let close = stat.iter().rposition(|byte| *byte == b')')?;
-    let pid = std::str::from_utf8(&stat[..open]).ok()?.trim().parse().ok()?;
+    let pid = std::str::from_utf8(&stat[..open])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
     let name = String::from_utf8_lossy(stat.get(open + 1..close)?).into_owned();
     let rest = std::str::from_utf8(stat.get(close + 1..)?).ok()?;
     let mut fields = rest.split_ascii_whitespace();
@@ -146,7 +159,13 @@ fn stat_detail_of(stat: &[u8]) -> Option<StatDetail> {
         return None;
     }
     let terminal_device = (device != 0).then_some(device);
-    Some(StatDetail { pid, parent, name, proc_start, terminal_device })
+    Some(StatDetail {
+        pid,
+        parent,
+        name,
+        proc_start,
+        terminal_device,
+    })
 }
 
 fn uids_in_status(status: &str) -> Option<(u32, u32)> {
@@ -172,16 +191,33 @@ mod tests {
         let read_as = (read.pid, read.name.as_str(), read.parent, read.group);
         assert_eq!(
             read_as,
-            (ProcessId::new(42).unwrap(), "a) b (c", ProcessId::new(7), Group::new(9).unwrap())
+            (
+                ProcessId::new(42).unwrap(),
+                "a) b (c",
+                ProcessId::new(7),
+                Group::new(9).unwrap()
+            )
         );
         assert!(read.stopped);
-        assert_eq!(read.terminal, Some(Terminal { device: 34817, front: Group::new(51) }));
+        assert_eq!(
+            read.terminal,
+            Some(Terminal {
+                device: 34817,
+                front: Group::new(51)
+            })
+        );
         let read = stat_of(b"42 (sh) S 0 9 9 0 -1 0").expect("it reads");
         assert!(!read.stopped);
         assert_eq!(read.parent, None);
         assert_eq!(read.terminal, None);
         let read = stat_of(b"42 (sh) S 7 9 9 34817 -1 0").expect("it reads");
-        assert_eq!(read.terminal, Some(Terminal { device: 34817, front: None }));
+        assert_eq!(
+            read.terminal,
+            Some(Terminal {
+                device: 34817,
+                front: None
+            })
+        );
         assert_eq!(stat_of(b"0 (sh) S 7 9 9 0 -1 0"), None);
         assert_eq!(stat_of(b"42 (sh) S 7 0 9 0 -1 0"), None);
         assert_eq!(stat_of(b"42 sh S 7 9"), None);
@@ -205,6 +241,9 @@ mod tests {
 
         let zombie = b"7 (a) b) Z 1 7 7 34817 -1 4194304 0 0 0 0 0 0 0 0 20 0 1 0 6630522 16";
         assert!(stat_detail_of(zombie).is_none());
-        assert_eq!(uids_in_status("Name:\tsh\nUid:\t1000\t1000\t1000\t1000\n"), Some((1000, 1000)));
+        assert_eq!(
+            uids_in_status("Name:\tsh\nUid:\t1000\t1000\t1000\t1000\n"),
+            Some((1000, 1000))
+        );
     }
 }

@@ -59,9 +59,11 @@ pub enum Helper {
 impl Helper {
     pub fn run(self) -> ExitCode {
         let said = match self {
-            Helper::Worktree { repo, moved_off, of } => {
-                links::worktree_made(&repo, &of, moved_off).map(Some)
-            },
+            Helper::Worktree {
+                repo,
+                moved_off,
+                of,
+            } => links::worktree_made(&repo, &of, moved_off).map(Some),
             Helper::Follow { dir } => links::followed(&dir).map(|()| None),
             Helper::FetchUpstream { dir, branch } => links::fetched_upstream(&dir, &branch)
                 .map(|found| Some(links::upstream_word(found).to_owned())),
@@ -72,11 +74,11 @@ impl Helper {
                     println!("{said}");
                 }
                 ExitCode::SUCCESS
-            },
+            }
             Err(why) => {
                 eprintln!("{}{why}", links::WHY);
                 ExitCode::FAILURE
-            },
+            }
         }
     }
 }

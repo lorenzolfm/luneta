@@ -9,9 +9,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -88,48 +88,306 @@ const DEFAULT_CELL: CellPixels = CellPixels {
     height: NonZeroU16::new(20).expect("default cell height is non-zero"),
 };
 
-const MISSING_GUIDANCE: &str =
-    "terminal-browser is not on PATH (install via `nix profile install` or github.com/zenbu-labs/terminal-browser)";
+const MISSING_GUIDANCE: &str = "terminal-browser is not on PATH (install via `nix profile install` or github.com/zenbu-labs/terminal-browser)";
 
 const ROW_COLUMN_DIACRITICS: [char; 297] = [
-    '\u{0305}', '\u{030D}', '\u{030E}', '\u{0310}', '\u{0312}', '\u{033D}', '\u{033E}', '\u{033F}',
-    '\u{0346}', '\u{034A}', '\u{034B}', '\u{034C}', '\u{0350}', '\u{0351}', '\u{0352}', '\u{0357}',
-    '\u{035B}', '\u{0363}', '\u{0364}', '\u{0365}', '\u{0366}', '\u{0367}', '\u{0368}', '\u{0369}',
-    '\u{036A}', '\u{036B}', '\u{036C}', '\u{036D}', '\u{036E}', '\u{036F}', '\u{0483}', '\u{0484}',
-    '\u{0485}', '\u{0486}', '\u{0487}', '\u{0592}', '\u{0593}', '\u{0594}', '\u{0595}', '\u{0597}',
-    '\u{0598}', '\u{0599}', '\u{059C}', '\u{059D}', '\u{059E}', '\u{059F}', '\u{05A0}', '\u{05A1}',
-    '\u{05A8}', '\u{05A9}', '\u{05AB}', '\u{05AC}', '\u{05AF}', '\u{05C4}', '\u{0610}', '\u{0611}',
-    '\u{0612}', '\u{0613}', '\u{0614}', '\u{0615}', '\u{0616}', '\u{0617}', '\u{0657}', '\u{0658}',
-    '\u{0659}', '\u{065A}', '\u{065B}', '\u{065D}', '\u{065E}', '\u{06D6}', '\u{06D7}', '\u{06D8}',
-    '\u{06D9}', '\u{06DA}', '\u{06DB}', '\u{06DC}', '\u{06DF}', '\u{06E0}', '\u{06E1}', '\u{06E2}',
-    '\u{06E4}', '\u{06E7}', '\u{06E8}', '\u{06EB}', '\u{06EC}', '\u{0730}', '\u{0732}', '\u{0733}',
-    '\u{0735}', '\u{0736}', '\u{073A}', '\u{073D}', '\u{073F}', '\u{0740}', '\u{0741}', '\u{0743}',
-    '\u{0745}', '\u{0747}', '\u{0749}', '\u{074A}', '\u{07EB}', '\u{07EC}', '\u{07ED}', '\u{07EE}',
-    '\u{07EF}', '\u{07F0}', '\u{07F1}', '\u{07F3}', '\u{0816}', '\u{0817}', '\u{0818}', '\u{0819}',
-    '\u{081B}', '\u{081C}', '\u{081D}', '\u{081E}', '\u{081F}', '\u{0820}', '\u{0821}', '\u{0822}',
-    '\u{0823}', '\u{0825}', '\u{0826}', '\u{0827}', '\u{0829}', '\u{082A}', '\u{082B}', '\u{082C}',
-    '\u{082D}', '\u{0951}', '\u{0953}', '\u{0954}', '\u{0F82}', '\u{0F83}', '\u{0F86}', '\u{0F87}',
-    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}', '\u{193A}', '\u{1A17}', '\u{1A75}', '\u{1A76}',
-    '\u{1A77}', '\u{1A78}', '\u{1A79}', '\u{1A7A}', '\u{1A7B}', '\u{1A7C}', '\u{1B6B}', '\u{1B6D}',
-    '\u{1B6E}', '\u{1B6F}', '\u{1B70}', '\u{1B71}', '\u{1B72}', '\u{1B73}', '\u{1CD0}', '\u{1CD1}',
-    '\u{1CD2}', '\u{1CDA}', '\u{1CDB}', '\u{1CE0}', '\u{1DC0}', '\u{1DC1}', '\u{1DC3}', '\u{1DC4}',
-    '\u{1DC5}', '\u{1DC6}', '\u{1DC7}', '\u{1DC8}', '\u{1DC9}', '\u{1DCB}', '\u{1DCC}', '\u{1DD1}',
-    '\u{1DD2}', '\u{1DD3}', '\u{1DD4}', '\u{1DD5}', '\u{1DD6}', '\u{1DD7}', '\u{1DD8}', '\u{1DD9}',
-    '\u{1DDA}', '\u{1DDB}', '\u{1DDC}', '\u{1DDD}', '\u{1DDE}', '\u{1DDF}', '\u{1DE0}', '\u{1DE1}',
-    '\u{1DE2}', '\u{1DE3}', '\u{1DE4}', '\u{1DE5}', '\u{1DE6}', '\u{1DFE}', '\u{20D0}', '\u{20D1}',
-    '\u{20D4}', '\u{20D5}', '\u{20D6}', '\u{20D7}', '\u{20DB}', '\u{20DC}', '\u{20E1}', '\u{20E7}',
-    '\u{20E9}', '\u{20F0}', '\u{2CEF}', '\u{2CF0}', '\u{2CF1}', '\u{2DE0}', '\u{2DE1}', '\u{2DE2}',
-    '\u{2DE3}', '\u{2DE4}', '\u{2DE5}', '\u{2DE6}', '\u{2DE7}', '\u{2DE8}', '\u{2DE9}', '\u{2DEA}',
-    '\u{2DEB}', '\u{2DEC}', '\u{2DED}', '\u{2DEE}', '\u{2DEF}', '\u{2DF0}', '\u{2DF1}', '\u{2DF2}',
-    '\u{2DF3}', '\u{2DF4}', '\u{2DF5}', '\u{2DF6}', '\u{2DF7}', '\u{2DF8}', '\u{2DF9}', '\u{2DFA}',
-    '\u{2DFB}', '\u{2DFC}', '\u{2DFD}', '\u{2DFE}', '\u{2DFF}', '\u{A66F}', '\u{A67C}', '\u{A67D}',
-    '\u{A6F0}', '\u{A6F1}', '\u{A8E0}', '\u{A8E1}', '\u{A8E2}', '\u{A8E3}', '\u{A8E4}', '\u{A8E5}',
-    '\u{A8E6}', '\u{A8E7}', '\u{A8E8}', '\u{A8E9}', '\u{A8EA}', '\u{A8EB}', '\u{A8EC}', '\u{A8ED}',
-    '\u{A8EE}', '\u{A8EF}', '\u{A8F0}', '\u{A8F1}', '\u{AAB0}', '\u{AAB2}', '\u{AAB3}', '\u{AAB7}',
-    '\u{AAB8}', '\u{AABE}', '\u{AABF}', '\u{AAC1}', '\u{FE20}', '\u{FE21}', '\u{FE22}', '\u{FE23}',
-    '\u{FE24}', '\u{FE25}', '\u{FE26}', '\u{10A0F}', '\u{10A38}', '\u{1D185}', '\u{1D186}',
-    '\u{1D187}', '\u{1D188}', '\u{1D189}', '\u{1D1AA}', '\u{1D1AB}', '\u{1D1AC}', '\u{1D1AD}',
-    '\u{1D242}', '\u{1D243}', '\u{1D244}',
+    '\u{0305}',
+    '\u{030D}',
+    '\u{030E}',
+    '\u{0310}',
+    '\u{0312}',
+    '\u{033D}',
+    '\u{033E}',
+    '\u{033F}',
+    '\u{0346}',
+    '\u{034A}',
+    '\u{034B}',
+    '\u{034C}',
+    '\u{0350}',
+    '\u{0351}',
+    '\u{0352}',
+    '\u{0357}',
+    '\u{035B}',
+    '\u{0363}',
+    '\u{0364}',
+    '\u{0365}',
+    '\u{0366}',
+    '\u{0367}',
+    '\u{0368}',
+    '\u{0369}',
+    '\u{036A}',
+    '\u{036B}',
+    '\u{036C}',
+    '\u{036D}',
+    '\u{036E}',
+    '\u{036F}',
+    '\u{0483}',
+    '\u{0484}',
+    '\u{0485}',
+    '\u{0486}',
+    '\u{0487}',
+    '\u{0592}',
+    '\u{0593}',
+    '\u{0594}',
+    '\u{0595}',
+    '\u{0597}',
+    '\u{0598}',
+    '\u{0599}',
+    '\u{059C}',
+    '\u{059D}',
+    '\u{059E}',
+    '\u{059F}',
+    '\u{05A0}',
+    '\u{05A1}',
+    '\u{05A8}',
+    '\u{05A9}',
+    '\u{05AB}',
+    '\u{05AC}',
+    '\u{05AF}',
+    '\u{05C4}',
+    '\u{0610}',
+    '\u{0611}',
+    '\u{0612}',
+    '\u{0613}',
+    '\u{0614}',
+    '\u{0615}',
+    '\u{0616}',
+    '\u{0617}',
+    '\u{0657}',
+    '\u{0658}',
+    '\u{0659}',
+    '\u{065A}',
+    '\u{065B}',
+    '\u{065D}',
+    '\u{065E}',
+    '\u{06D6}',
+    '\u{06D7}',
+    '\u{06D8}',
+    '\u{06D9}',
+    '\u{06DA}',
+    '\u{06DB}',
+    '\u{06DC}',
+    '\u{06DF}',
+    '\u{06E0}',
+    '\u{06E1}',
+    '\u{06E2}',
+    '\u{06E4}',
+    '\u{06E7}',
+    '\u{06E8}',
+    '\u{06EB}',
+    '\u{06EC}',
+    '\u{0730}',
+    '\u{0732}',
+    '\u{0733}',
+    '\u{0735}',
+    '\u{0736}',
+    '\u{073A}',
+    '\u{073D}',
+    '\u{073F}',
+    '\u{0740}',
+    '\u{0741}',
+    '\u{0743}',
+    '\u{0745}',
+    '\u{0747}',
+    '\u{0749}',
+    '\u{074A}',
+    '\u{07EB}',
+    '\u{07EC}',
+    '\u{07ED}',
+    '\u{07EE}',
+    '\u{07EF}',
+    '\u{07F0}',
+    '\u{07F1}',
+    '\u{07F3}',
+    '\u{0816}',
+    '\u{0817}',
+    '\u{0818}',
+    '\u{0819}',
+    '\u{081B}',
+    '\u{081C}',
+    '\u{081D}',
+    '\u{081E}',
+    '\u{081F}',
+    '\u{0820}',
+    '\u{0821}',
+    '\u{0822}',
+    '\u{0823}',
+    '\u{0825}',
+    '\u{0826}',
+    '\u{0827}',
+    '\u{0829}',
+    '\u{082A}',
+    '\u{082B}',
+    '\u{082C}',
+    '\u{082D}',
+    '\u{0951}',
+    '\u{0953}',
+    '\u{0954}',
+    '\u{0F82}',
+    '\u{0F83}',
+    '\u{0F86}',
+    '\u{0F87}',
+    '\u{135D}',
+    '\u{135E}',
+    '\u{135F}',
+    '\u{17DD}',
+    '\u{193A}',
+    '\u{1A17}',
+    '\u{1A75}',
+    '\u{1A76}',
+    '\u{1A77}',
+    '\u{1A78}',
+    '\u{1A79}',
+    '\u{1A7A}',
+    '\u{1A7B}',
+    '\u{1A7C}',
+    '\u{1B6B}',
+    '\u{1B6D}',
+    '\u{1B6E}',
+    '\u{1B6F}',
+    '\u{1B70}',
+    '\u{1B71}',
+    '\u{1B72}',
+    '\u{1B73}',
+    '\u{1CD0}',
+    '\u{1CD1}',
+    '\u{1CD2}',
+    '\u{1CDA}',
+    '\u{1CDB}',
+    '\u{1CE0}',
+    '\u{1DC0}',
+    '\u{1DC1}',
+    '\u{1DC3}',
+    '\u{1DC4}',
+    '\u{1DC5}',
+    '\u{1DC6}',
+    '\u{1DC7}',
+    '\u{1DC8}',
+    '\u{1DC9}',
+    '\u{1DCB}',
+    '\u{1DCC}',
+    '\u{1DD1}',
+    '\u{1DD2}',
+    '\u{1DD3}',
+    '\u{1DD4}',
+    '\u{1DD5}',
+    '\u{1DD6}',
+    '\u{1DD7}',
+    '\u{1DD8}',
+    '\u{1DD9}',
+    '\u{1DDA}',
+    '\u{1DDB}',
+    '\u{1DDC}',
+    '\u{1DDD}',
+    '\u{1DDE}',
+    '\u{1DDF}',
+    '\u{1DE0}',
+    '\u{1DE1}',
+    '\u{1DE2}',
+    '\u{1DE3}',
+    '\u{1DE4}',
+    '\u{1DE5}',
+    '\u{1DE6}',
+    '\u{1DFE}',
+    '\u{20D0}',
+    '\u{20D1}',
+    '\u{20D4}',
+    '\u{20D5}',
+    '\u{20D6}',
+    '\u{20D7}',
+    '\u{20DB}',
+    '\u{20DC}',
+    '\u{20E1}',
+    '\u{20E7}',
+    '\u{20E9}',
+    '\u{20F0}',
+    '\u{2CEF}',
+    '\u{2CF0}',
+    '\u{2CF1}',
+    '\u{2DE0}',
+    '\u{2DE1}',
+    '\u{2DE2}',
+    '\u{2DE3}',
+    '\u{2DE4}',
+    '\u{2DE5}',
+    '\u{2DE6}',
+    '\u{2DE7}',
+    '\u{2DE8}',
+    '\u{2DE9}',
+    '\u{2DEA}',
+    '\u{2DEB}',
+    '\u{2DEC}',
+    '\u{2DED}',
+    '\u{2DEE}',
+    '\u{2DEF}',
+    '\u{2DF0}',
+    '\u{2DF1}',
+    '\u{2DF2}',
+    '\u{2DF3}',
+    '\u{2DF4}',
+    '\u{2DF5}',
+    '\u{2DF6}',
+    '\u{2DF7}',
+    '\u{2DF8}',
+    '\u{2DF9}',
+    '\u{2DFA}',
+    '\u{2DFB}',
+    '\u{2DFC}',
+    '\u{2DFD}',
+    '\u{2DFE}',
+    '\u{2DFF}',
+    '\u{A66F}',
+    '\u{A67C}',
+    '\u{A67D}',
+    '\u{A6F0}',
+    '\u{A6F1}',
+    '\u{A8E0}',
+    '\u{A8E1}',
+    '\u{A8E2}',
+    '\u{A8E3}',
+    '\u{A8E4}',
+    '\u{A8E5}',
+    '\u{A8E6}',
+    '\u{A8E7}',
+    '\u{A8E8}',
+    '\u{A8E9}',
+    '\u{A8EA}',
+    '\u{A8EB}',
+    '\u{A8EC}',
+    '\u{A8ED}',
+    '\u{A8EE}',
+    '\u{A8EF}',
+    '\u{A8F0}',
+    '\u{A8F1}',
+    '\u{AAB0}',
+    '\u{AAB2}',
+    '\u{AAB3}',
+    '\u{AAB7}',
+    '\u{AAB8}',
+    '\u{AABE}',
+    '\u{AABF}',
+    '\u{AAC1}',
+    '\u{FE20}',
+    '\u{FE21}',
+    '\u{FE22}',
+    '\u{FE23}',
+    '\u{FE24}',
+    '\u{FE25}',
+    '\u{FE26}',
+    '\u{10A0F}',
+    '\u{10A38}',
+    '\u{1D185}',
+    '\u{1D186}',
+    '\u{1D187}',
+    '\u{1D188}',
+    '\u{1D189}',
+    '\u{1D1AA}',
+    '\u{1D1AB}',
+    '\u{1D1AC}',
+    '\u{1D1AD}',
+    '\u{1D242}',
+    '\u{1D243}',
+    '\u{1D244}',
 ];
 
 const _: () = assert!(ROW_COLUMN_DIACRITICS.len() == DIACRITICS_MAX as usize);
@@ -205,7 +463,10 @@ impl PointerShape {
         }
         let shape = PointerShape(raw.to_owned());
         assert_ne!(shape.0, "", "pointer shape is non-empty");
-        assert!(shape.0.len() <= POINTER_SHAPE_BYTES_MAX, "pointer shape fits bound");
+        assert!(
+            shape.0.len() <= POINTER_SHAPE_BYTES_MAX,
+            "pointer shape fits bound"
+        );
         Some(shape)
     }
 
@@ -233,7 +494,10 @@ impl Folder {
             return None;
         }
         let terminal_socket = folder.join(terminal_socket::SOCKET);
-        Some(Folder { folder, terminal_socket })
+        Some(Folder {
+            folder,
+            terminal_socket,
+        })
     }
 }
 
@@ -295,7 +559,9 @@ impl Frame {
         if shm.is_empty() || shm.len() > SHM_NAME_BYTES_MAX || !shm.starts_with('/') {
             return None;
         }
-        if shm.bytes().any(|byte| byte == 0 || byte.is_ascii_control() || byte.is_ascii_whitespace())
+        if shm
+            .bytes()
+            .any(|byte| byte == 0 || byte.is_ascii_control() || byte.is_ascii_whitespace())
         {
             return None;
         }
@@ -303,7 +569,14 @@ impl Frame {
         let height = NonZeroU32::new(height).filter(|height| height.get() <= IMAGE_PIXELS_MAX)?;
         let columns = NonZeroU16::new(columns)?;
         let rows = NonZeroU16::new(rows)?;
-        Some(Frame { shm, width, height, columns, rows, generation })
+        Some(Frame {
+            shm,
+            width,
+            height,
+            columns,
+            rows,
+            generation,
+        })
     }
 
     #[must_use]
@@ -356,7 +629,10 @@ pub enum Heard {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Copy(String),
-    Navigated { view: ViewId, url: Option<BrowserUrl> },
+    Navigated {
+        view: ViewId,
+        url: Option<BrowserUrl>,
+    },
     Close(ViewId),
 }
 
@@ -514,7 +790,11 @@ enum Presence {
 
 impl Presence {
     fn of(visible: bool, focused: bool) -> Presence {
-        if visible { Presence::Visible { focused } } else { Presence::Hidden }
+        if visible {
+            Presence::Visible { focused }
+        } else {
+            Presence::Hidden
+        }
     }
 
     fn visible(self) -> bool {
@@ -559,7 +839,7 @@ impl Running {
                     log::say("embedded browser outbound queue full; dropping message");
                 }
                 true
-            },
+            }
             Err(TrySendError::Disconnected(_)) => false,
         }
     }
@@ -616,7 +896,10 @@ fn remove_if_present(path: &Path) {
     if let Err(error) = fs::remove_file(path)
         && error.kind() != ErrorKind::NotFound
     {
-        log::say(&format!("{}: embedded browser file not removed: {error}", path.display()));
+        log::say(&format!(
+            "{}: embedded browser file not removed: {error}",
+            path.display()
+        ));
     }
 }
 
@@ -653,11 +936,20 @@ impl SupportedState {
         events: &Sender<Event>,
         spec: &SpawnSpec<'_>,
     ) {
-        assert!(!self.views.contains_key(&spec.view), "spawn does not overwrite an active view");
-        assert!(self.views.len() < EMBEDDED_MAX, "spawn stays within EMBEDDED_MAX");
+        assert!(
+            !self.views.contains_key(&spec.view),
+            "spawn does not overwrite an active view"
+        );
+        assert!(
+            self.views.len() < EMBEDDED_MAX,
+            "spawn stays within EMBEDDED_MAX"
+        );
         self.next_socket = self.next_socket.wrapping_add(1);
         let pid = std::process::id();
-        let socket = self.folder.folder.join(format!("b-{pid}-{}.sock", self.next_socket));
+        let socket = self
+            .folder
+            .folder
+            .join(format!("b-{pid}-{}.sock", self.next_socket));
         let tty = terminal_socket::browser_client_tty_path(
             &self.folder.folder,
             spec.view,
@@ -671,7 +963,7 @@ impl SupportedState {
             Err(error) => {
                 self.insert_failed(spec.view, format!("embed socket failed: {error}"));
                 return;
-            },
+            }
         };
         if let Err(error) = listener.set_nonblocking(true) {
             remove_if_present(&socket);
@@ -692,13 +984,16 @@ impl SupportedState {
                 remove_if_present(&tty);
                 self.insert_failed(spec.view, MISSING_GUIDANCE.to_owned());
                 return;
-            },
+            }
             Err(error) => {
                 remove_if_present(&socket);
                 remove_if_present(&tty);
-                self.insert_failed(spec.view, format!("terminal-browser did not start: {error}"));
+                self.insert_failed(
+                    spec.view,
+                    format!("terminal-browser did not start: {error}"),
+                );
                 return;
-            },
+            }
         };
         let image_id = self.alloc_image_id();
         let stop = Arc::new(AtomicBool::new(false));
@@ -748,9 +1043,15 @@ impl SupportedState {
 
     fn insert_failed(&mut self, view: ViewId, error: String) {
         assert_ne!(error, "", "failure message is non-empty");
-        assert!(self.views.len() < EMBEDDED_MAX, "failed instance stays within EMBEDDED_MAX");
+        assert!(
+            self.views.len() < EMBEDDED_MAX,
+            "failed instance stays within EMBEDDED_MAX"
+        );
         let previous = self.views.insert(view, Instance::Failed { error });
-        assert!(previous.is_none(), "failed view did not overwrite an active view");
+        assert!(
+            previous.is_none(),
+            "failed view did not overwrite an active view"
+        );
     }
 
     fn fail_instance(&mut self, view: ViewId, error: String) {
@@ -816,7 +1117,10 @@ impl SupportedState {
             self.remove(view);
         }
         assert!(self.views.is_empty(), "cleared browsers hold no views");
-        assert!(self.owned_ids.is_empty(), "cleared browsers own no live images");
+        assert!(
+            self.owned_ids.is_empty(),
+            "cleared browsers own no live images"
+        );
     }
 
     fn delete_image(&mut self, image_id: ImageId) {
@@ -848,7 +1152,13 @@ impl Browsers {
             Mode::Unsupported => BrowsersMode::Unsupported,
             Mode::Supported(runtime) => BrowsersMode::Supported(SupportedState::new(runtime)),
         };
-        Browsers { number, cell: config.cell, colours: config.colours, events, mode }
+        Browsers {
+            number,
+            cell: config.cell,
+            colours: config.colours,
+            events,
+            mode,
+        }
     }
 
     #[must_use]
@@ -862,7 +1172,11 @@ impl Browsers {
             BrowsersMode::Unsupported => Mode::Unsupported,
             BrowsersMode::Supported(state) => Mode::Supported(state.folder.clone()),
         };
-        Config { mode, cell: self.cell, colours: self.colours }
+        Config {
+            mode,
+            cell: self.cell,
+            colours: self.colours,
+        }
     }
 
     pub fn drain_tty_changes(&mut self) -> Vec<(ViewId, Option<String>)> {
@@ -901,10 +1215,17 @@ impl Browsers {
         let BrowsersMode::Supported(state) = &mut self.mode else {
             return;
         };
-        assert!(state.views.len() <= EMBEDDED_MAX, "embedded browsers stay within EMBEDDED_MAX");
+        assert!(
+            state.views.len() <= EMBEDDED_MAX,
+            "embedded browsers stay within EMBEDDED_MAX"
+        );
         let wanted: BTreeSet<ViewId> = desired.iter().map(|item| item.view).collect();
-        let removed: Vec<ViewId> =
-            state.views.keys().copied().filter(|id| !wanted.contains(id)).collect();
+        let removed: Vec<ViewId> = state
+            .views
+            .keys()
+            .copied()
+            .filter(|id| !wanted.contains(id))
+            .collect();
         for view in removed {
             state.remove(view);
         }
@@ -931,10 +1252,14 @@ impl Browsers {
                     });
                 }
                 if alive && running.presence.visible() != presence.visible() {
-                    alive &= running.send(ToGuest::Visible { value: presence.visible() });
+                    alive &= running.send(ToGuest::Visible {
+                        value: presence.visible(),
+                    });
                 }
                 if alive && running.presence.focused() != presence.focused() {
-                    alive &= running.send(ToGuest::Focus { focused: presence.focused() });
+                    alive &= running.send(ToGuest::Focus {
+                        focused: presence.focused(),
+                    });
                 }
                 running.presence = presence;
                 if !alive {
@@ -963,7 +1288,10 @@ impl Browsers {
         for view in disconnected {
             state.fail_instance(view, "terminal-browser disconnected".to_owned());
         }
-        assert!(state.views.len() <= EMBEDDED_MAX, "embedded browsers stay within EMBEDDED_MAX");
+        assert!(
+            state.views.len() <= EMBEDDED_MAX,
+            "embedded browsers stay within EMBEDDED_MAX"
+        );
     }
 
     pub fn retry(
@@ -986,7 +1314,10 @@ impl Browsers {
             return;
         }
         state.remove(view);
-        assert!(!state.views.contains_key(&view), "retried view was removed first");
+        assert!(
+            !state.views.contains_key(&view),
+            "retried view was removed first"
+        );
         state.spawn(
             number,
             cell,
@@ -1001,7 +1332,10 @@ impl Browsers {
                 presence: Presence::Visible { focused },
             },
         );
-        assert!(state.views.len() <= EMBEDDED_MAX, "embedded browsers stay within EMBEDDED_MAX");
+        assert!(
+            state.views.len() <= EMBEDDED_MAX,
+            "embedded browsers stay within EMBEDDED_MAX"
+        );
     }
 
     pub fn clear(&mut self) {
@@ -1022,15 +1356,18 @@ impl Browsers {
         match heard {
             Heard::Frame(frame) => {
                 match state.views.get(&view) {
-                    Some(Instance::Starting(_)) => {},
-                    Some(Instance::Live { frame: previous, .. })
-                        if frame.generation() >= previous.generation() => {},
+                    Some(Instance::Starting(_)) => {}
+                    Some(Instance::Live {
+                        frame: previous, ..
+                    }) if frame.generation() >= previous.generation() => {}
                     Some(Instance::Live { .. } | Instance::Failed { .. }) | None => return None,
                 }
                 let previous = state.views.remove(&view).expect("checked view exists");
                 let (running, pointer) = match previous {
                     Instance::Starting(running) => (running, None),
-                    Instance::Live { running, pointer, .. } => (running, pointer),
+                    Instance::Live {
+                        running, pointer, ..
+                    } => (running, pointer),
                     Instance::Failed { .. } => unreachable!("failed instances return early above"),
                 };
                 let image_id = running.image_id;
@@ -1040,20 +1377,27 @@ impl Browsers {
                 );
                 state.pending_transmits.insert(image_id, frame.clone());
                 state.owned_ids.insert(image_id);
-                state.views.insert(view, Instance::Live { running, frame, pointer });
+                state.views.insert(
+                    view,
+                    Instance::Live {
+                        running,
+                        frame,
+                        pointer,
+                    },
+                );
                 assert!(state.owned_ids.len() <= EMBEDDED_MAX);
                 assert!(state.pending_transmits.len() <= EMBEDDED_MAX);
                 None
-            },
+            }
             Heard::Title(title) => {
                 let running = state.views.get_mut(&view)?.running_mut()?;
                 let changed = running.title != title;
                 running.title = title;
                 if changed {
                     let now = Instant::now();
-                    let due = running.last_url_poll.is_none_or(|last| {
-                        now.saturating_duration_since(last) >= URL_POLL_GAP_MIN
-                    });
+                    let due = running
+                        .last_url_poll
+                        .is_none_or(|last| now.saturating_duration_since(last) >= URL_POLL_GAP_MIN);
                     if due
                         && running
                             .url_poll_in_flight
@@ -1072,7 +1416,11 @@ impl Browsers {
                             };
                             if let Some(url) = navigated
                                 && events
-                                    .send(Event::Browser { number, view, heard: Heard::Url(url) })
+                                    .send(Event::Browser {
+                                        number,
+                                        view,
+                                        heard: Heard::Url(url),
+                                    })
                                     .is_err()
                             {
                                 log::say("embedded browser URL reply dropped on closed channel");
@@ -1081,29 +1429,29 @@ impl Browsers {
                     }
                 }
                 None
-            },
+            }
             Heard::Pointer(shape) => {
                 if let Some(Instance::Live { pointer, .. }) = state.views.get_mut(&view) {
                     *pointer = Some(shape);
                 }
                 None
-            },
+            }
             Heard::Clipboard(text) => {
                 state.views.get(&view)?.running()?;
                 Some(Outcome::Copy(text))
-            },
+            }
             Heard::Url(url) => {
                 state.views.get(&view)?.running()?;
                 Some(Outcome::Navigated { view, url })
-            },
+            }
             Heard::Exited(Exit::Clean) => {
                 state.remove(view);
                 Some(Outcome::Close(view))
-            },
+            }
             Heard::Exited(Exit::Failed(why)) => {
                 state.fail_instance(view, why);
                 None
-            },
+            }
         }
     }
 
@@ -1124,7 +1472,12 @@ impl Browsers {
         let BrowsersMode::Supported(state) = &mut self.mode else {
             return false;
         };
-        state.send_to(view, ToGuest::Paste { text: text.to_owned() })
+        state.send_to(
+            view,
+            ToGuest::Paste {
+                text: text.to_owned(),
+            },
+        )
     }
 
     pub fn mouse(&mut self, view: ViewId, mouse: MouseEvent, column: u16, row: u16) -> bool {
@@ -1218,7 +1571,7 @@ impl Browsers {
                     frame.rows().get(),
                 );
                 Shown::Live
-            },
+            }
             Some(Instance::Failed { error }) => Shown::Failed(error),
             None if state.views.len() >= EMBEDDED_MAX => Shown::AtLimit,
             Some(Instance::Starting(_)) | None => Shown::Starting,
@@ -1298,10 +1651,10 @@ fn configure_spawn_command(
     match spec.machine {
         Machine::Local => {
             command.env("TERMINAL_BROWSER_TERMINAL_SOCKET", terminal_socket);
-        },
+        }
         Machine::Remote(_) => {
             command.env_remove("TERMINAL_BROWSER_TERMINAL_SOCKET");
-        },
+        }
     }
     command
 }
@@ -1352,16 +1705,20 @@ struct Peer {
 fn kill_and_wait(child: &mut Child) {
     match child.try_wait() {
         Ok(Some(_)) => return,
-        Ok(None) => {},
+        Ok(None) => {}
         Err(error) => {
             log::say(&format!("terminal-browser status check failed: {error}"));
-        },
+        }
     }
-    if let Some(pid) = i32::try_from(child.id()).ok().and_then(rustix::process::Pid::from_raw)
+    if let Some(pid) = i32::try_from(child.id())
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
         && let Err(error) = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL)
         && error != rustix::io::Errno::SRCH
     {
-        log::say(&format!("terminal-browser process group kill failed: {error}"));
+        log::say(&format!(
+            "terminal-browser process group kill failed: {error}"
+        ));
     }
     if let Err(error) = child.kill()
         && error.kind() != ErrorKind::InvalidInput
@@ -1374,7 +1731,9 @@ fn kill_and_wait(child: &mut Child) {
 }
 
 fn collect_stderr(stderr: Option<mpsc::Receiver<String>>) -> String {
-    stderr.and_then(|rx| rx.recv_timeout(STDERR_JOIN_WAIT).ok()).unwrap_or_default()
+    stderr
+        .and_then(|rx| rx.recv_timeout(STDERR_JOIN_WAIT).ok())
+        .unwrap_or_default()
 }
 
 fn wait_for_child(
@@ -1402,30 +1761,46 @@ fn run_peer(peer: Peer, child: Option<Child>) {
 }
 
 fn run_peer_with_timeouts(peer: Peer, mut child: Option<Child>, timeouts: PeerTimeouts) {
-    let Peer { number, view, listener, init, receiver, events, stop } = peer;
-    let stderr = child.as_mut().and_then(|child| child.stderr.take()).map(|mut err| {
-        let (tx, rx) = mpsc::sync_channel(1);
-        thread::spawn(move || {
-            let mut buffer = Vec::new();
-            if let Err(error) = err.by_ref().take(STDERR_BYTES_MAX as u64).read_to_end(&mut buffer)
-            {
-                log::say(&format!("terminal-browser stderr read failed: {error}"));
-            }
-            assert!(buffer.len() <= STDERR_BYTES_MAX);
-            let _ = tx.send(String::from_utf8_lossy(&buffer).trim().to_owned());
+    let Peer {
+        number,
+        view,
+        listener,
+        init,
+        receiver,
+        events,
+        stop,
+    } = peer;
+    let stderr = child
+        .as_mut()
+        .and_then(|child| child.stderr.take())
+        .map(|mut err| {
+            let (tx, rx) = mpsc::sync_channel(1);
+            thread::spawn(move || {
+                let mut buffer = Vec::new();
+                if let Err(error) = err
+                    .by_ref()
+                    .take(STDERR_BYTES_MAX as u64)
+                    .read_to_end(&mut buffer)
+                {
+                    log::say(&format!("terminal-browser stderr read failed: {error}"));
+                }
+                assert!(buffer.len() <= STDERR_BYTES_MAX);
+                let _ = tx.send(String::from_utf8_lossy(&buffer).trim().to_owned());
+            });
+            rx
         });
-        rx
-    });
     match accept_peer(&listener, &stop, child.as_mut(), timeouts) {
         Accepted::Connected(stream) => {
-            serve_stream(stream, number, view, &init, receiver, &events, &stop, timeouts);
-        },
+            serve_stream(
+                stream, number, view, &init, receiver, &events, &stop, timeouts,
+            );
+        }
         Accepted::Stopped => {
             if let Some(mut child) = child {
                 kill_and_wait(&mut child);
             }
             return;
-        },
+        }
         Accepted::Exited(status) => {
             let stderr_text = collect_stderr(stderr);
             if stop.load(Ordering::Relaxed) {
@@ -1441,26 +1816,41 @@ fn run_peer_with_timeouts(peer: Peer, mut child: Option<Child>, timeouts: PeerTi
                 };
                 Exit::Failed(message)
             };
-            if events.send(Event::Browser { number, view, heard: Heard::Exited(exit) }).is_err() {
+            if events
+                .send(Event::Browser {
+                    number,
+                    view,
+                    heard: Heard::Exited(exit),
+                })
+                .is_err()
+            {
                 log::say("embedded browser exit event dropped on closed channel");
             }
             return;
-        },
+        }
         Accepted::Failed(why) => {
             if let Some(mut child) = child {
                 kill_and_wait(&mut child);
             }
             let stderr_text = collect_stderr(stderr);
-            let detail = if stderr_text.is_empty() { why } else { stderr_text };
+            let detail = if stderr_text.is_empty() {
+                why
+            } else {
+                stderr_text
+            };
             if !stop.load(Ordering::Relaxed)
                 && events
-                    .send(Event::Browser { number, view, heard: Heard::Exited(Exit::Failed(detail)) })
+                    .send(Event::Browser {
+                        number,
+                        view,
+                        heard: Heard::Exited(Exit::Failed(detail)),
+                    })
                     .is_err()
             {
                 log::say("embedded browser exit event dropped on closed channel");
             }
             return;
-        },
+        }
     }
     if let Some(mut child) = child {
         if stop.load(Ordering::Relaxed) {
@@ -1484,7 +1874,7 @@ fn run_peer_with_timeouts(peer: Peer, mut child: Option<Child>, timeouts: PeerTi
                     stderr_text
                 };
                 Exit::Failed(message)
-            },
+            }
             Ok(None) => {
                 let message = if stderr_text.is_empty() {
                     "terminal-browser stopped responding".to_owned()
@@ -1492,18 +1882,29 @@ fn run_peer_with_timeouts(peer: Peer, mut child: Option<Child>, timeouts: PeerTi
                     stderr_text
                 };
                 Exit::Failed(message)
-            },
+            }
             Err(error) => {
                 kill_and_wait(&mut child);
                 Exit::Failed(format!("terminal-browser wait failed: {error}"))
-            },
+            }
         };
-        if events.send(Event::Browser { number, view, heard: Heard::Exited(exit) }).is_err() {
+        if events
+            .send(Event::Browser {
+                number,
+                view,
+                heard: Heard::Exited(exit),
+            })
+            .is_err()
+        {
             log::say("embedded browser exit event dropped on closed channel");
         }
     } else if !stop.load(Ordering::Relaxed)
         && events
-            .send(Event::Browser { number, view, heard: Heard::Exited(Exit::Clean) })
+            .send(Event::Browser {
+                number,
+                view,
+                heard: Heard::Exited(Exit::Clean),
+            })
             .is_err()
     {
         log::say("embedded browser exit event dropped on closed channel");
@@ -1528,17 +1929,19 @@ fn accept_peer(
                     return Accepted::Failed(format!("embed stream setup failed: {error}"));
                 }
                 return Accepted::Connected(stream);
-            },
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {},
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {}
             Err(error) => return Accepted::Failed(format!("embed accept failed: {error}")),
         }
         if let Some(child) = child.as_deref_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => return Accepted::Exited(status),
-                Ok(None) => {},
+                Ok(None) => {}
                 Err(error) => {
-                    return Accepted::Failed(format!("terminal-browser wait check failed: {error}"));
-                },
+                    return Accepted::Failed(format!(
+                        "terminal-browser wait check failed: {error}"
+                    ));
+                }
             }
         }
         if Instant::now() >= deadline {
@@ -1560,7 +1963,9 @@ fn serve_stream(
     timeouts: PeerTimeouts,
 ) {
     if let Err(error) = stream.set_read_timeout(Some(ACCEPT_POLL)) {
-        log::say(&format!("embedded browser handshake read timeout failed: {error}"));
+        log::say(&format!(
+            "embedded browser handshake read timeout failed: {error}"
+        ));
         return;
     }
     if let Err(error) = stream.set_write_timeout(Some(WRITE_TIMEOUT)) {
@@ -1572,7 +1977,7 @@ fn serve_stream(
         Err(error) => {
             log::say(&format!("embedded browser stream clone failed: {error}"));
             return;
-        },
+        }
     };
     let mut reader = BufReader::new(stream);
     let first = match read_handshake_line(
@@ -1586,9 +1991,12 @@ fn serve_stream(
         Err(error) => {
             log::say(&format!("embedded browser handshake read failed: {error}"));
             return;
-        },
+        }
     };
-    if !matches!(serde_json::from_str::<FromGuest>(&first), Ok(FromGuest::Join {})) {
+    if !matches!(
+        serde_json::from_str::<FromGuest>(&first),
+        Ok(FromGuest::Join {})
+    ) {
         log::say("embedded browser sent unexpected handshake");
         return;
     }
@@ -1597,16 +2005,20 @@ fn serve_stream(
         return;
     }
     if let Err(error) = reader.get_ref().set_read_timeout(None) {
-        log::say(&format!("embedded browser read timeout clear failed: {error}"));
+        log::say(&format!(
+            "embedded browser read timeout clear failed: {error}"
+        ));
         return;
     }
     let write_stop = Arc::clone(stop);
     let shutdown_stream = match writer.try_clone() {
         Ok(stream) => stream,
         Err(error) => {
-            log::say(&format!("embedded browser shutdown handle clone failed: {error}"));
+            log::say(&format!(
+                "embedded browser shutdown handle clone failed: {error}"
+            ));
             return;
-        },
+        }
     };
     thread::scope(|scope| {
         scope.spawn(move || {
@@ -1637,14 +2049,14 @@ fn serve_stream(
                         "embedded browser message exceeded {GUEST_LINE_BYTES_MAX} bytes; skipping"
                     ));
                     continue;
-                },
+                }
                 Ok(BoundedLine::Eof) => break,
                 Err(error) => {
                     if !stop.load(Ordering::Relaxed) {
                         log::say(&format!("embedded browser read failed: {error}"));
                     }
                     break;
-                },
+                }
             };
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -1655,17 +2067,24 @@ fn serve_stream(
                 Err(error) => {
                     log::say(&format!("embedded browser sent invalid message: {error}"));
                     continue;
-                },
+                }
             };
             let heard = match message {
-                FromGuest::Frame { shm, width, height, columns, rows, generation } => {
+                FromGuest::Frame {
+                    shm,
+                    width,
+                    height,
+                    columns,
+                    rows,
+                    generation,
+                } => {
                     let Some(frame) = Frame::parse(shm, width, height, columns, rows, generation)
                     else {
                         log::say("embedded browser sent invalid frame dimensions or shm");
                         continue;
                     };
                     Heard::Frame(frame)
-                },
+                }
                 FromGuest::Title { text } => Heard::Title((!text.is_empty()).then_some(text)),
                 FromGuest::Pointer { shape } => {
                     let Some(shape) = PointerShape::parse(&shape) else {
@@ -1673,11 +2092,18 @@ fn serve_stream(
                         continue;
                     };
                     Heard::Pointer(shape)
-                },
+                }
                 FromGuest::Clipboard { text } => Heard::Clipboard(text),
                 FromGuest::Join {} | FromGuest::Other => continue,
             };
-            if events.send(Event::Browser { number, view, heard }).is_err() {
+            if events
+                .send(Event::Browser {
+                    number,
+                    view,
+                    heard,
+                })
+                .is_err()
+            {
                 break;
             }
         }
@@ -1709,7 +2135,7 @@ fn read_handshake_line(
                     ));
                 }
                 continue;
-            },
+            }
             Err(error) => return Err(error),
         };
         if available.is_empty() {
@@ -1743,7 +2169,10 @@ fn read_handshake_line(
         buffer.extend_from_slice(available);
         reader.consume(chunk_len);
     }
-    Err(io::Error::new(ErrorKind::TimedOut, "embedded browser handshake timed out"))
+    Err(io::Error::new(
+        ErrorKind::TimedOut,
+        "embedded browser handshake timed out",
+    ))
 }
 
 fn read_bounded_line(
@@ -1752,7 +2181,10 @@ fn read_bounded_line(
     drain_max: usize,
 ) -> io::Result<BoundedLine> {
     assert!(max_bytes > 0, "line byte limit is positive");
-    assert!(drain_max >= max_bytes, "drain limit is at least line byte limit");
+    assert!(
+        drain_max >= max_bytes,
+        "drain limit is at least line byte limit"
+    );
     let mut buffer = Vec::new();
     let mut total_read = 0usize;
     let mut oversized = false;
@@ -1769,7 +2201,9 @@ fn read_bounded_line(
                 return Ok(BoundedLine::Eof);
             }
             assert!(buffer.len() <= max_bytes);
-            return Ok(BoundedLine::Line(String::from_utf8_lossy(&buffer).into_owned()));
+            return Ok(BoundedLine::Line(
+                String::from_utf8_lossy(&buffer).into_owned(),
+            ));
         }
         if let Some(newline) = available.iter().position(|&byte| byte == b'\n') {
             let line_len = total_read.saturating_add(newline);
@@ -1777,7 +2211,9 @@ fn read_bounded_line(
                 buffer.extend_from_slice(&available[..newline]);
                 reader.consume(newline + 1);
                 assert!(buffer.len() <= max_bytes);
-                return Ok(BoundedLine::Line(String::from_utf8_lossy(&buffer).into_owned()));
+                return Ok(BoundedLine::Line(
+                    String::from_utf8_lossy(&buffer).into_owned(),
+                ));
             }
             reader.consume(newline + 1);
             if line_len > drain_max {
@@ -1813,7 +2249,10 @@ fn read_bounded_line(
 
 fn write_json_line(writer: &mut impl io::Write, message: &impl Serialize) -> io::Result<()> {
     let mut line = serde_json::to_string(message).map_err(io::Error::other)?;
-    assert!(!line.contains('\n'), "serialized JSON line holds no embedded newline");
+    assert!(
+        !line.contains('\n'),
+        "serialized JSON line holds no embedded newline"
+    );
     line.push('\n');
     writer.write_all(line.as_bytes())?;
     writer.flush()
@@ -1889,7 +2328,7 @@ fn encode_key(key: &KeyEvent) -> Option<ToGuest> {
                 spelled.clone()
             };
             (spelled, text)
-        },
+        }
         KeyCode::Up => ("up".to_owned(), String::new()),
         KeyCode::Down => ("down".to_owned(), String::new()),
         KeyCode::Left => ("left".to_owned(), String::new()),
@@ -1907,12 +2346,17 @@ fn encode_key(key: &KeyEvent) -> Option<ToGuest> {
         KeyCode::BackTab => {
             mods.shift = true;
             ("tab".to_owned(), String::new())
-        },
+        }
         KeyCode::F(number @ 1..=12) => (format!("f{number}"), String::new()),
         _ => return None,
     };
     assert_ne!(name, "", "encoded key carries a non-empty key name");
-    Some(ToGuest::Key { key: name, kind, text, mods })
+    Some(ToGuest::Key {
+        key: name,
+        kind,
+        text,
+        mods,
+    })
 }
 
 fn encode_mouse(mouse: MouseEvent, column: u16, row: u16, cell: CellPixels) -> ToGuest {
@@ -1937,7 +2381,13 @@ fn encode_mouse(mouse: MouseEvent, column: u16, row: u16, cell: CellPixels) -> T
     let y = u32::from(row) * cell_height + cell_height / 2;
     assert!(x >= u32::from(column) * cell_width);
     assert!(y >= u32::from(row) * cell_height);
-    ToGuest::Mouse { kind, button, mods: GuestMods::of(mouse.modifiers), x, y }
+    ToGuest::Mouse {
+        kind,
+        button,
+        mods: GuestMods::of(mouse.modifiers),
+        x,
+        y,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1961,7 +2411,7 @@ fn classify_queried_url(url: Option<&str>) -> QueriedUrl {
         Err(why) => {
             log::say(&format!("embedded browser URL not persisted: {why}"));
             QueriedUrl::Unpersistable
-        },
+        }
     }
 }
 
@@ -1990,9 +2440,12 @@ fn query_url_for_tty(tty: &Path) -> QueriedUrl {
     let dirs = match fs::read_dir(&runtime) {
         Ok(dirs) => dirs,
         Err(error) => {
-            log::say(&format!("{}: browser runtime dir unread: {error}", runtime.display()));
+            log::say(&format!(
+                "{}: browser runtime dir unread: {error}",
+                runtime.display()
+            ));
             return QueriedUrl::Missing;
-        },
+        }
     };
     let mut probed = 0usize;
     for entry in dirs.take(DIR_ENTRIES_MAX) {
@@ -2039,7 +2492,9 @@ fn ask_control_state(socket: &Path) -> Option<ControlData> {
     let mut stream = UnixStream::connect(socket).ok()?;
     stream.set_read_timeout(Some(CONTROL_TIMEOUT)).ok()?;
     stream.set_write_timeout(Some(CONTROL_TIMEOUT)).ok()?;
-    stream.write_all(b"{\"id\":\"1\",\"cmd\":\"state\"}\n").ok()?;
+    stream
+        .write_all(b"{\"id\":\"1\",\"cmd\":\"state\"}\n")
+        .ok()?;
     stream.flush().ok()?;
     let mut reader = BufReader::new(stream);
     let BoundedLine::Line(line) =
@@ -2080,10 +2535,7 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::SHIFT,
         };
-        let encoded = serde_json::to_value(
-            encode_mouse(mouse, 3, 2, DEFAULT_CELL),
-        )
-        .unwrap();
+        let encoded = serde_json::to_value(encode_mouse(mouse, 3, 2, DEFAULT_CELL)).unwrap();
         assert_eq!(encoded["type"], "mouse");
         assert_eq!(encoded["kind"], "down");
         assert_eq!(encoded["button"], "left");
@@ -2095,7 +2547,10 @@ mod tests {
     #[test]
     fn pointer_shape_and_frame_reject_invalid_guest_values() {
         assert_eq!(PointerShape::parse("pointer").unwrap().as_str(), "pointer");
-        assert_eq!(PointerShape::parse("ew-resize").unwrap().as_str(), "ew-resize");
+        assert_eq!(
+            PointerShape::parse("ew-resize").unwrap().as_str(),
+            "ew-resize"
+        );
         for bad in [
             "",
             "pointer\x1b\\injected",
@@ -2125,7 +2580,8 @@ mod tests {
         let mut client = UnixStream::connect(&socket).unwrap();
         let (server, _) = listener.accept().unwrap();
 
-        let oversized_with_newline = format!("{}\nafter\n", "x".repeat(CONTROL_LINE_BYTES_MAX + 64));
+        let oversized_with_newline =
+            format!("{}\nafter\n", "x".repeat(CONTROL_LINE_BYTES_MAX + 64));
         let runaway = vec![b'y'; CONTROL_LINE_BYTES_MAX * 2 + 128];
         let writer = thread::spawn(move || {
             client.write_all(oversized_with_newline.as_bytes()).unwrap();
@@ -2133,7 +2589,11 @@ mod tests {
         });
         let mut reader = BufReader::new(server);
         assert!(matches!(
-            read_bounded_line(&mut reader, CONTROL_LINE_BYTES_MAX, CONTROL_LINE_BYTES_MAX * 2),
+            read_bounded_line(
+                &mut reader,
+                CONTROL_LINE_BYTES_MAX,
+                CONTROL_LINE_BYTES_MAX * 2
+            ),
             Ok(BoundedLine::Oversized)
         ));
         assert!(matches!(
@@ -2160,7 +2620,9 @@ mod tests {
         let expected_b64 = base64::engine::general_purpose::STANDARD.encode("/px-12345");
         assert_eq!(
             text,
-            format!("\x1b_Ga=T,f=32,s=800,v=480,t=s,i=4980737,U=1,c=80,r=24,q=2;{expected_b64}\x1b\\")
+            format!(
+                "\x1b_Ga=T,f=32,s=800,v=480,t=s,i=4980737,U=1,c=80,r=24,q=2;{expected_b64}\x1b\\"
+            )
         );
 
         let area = Rect::new(2, 3, 4, 2);
@@ -2169,13 +2631,19 @@ mod tests {
         let cell = &buffer[(2, 3)];
         assert_eq!(
             cell.symbol(),
-            format!("{PLACEHOLDER}{}{}", ROW_COLUMN_DIACRITICS[0], ROW_COLUMN_DIACRITICS[0])
+            format!(
+                "{PLACEHOLDER}{}{}",
+                ROW_COLUMN_DIACRITICS[0], ROW_COLUMN_DIACRITICS[0]
+            )
         );
         assert_eq!(cell.fg, Color::Rgb(0x4c, 0x00, 0x01));
         let corner = &buffer[(5, 4)];
         assert_eq!(
             corner.symbol(),
-            format!("{PLACEHOLDER}{}{}", ROW_COLUMN_DIACRITICS[1], ROW_COLUMN_DIACRITICS[3])
+            format!(
+                "{PLACEHOLDER}{}{}",
+                ROW_COLUMN_DIACRITICS[1], ROW_COLUMN_DIACRITICS[3]
+            )
         );
     }
 
@@ -2191,9 +2659,15 @@ mod tests {
             QueriedUrl::Unpersistable
         );
         let oversized = format!("https://sso.example.com/?token={}", "a".repeat(3000));
-        assert_eq!(classify_queried_url(Some(&oversized)), QueriedUrl::Unpersistable);
+        assert_eq!(
+            classify_queried_url(Some(&oversized)),
+            QueriedUrl::Unpersistable
+        );
         assert_eq!(classify_queried_url(Some("")), QueriedUrl::StartPage);
-        assert_eq!(classify_queried_url(Some("about:blank")), QueriedUrl::StartPage);
+        assert_eq!(
+            classify_queried_url(Some("about:blank")),
+            QueriedUrl::StartPage
+        );
         assert_eq!(
             classify_queried_url(Some("https://example.com/docs")),
             QueriedUrl::Url(BrowserUrl::parse("https://example.com/docs").unwrap())
@@ -2204,11 +2678,18 @@ mod tests {
     fn browser_state_machine_handles_disconnect_failed_guards_empty_title_and_limit() {
         let dir = tempfile::tempdir().unwrap();
         let folder = Folder::new(dir.path().to_owned()).unwrap();
-        assert!(Folder::new(PathBuf::new()).is_none(), "empty runtime folder is rejected");
+        assert!(
+            Folder::new(PathBuf::new()).is_none(),
+            "empty runtime folder is rejected"
+        );
         let (events_tx, _events_rx) = mpsc::channel();
         let mut browsers = Browsers::new(
             1,
-            Config { mode: Mode::Supported(folder), cell: DEFAULT_CELL, colours: Colours::default() },
+            Config {
+                mode: Mode::Supported(folder),
+                cell: DEFAULT_CELL,
+                colours: Colours::default(),
+            },
             events_tx,
         );
         let view = ViewId::of(1).unwrap();
@@ -2238,29 +2719,65 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         assert_eq!(browsers.heard(view, Heard::Title(None)), None);
         if let BrowsersMode::Supported(state) = &browsers.mode {
-            assert!(state.views[&view].running().unwrap().last_url_poll.is_none());
+            assert!(
+                state.views[&view]
+                    .running()
+                    .unwrap()
+                    .last_url_poll
+                    .is_none()
+            );
         }
-        assert_eq!(browsers.heard(view, Heard::Pointer(PointerShape::parse("pointer").unwrap())), None);
+        assert_eq!(
+            browsers.heard(
+                view,
+                Heard::Pointer(PointerShape::parse("pointer").unwrap())
+            ),
+            None
+        );
         assert_eq!(browsers.pointer(view), None);
 
         let frame = Frame::parse("/px-1".to_owned(), 400, 240, 40, 12, 1).unwrap();
         assert_eq!(browsers.heard(view, Heard::Frame(frame.clone())), None);
         assert_eq!(browsers.draw(view, &mut buffer, area), Shown::Live);
-        assert_eq!(browsers.heard(view, Heard::Pointer(PointerShape::parse("pointer").unwrap())), None);
-        assert_eq!(browsers.pointer(view).map(PointerShape::as_str), Some("pointer"));
+        assert_eq!(
+            browsers.heard(
+                view,
+                Heard::Pointer(PointerShape::parse("pointer").unwrap())
+            ),
+            None
+        );
+        assert_eq!(
+            browsers.pointer(view).map(PointerShape::as_str),
+            Some("pointer")
+        );
 
         drop(rx);
         let press = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
-        assert!(browsers.key(view, &press), "disconnect-detecting keystroke is consumed");
-        assert!(matches!(browsers.draw(view, &mut buffer, area), Shown::Failed(_)));
+        assert!(
+            browsers.key(view, &press),
+            "disconnect-detecting keystroke is consumed"
+        );
+        assert!(matches!(
+            browsers.draw(view, &mut buffer, area),
+            Shown::Failed(_)
+        ));
         assert_eq!(browsers.pointer(view), None);
-        assert!(!browsers.key(view, &press), "subsequent keystrokes fall through to fallback UI");
+        assert!(
+            !browsers.key(view, &press),
+            "subsequent keystrokes fall through to fallback UI"
+        );
         let tty_changes = browsers.drain_tty_changes();
         assert_eq!(tty_changes, vec![(view, None)]);
 
         assert_eq!(browsers.heard(view, Heard::Frame(frame)), None);
-        assert!(matches!(browsers.draw(view, &mut buffer, area), Shown::Failed(_)));
-        assert_eq!(browsers.heard(view, Heard::Pointer(PointerShape::parse("text").unwrap())), None);
+        assert!(matches!(
+            browsers.draw(view, &mut buffer, area),
+            Shown::Failed(_)
+        ));
+        assert_eq!(
+            browsers.heard(view, Heard::Pointer(PointerShape::parse("text").unwrap())),
+            None
+        );
         assert_eq!(browsers.pointer(view), None);
 
         if let BrowsersMode::Supported(state) = &mut browsers.mode {
@@ -2321,10 +2838,18 @@ mod tests {
                 b"{\"type\":\"frame\",\"shm\":\"/px-1\",\"format\":\"rgba\",\"width\":400,\"height\":240,\"generation\":1,\"cols\":40,\"rows\":12,\"cell\":[10,20]}\n",
             )
             .unwrap();
-        client.write_all(b"{\"type\":\"title\",\"text\":\"GitHub\"}\n").unwrap();
-        client.write_all(b"{\"type\":\"pointer\",\"shape\":\"pointer\"}\n").unwrap();
-        client.write_all(b"{\"type\":\"pointer\",\"shape\":\"bad\\u001b]52;c;\"}\n").unwrap();
-        client.write_all(b"{\"type\":\"clipboard\",\"text\":\"copied\"}\n").unwrap();
+        client
+            .write_all(b"{\"type\":\"title\",\"text\":\"GitHub\"}\n")
+            .unwrap();
+        client
+            .write_all(b"{\"type\":\"pointer\",\"shape\":\"pointer\"}\n")
+            .unwrap();
+        client
+            .write_all(b"{\"type\":\"pointer\",\"shape\":\"bad\\u001b]52;c;\"}\n")
+            .unwrap();
+        client
+            .write_all(b"{\"type\":\"clipboard\",\"text\":\"copied\"}\n")
+            .unwrap();
 
         let large_clip = "c".repeat(32 * 1024);
         let clip_payload = format!("{{\"type\":\"clipboard\",\"text\":\"{large_clip}\"}}\n");
@@ -2339,11 +2864,18 @@ mod tests {
         });
         assert!(matches!(received[0], Heard::Frame(ref frame) if frame.shm() == "/px-1"));
         assert_eq!(received[1], Heard::Title(Some("GitHub".to_owned())));
-        assert_eq!(received[2], Heard::Pointer(PointerShape::parse("pointer").unwrap()));
+        assert_eq!(
+            received[2],
+            Heard::Pointer(PointerShape::parse("pointer").unwrap())
+        );
         assert_eq!(received[3], Heard::Clipboard("copied".to_owned()));
         assert_eq!(received[4], Heard::Clipboard(large_clip));
 
-        to_guest_tx.send(ToGuest::Paste { text: "hello".to_owned() }).unwrap();
+        to_guest_tx
+            .send(ToGuest::Paste {
+                text: "hello".to_owned(),
+            })
+            .unwrap();
         let mut pasted_line = String::new();
         reader.read_line(&mut pasted_line).unwrap();
         let pasted: serde_json::Value = serde_json::from_str(&pasted_line).unwrap();
@@ -2379,7 +2911,10 @@ mod tests {
         );
 
         let remote_machine = Machine::Remote("box".parse().unwrap());
-        let remote_spec = SpawnSpec { machine: &remote_machine, ..local_spec };
+        let remote_spec = SpawnSpec {
+            machine: &remote_machine,
+            ..local_spec
+        };
         let remote_cmd = configure_spawn_command(&remote_spec, &socket, &tty, &terminal_socket);
         let remote_envs: BTreeMap<_, _> = remote_cmd.get_envs().collect();
         assert_eq!(
@@ -2388,7 +2923,10 @@ mod tests {
             "remote browsers must remove inherited local terminal socket env var"
         );
         let args: Vec<_> = remote_cmd.get_args().collect();
-        assert!(args.iter().any(|arg| *arg == std::ffi::OsStr::new("--ssh=box")));
+        assert!(
+            args.iter()
+                .any(|arg| *arg == std::ffi::OsStr::new("--ssh=box"))
+        );
     }
 
     #[test]
@@ -2436,10 +2974,15 @@ mod tests {
             exit_polls_max: 2,
         };
         let handle = thread::spawn(move || run_peer_with_timeouts(peer, Some(child), short));
-        let event = lune_waits::eventually("browser exit event arrives after accept timeout", || {
-            events_rx.try_recv().ok()
-        });
-        let Event::Browser { heard: Heard::Exited(Exit::Failed(reason)), .. } = event else {
+        let event =
+            lune_waits::eventually("browser exit event arrives after accept timeout", || {
+                events_rx.try_recv().ok()
+            });
+        let Event::Browser {
+            heard: Heard::Exited(Exit::Failed(reason)),
+            ..
+        } = event
+        else {
             panic!("expected failed exit on accept timeout");
         };
         assert!(reason.contains("did not connect in time"), "{reason}");
@@ -2470,7 +3013,8 @@ mod tests {
             events: events_tx,
             stop: Arc::clone(&stop),
         };
-        let handle = thread::spawn(move || run_peer_with_timeouts(peer, None, PeerTimeouts::DEFAULT));
+        let handle =
+            thread::spawn(move || run_peer_with_timeouts(peer, None, PeerTimeouts::DEFAULT));
         let _stalled = UnixStream::connect(&handshake_socket).unwrap();
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();

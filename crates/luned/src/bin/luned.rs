@@ -7,7 +7,7 @@ use clap::Parser;
 use luned::helper::Helper;
 use luned::log::{self, Process};
 use luned::projects::{self, Unheld};
-use luned::{folder, panics, release, tasks, Claim, Refusal};
+use luned::{Claim, Refusal, folder, panics, release, tasks};
 use rustix::io::FdFlags;
 
 #[derive(Parser)]
@@ -55,7 +55,7 @@ fn main() -> ExitCode {
         Err(unfound) => {
             log::say(&format!("{unfound}, to listen in"));
             return ExitCode::FAILURE;
-        },
+        }
     };
     let claim = match Claim::take(&folder) {
         Ok(claim) => claim,
@@ -65,7 +65,7 @@ fn main() -> ExitCode {
                 Refusal::Running(_) => ExitCode::from(folder::ANOTHER_RUNS),
                 Refusal::NotYours(_) | Refusal::Open(_) | Refusal::Io(..) => ExitCode::FAILURE,
             };
-        },
+        }
     };
     let kept = match projects::take(claim.folder()) {
         Ok(lock) => Ok(lock),
@@ -73,14 +73,17 @@ fn main() -> ExitCode {
         Err(Unheld::Elsewhere(elsewhere)) => {
             log::say(&elsewhere.to_string());
             return ExitCode::FAILURE;
-        },
+        }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             log::say(&format!("no runtime: {error}"));
             return ExitCode::FAILURE;
-        },
+        }
     };
     let socket = claim.socket().to_owned();
     if let Err(error) = runtime.block_on(luned::serve(hooked, claim, kept, unkept, args.detached)) {
@@ -101,9 +104,16 @@ fn main() -> ExitCode {
 fn close_inherited() -> io::Result<()> {
     if cfg!(target_os = "linux") {
         let threads = fs::read_dir("/proc/self/task")?.count();
-        assert_eq!(threads, 1, "luned closes what it was handed only while it has one thread");
+        assert_eq!(
+            threads, 1,
+            "luned closes what it was handed only while it has one thread"
+        );
     }
-    let open = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+    let open = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
     let mut listing = fs::read_dir(open)?;
     let mut fds: Vec<RawFd> = Vec::new();
     for entry in listing.by_ref() {

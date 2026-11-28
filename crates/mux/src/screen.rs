@@ -218,20 +218,33 @@ impl Screen {
             let end = ScrollbackEnd::of(terminal);
             let mut marks = Vec::new();
             let mut resume_reports = VecDeque::new();
-            scanner.write(terminal, bytes, &mut marks, &mut resume_reports, |mark| match mark {
-                Mark::Prompt => statuses.borrow_mut().prompt_started(),
-                Mark::Command(_) => statuses.borrow_mut().command_started(),
-                Mark::Done(_) => {},
-            })?;
+            scanner.write(
+                terminal,
+                bytes,
+                &mut marks,
+                &mut resume_reports,
+                |mark| match mark {
+                    Mark::Prompt => statuses.borrow_mut().prompt_started(),
+                    Mark::Command(_) => statuses.borrow_mut().command_started(),
+                    Mark::Done(_) => {}
+                },
+            )?;
             if (terminal.cols()?, terminal.rows()?) != (columns, rows) {
                 terminal.resize(columns, rows, 0, 0)?;
             }
             assert_eq!((terminal.cols()?, terminal.rows()?), (columns, rows));
-            let pushed = end.and_then(|end| end.pushed(terminal)).unwrap_or(Pushed::Lost);
+            let pushed = end
+                .and_then(|end| end.pushed(terminal))
+                .unwrap_or(Pushed::Lost);
             Ok((marks, resume_reports, pushed))
         });
         let (marks, resume_reports, pushed) = wrote?;
-        Ok(Written { answers, marks, resume_reports, pushed })
+        Ok(Written {
+            answers,
+            marks,
+            resume_reports,
+            pushed,
+        })
     }
 
     #[must_use]
@@ -250,8 +263,9 @@ impl Screen {
 
     pub fn resize(&mut self, size: Size) -> Result<Answers, Error> {
         let (columns, rows) = size.get();
-        let (resized, answers) =
-            self.answering.drive(|terminal| terminal.resize(columns, rows, 0, 0));
+        let (resized, answers) = self
+            .answering
+            .drive(|terminal| terminal.resize(columns, rows, 0, 0));
         resized?;
         self.size = size;
         Ok(answers)
@@ -263,7 +277,10 @@ impl Screen {
         background: Option<RgbColor>,
     ) -> Result<(), Error> {
         let (set, answers) = self.answering.drive(|terminal| {
-            terminal.set_default_fg_color(foreground)?.set_default_bg_color(background).map(|_| ())
+            terminal
+                .set_default_fg_color(foreground)?
+                .set_default_bg_color(background)
+                .map(|_| ())
         });
         assert!(answers.is_empty(), "setting colours answered {answers:?}");
         set
@@ -282,7 +299,9 @@ impl Screen {
     #[must_use]
     pub fn tracks_mouse(&self) -> bool {
         let terminal = self.answering.terminal();
-        terminal.is_mouse_tracking().expect("a terminal says whether it tracks the mouse")
+        terminal
+            .is_mouse_tracking()
+            .expect("a terminal says whether it tracks the mouse")
     }
 
     #[must_use]
@@ -294,18 +313,26 @@ impl Screen {
         let (set, answers) = self
             .answering
             .drive(|terminal| terminal.set_mode(Mode::SYNC_OUTPUT, false).map(|_| ()));
-        assert!(answers.is_empty(), "turning off mode 2026 answered {answers:?}");
+        assert!(
+            answers.is_empty(),
+            "turning off mode 2026 answered {answers:?}"
+        );
         set
     }
 
     fn mode(&self, mode: Mode) -> bool {
-        self.answering.terminal().mode(mode).expect("a terminal says its modes")
+        self.answering
+            .terminal()
+            .mode(mode)
+            .expect("a terminal says its modes")
     }
 
     #[must_use]
     pub fn scrollback(&self) -> usize {
         let terminal = self.answering.terminal();
-        terminal.scrollback_rows().expect("a terminal says its scrollback")
+        terminal
+            .scrollback_rows()
+            .expect("a terminal says its scrollback")
     }
 
     #[must_use]
@@ -333,7 +360,9 @@ impl Screen {
     }
 
     fn scroll(&mut self, to: ScrollViewport) {
-        let ((), answers) = self.answering.drive(|terminal| terminal.scroll_viewport(to));
+        let ((), answers) = self
+            .answering
+            .drive(|terminal| terminal.scroll_viewport(to));
         assert!(answers.is_empty(), "scrolling answered {answers:?}");
     }
 
@@ -354,25 +383,38 @@ impl Screen {
         let mut rows = self.rows.update(&snapshot)?;
         let mut lines = Vec::with_capacity(row_count);
         while let Some(row) = rows.next() {
-            assert!(lines.len() < row_count, "more lines than the screen's {row_count}");
+            assert!(
+                lines.len() < row_count,
+                "more lines than the screen's {row_count}"
+            );
             let wraps = row.raw_row()?.is_wrapped()?;
             lines.push(line(&mut self.cells.update(row)?, column_count, wraps)?);
         }
         assert_eq!(lines.len(), row_count);
-        Ok(View { size: self.size, lines, cursor })
+        Ok(View {
+            size: self.size,
+            lines,
+            cursor,
+        })
     }
 
     pub fn dumped_screen(&self) -> Result<String, Error> {
         let terminal = self.answering.terminal();
         let mut formatter = shown_only(terminal)?;
-        formatter.set_format(Format::Vt)?.set_trim(true)?.set_extras(Extras::NONE)?;
+        formatter
+            .set_format(Format::Vt)?
+            .set_trim(true)?
+            .set_extras(Extras::NONE)?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub fn dumped_text(&self) -> Result<String, Error> {
         let mut formatter = Formatter::new(self.answering.terminal())?;
-        formatter.set_format(Format::Plain)?.set_unwrap(true)?.set_trim(true)?;
+        formatter
+            .set_format(Format::Plain)?
+            .set_unwrap(true)?
+            .set_trim(true)?;
         let bytes = formatter.format_alloc(None)?;
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
@@ -380,11 +422,18 @@ impl Screen {
     pub fn looked(&self) -> Result<Looked, Error> {
         let terminal = self.answering.terminal();
         let mut formatter = shown_only(terminal)?;
-        formatter.set_format(Format::Plain)?.set_unwrap(true)?.set_trim(true)?;
+        formatter
+            .set_format(Format::Plain)?
+            .set_unwrap(true)?
+            .set_trim(true)?;
         let bytes = formatter.format_alloc(None)?;
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let rows = usize::from(terminal.rows()?);
-        assert!(text.lines().count() <= rows, "{} lines of {rows} rows", text.lines().count());
+        assert!(
+            text.lines().count() <= rows,
+            "{} lines of {rows} rows",
+            text.lines().count()
+        );
         Ok(Looked::of(text))
     }
 }
@@ -399,7 +448,10 @@ impl Looked {
     fn of(text: String) -> Looked {
         let mut hasher = DefaultHasher::new();
         text.hash(&mut hasher);
-        Looked { shown: hasher.finish(), text }
+        Looked {
+            shown: hasher.finish(),
+            text,
+        }
     }
 }
 
@@ -432,10 +484,13 @@ impl ScrollbackEnd {
             Some(index) => {
                 let y = u32::try_from(index).expect("a scrollback row fits a screen coordinate");
                 Some(terminal.track_grid_ref(Point::Screen(Coordinate { x: 0, y }))?)
-            },
+            }
             None => None,
         };
-        Ok(ScrollbackEnd { screen: terminal.active_screen()?, last })
+        Ok(ScrollbackEnd {
+            screen: terminal.active_screen()?,
+            last,
+        })
     }
 
     fn pushed(&self, terminal: &Terminal<'_, '_>) -> Result<Pushed, Error> {
@@ -468,7 +523,11 @@ fn line(
         let mut text = String::new();
         cell.graphemes_utf8(&mut text)?;
         let wide = cell.raw_cell()?.wide()?;
-        assert_eq!(spacer_owed, wide == CellWide::SpacerTail, "{wide:?} in column {column}");
+        assert_eq!(
+            spacer_owed,
+            wide == CellWide::SpacerTail,
+            "{wide:?} in column {column}"
+        );
         spacer_owed = wide == CellWide::Wide;
         let glyph = match wide {
             CellWide::Narrow if text.is_empty() => Some(Glyph::Blank),
@@ -476,17 +535,17 @@ fn line(
             CellWide::Wide => {
                 assert!(!text.is_empty(), "a wide cell that shows nothing");
                 Some(Glyph::Wide(text))
-            },
+            }
             CellWide::SpacerTail => {
                 assert!(text.is_empty(), "a spacer that shows {text:?}");
                 None
-            },
+            }
             CellWide::SpacerHead => {
                 assert_eq!(column + 1, column_count, "padding in column {column}");
                 assert!(text.is_empty(), "padding that shows {text:?}");
                 padded = true;
                 None
-            },
+            }
         };
         if let Some(glyph) = glyph {
             let raw = cell.raw_cell()?;
@@ -494,16 +553,19 @@ fn line(
             match raw.content_tag()? {
                 CellContentTag::BgColorPalette => {
                     style.bg_color = StyleColor::Palette(raw.bg_color_palette()?);
-                },
+                }
                 CellContentTag::BgColorRgb => style.bg_color = StyleColor::Rgb(raw.bg_color_rgb()?),
-                CellContentTag::Codepoint | CellContentTag::CodepointGrapheme => {},
+                CellContentTag::Codepoint | CellContentTag::CodepointGrapheme => {}
             }
             kept.push(Cell { glyph, style });
         }
         column += 1;
     }
     assert_eq!(column, column_count);
-    assert!(wraps || !padded, "a wide glyph wraps early only out of a row that wraps");
+    assert!(
+        wraps || !padded,
+        "a wide glyph wraps early only out of a row that wraps"
+    );
     let ending = match (padded, wraps) {
         (true, _) => Ending::WrapsWide,
         (false, true) => Ending::Wraps,
@@ -514,7 +576,10 @@ fn line(
             + usize::from(ending == Ending::WrapsWide),
         column_count,
     );
-    Ok(Line { cells: kept, ending })
+    Ok(Line {
+        cells: kept,
+        ending,
+    })
 }
 
 #[cfg(test)]
@@ -524,7 +589,10 @@ mod tests {
     use super::*;
 
     fn size(columns: u16, rows: u16) -> Size {
-        Size { columns: NonZeroU16::new(columns).unwrap(), rows: NonZeroU16::new(rows).unwrap() }
+        Size {
+            columns: NonZeroU16::new(columns).unwrap(),
+            rows: NonZeroU16::new(rows).unwrap(),
+        }
     }
 
     fn screen(columns: u16, rows: u16) -> Screen {
@@ -568,7 +636,10 @@ mod tests {
 
     #[test]
     fn a_family_of_emoji_is_one_wide_glyph() {
-        assert_eq!(first("👨\u{200d}👩\u{200d}👧x", 2), [wide("👨\u{200d}👩\u{200d}👧"), narrow("x")]);
+        assert_eq!(
+            first("👨\u{200d}👩\u{200d}👧x", 2),
+            [wide("👨\u{200d}👩\u{200d}👧"), narrow("x")]
+        );
     }
 
     #[test]
@@ -578,7 +649,10 @@ mod tests {
 
     #[test]
     fn a_written_space_is_not_blank() {
-        assert_eq!(first("a b", 4), [narrow("a"), narrow(" "), narrow("b"), Glyph::Blank]);
+        assert_eq!(
+            first("a b", 4),
+            [narrow("a"), narrow(" "), narrow("b"), Glyph::Blank]
+        );
     }
 
     #[test]
@@ -597,7 +671,11 @@ mod tests {
         assert_eq!(lines[1].ending(), Ending::Here);
         let lines = read("0123456789\r\nab");
         let ended = lines[0].ending();
-        assert_eq!(ended, Ending::Here, "text that fills its row and then ends does not wrap");
+        assert_eq!(
+            ended,
+            Ending::Here,
+            "text that fills its row and then ends does not wrap"
+        );
     }
 
     #[test]
@@ -606,7 +684,10 @@ mod tests {
         assert!(screen.clusters());
         assert_eq!(answered(&mut screen, "\x1b[?2027l👍🏽".as_bytes()), b"");
         assert!(!screen.clusters());
-        assert_eq!(glyphs(&screen.view(0).unwrap().lines()[0])[..2], [wide("👍"), wide("🏽")]);
+        assert_eq!(
+            glyphs(&screen.view(0).unwrap().lines()[0])[..2],
+            [wide("👍"), wide("🏽")]
+        );
     }
 
     #[test]
@@ -614,7 +695,10 @@ mod tests {
         let mut screen = screen(10, 2);
         let answer = String::from_utf8(answered(&mut screen, b"\x1b[>q")).unwrap();
         assert_eq!(answer, format!("\x1bP>|{NAME}\x1b\\"));
-        assert!(answered(&mut screen, b"x").is_empty(), "an answer is given once");
+        assert!(
+            answered(&mut screen, b"x").is_empty(),
+            "an answer is given once"
+        );
     }
 
     #[test]
@@ -652,12 +736,19 @@ mod tests {
         assert_eq!(screen.scrollback(), 2);
         let live = screen.view(0).unwrap();
         assert_eq!(glyphs(&live.lines()[0])[0], narrow("3"));
-        assert_eq!(live.cursor().map(|cursor| (cursor.row, cursor.column)), Some((1, 1)));
+        assert_eq!(
+            live.cursor().map(|cursor| (cursor.row, cursor.column)),
+            Some((1, 1))
+        );
         let back = screen.view(2).unwrap();
         assert_eq!(glyphs(&back.lines()[0])[0], narrow("1"));
         assert_eq!(glyphs(&back.lines()[1])[0], narrow("2"));
         assert_eq!(back.cursor(), None);
-        assert_eq!(screen.view(0).unwrap(), live, "the view goes back to the bottom");
+        assert_eq!(
+            screen.view(0).unwrap(),
+            live,
+            "the view goes back to the bottom"
+        );
     }
 
     #[test]
@@ -672,7 +763,10 @@ mod tests {
     #[test]
     fn a_pwd_that_is_not_utf_8_is_none() {
         let mut screen = screen(10, 2);
-        assert_eq!(answered(&mut screen, b"\x1b]0;top\x07\x1b]7;file://h/\xfe\x07"), b"");
+        assert_eq!(
+            answered(&mut screen, b"\x1b]0;top\x07\x1b]7;file://h/\xfe\x07"),
+            b""
+        );
         assert_eq!(screen.title().as_deref(), Some("top"));
         assert_eq!(screen.pwd(), None);
     }
@@ -680,7 +774,10 @@ mod tests {
     #[test]
     fn the_dumps_have_the_text_and_the_screen() {
         let mut screen = scrolling(5, 2);
-        assert_eq!(answered(&mut screen, b"one\r\ntwo\r\n\x1b[31mred\x1b[0m"), b"");
+        assert_eq!(
+            answered(&mut screen, b"one\r\ntwo\r\n\x1b[31mred\x1b[0m"),
+            b""
+        );
         assert_eq!(screen.dumped_text().unwrap(), "one\ntwo\nred");
         let dumped = screen.dumped_screen().unwrap();
         assert_eq!(dumped, "two\r\n\x1b[0m\x1b[38;5;1mred\x1b[0m", "{dumped:?}");
@@ -713,8 +810,14 @@ mod tests {
         assert_eq!(glyphs(&view.lines()[0])[0], Glyph::Blank);
         assert_eq!(answered(&mut screen, b"\x1b[?3hcd"), b"");
         let view = screen.view(0).unwrap();
-        assert_eq!(glyphs(&view.lines()[0])[..3], [narrow("c"), narrow("d"), Glyph::Blank]);
-        assert_eq!(view.cursor().map(|cursor| (cursor.row, cursor.column)), Some((0, 2)));
+        assert_eq!(
+            glyphs(&view.lines()[0])[..3],
+            [narrow("c"), narrow("d"), Glyph::Blank]
+        );
+        assert_eq!(
+            view.cursor().map(|cursor| (cursor.row, cursor.column)),
+            Some((0, 2))
+        );
         assert_eq!(answered(&mut screen, b"\x1b[?3l"), b"");
         assert_eq!(answered(&mut screen, edge), b"\x1b[1;10R");
     }
@@ -722,7 +825,10 @@ mod tests {
     #[test]
     fn a_write_says_the_rows_it_pushed_into_the_scrollback() {
         let mut screen = scrolling(10, 2);
-        assert_eq!(screen.write(b"1\r\n2\r\n3\r\n4").unwrap().pushed, Pushed::Rows(2));
+        assert_eq!(
+            screen.write(b"1\r\n2\r\n3\r\n4").unwrap().pushed,
+            Pushed::Rows(2)
+        );
         let pruned = (0..100_000).any(|_| {
             let before = screen.scrollback();
             assert_eq!(screen.write(b"\r\nx").unwrap().pushed, Pushed::Rows(1));
@@ -737,8 +843,14 @@ mod tests {
     #[test]
     fn a_write_to_the_other_screen_loses_the_rows() {
         let mut screen = scrolling(10, 2);
-        assert_eq!(screen.write(b"1\r\n2\r\n3\x1b[?1049h").unwrap().pushed, Pushed::Lost);
-        assert_eq!(screen.write(b"a\r\nb\r\nc").unwrap().pushed, Pushed::Rows(0));
+        assert_eq!(
+            screen.write(b"1\r\n2\r\n3\x1b[?1049h").unwrap().pushed,
+            Pushed::Lost
+        );
+        assert_eq!(
+            screen.write(b"a\r\nb\r\nc").unwrap().pushed,
+            Pushed::Rows(0)
+        );
     }
 
     #[test]
@@ -746,7 +858,10 @@ mod tests {
         assert_eq!(Pushed::Rows(3).moved(2, 10), 5);
         assert_eq!(Pushed::Rows(3).moved(9, 10), 10);
         assert_eq!(Pushed::Lost.moved(2, 10), 10);
-        assert_eq!([Pushed::Rows(3).moved(0, 10), Pushed::Lost.moved(0, 10)], [0, 0]);
+        assert_eq!(
+            [Pushed::Rows(3).moved(0, 10), Pushed::Lost.moved(0, 10)],
+            [0, 0]
+        );
         assert_eq!(Pushed::Rows(1).then(Pushed::Rows(2)), Pushed::Rows(3));
         assert_eq!(Pushed::Rows(1).then(Pushed::Lost), Pushed::Lost);
         assert_eq!(Pushed::Lost.then(Pushed::Rows(2)), Pushed::Lost);
@@ -755,15 +870,23 @@ mod tests {
     #[test]
     fn a_write_gives_back_the_marks_it_ends() {
         let mut screen = screen(10, 2);
-        assert_eq!(screen.write(b"\x1b]133;A\x07$ \x1b]133;D").unwrap().marks, [Mark::Prompt]);
-        assert_eq!(screen.write(b";1\x07").unwrap().marks, [Mark::Done(Some(1))]);
+        assert_eq!(
+            screen.write(b"\x1b]133;A\x07$ \x1b]133;D").unwrap().marks,
+            [Mark::Prompt]
+        );
+        assert_eq!(
+            screen.write(b";1\x07").unwrap().marks,
+            [Mark::Done(Some(1))]
+        );
     }
 
     #[test]
     fn an_osc_7501_probe_is_answered_before_da1() {
         let mut screen = screen(10, 2);
         let reply = String::from_utf8(answered(&mut screen, b"\x1b]7501;?\x1b\\\x1b[c")).unwrap();
-        let probe = reply.find("\x1b]7501;?").expect("the terminal answers the OSC 7501 probe");
+        let probe = reply
+            .find("\x1b]7501;?")
+            .expect("the terminal answers the OSC 7501 probe");
         let da1 = reply.find("\x1b[?62;").expect("the terminal answers DA1");
         assert!(probe < da1, "probe reply must precede DA1 reply: {reply:?}");
     }
@@ -788,36 +911,64 @@ mod tests {
             root.phase,
             ProgramPhase::Blocked {
                 kind: Some(OscBlockedKind::Permission),
-                message: Some(crate::program_status::Message::parse("message", "allow danger").unwrap()),
+                message: Some(
+                    crate::program_status::Message::parse("message", "allow danger").unwrap()
+                ),
             }
         );
-        assert_eq!(root.app.as_ref().map(crate::program_status::AppName::as_str), Some("claude-code"));
+        assert_eq!(
+            root.app
+                .as_ref()
+                .map(crate::program_status::AppName::as_str),
+            Some("claude-code")
+        );
         assert_eq!(snapshot.children.len(), 3);
         assert_eq!(snapshot.children[0].id.as_str(), "agent-1");
         assert_eq!(
-            snapshot.children[0].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            snapshot.children[0]
+                .status
+                .app
+                .as_ref()
+                .map(crate::program_status::AppName::as_str),
             Some("claude-code")
         );
         assert_eq!(
-            snapshot.children[0].status.title.as_ref().map(crate::program_status::Title::as_str),
+            snapshot.children[0]
+                .status
+                .title
+                .as_ref()
+                .map(crate::program_status::Title::as_str),
             Some("subtask")
         );
         assert_eq!(
             snapshot.children[0].status.phase,
-            ProgramPhase::Working { progress: crate::program_status::Progress::new(42) }
+            ProgramPhase::Working {
+                progress: crate::program_status::Progress::new(42)
+            }
         );
         assert_eq!(snapshot.children[1].id.as_str(), "agent-1/step");
         assert_eq!(
-            snapshot.children[1].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            snapshot.children[1]
+                .status
+                .app
+                .as_ref()
+                .map(crate::program_status::AppName::as_str),
             Some("claude-code")
         );
         assert_eq!(snapshot.children[2].id.as_str(), "agent-10");
         assert_eq!(
-            snapshot.children[2].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            snapshot.children[2]
+                .status
+                .app
+                .as_ref()
+                .map(crate::program_status::AppName::as_str),
             Some("claude-code")
         );
 
-        assert_eq!(answered(&mut screen, b"\x1b]7501;state=clear:id=agent-1\x07"), b"");
+        assert_eq!(
+            answered(&mut screen, b"\x1b]7501;state=clear:id=agent-1\x07"),
+            b""
+        );
         let snapshot = screen.program_statuses();
         assert!(snapshot.root.is_some());
         let ids: Vec<&str> = snapshot.children.iter().map(|it| it.id.as_str()).collect();
@@ -848,8 +999,11 @@ mod tests {
         assert_eq!(answered(&mut screen, bytes.as_bytes()), b"");
         let snapshot = screen.program_statuses();
         assert_eq!(snapshot.root, None);
-        let kept: Vec<(&str, &ProgramPhase)> =
-            snapshot.children.iter().map(|it| (it.id.as_str(), &it.status.phase)).collect();
+        let kept: Vec<(&str, &ProgramPhase)> = snapshot
+            .children
+            .iter()
+            .map(|it| (it.id.as_str(), &it.status.phase))
+            .collect();
         assert_eq!(
             kept,
             [
@@ -860,15 +1014,25 @@ mod tests {
         );
 
         assert_eq!(answered(&mut screen, b"\x1b]133;A\x07"), b"");
-        let kept: Vec<String> =
-            screen.program_statuses().children.into_iter().map(|it| it.id.into()).collect();
+        let kept: Vec<String> = screen
+            .program_statuses()
+            .children
+            .into_iter()
+            .map(|it| it.id.into())
+            .collect();
         assert_eq!(kept, ["failed", "finished"]);
 
-        assert_eq!(answered(&mut screen, b"\x1b]7501;state=idle:app=pi\x07"), b"");
+        assert_eq!(
+            answered(&mut screen, b"\x1b]7501;state=idle:app=pi\x07"),
+            b""
+        );
         let ended = screen.program_exited();
         assert_eq!(ended.root, None);
-        let ended_ids: Vec<(&str, &TerminalPhase)> =
-            ended.children.iter().map(|it| (it.id.as_str(), &it.status.phase)).collect();
+        let ended_ids: Vec<(&str, &TerminalPhase)> = ended
+            .children
+            .iter()
+            .map(|it| (it.id.as_str(), &it.status.phase))
+            .collect();
         assert_eq!(
             ended_ids,
             [
@@ -901,13 +1065,21 @@ mod tests {
             Some("claude-code"),
             "subagent eviction must never evict the root record"
         );
-        let ids: Vec<String> = snapshot.children.iter().map(|it| it.id.as_str().to_owned()).collect();
+        let ids: Vec<String> = snapshot
+            .children
+            .iter()
+            .map(|it| it.id.as_str().to_owned())
+            .collect();
         assert_eq!(ids.len(), crate::program_status::RECORDS_MAX);
         assert!(!ids.contains(&"r000".to_owned()));
         assert!(ids.contains(&"r001".to_owned()));
         assert!(ids.contains(&format!("r{:03}", crate::program_status::RECORDS_MAX)));
         assert_eq!(
-            snapshot.children[0].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            snapshot.children[0]
+                .status
+                .app
+                .as_ref()
+                .map(crate::program_status::AppName::as_str),
             Some("claude-code"),
             "children still inherit app from the retained root record"
         );
@@ -929,7 +1101,10 @@ mod tests {
         assert!(screen.program_statuses().is_empty());
         assert_eq!(screen.program_statuses_version(), 0);
 
-        assert_eq!(answered(&mut screen, b"\x1b]7501;state=working:app=pi\x07"), b"");
+        assert_eq!(
+            answered(&mut screen, b"\x1b]7501;state=working:app=pi\x07"),
+            b""
+        );
         let after_working = screen.program_statuses_version();
         assert!(after_working > 0);
         assert_eq!(answered(&mut screen, b"more plain output\r\n"), b"");
@@ -952,9 +1127,23 @@ mod tests {
         let kept: Vec<(&str, Option<&str>)> = snapshot
             .children
             .iter()
-            .map(|it| (it.id.as_str(), it.status.app.as_ref().map(crate::program_status::AppName::as_str)))
+            .map(|it| {
+                (
+                    it.id.as_str(),
+                    it.status
+                        .app
+                        .as_ref()
+                        .map(crate::program_status::AppName::as_str),
+                )
+            })
             .collect();
-        assert_eq!(kept, [("finished", Some("claude-code")), ("parent/failed", Some("pi"))]);
+        assert_eq!(
+            kept,
+            [
+                ("finished", Some("claude-code")),
+                ("parent/failed", Some("pi"))
+            ]
+        );
 
         let more = concat!(
             "\x1b]7501;state=working:app=antigravity\x07",
@@ -966,7 +1155,15 @@ mod tests {
         let ended_kept: Vec<(&str, Option<&str>)> = ended
             .children
             .iter()
-            .map(|it| (it.id.as_str(), it.status.app.as_ref().map(crate::program_status::AppName::as_str)))
+            .map(|it| {
+                (
+                    it.id.as_str(),
+                    it.status
+                        .app
+                        .as_ref()
+                        .map(crate::program_status::AppName::as_str),
+                )
+            })
             .collect();
         assert_eq!(
             ended_kept,
@@ -998,9 +1195,16 @@ mod tests {
         assert_eq!(snapshot.root, None);
         assert_eq!(snapshot.children.len(), 1);
         assert_eq!(snapshot.children[0].id.as_str(), "next");
-        assert_eq!(snapshot.children[0].status.phase, ProgramPhase::Working { progress: None });
         assert_eq!(
-            snapshot.children[0].status.app.as_ref().map(crate::program_status::AppName::as_str),
+            snapshot.children[0].status.phase,
+            ProgramPhase::Working { progress: None }
+        );
+        assert_eq!(
+            snapshot.children[0]
+                .status
+                .app
+                .as_ref()
+                .map(crate::program_status::AppName::as_str),
             Some("pi")
         );
 

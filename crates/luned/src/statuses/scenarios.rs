@@ -27,16 +27,28 @@ struct Reading {
 }
 
 const fn osc_7501(harness: Harness) -> Reading {
-    Reading { reads: OscReads::of(harness).declared(), heard: heard_osc_7501 }
+    Reading {
+        reads: OscReads::of(harness).declared(),
+        heard: heard_osc_7501,
+    }
 }
 
 const READINGS: [Reading; 6] = [
     osc_7501(Harness::ClaudeCode),
-    Reading { reads: claude::READS, heard: heard_claude_sessions },
+    Reading {
+        reads: claude::READS,
+        heard: heard_claude_sessions,
+    },
     osc_7501(Harness::Pi),
-    Reading { reads: pi::READS, heard: heard_pi_extension },
+    Reading {
+        reads: pi::READS,
+        heard: heard_pi_extension,
+    },
     osc_7501(Harness::Antigravity),
-    Reading { reads: agy::READS, heard: heard_agy_hook },
+    Reading {
+        reads: agy::READS,
+        heard: heard_agy_hook,
+    },
 ];
 
 const fn reads_each_declared_rung_once(readings: &[Reading]) -> bool {
@@ -89,16 +101,25 @@ const FIXTURES: &str = "src/statuses/fixtures";
 
 fn fixture_path(reads: Declared) -> PathBuf {
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURES);
-    folder.join(reads.harness().program()).join(format!("{}.json", reads.rung().name()))
+    folder
+        .join(reads.harness().program())
+        .join(format!("{}.json", reads.rung().name()))
 }
 
 fn shown(reads: Declared) -> String {
-    format!("crates/luned/{FIXTURES}/{}/{}.json", reads.harness().program(), reads.rung().name())
+    format!(
+        "crates/luned/{FIXTURES}/{}/{}.json",
+        reads.harness().program(),
+        reads.rung().name()
+    )
 }
 
 fn fixture(reads: Declared) -> Result<Fixture, String> {
     let path = shown(reads);
-    let record = format!("record it with `dev record-status {}`", reads.harness().program());
+    let record = format!(
+        "record it with `dev record-status {}`",
+        reads.harness().program()
+    );
     let text =
         fs::read(fixture_path(reads)).map_err(|error| format!("{path}: {error}; {record}"))?;
     let fixture: Fixture =
@@ -109,7 +130,11 @@ fn fixture(reads: Declared) -> Result<Fixture, String> {
             return Err(format!("{path}: recorded.{field} is empty"));
         }
     }
-    if let Some(unknown) = fixture.steps.keys().find(|name| Step::named(name).is_none()) {
+    if let Some(unknown) = fixture
+        .steps
+        .keys()
+        .find(|name| Step::named(name).is_none())
+    {
         return Err(format!("{path}: {unknown:?} is no step"));
     }
     Ok(fixture)
@@ -136,14 +161,26 @@ fn tells(step: Step, heard: &Heard) -> bool {
     match step {
         Step::Start | Step::Reject | Step::Interrupt => {
             matches!(status, ActiveStatus::Idle | ActiveStatus::Stopped)
-        },
+        }
         Step::Prompt => *status == ActiveStatus::Working,
         Step::Permission => {
-            matches!(status, ActiveStatus::Blocked { reason: BlockedReason::Permission, .. })
-        },
+            matches!(
+                status,
+                ActiveStatus::Blocked {
+                    reason: BlockedReason::Permission,
+                    ..
+                }
+            )
+        }
         Step::Question => {
-            matches!(status, ActiveStatus::Blocked { reason: BlockedReason::Question, .. })
-        },
+            matches!(
+                status,
+                ActiveStatus::Blocked {
+                    reason: BlockedReason::Question,
+                    ..
+                }
+            )
+        }
         Step::Finish => matches!(status, ActiveStatus::Done { .. }),
         Step::Error => matches!(status, ActiveStatus::Error { .. }),
         Step::Exit => false,
@@ -163,7 +200,7 @@ fn wrong_steps(reads: Declared) -> Vec<String> {
             Err(why) => {
                 wrong.push(why);
                 continue;
-            },
+            }
         };
         let name = step.name();
         match (reads.steps().tells(step), heard) {
@@ -187,13 +224,22 @@ fn wrong_steps(reads: Declared) -> Vec<String> {
 
 #[test]
 fn every_declared_rung_tells_each_step_from_its_recording_or_says_why_not() {
-    let wrong: Vec<String> =
-        READINGS.iter().flat_map(|reading| wrong_steps(reading.reads)).collect();
-    assert_eq!(wrong.join("\n"), "", "each line above is a rung that does not tell a step");
+    let wrong: Vec<String> = READINGS
+        .iter()
+        .flat_map(|reading| wrong_steps(reading.reads))
+        .collect();
+    assert_eq!(
+        wrong.join("\n"),
+        "",
+        "each line above is a rung that does not tell a step"
+    );
 }
 
 fn agent() -> AgentId {
-    AgentId::new(AgentPid::new(42).unwrap(), Start::spelled("100".to_owned()).unwrap())
+    AgentId::new(
+        AgentPid::new(42).unwrap(),
+        Start::spelled("100".to_owned()).unwrap(),
+    )
 }
 
 const RECORDINGS_TEST: &str =
@@ -207,12 +253,20 @@ fn told(reads: Declared, step: Step) -> Option<(RungUpdate, ActiveStatus)> {
     let heard = recorded_step(reads, &fixture, step)
         .unwrap_or_else(|why| panic!("{why}; see {RECORDINGS_TEST}"))
         .unwrap_or_else(|| {
-            panic!("{}: {} has no recording; see {RECORDINGS_TEST}", shown(reads), step.name())
+            panic!(
+                "{}: {} has no recording; see {RECORDINGS_TEST}",
+                shown(reads),
+                step.name()
+            )
         });
     match heard {
-        Heard::Said(RungUpdate::Active { status, at }) => {
-            Some((RungUpdate::Active { status: status.clone(), at }, status))
-        },
+        Heard::Said(RungUpdate::Active { status, at }) => Some((
+            RungUpdate::Active {
+                status: status.clone(),
+                at,
+            },
+            status,
+        )),
         Heard::Said(RungUpdate::Clear) | Heard::Gone => None,
     }
 }
@@ -222,10 +276,10 @@ fn gone(reads: Declared, statuses: &mut Statuses) {
     match recorded_step(reads, &fixture, Step::Exit).expect("an exit reads") {
         Some(Heard::Said(RungUpdate::Clear)) => {
             statuses.record(Report::new(reads, agent(), RungUpdate::Clear));
-        },
+        }
         Some(Heard::Said(RungUpdate::Active { .. }) | Heard::Gone) | None => {
             statuses.replace_rung(reads.rung(), Vec::new());
-        },
+        }
     }
 }
 
@@ -234,16 +288,19 @@ fn the_highest_rung_that_tells_a_step_wins_and_the_next_takes_over_when_it_goes(
     for harness in Harness::ALL {
         let mut pairs = 0;
         let mut declared = 0;
-        let rungs: Vec<Declared> =
-            harness.rungs().map(|rung| Declared::of(harness, rung)).collect();
+        let rungs: Vec<Declared> = harness
+            .rungs()
+            .map(|rung| Declared::of(harness, rung))
+            .collect();
         for (place, &higher) in rungs.iter().enumerate() {
             for &lower in &rungs[place + 1..] {
                 for step in Step::ALL {
                     if step == Step::Exit {
                         continue;
                     }
-                    let told_by_both =
-                        [higher, lower].iter().all(|reads| reads.steps().tells(step) == Tells::Yes);
+                    let told_by_both = [higher, lower]
+                        .iter()
+                        .all(|reads| reads.steps().tells(step) == Tells::Yes);
                     if told_by_both {
                         declared += 1;
                     }
@@ -274,7 +331,10 @@ fn the_highest_rung_that_tells_a_step_wins_and_the_next_takes_over_when_it_goes(
                 }
             }
         }
-        assert_eq!(pairs, declared, "{harness:?}: each step two of its rungs tell is played");
+        assert_eq!(
+            pairs, declared,
+            "{harness:?}: each step two of its rungs tell is played"
+        );
         if rungs.len() > 1 {
             assert_ne!(pairs, 0, "{harness:?}: two of its rungs tell some step");
         }
@@ -290,7 +350,9 @@ fn file_of(step: Step, value: &Value) -> Result<Option<Vec<u8>>, String> {
         Value::Null if step == Step::Exit => Ok(None),
         Value::Null => Err("only an exit has no file".to_owned()),
         Value::Object(_) => bytes_of(value).map(Some),
-        _ => Err(format!("a file's recording is an object or null, not {value}")),
+        _ => Err(format!(
+            "a file's recording is an object or null, not {value}"
+        )),
     }
 }
 
@@ -298,14 +360,18 @@ fn heard_claude_sessions(_: Declared, step: Step, value: &Value) -> Result<Heard
     let Some(bytes) = file_of(step, value)? else {
         return Ok(Heard::Gone);
     };
-    claude::update_of_file(&bytes).map(Heard::Said).map_err(|error| error.to_string())
+    claude::update_of_file(&bytes)
+        .map(Heard::Said)
+        .map_err(|error| error.to_string())
 }
 
 fn heard_pi_extension(_: Declared, step: Step, value: &Value) -> Result<Heard, String> {
     let Some(bytes) = file_of(step, value)? else {
         return Ok(Heard::Gone);
     };
-    pi::update_of_file(&bytes).map(Heard::Said).map_err(|error| error.to_string())
+    pi::update_of_file(&bytes)
+        .map(Heard::Said)
+        .map_err(|error| error.to_string())
 }
 
 fn heard_agy_hook(_: Declared, step: Step, value: &Value) -> Result<Heard, String> {
@@ -319,21 +385,42 @@ fn heard_agy_hook(_: Declared, step: Step, value: &Value) -> Result<Heard, Strin
 
 fn heard_osc_7501(reads: Declared, step: Step, value: &Value) -> Result<Heard, String> {
     let Value::String(bytes) = value else {
-        return Err(format!("an OSC 7501 recording is the bytes the agent wrote, not {value}"));
+        return Err(format!(
+            "an OSC 7501 recording is the bytes the agent wrote, not {value}"
+        ));
     };
     let side = NonZeroU16::new(80).expect("80 is not 0");
-    let mut screen = Screen::new(Size { columns: side, rows: side }, SCROLLBACK_BYTES)
-        .map_err(|error| format!("a screen: {error:?}"))?;
-    screen.write(bytes.as_bytes()).map_err(|error| format!("writing: {error:?}"))?;
+    let mut screen = Screen::new(
+        Size {
+            columns: side,
+            rows: side,
+        },
+        SCROLLBACK_BYTES,
+    )
+    .map_err(|error| format!("a screen: {error:?}"))?;
+    screen
+        .write(bytes.as_bytes())
+        .map_err(|error| format!("writing: {error:?}"))?;
     if step == Step::Exit {
         screen.program_exited();
-        assert!(screen.program_statuses().root.is_none(), "an exit ends the root record");
+        assert!(
+            screen.program_statuses().root.is_none(),
+            "an exit ends the root record"
+        );
     }
     let Some(root) = screen.program_statuses().root else {
         return Ok(Heard::Gone);
     };
-    let app = reads.harness().osc_7501_app().expect("a harness on rung 1 has its app");
-    if root.app.as_ref().map(lune_protocol::program_status::AppName::as_str) != Some(app) {
+    let app = reads
+        .harness()
+        .osc_7501_app()
+        .expect("a harness on rung 1 has its app");
+    if root
+        .app
+        .as_ref()
+        .map(lune_protocol::program_status::AppName::as_str)
+        != Some(app)
+    {
         return Err(format!(
             "the record names app {:?}, and {:?}'s ladder says {app:?}",
             root.app,
@@ -341,6 +428,12 @@ fn heard_osc_7501(reads: Declared, step: Step, value: &Value) -> Result<Heard, S
         ));
     }
     let reads = OscReads::of(reads.harness());
-    let told = Report::osc_7501(reads, agent(), osc_7501::phase(&root.phase), root.at, Vec::new());
+    let told = Report::osc_7501(
+        reads,
+        agent(),
+        osc_7501::phase(&root.phase),
+        root.at,
+        Vec::new(),
+    );
     Ok(Heard::Said(told.update().clone()))
 }

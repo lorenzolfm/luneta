@@ -288,10 +288,19 @@ fn assert_valid_token_spans(line: &str, spans: &[TokenSpan]) {
     let mut previous_end = 0usize;
     for span in spans {
         assert!(span.start < span.end, "token span is non-empty");
-        assert!(span.start >= previous_end, "token spans are sorted and non-overlapping");
+        assert!(
+            span.start >= previous_end,
+            "token spans are sorted and non-overlapping"
+        );
         assert!(span.end <= line.len(), "token span stays in line");
-        assert!(line.is_char_boundary(span.start), "token span start is UTF-8 aligned");
-        assert!(line.is_char_boundary(span.end), "token span end is UTF-8 aligned");
+        assert!(
+            line.is_char_boundary(span.start),
+            "token span start is UTF-8 aligned"
+        );
+        assert!(
+            line.is_char_boundary(span.end),
+            "token span end is UTF-8 aligned"
+        );
         previous_end = span.end;
     }
 }
@@ -718,7 +727,10 @@ fn is_quoted_literal_start(bytes: &[u8], at: usize, language: Language) -> bool 
 }
 
 fn scan_block_comment(bytes: &[u8], start: usize) -> usize {
-    assert!(start + 1 < bytes.len(), "block comment starts with two bytes");
+    assert!(
+        start + 1 < bytes.len(),
+        "block comment starts with two bytes"
+    );
     let mut at = start + 2;
     while at + 1 < bytes.len() && !(bytes[at] == b'*' && bytes[at + 1] == b'/') {
         at += 1;
@@ -728,7 +740,10 @@ fn scan_block_comment(bytes: &[u8], start: usize) -> usize {
     } else {
         bytes.len()
     };
-    assert!(end > start && end <= bytes.len(), "block comment scan advances");
+    assert!(
+        end > start && end <= bytes.len(),
+        "block comment scan advances"
+    );
     end
 }
 
@@ -786,9 +801,15 @@ fn scan_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
 
 fn next_char_len(text: &str, at: usize) -> usize {
     assert!(at < text.len(), "character step starts in bounds");
-    assert!(text.is_char_boundary(at), "character step starts on UTF-8 boundary");
+    assert!(
+        text.is_char_boundary(at),
+        "character step starts on UTF-8 boundary"
+    );
     let len = text[at..].chars().next().map_or(1, char::len_utf8);
-    assert!(len >= 1 && at + len <= text.len(), "character step advances in bounds");
+    assert!(
+        len >= 1 && at + len <= text.len(),
+        "character step advances in bounds"
+    );
     len
 }
 
@@ -869,17 +890,18 @@ mod tests {
             let quoted = "a @ \"quoted\"";
             let spans = highlight_line(quoted, language);
             assert!(
-                spans
-                    .iter()
-                    .any(|s| &quoted[s.start..s.end] == "\"quoted\"" && s.role == SyntaxRole::String),
+                spans.iter().any(
+                    |s| &quoted[s.start..s.end] == "\"quoted\"" && s.role == SyntaxRole::String
+                ),
                 "{language:?}: {spans:?}"
             );
             let bare_quoted = "@\"quoted\"";
             let spans = highlight_line(bare_quoted, language);
             assert!(
-                spans.iter().any(
-                    |s| &bare_quoted[s.start..s.end] == "\"quoted\"" && s.role == SyntaxRole::String
-                ),
+                spans
+                    .iter()
+                    .any(|s| &bare_quoted[s.start..s.end] == "\"quoted\""
+                        && s.role == SyntaxRole::String),
                 "{language:?}: {spans:?}"
             );
         }

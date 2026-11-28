@@ -15,7 +15,10 @@ impl SocketId {
     #[must_use]
     pub fn at(socket: &Path) -> Option<SocketId> {
         let found = fs::symlink_metadata(socket).ok()?;
-        found.file_type().is_socket().then_some(SocketId { device: found.dev(), inode: found.ino() })
+        found.file_type().is_socket().then_some(SocketId {
+            device: found.dev(),
+            inode: found.ino(),
+        })
     }
 }
 
@@ -55,7 +58,11 @@ impl fmt::Display for Unreached {
 }
 
 pub fn bind(socket: &Path) -> io::Result<(UnixListener, Bound)> {
-    assert!(socket.is_absolute(), "{} is looked at from any folder", socket.display());
+    assert!(
+        socket.is_absolute(),
+        "{} is looked at from any folder",
+        socket.display()
+    );
     let listener = UnixListener::bind(socket)?;
     let bound = Bound::of(socket).map_err(|error| {
         let socket = socket.display();
@@ -71,8 +78,14 @@ impl Bound {
         if !found.file_type().is_socket() {
             return Err(io::Error::other("it is no socket just after it was bound"));
         }
-        let id = SocketId { device: found.dev(), inode: found.ino() };
-        Ok(Bound { socket: socket.to_owned(), id })
+        let id = SocketId {
+            device: found.dev(),
+            inode: found.ino(),
+        };
+        Ok(Bound {
+            socket: socket.to_owned(),
+            id,
+        })
     }
 
     #[must_use]
@@ -86,20 +99,28 @@ impl Bound {
     }
 
     pub fn found(&self) -> io::Result<Found> {
-        let lost = |lost| Ok(Found::Lost(Unreached { socket: self.socket.clone(), lost }));
+        let lost = |lost| {
+            Ok(Found::Lost(Unreached {
+                socket: self.socket.clone(),
+                lost,
+            }))
+        };
         match fs::symlink_metadata(&self.socket) {
             Ok(found)
                 if found.file_type().is_socket()
-                    && SocketId { device: found.dev(), inode: found.ino() } == self.id =>
+                    && SocketId {
+                        device: found.dev(),
+                        inode: found.ino(),
+                    } == self.id =>
             {
                 Ok(Found::Ours)
-            },
+            }
             Ok(_) => lost(Lost::Replaced),
             Err(error)
                 if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
             {
                 lost(Lost::Gone)
-            },
+            }
             Err(error) => Err(error),
         }
     }

@@ -7,7 +7,11 @@ pub fn path(name: &str) -> Result<PathBuf, Unset> {
 }
 
 pub fn folder() -> Result<PathBuf, Unset> {
-    let set = |name: &str| env::var_os(name).map(PathBuf::from).filter(|value| value.is_absolute());
+    let set = |name: &str| {
+        env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|value| value.is_absolute())
+    };
     let state = set("XDG_STATE_HOME")
         .or_else(|| set("HOME").map(|home| home.join(".local").join("state")))
         .ok_or(Unset)?;

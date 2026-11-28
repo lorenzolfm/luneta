@@ -28,8 +28,11 @@ const OSASCRIPT: Tool = Tool {
     says: Says::Printed,
 };
 
-const WL_PASTE: Tool =
-    Tool { program: "wl-paste", args: &["--type", "image/png"], says: Says::Bytes };
+const WL_PASTE: Tool = Tool {
+    program: "wl-paste",
+    args: &["--type", "image/png"],
+    says: Says::Bytes,
+};
 
 const XCLIP: Tool = Tool {
     program: "xclip",
@@ -46,7 +49,11 @@ enum Read {
 
 impl Tool {
     fn read(&self) -> Read {
-        let Tool { program, args, says } = self;
+        let Tool {
+            program,
+            args,
+            says,
+        } = self;
         let most = match says {
             Says::Bytes => images::BYTES_MAX,
             Says::Printed => PRINTED_MAX,
@@ -57,18 +64,21 @@ impl Tool {
             Ok(Ran::Ended { status, stdout, .. }) if status.success() => stdout,
             Ok(Ran::Ended { .. }) => return Read::Nothing,
             Ok(Ran::Stuck) => {
-                log::say(&format!("clipboard: {program} did not answer in {}s", READ.as_secs()));
+                log::say(&format!(
+                    "clipboard: {program} did not answer in {}s",
+                    READ.as_secs()
+                ));
                 return Read::Nothing;
-            },
+            }
             Err(error) if error.kind() == ErrorKind::NotFound => return Read::Absent,
             Err(error) if error.kind() == ErrorKind::FileTooLarge => {
                 let most = images::BYTES_MAX / (1024 * 1024);
                 return Read::Refused(format!("the image on the clipboard is over {most} MiB"));
-            },
+            }
             Err(error) => {
                 log::say(&format!("clipboard: {program}: {error}"));
                 return Read::Nothing;
-            },
+            }
         };
         let bytes = match says {
             Says::Bytes => Some(said),
@@ -83,7 +93,11 @@ impl Tool {
 }
 
 pub fn image() -> Result<Option<Png>, String> {
-    if cfg!(target_os = "macos") { image_by(&[OSASCRIPT]) } else { image_by(&[WL_PASTE, XCLIP]) }
+    if cfg!(target_os = "macos") {
+        image_by(&[OSASCRIPT])
+    } else {
+        image_by(&[WL_PASTE, XCLIP])
+    }
 }
 
 fn image_by(tools: &[Tool]) -> Result<Option<Png>, String> {
@@ -91,13 +105,16 @@ fn image_by(tools: &[Tool]) -> Result<Option<Png>, String> {
     for tool in tools {
         match tool.read() {
             Read::Absent => absent.push(tool.program),
-            Read::Nothing => {},
+            Read::Nothing => {}
             Read::Image(png) => return Ok(Some(png)),
             Read::Refused(why) => return Err(why),
         }
     }
     if absent.len() == tools.len() {
-        log::say(&format!("clipboard: none of {} is on the PATH", absent.join(", ")));
+        log::say(&format!(
+            "clipboard: none of {} is on the PATH",
+            absent.join(", ")
+        ));
     }
     Ok(None)
 }
@@ -106,14 +123,24 @@ fn printed(said: &[u8]) -> Option<Vec<u8>> {
     const CLASS: &[u8] = b"PNGf";
     let class = said.windows(CLASS.len()).position(|word| word == CLASS)?;
     let digits = &said[class + CLASS.len()..];
-    let end = digits.iter().position(|digit| !digit.is_ascii_hexdigit()).unwrap_or(digits.len());
+    let end = digits
+        .iter()
+        .position(|digit| !digit.is_ascii_hexdigit())
+        .unwrap_or(digits.len());
     let digits = &digits[..end];
     if digits.is_empty() || !digits.len().is_multiple_of(2) {
         return None;
     }
-    let digit = |digit: u8| char::from(digit).to_digit(16).and_then(|it| u8::try_from(it).ok());
+    let digit = |digit: u8| {
+        char::from(digit)
+            .to_digit(16)
+            .and_then(|it| u8::try_from(it).ok())
+    };
     let (pairs, _) = digits.as_chunks::<2>();
-    pairs.iter().map(|[high, low]| Some(digit(*high)? << 4 | digit(*low)?)).collect()
+    pairs
+        .iter()
+        .map(|[high, low]| Some(digit(*high)? << 4 | digit(*low)?))
+        .collect()
 }
 
 #[cfg(test)]
@@ -121,14 +148,19 @@ mod tests {
     use super::*;
 
     fn tool(script: &'static [&'static str], says: Says) -> Tool {
-        Tool { program: "sh", args: script, says }
+        Tool {
+            program: "sh",
+            args: script,
+            says,
+        }
     }
 
     fn image_of(tools: &[Tool]) -> Option<Vec<u8>> {
         let png = image_by(tools).unwrap()?;
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let parts: Vec<_> =
-            runtime.block_on(tokio_stream::StreamExt::collect(png.asked(None)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let parts: Vec<_> = runtime.block_on(tokio_stream::StreamExt::collect(png.asked(None)));
         let part = |part: &luned::api::KeepImageRequest| match &part.part {
             Some(luned::api::keep_image_request::Part::Bytes(bytes)) => bytes.clone(),
             _ => Vec::new(),
@@ -140,7 +172,10 @@ mod tests {
     fn data_as_applescript_prints_it_is_read_as_bytes() {
         let bytes = printed("«data PNGf89504E47»\n".as_bytes());
         assert_eq!(bytes, Some(vec![0x89, 0x50, 0x4e, 0x47]));
-        assert_eq!(printed(b"\xc7data PNGf89504e47\xc8\n"), Some(vec![0x89, 0x50, 0x4e, 0x47]));
+        assert_eq!(
+            printed(b"\xc7data PNGf89504e47\xc8\n"),
+            Some(vec![0x89, 0x50, 0x4e, 0x47])
+        );
         assert_eq!(printed("«data TIFF89504E47»".as_bytes()), None);
         assert_eq!(printed("«data PNGf»".as_bytes()), None);
         assert_eq!(printed("«data PNGf895»".as_bytes()), None);
@@ -153,7 +188,11 @@ mod tests {
         const NOT_PNG: &[&str] = &["-c", "printf 'GIF89a'"];
         const GOOD: &[&str] = &["-c", r"printf '\211PNG\r\n\032\n!'"];
         const SECOND: &[&str] = &["-c", r"printf '\211PNG\r\n\032\n?'"];
-        let absent = Tool { program: "lune-no-such-tool", args: &[], says: Says::Bytes };
+        let absent = Tool {
+            program: "lune-no-such-tool",
+            args: &[],
+            says: Says::Bytes,
+        };
         let whole = |last: u8| {
             let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
             bytes.push(last);
@@ -161,8 +200,15 @@ mod tests {
         };
         let (fails, not_png) = (tool(FAILS, Says::Bytes), tool(NOT_PNG, Says::Bytes));
         let (good, second) = (tool(GOOD, Says::Bytes), tool(SECOND, Says::Bytes));
-        assert_eq!(image_of(&[absent, fails, not_png, good, second]), whole(b'!'));
-        let absent = Tool { program: "lune-no-such-tool", args: &[], says: Says::Bytes };
+        assert_eq!(
+            image_of(&[absent, fails, not_png, good, second]),
+            whole(b'!')
+        );
+        let absent = Tool {
+            program: "lune-no-such-tool",
+            args: &[],
+            says: Says::Bytes,
+        };
         let (fails, not_png) = (tool(FAILS, Says::Bytes), tool(NOT_PNG, Says::Bytes));
         assert_eq!(image_of(&[absent, fails, not_png]), None);
     }
@@ -184,6 +230,9 @@ mod tests {
     fn an_image_too_large_is_no_image_to_send_and_says_so() {
         const LARGE: &[&str] = &["-c", "head -c 67108865 /dev/zero"];
         let refused = image_by(&[tool(LARGE, Says::Bytes)]).err();
-        assert_eq!(refused.as_deref(), Some("the image on the clipboard is over 64 MiB"));
+        assert_eq!(
+            refused.as_deref(),
+            Some("the image on the clipboard is over 64 MiB")
+        );
     }
 }

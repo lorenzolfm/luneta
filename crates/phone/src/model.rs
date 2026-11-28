@@ -6,8 +6,8 @@ use std::time::SystemTime;
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
 use lune_protocol::made::Made;
 
-use crate::api::{self, project, projects, remote, terminal, worktree};
 use crate::api::project::clone;
+use crate::api::{self, project, projects, remote, terminal, worktree};
 
 #[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
 #[uniffi::export(Eq, Hash)]
@@ -20,16 +20,28 @@ pub struct TerminalKey {
 impl TerminalKey {
     fn of(on: Option<&str>, said: &api::TerminalKey) -> Result<Arc<TerminalKey>, String> {
         let id = NonZeroU32::new(said.id).ok_or("0 is no terminal's id")?;
-        let made = said.made_at.ok_or_else(|| format!("terminal {id} has no made_at"))?;
+        let made = said
+            .made_at
+            .ok_or_else(|| format!("terminal {id} has no made_at"))?;
         let made = Made::read(made).map_err(|why| format!("terminal {id}'s made_at: {why}"))?;
-        let key = TerminalKey { on: on.map(str::to_owned), id, made };
+        let key = TerminalKey {
+            on: on.map(str::to_owned),
+            id,
+            made,
+        };
         assert_eq!(key.to_api().1, *said);
         Ok(Arc::new(key))
     }
 
     pub(crate) fn to_api(&self) -> (Option<api::On>, api::TerminalKey) {
         let on = self.on.clone().map(|destination| api::On { destination });
-        (on, api::TerminalKey { id: self.id.get(), made_at: Some(self.made.into()) })
+        (
+            on,
+            api::TerminalKey {
+                id: self.id.get(),
+                made_at: Some(self.made.into()),
+            },
+        )
     }
 }
 
@@ -51,7 +63,10 @@ pub struct Far {
 pub enum Reached {
     Reaching,
     Reached,
-    Unreached { why: String, since: Option<SystemTime> },
+    Unreached {
+        why: String,
+        since: Option<SystemTime>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -72,8 +87,13 @@ pub struct Project {
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Holds {
-    Folder { worktree: Worktree },
-    Clone { worktrees: Vec<Worktree>, unopened: Unopened },
+    Folder {
+        worktree: Worktree,
+    },
+    Clone {
+        worktrees: Vec<Worktree>,
+        unopened: Unopened,
+    },
     Untold,
 }
 
@@ -208,23 +228,29 @@ impl Model {
         let mut seats = Vec::with_capacity(host.remotes.len());
         for remote in &host.remotes {
             let on = remote.destination.as_str();
-            let seat =
-                |agents, git_statuses, projects| Seat { on: Some(on), agents, git_statuses, projects };
+            let seat = |agents, git_statuses, projects| Seat {
+                on: Some(on),
+                agents,
+                git_statuses,
+                projects,
+            };
             match &remote.reached {
-                Some(remote::Reached::Here(())) => {},
+                Some(remote::Reached::Here(())) => {}
                 Some(remote::Reached::Host(far)) => {
                     let seat = seat(&far.agents, &far.git_statuses, far.projects.as_ref());
                     seats.push((on, seat, Reached::Reached));
-                },
+                }
                 Some(remote::Reached::Unreached(unreached)) => {
-                    let since = unreached.since.and_then(|since| SystemTime::try_from(since).ok());
+                    let since = unreached
+                        .since
+                        .and_then(|since| SystemTime::try_from(since).ok());
                     let why = unreached.why.clone();
                     let seat = seat(&[], &[], unreached.projects.as_ref());
                     seats.push((on, seat, Reached::Unreached { why, since }));
-                },
+                }
                 Some(remote::Reached::Reaching(())) | None => {
                     seats.push((on, seat(&[], &[], None), Reached::Reaching));
-                },
+                }
             }
         }
         let far_agents: usize = seats.iter().map(|(_, seat, _)| seat.agents.len()).sum();
@@ -238,7 +264,11 @@ impl Model {
         let here = seated(&here);
         let far = seats
             .into_iter()
-            .map(|(on, seat, reached)| Far { on: on.to_owned(), reached, held: seated(&seat) })
+            .map(|(on, seat, reached)| Far {
+                on: on.to_owned(),
+                reached,
+                held: seated(&seat),
+            })
             .collect();
         inbox.sort_by_key(inbox_place);
         assert_eq!(inbox.len(), agents_count);
@@ -274,34 +304,41 @@ fn held_of(seat: &Seat<'_>) -> Held {
         .collect();
     match seat.projects.and_then(|projects| projects.held.as_ref()) {
         Some(projects::Held::Kept(kept)) => {
-            let projects = kept.projects.iter().map(|it| project_of(seat.on, it, &branches)).collect();
+            let projects = kept
+                .projects
+                .iter()
+                .map(|it| project_of(seat.on, it, &branches))
+                .collect();
             Held::Kept { projects }
-        },
+        }
         Some(projects::Held::Unkept(why)) => Held::Unkept { why: why.clone() },
         None => Held::Untold,
     }
 }
 
-fn project_of(
-    on: Option<&str>,
-    project: &api::Project,
-    branches: &HashMap<&str, &str>,
-) -> Project {
+fn project_of(on: Option<&str>, project: &api::Project, branches: &HashMap<&str, &str>) -> Project {
     let holds = match &project.holds {
-        Some(project::Holds::Folder(worktree)) => {
-            Holds::Folder { worktree: worktree_of(on, worktree, branches) }
+        Some(project::Holds::Folder(worktree)) => Holds::Folder {
+            worktree: worktree_of(on, worktree, branches),
         },
         Some(project::Holds::Clone(clone)) => {
-            let worktrees = clone.worktrees.iter().map(|it| worktree_of(on, it, branches)).collect();
+            let worktrees = clone
+                .worktrees
+                .iter()
+                .map(|it| worktree_of(on, it, branches))
+                .collect();
             let unopened = match &clone.listing {
-                Some(clone::Listing::Unopened(unopened)) => {
-                    Unopened::Listed { subfolders: unopened.subfolders.clone() }
+                Some(clone::Listing::Unopened(unopened)) => Unopened::Listed {
+                    subfolders: unopened.subfolders.clone(),
                 },
                 Some(clone::Listing::Unlisted(why)) => Unopened::Unlisted { why: why.clone() },
                 None => Unopened::Untold,
             };
-            Holds::Clone { worktrees, unopened }
-        },
+            Holds::Clone {
+                worktrees,
+                unopened,
+            }
+        }
         None => Holds::Untold,
     };
     Project {
@@ -336,9 +373,15 @@ fn worktree_of(
         name: worktree.name.clone(),
         renamed: worktree.renamed,
         folder: worktree.folder.clone(),
-        branch: branches.get(worktree.folder.as_str()).map(|&branch| branch.to_owned()),
+        branch: branches
+            .get(worktree.folder.as_str())
+            .map(|&branch| branch.to_owned()),
         seen,
-        views: worktree.terminals.iter().map(|it| view_of(on, it)).collect(),
+        views: worktree
+            .terminals
+            .iter()
+            .map(|it| view_of(on, it))
+            .collect(),
     }
 }
 
@@ -348,17 +391,25 @@ fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
             Ok(key) => Found::Key { key },
             Err(why) => Found::Unread { why },
         },
-        None => Found::Unread { why: "no terminal key".to_owned() },
+        None => Found::Unread {
+            why: "no terminal key".to_owned(),
+        },
     };
     let (found, topic, command) = match &view.state {
         Some(terminal::State::Running(running)) => (
             key_of(running.key.as_ref()),
-            running.titled.as_ref().and_then(|titled| titled.topic.clone()),
+            running
+                .titled
+                .as_ref()
+                .and_then(|titled| titled.topic.clone()),
             running.command.clone(),
         ),
         Some(terminal::State::Ended(ended)) => (
             key_of(ended.key.as_ref()),
-            ended.titled.as_ref().and_then(|titled| titled.topic.clone()),
+            ended
+                .titled
+                .as_ref()
+                .and_then(|titled| titled.topic.clone()),
             None,
         ),
         Some(terminal::State::Unlisted(key)) => (key_of(Some(key)), None, None),
@@ -373,7 +424,7 @@ fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
             };
             let topic = view.titled.as_ref().and_then(|titled| titled.topic.clone());
             (found, topic, view.command.clone())
-        },
+        }
     };
     View {
         id: view.id,
@@ -386,11 +437,20 @@ fn view_of(on: Option<&str>, view: &api::Terminal) -> View {
 }
 
 fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
-    let terminal = agent.terminal.as_ref().and_then(|key| TerminalKey::of(seat.on, key).ok());
+    let terminal = agent
+        .terminal
+        .as_ref()
+        .and_then(|key| TerminalKey::of(seat.on, key).ok());
     let placed = match (held, &terminal) {
         (Held::Kept { projects }, Some(terminal)) => projects
             .iter()
-            .flat_map(|project| project.holds.worktrees().iter().map(move |it| (project, it)))
+            .flat_map(|project| {
+                project
+                    .holds
+                    .worktrees()
+                    .iter()
+                    .map(move |it| (project, it))
+            })
             .find(|(_, worktree)| worktree.views.iter().any(|it| it.key() == Some(terminal)))
             .map(|(project, worktree)| Placed {
                 project: project.id,
@@ -406,7 +466,9 @@ fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
         name: name_of(agent),
         placed,
         status: status_of(agent),
-        since: agent.status_since.and_then(|since| SystemTime::try_from(since).ok()),
+        since: agent
+            .status_since
+            .and_then(|since| SystemTime::try_from(since).ok()),
     }
 }
 
@@ -422,7 +484,10 @@ fn name_of(agent: &api::Agent) -> String {
         .unwrap_or(agent.cwd.as_str())
         .to_owned();
     if !agent.cwd.is_empty() {
-        assert!(!name.is_empty(), "an agent with a cwd gets a non-empty name");
+        assert!(
+            !name.is_empty(),
+            "an agent with a cwd gets a non-empty name"
+        );
     }
     name
 }
@@ -432,11 +497,16 @@ fn status_of(agent: &api::Agent) -> Status {
         AgentStatus::Working => Status::Busy,
         AgentStatus::Idle => Status::Idle,
         AgentStatus::Stopped => Status::Stopped,
-        AgentStatus::Done { message } => Status::Done { message: message.map(Into::into) },
-        AgentStatus::Error { message } => Status::Error { message: message.map(Into::into) },
+        AgentStatus::Done { message } => Status::Done {
+            message: message.map(Into::into),
+        },
+        AgentStatus::Error { message } => Status::Error {
+            message: message.map(Into::into),
+        },
         AgentStatus::Shell => Status::Shell,
-        AgentStatus::Blocked { reason, message } => {
-            Status::Waiting { why: why_of(reason), message: message.map(Into::into) }
+        AgentStatus::Blocked { reason, message } => Status::Waiting {
+            why: why_of(reason),
+            message: message.map(Into::into),
         },
         AgentStatus::Other(said) => Status::Other { said: said.into() },
         AgentStatus::Unreported => Status::Untold,
@@ -461,7 +531,13 @@ mod tests {
     use super::*;
 
     fn key(id: u32) -> api::TerminalKey {
-        api::TerminalKey { id, made_at: Some(Timestamp { seconds: 1_700_000_000, nanos: 7 }) }
+        api::TerminalKey {
+            id,
+            made_at: Some(Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 7,
+            }),
+        }
     }
 
     fn agent(pid: u32, status: api::Status, since: i64, terminal: Option<u32>) -> api::Agent {
@@ -469,7 +545,10 @@ mod tests {
             pid,
             cwd: format!("/w/lune/agent-{pid}"),
             status: Some(api::agent::Status::KnownStatus(status.into())),
-            status_since: Some(Timestamp { seconds: since, nanos: 0 }),
+            status_since: Some(Timestamp {
+                seconds: since,
+                nanos: 0,
+            }),
             terminal: terminal.map(key),
             waiting_for: (status == api::Status::Waiting).then_some(
                 api::agent::WaitingFor::KnownWaitingFor(api::WaitingFor::PermissionPrompt.into()),
@@ -479,12 +558,20 @@ mod tests {
     }
 
     fn kept(projects: Vec<api::Project>) -> api::Projects {
-        let kept = projects::Kept { projects, version: None };
-        api::Projects { held: Some(projects::Held::Kept(kept)) }
+        let kept = projects::Kept {
+            projects,
+            version: None,
+        };
+        api::Projects {
+            held: Some(projects::Held::Kept(kept)),
+        }
     }
 
     fn clone_of(worktrees: Vec<api::Worktree>) -> api::Project {
-        let clone = project::Clone { worktrees, listing: None };
+        let clone = project::Clone {
+            worktrees,
+            listing: None,
+        };
         api::Project {
             id: 1,
             name: "lune".to_owned(),
@@ -518,20 +605,39 @@ mod tests {
                 agent(2, api::Status::Waiting, 30, None),
                 agent(3, api::Status::Idle, 5, None),
                 agent(4, api::Status::Waiting, 20, None),
-                api::Agent { status_since: None, ..agent(5, api::Status::Waiting, 0, None) },
+                api::Agent {
+                    status_since: None,
+                    ..agent(5, api::Status::Waiting, 0, None)
+                },
             ],
             ..api::Host::default()
         };
         let model = Model::of(&host);
-        let names: Vec<&str> = model.inbox.iter().map(|agent| agent.name.as_str()).collect();
-        assert_eq!(names, ["agent-4", "agent-2", "agent-5", "agent-1", "agent-3"]);
-        assert_eq!(model.inbox[0].status, Status::Waiting { why: Why::Permission, message: None });
+        let names: Vec<&str> = model
+            .inbox
+            .iter()
+            .map(|agent| agent.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["agent-4", "agent-2", "agent-5", "agent-1", "agent-3"]
+        );
+        assert_eq!(
+            model.inbox[0].status,
+            Status::Waiting {
+                why: Why::Permission,
+                message: None
+            }
+        );
     }
 
     #[test]
     fn an_agent_name_prefers_given_then_topic_then_auto_then_folder() {
         let named = |text: &str, source: api::NameSource| {
-            Some(api::Name { text: text.to_owned(), source: Some(source.into()) })
+            Some(api::Name {
+                text: text.to_owned(),
+                source: Some(source.into()),
+            })
         };
         let mut given = agent(1, api::Status::Idle, 1, None);
         given.name = named("fold", api::NameSource::User);
@@ -571,7 +677,10 @@ mod tests {
         };
         assert_eq!(agent.placed, Some(placed));
         assert_eq!(agent.terminal.as_ref().map(|it| it.id.get()), Some(8));
-        assert_eq!(agent.terminal.as_ref().map(|it| it.to_api()), Some((None, key(8))));
+        assert_eq!(
+            agent.terminal.as_ref().map(|it| it.to_api()),
+            Some((None, key(8)))
+        );
         let Held::Kept { projects } = &model.here else {
             panic!("the projects are kept: {:?}", model.here);
         };
@@ -583,9 +692,15 @@ mod tests {
 
     #[test]
     fn a_worktree_s_branch_is_the_one_its_folder_has_checked_out() {
-        let branch = api::Branch { name: "issue-723".to_owned(), ..api::Branch::default() };
+        let branch = api::Branch {
+            name: "issue-723".to_owned(),
+            ..api::Branch::default()
+        };
         let head = Some(api::checkout::Head::Branch(branch));
-        let checkout = api::Checkout { head, ..api::Checkout::default() };
+        let checkout = api::Checkout {
+            head,
+            ..api::Checkout::default()
+        };
         let host = api::Host {
             git_statuses: vec![api::GitStatus {
                 dir: "/w/lune/fix".to_owned(),
@@ -597,7 +712,10 @@ mod tests {
         let Held::Kept { projects } = &Model::of(&host).here else {
             panic!("the projects are kept");
         };
-        assert_eq!(projects[0].holds.worktrees()[0].branch.as_deref(), Some("issue-723"));
+        assert_eq!(
+            projects[0].holds.worktrees()[0].branch.as_deref(),
+            Some("issue-723")
+        );
     }
 
     #[test]
@@ -606,22 +724,51 @@ mod tests {
         let here = TerminalKey::of(None, &made).unwrap();
         let far = TerminalKey::of(Some("far"), &made).unwrap();
         assert_eq!(here.to_api(), (None, made));
-        assert_eq!(far.to_api(), (Some(api::On { destination: "far".to_owned() }), made));
+        assert_eq!(
+            far.to_api(),
+            (
+                Some(api::On {
+                    destination: "far".to_owned()
+                }),
+                made
+            )
+        );
         assert_ne!(here, far, "terminal 17 here is not terminal 17 on far");
     }
 
     #[test]
     fn a_view_says_whether_its_terminal_is_found_lost_looked_for_or_unread() {
-        let found = |found| view_of(Some("far"), &api::Terminal { found, ..api::Terminal::default() }).found;
+        let found = |found| {
+            view_of(
+                Some("far"),
+                &api::Terminal {
+                    found,
+                    ..api::Terminal::default()
+                },
+            )
+            .found
+        };
         let three = TerminalKey::of(Some("far"), &key(3)).unwrap();
-        assert_eq!(found(Some(terminal::Found::Key(key(3)))), Found::Key { key: three.clone() });
+        assert_eq!(
+            found(Some(terminal::Found::Key(key(3)))),
+            Found::Key { key: three.clone() }
+        );
         assert_eq!(found(Some(terminal::Found::Lost(()))), Found::Lost);
         assert_eq!(found(Some(terminal::Found::Looking(()))), Found::Looking);
         assert_eq!(found(None), Found::Untold);
-        let unmade = [api::TerminalKey { made_at: None, ..key(3) }, key(0)];
+        let unmade = [
+            api::TerminalKey {
+                made_at: None,
+                ..key(3)
+            },
+            key(0),
+        ];
         for unmade in unmade {
             let unread = found(Some(terminal::Found::Key(unmade)));
-            assert!(matches!(unread, Found::Unread { .. }), "{unmade:?}: {unread:?}");
+            assert!(
+                matches!(unread, Found::Unread { .. }),
+                "{unmade:?}: {unread:?}"
+            );
         }
 
         let running = view_of(
@@ -630,7 +777,9 @@ mod tests {
                 state: Some(terminal::State::Running(terminal::Running {
                     key: Some(key(3)),
                     command: Some("claude".to_owned()),
-                    titled: Some(api::Titled { topic: Some("Fixing".to_owned()) }),
+                    titled: Some(api::Titled {
+                        topic: Some("Fixing".to_owned()),
+                    }),
                     shell: None,
                 })),
                 ..api::Terminal::default()
@@ -646,7 +795,9 @@ mod tests {
                 command: Some("stale".to_owned()),
                 state: Some(terminal::State::Ended(terminal::Ended {
                     key: Some(key(3)),
-                    titled: Some(api::Titled { topic: Some("Done".to_owned()) }),
+                    titled: Some(api::Titled {
+                        topic: Some("Done".to_owned()),
+                    }),
                 })),
                 ..api::Terminal::default()
             },
@@ -687,23 +838,33 @@ mod tests {
     #[test]
     fn a_clone_whose_worktrees_luned_could_not_list_says_why() {
         let unlisted = clone::Listing::Unlisted("/w/lune is missing".to_owned());
-        let listed = clone::Listing::Unopened(api::project::Unopened { subfolders: vec!["old".to_owned()] });
+        let listed = clone::Listing::Unopened(api::project::Unopened {
+            subfolders: vec!["old".to_owned()],
+        });
         let unopened = |listing| {
             let mut project = clone_of(vec![worktree_with(5, "fix", 9)]);
             let Some(project::Holds::Clone(clone)) = &mut project.holds else {
                 panic!("the project is a clone");
             };
             clone.listing = listing;
-            let host = api::Host { projects: Some(kept(vec![project])), ..api::Host::default() };
+            let host = api::Host {
+                projects: Some(kept(vec![project])),
+                ..api::Host::default()
+            };
             match Model::of(&host).here {
                 Held::Kept { mut projects } => match projects.remove(0).holds {
-                    Holds::Clone { worktrees, unopened } => (worktrees.len(), unopened),
+                    Holds::Clone {
+                        worktrees,
+                        unopened,
+                    } => (worktrees.len(), unopened),
                     holds => panic!("the project is a clone: {holds:?}"),
                 },
                 held => panic!("the projects are kept: {held:?}"),
             }
         };
-        let why = Unopened::Unlisted { why: "/w/lune is missing".to_owned() };
+        let why = Unopened::Unlisted {
+            why: "/w/lune is missing".to_owned(),
+        };
         assert_eq!(unopened(Some(unlisted)), (1, why));
         let subfolders = vec!["old".to_owned()];
         assert_eq!(unopened(Some(listed)), (1, Unopened::Listed { subfolders }));
@@ -716,7 +877,10 @@ mod tests {
             agents: vec![agent(7, api::Status::Waiting, 3, None)],
             ..remote::Host::default()
         };
-        let unreached = remote::Unreached { why: "ssh ended".to_owned(), ..remote::Unreached::default() };
+        let unreached = remote::Unreached {
+            why: "ssh ended".to_owned(),
+            ..remote::Unreached::default()
+        };
         let remote = |destination: &str, reached| api::Remote {
             destination: destination.to_owned(),
             reached: Some(reached),
@@ -731,10 +895,23 @@ mod tests {
             ..api::Host::default()
         };
         let model = Model::of(&host);
-        let far: Vec<(&str, &Reached)> =
-            model.far.iter().map(|it| (it.on.as_str(), &it.reached)).collect();
-        let unreached = Reached::Unreached { why: "ssh ended".to_owned(), since: None };
-        assert_eq!(far, [("far", &Reached::Reached), ("vps", &unreached), ("mac", &Reached::Reaching)]);
+        let far: Vec<(&str, &Reached)> = model
+            .far
+            .iter()
+            .map(|it| (it.on.as_str(), &it.reached))
+            .collect();
+        let unreached = Reached::Unreached {
+            why: "ssh ended".to_owned(),
+            since: None,
+        };
+        assert_eq!(
+            far,
+            [
+                ("far", &Reached::Reached),
+                ("vps", &unreached),
+                ("mac", &Reached::Reaching)
+            ]
+        );
         assert_eq!(model.inbox[0].on.as_deref(), Some("far"));
         assert_eq!(model.here, Held::Untold);
     }
@@ -764,7 +941,9 @@ mod tests {
                 with_reported(
                     3,
                     api::agent::ReportedStatus::Blocked(api::BlockedStatus {
-                        reason: Some(api::blocked_status::Reason::Known(api::WaitingFor::Auth.into())),
+                        reason: Some(api::blocked_status::Reason::Known(
+                            api::WaitingFor::Auth.into(),
+                        )),
                         message: Some("Log in".to_owned()),
                     }),
                 ),
@@ -775,10 +954,23 @@ mod tests {
         let model = Model::of(&host);
         assert_eq!(
             model.inbox[0].status,
-            Status::Waiting { why: Why::Auth, message: Some("Log in".to_owned()) }
+            Status::Waiting {
+                why: Why::Auth,
+                message: Some("Log in".to_owned())
+            }
         );
-        assert_eq!(model.inbox[1].status, Status::Done { message: Some("All tests pass".to_owned()) });
-        assert_eq!(model.inbox[2].status, Status::Error { message: Some("Token expired".to_owned()) });
+        assert_eq!(
+            model.inbox[1].status,
+            Status::Done {
+                message: Some("All tests pass".to_owned())
+            }
+        );
+        assert_eq!(
+            model.inbox[2].status,
+            Status::Error {
+                message: Some("Token expired".to_owned())
+            }
+        );
         assert_eq!(model.inbox[3].status, Status::Stopped);
     }
 }

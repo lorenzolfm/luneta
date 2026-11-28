@@ -48,15 +48,26 @@ pub struct Spot(Place);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Place {
-    Clone { root: Dir, subfolder: Option<Subfolder>, listed: Listed },
-    Folder { asked: Dir, repository: Option<Dir> },
+    Clone {
+        root: Dir,
+        subfolder: Option<Subfolder>,
+        listed: Listed,
+    },
+    Folder {
+        asked: Dir,
+        repository: Option<Dir>,
+    },
 }
 
 impl Spot {
     #[must_use]
     pub fn in_clone(root: Dir, listed: Listed, at: Option<Subfolder>) -> Spot {
         let subfolder = at.filter(|it| listed.0.contains(it));
-        Spot(Place::Clone { root, subfolder, listed })
+        Spot(Place::Clone {
+            root,
+            subfolder,
+            listed,
+        })
     }
 
     #[must_use]
@@ -68,8 +79,16 @@ impl Spot {
     #[must_use]
     pub fn place(&self) -> Dir {
         match &self.0 {
-            Place::Clone { root, subfolder: Some(subfolder), .. } => root.at(subfolder),
-            Place::Clone { root, subfolder: None, .. } => root.clone(),
+            Place::Clone {
+                root,
+                subfolder: Some(subfolder),
+                ..
+            } => root.at(subfolder),
+            Place::Clone {
+                root,
+                subfolder: None,
+                ..
+            } => root.clone(),
             Place::Folder { asked, .. } => asked.clone(),
         }
     }
@@ -120,7 +139,10 @@ pub fn clone_root(common: &Path, bareness: Bareness) -> CloneRoot {
     if common.file_name().and_then(|name| name.to_str()) != Some(BARE) {
         return CloneRoot::NoBare;
     }
-    let root = common.parent().and_then(Path::to_str).expect("a named path of a str has a parent");
+    let root = common
+        .parent()
+        .and_then(Path::to_str)
+        .expect("a named path of a str has a parent");
     match Dir::parse(root) {
         Ok(root) => CloneRoot::Of(root),
         Err(why) => CloneRoot::Unparsed(why),
@@ -135,16 +157,19 @@ pub fn porcelain(root: &Dir, said: &[u8]) -> Result<Listed, String> {
         match word {
             "worktree" => {
                 if found.len() == LISTED_MAX {
-                    return Err(format!("git listed over {LISTED_MAX} worktrees of {}", root.0));
+                    return Err(format!(
+                        "git listed over {LISTED_MAX} worktrees of {}",
+                        root.0
+                    ));
                 }
                 found.push((Dir::parse(rest)?, true));
-            },
+            }
             "bare" | "prunable" => {
                 if let Some((_, kept)) = found.last_mut() {
                     *kept = false;
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
     let kept = found.into_iter().filter(|(_, kept)| *kept);
@@ -192,7 +217,10 @@ mod tests {
             worktree /elsewhere/x\0HEAD 3\0detached\0\0\
             worktree /w/lune/issue-7\0HEAD 4\0branch refs/heads/issue-7\0locked\0\0";
         let want = BTreeSet::from([subfolder("issue-7"), subfolder("main")]);
-        assert_eq!(porcelain(&dir("/w/lune"), said).map(|it| it.subfolders().clone()), Ok(want));
+        assert_eq!(
+            porcelain(&dir("/w/lune"), said).map(|it| it.subfolders().clone()),
+            Ok(want)
+        );
     }
 
     #[test]
@@ -200,11 +228,17 @@ mod tests {
         let entry = |at: usize| format!("worktree /w/lune/{at}\0HEAD 1\0\0");
         let said: String = (0..=LISTED_MAX).map(entry).collect();
         let refused = porcelain(&dir("/w/lune"), said.as_bytes()).unwrap_err();
-        assert!(refused.contains(&format!("over {LISTED_MAX} worktrees")), "{refused}");
+        assert!(
+            refused.contains(&format!("over {LISTED_MAX} worktrees")),
+            "{refused}"
+        );
         let said: String = (0..=CLONE_WORKTREES_MAX).map(entry).collect();
         let refused = porcelain(&dir("/w/lune"), said.as_bytes()).unwrap_err();
         let over = CLONE_WORKTREES_MAX + 1;
-        assert_eq!(refused, format!("/w/lune holds {over} worktrees, over {CLONE_WORKTREES_MAX}"));
+        assert_eq!(
+            refused,
+            format!("/w/lune holds {over} worktrees, over {CLONE_WORKTREES_MAX}")
+        );
     }
 
     #[test]

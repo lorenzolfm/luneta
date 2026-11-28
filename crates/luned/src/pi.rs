@@ -12,7 +12,7 @@ use lune_protocol::said::Said;
 use serde::Deserialize;
 
 use crate::agent::{
-    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, Sighting,
+    Sighting, absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble,
 };
 use crate::mux;
 use crate::process::{self, AgentId};
@@ -20,7 +20,7 @@ use crate::statuses::{
     ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
-use crate::{log, Directory};
+use crate::{Directory, log};
 
 const EXTENSION: &str = include_str!("pi/lune.ts");
 
@@ -98,8 +98,9 @@ impl PiStatus {
         match self {
             PiStatus::Stopped => ActiveStatus::Stopped,
             PiStatus::Working => ActiveStatus::Working,
-            PiStatus::Waiting => {
-                ActiveStatus::Blocked { reason: BlockedReason::Unspecified, message: None }
+            PiStatus::Waiting => ActiveStatus::Blocked {
+                reason: BlockedReason::Unspecified,
+                message: None,
             },
             PiStatus::Done => ActiveStatus::Done { message: None },
             PiStatus::Error { message } => ActiveStatus::Error { message },
@@ -128,12 +129,20 @@ fn project_phase(phase: &RawPhase, prompt_open: bool) -> io::Result<PiStatus> {
     match phase {
         RawPhase::Resting { resting } => {
             let resting = parse_resting(resting)?;
-            Ok(if prompt_open { PiStatus::Waiting } else { resting })
-        },
+            Ok(if prompt_open {
+                PiStatus::Waiting
+            } else {
+                resting
+            })
+        }
         RawPhase::Running { outcome } => {
             let _ = parse_resting(outcome)?;
-            Ok(if prompt_open { PiStatus::Waiting } else { PiStatus::Working })
-        },
+            Ok(if prompt_open {
+                PiStatus::Waiting
+            } else {
+                PiStatus::Working
+            })
+        }
     }
 }
 
@@ -148,9 +157,13 @@ struct File {
 
 impl File {
     fn parse(raw: RawFile) -> io::Result<Self> {
-        let status = PiStatus::parse(&raw.status, raw.status_message.as_deref()).ok_or_else(|| {
-            io::Error::new(ErrorKind::InvalidData, format!("unknown pi status {:?}", raw.status))
-        })?;
+        let status =
+            PiStatus::parse(&raw.status, raw.status_message.as_deref()).ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("unknown pi status {:?}", raw.status),
+                )
+            })?;
         match (raw.phase.as_ref(), raw.prompt_open) {
             (Some(phase), Some(prompt_open)) => {
                 let projected = project_phase(phase, prompt_open)?;
@@ -160,14 +173,14 @@ impl File {
                         "pi status disagrees with phase and promptOpen",
                     ));
                 }
-            },
-            (None, None) => {},
+            }
+            (None, None) => {}
             (Some(_), None) | (None, Some(_)) => {
                 return Err(io::Error::new(
                     ErrorKind::InvalidData,
                     "phase and promptOpen must appear together",
                 ));
-            },
+            }
         }
         let proc_start = raw
             .proc_start
@@ -229,14 +242,16 @@ impl AgentFiles {
         if let Some(pi) = self.pi.as_ref().filter(|pi| pi.is_dir())
             && let Err(error) = install(pi, &self.lune)
         {
-            self.troubles.say(format!("pi's extension in {}: {error}", pi.display()));
+            self.troubles
+                .say(format!("pi's extension in {}: {error}", pi.display()));
         }
         let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
             Err(error) => {
-                self.troubles.say(format!("{}: {error}", self.dir.display()));
+                self.troubles
+                    .say(format!("{}: {error}", self.dir.display()));
                 Vec::new()
-            },
+            }
         };
         if paths.len() > SOURCE_AGENTS_MAX {
             self.troubles.say(format!(
@@ -258,8 +273,9 @@ impl AgentFiles {
             };
             let id = AgentId::new(pid, start);
             let cached = self.processes.remove(&id);
-            let Some(started) =
-                cached.map(|it| it.started).or_else(|| process::started(pid.get()))
+            let Some(started) = cached
+                .map(|it| it.started)
+                .or_else(|| process::started(pid.get()))
             else {
                 continue;
             };
@@ -279,17 +295,17 @@ impl AgentFiles {
                     let built = reported(id.clone(), file, found, proof);
                     processes.insert(id, found);
                     agents.push(built);
-                },
+                }
                 Ok(None) => {
                     let why = format!("{}: no process of its pid wrote it", path.display());
                     self.troubles.say(why);
-                },
+                }
                 Err(error) => {
                     processes.extend(cached.map(|it| (id, it)));
                     if error.kind() != ErrorKind::NotFound {
                         self.troubles.say(format!("{}: {error}", path.display()));
                     }
-                },
+                }
             }
         }
         self.processes = processes;
@@ -300,7 +316,10 @@ impl AgentFiles {
 
 pub fn extension(lune: &Path) -> io::Result<String> {
     let Some(folder) = lune.to_str() else {
-        return Err(io::Error::new(ErrorKind::InvalidData, "the daemon's folder is not UTF-8"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "the daemon's folder is not UTF-8",
+        ));
     };
     Ok(EXTENSION.replacen(FOLDER_STRING, &serde_json::to_string(folder)?, 1))
 }
@@ -339,7 +358,9 @@ fn read(
 }
 
 fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
-    modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
+    modified
+        .checked_add(DATED_LATE)
+        .is_none_or(|late| started <= late)
 }
 
 #[cfg(test)]
@@ -352,7 +373,10 @@ pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
 impl File {
     fn update(&self) -> RungUpdate {
         let status = self.status.clone().into_active();
-        RungUpdate::Active { status, at: Some(self.status_since) }
+        RungUpdate::Active {
+            status,
+            at: Some(self.status_since),
+        }
     }
 }
 
@@ -376,24 +400,36 @@ mod tests {
     use lune_protocol::program_status::Message;
     use lune_protocol::said::Said;
 
-    use super::{dated_since, File, PiStatus, RawFile, RawPhase, RawResting, DATED_LATE};
-    use crate::statuses::ActiveStatus;
+    use super::{DATED_LATE, File, PiStatus, RawFile, RawPhase, RawResting, dated_since};
     use crate::Directory;
+    use crate::statuses::ActiveStatus;
 
     #[test]
     fn a_file_dated_since_its_process_started_stands() {
         let started = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         assert!(dated_since(started, started));
-        assert!(dated_since(started - DATED_LATE, started), "a file dated a little late stands");
+        assert!(
+            dated_since(started - DATED_LATE, started),
+            "a file dated a little late stands"
+        );
         let earlier = started - DATED_LATE - Duration::from_nanos(1);
-        assert!(!dated_since(earlier, started), "a file from an earlier process does not");
+        assert!(
+            !dated_since(earlier, started),
+            "a file from an earlier process does not"
+        );
     }
 
     #[test]
     fn a_file_dated_at_the_last_time_there_is_stands() {
         let secs = u64::try_from(i64::MAX).unwrap();
-        let last = SystemTime::UNIX_EPOCH.checked_add(Duration::new(secs, 999_999_999)).unwrap();
-        assert_eq!(last.checked_add(DATED_LATE), None, "nothing is later than the last time");
+        let last = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::new(secs, 999_999_999))
+            .unwrap();
+        assert_eq!(
+            last.checked_add(DATED_LATE),
+            None,
+            "nothing is later than the last time"
+        );
         assert!(dated_since(last, SystemTime::now()));
     }
 
@@ -402,7 +438,10 @@ mod tests {
         let parse = |word, message| PiStatus::parse(word, message).map(PiStatus::into_active);
         assert_eq!(parse("stopped", None), Some(ActiveStatus::Stopped));
         assert_eq!(parse("idle", None), Some(ActiveStatus::Stopped));
-        assert_eq!(parse("done", Some("ignored")), Some(ActiveStatus::Done { message: None }));
+        assert_eq!(
+            parse("done", Some("ignored")),
+            Some(ActiveStatus::Done { message: None })
+        );
         assert_eq!(parse("busy", Some("ignored")), Some(ActiveStatus::Working));
         assert_eq!(
             parse("error", Some("  \x1b[31mrate\u{200b} limited  ")),
@@ -410,7 +449,10 @@ mod tests {
                 message: Message::parse("message", "[31mrate limited").ok(),
             })
         );
-        assert_eq!(parse("error", Some("   ")), Some(ActiveStatus::Error { message: None }));
+        assert_eq!(
+            parse("error", Some("   ")),
+            Some(ActiveStatus::Error { message: None })
+        );
         assert_eq!(parse("working", None), None);
         assert_eq!(parse("blocked", None), None);
         assert_eq!(parse("   ", None), None);
@@ -437,14 +479,20 @@ mod tests {
 
         let mut consistent = base("waiting", Some("42"));
         consistent.phase = Some(RawPhase::Running {
-            outcome: RawResting { status: "error".to_owned(), message: Some("boom".to_owned()) },
+            outcome: RawResting {
+                status: "error".to_owned(),
+                message: Some("boom".to_owned()),
+            },
         });
         consistent.prompt_open = Some(true);
         assert!(File::parse(consistent).is_ok());
 
         let mut mismatched = base("done", Some("42"));
         mismatched.phase = Some(RawPhase::Running {
-            outcome: RawResting { status: "done".to_owned(), message: None },
+            outcome: RawResting {
+                status: "done".to_owned(),
+                message: None,
+            },
         });
         mismatched.prompt_open = Some(true);
         assert!(File::parse(mismatched).is_err());
@@ -455,7 +503,10 @@ mod tests {
 
         let mut bad_outcome = base("busy", Some("42"));
         bad_outcome.phase = Some(RawPhase::Running {
-            outcome: RawResting { status: "busy".to_owned(), message: None },
+            outcome: RawResting {
+                status: "busy".to_owned(),
+                message: None,
+            },
         });
         bad_outcome.prompt_open = Some(false);
         assert!(File::parse(bad_outcome).is_err());

@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use lune_domain::projects::{clone_root, porcelain, Bareness, CloneRoot, Dir, Listed, Spot};
 use lune_domain::projects::BARE;
+use lune_domain::projects::{Bareness, CloneRoot, Dir, Listed, Spot, clone_root, porcelain};
 
 use crate::directory::Directory;
 use crate::git::{self, Common, Git};
@@ -17,11 +17,17 @@ pub fn of(folder: &Dir, look: Duration) -> Result<Spot, String> {
         Common::NoRepository => return Ok(Spot::in_folder(folder.clone(), None)),
         Common::Unsaid(why) => {
             let folder = folder.as_str();
-            return Err(format!("git did not say what repository {folder} is in: {why}"));
-        },
+            return Err(format!(
+                "git did not say what repository {folder} is in: {why}"
+            ));
+        }
         Common::BareUnread(bare) => {
-            return Err(format!("{} is in {}", folder.as_str(), Common::bare_unread(&bare)));
-        },
+            return Err(format!(
+                "{} is in {}",
+                folder.as_str(),
+                Common::bare_unread(&bare)
+            ));
+        }
         Common::Gone => return Err(format!("{} is gone", folder.as_str())),
     };
     let top = toplevel(folder, until, look)?;
@@ -30,14 +36,14 @@ pub fn of(folder: &Dir, look: Duration) -> Result<Spot, String> {
             let listed = listed(&root, until, look)?;
             let at = top.and_then(|top| root.subfolder(&top));
             return Ok(Spot::in_clone(root, listed, at));
-        },
+        }
         CloneRoot::Unparsed(why) => {
             return Err(format!(
                 "{} is in a clone wt made in a folder lune cannot keep: {why}",
                 folder.as_str()
             ));
-        },
-        CloneRoot::Worked | CloneRoot::NoBare => {},
+        }
+        CloneRoot::Worked | CloneRoot::NoBare => {}
     }
     Ok(Spot::in_folder(folder.clone(), top))
 }
@@ -108,18 +114,27 @@ fn clone_within(common: &Directory, until: Instant, look: Duration) -> Result<Cl
 }
 
 fn bareness(ran: Ran) -> Result<Bareness, String> {
-    if let Ran::Ended { status, stdout, stderr } = &ran
+    if let Ran::Ended {
+        status,
+        stdout,
+        stderr,
+    } = &ran
         && status.code() == Some(1)
         && stdout.is_empty()
         && stderr.is_empty()
     {
         return Ok(Bareness::Worked);
     }
-    let said = ran.answer().map_err(|why| format!("git config core.bare: {why}"))?;
+    let said = ran
+        .answer()
+        .map_err(|why| format!("git config core.bare: {why}"))?;
     match said.as_slice() {
         b"true\n" => Ok(Bareness::Bare),
         b"false\n" => Ok(Bareness::Worked),
-        _ => Err(format!("git said core.bare is {:?}", String::from_utf8_lossy(&said))),
+        _ => Err(format!(
+            "git said core.bare is {:?}",
+            String::from_utf8_lossy(&said)
+        )),
     }
 }
 
@@ -154,11 +169,21 @@ mod tests {
     fn a_folder_is_spotted_in_its_clone_s_worktree_in_its_plain_repository_or_alone() {
         let scratch = tempfile::tempdir().unwrap();
         let scratch = fs::canonicalize(scratch.path()).unwrap();
-        let (clone, plain, alone) = (scratch.join("lune"), scratch.join("plain"), scratch.join("Vault"));
+        let (clone, plain, alone) = (
+            scratch.join("lune"),
+            scratch.join("plain"),
+            scratch.join("Vault"),
+        );
         fs::create_dir_all(clone.join(".bare")).unwrap();
-        git(&clone.join(".bare"), &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            &clone.join(".bare"),
+            &["init", "-q", "--bare", "-b", "main"],
+        );
         fs::write(clone.join(".git"), "gitdir: ./.bare\n").unwrap();
-        git(&clone, &["worktree", "add", "-q", "--orphan", "-b", "main", "main"]);
+        git(
+            &clone,
+            &["worktree", "add", "-q", "--orphan", "-b", "main", "main"],
+        );
         fs::create_dir_all(clone.join("main/crates")).unwrap();
         fs::create_dir_all(clone.join("notes")).unwrap();
         fs::create_dir_all(&plain).unwrap();
@@ -167,16 +192,21 @@ mod tests {
         fs::create_dir_all(alone.join("notes")).unwrap();
 
         let listed = Listed::of(BTreeSet::from([subfolder("main")])).unwrap();
-        let clone_at = |at: Option<&str>| {
-            Spot::in_clone(real(&clone), listed.clone(), at.map(subfolder))
-        };
+        let clone_at =
+            |at: Option<&str>| Spot::in_clone(real(&clone), listed.clone(), at.map(subfolder));
         let of = |folder: &Dir| of(folder, LOOK);
         assert_eq!(of(&real(&clone)), Ok(clone_at(None)));
         assert_eq!(of(&real(&clone.join("notes"))), Ok(clone_at(None)));
         assert_eq!(of(&real(&clone.join("main"))), Ok(clone_at(Some("main"))));
-        assert_eq!(of(&real(&clone.join("main/crates"))), Ok(clone_at(Some("main"))));
+        assert_eq!(
+            of(&real(&clone.join("main/crates"))),
+            Ok(clone_at(Some("main")))
+        );
         let src = real(&plain.join("src"));
-        assert_eq!(of(&src), Ok(Spot::in_folder(src.clone(), Some(real(&plain)))));
+        assert_eq!(
+            of(&src),
+            Ok(Spot::in_folder(src.clone(), Some(real(&plain))))
+        );
         let linked = scratch.join("linked");
         std::os::unix::fs::symlink(&plain, &linked).unwrap();
         let through = dir(linked.join("src").to_str().unwrap());
@@ -196,17 +226,40 @@ mod tests {
         let scratch = fs::canonicalize(scratch.path()).unwrap();
         let (sep, worked) = (scratch.join("sep/.bare"), scratch.join("sep/main"));
         let sep = format!("--separate-git-dir={}", sep.display());
-        git(&scratch, &["init", "-q", "-b", "main", &sep, worked.to_str().unwrap()]);
+        git(
+            &scratch,
+            &["init", "-q", "-b", "main", &sep, worked.to_str().unwrap()],
+        );
         let worked = real(&worked);
-        assert_eq!(of(&worked, LOOK), Ok(Spot::in_folder(worked.clone(), Some(worked.clone()))));
+        assert_eq!(
+            of(&worked, LOOK),
+            Ok(Spot::in_folder(worked.clone(), Some(worked.clone())))
+        );
 
         let unkept = scratch.join("lun\teta");
         fs::create_dir_all(unkept.join(".bare")).unwrap();
-        git(&unkept.join(".bare"), &["init", "-q", "--bare", "-b", "main"]);
+        git(
+            &unkept.join(".bare"),
+            &["init", "-q", "--bare", "-b", "main"],
+        );
         fs::write(unkept.join(".git"), "gitdir: ./.bare\n").unwrap();
         let out = scratch.join("out");
-        git(&unkept, &["worktree", "add", "-q", "--orphan", "-b", "main", out.to_str().unwrap()]);
+        git(
+            &unkept,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--orphan",
+                "-b",
+                "main",
+                out.to_str().unwrap(),
+            ],
+        );
         let refused = of(&real(&out), LOOK).unwrap_err();
-        assert!(refused.contains("in a clone wt made in a folder lune cannot keep"), "{refused}");
+        assert!(
+            refused.contains("in a clone wt made in a folder lune cannot keep"),
+            "{refused}"
+        );
     }
 }

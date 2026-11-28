@@ -7,8 +7,8 @@ use luned::api::{self, KeepPrintedRequest, KeepPrintedResponse};
 use luned::mux::own::api as mux_api;
 use tonic::Code;
 
-use crate::host::{Running, PATIENT};
-use crate::own::{built_server, Owned};
+use crate::host::{PATIENT, Running};
+use crate::own::{Owned, built_server};
 
 const PRINTS: &str = r"printf '$ make\r\nbuilt it\r\n$ '; sleep 600";
 
@@ -45,11 +45,20 @@ impl Shell {
         terminal: Option<api::TerminalKey>,
         typed: &str,
     ) -> Result<KeepPrintedResponse, tonic::Status> {
-        let folder = luned::folder::open(&self.owned.host.folder()).unwrap().unwrap();
-        let request = KeepPrintedRequest { on: None, terminal, typed: typed.to_owned() };
+        let folder = luned::folder::open(&self.owned.host.folder())
+            .unwrap()
+            .unwrap();
+        let request = KeepPrintedRequest {
+            on: None,
+            terminal,
+            typed: typed.to_owned(),
+        };
         self.owned.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
-            daemon.keep_printed(request).await.map(tonic::Response::into_inner)
+            daemon
+                .keep_printed(request)
+                .await
+                .map(tonic::Response::into_inner)
         })
     }
 }
@@ -63,11 +72,19 @@ fn luned_keeps_what_a_command_printed_in_a_terminal_of_this_machine() {
         panic!("what make printed is kept: {kept:?}");
     };
     assert_eq!((file.lines, file.left_out), (1, 0));
-    assert!(file.path.starts_with(shell.owned.host.folder().to_str().unwrap()), "{}", file.path);
+    assert!(
+        file.path
+            .starts_with(shell.owned.host.folder().to_str().unwrap()),
+        "{}",
+        file.path
+    );
     assert_eq!(fs::read_to_string(&file.path).unwrap(), "built it\n");
 
     let untyped = shell.kept(Some(terminal), "").unwrap_err();
-    assert_eq!((untyped.code(), untyped.message()), (Code::InvalidArgument, "typed: nothing"));
+    assert_eq!(
+        (untyped.code(), untyped.message()),
+        (Code::InvalidArgument, "typed: nothing")
+    );
     let unnamed = shell.kept(None, "make").unwrap_err();
     let said = (unnamed.code(), unnamed.message());
     assert_eq!(said, (Code::InvalidArgument, "it names no terminal"));

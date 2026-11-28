@@ -73,17 +73,27 @@ impl BuiltinRule {
             BuiltinRule::Agy => agy_builtin_rule(),
             BuiltinRule::Codex => TrustRule {
                 name: "codex".to_owned(),
-                origin: RuleOrigin::Builtin { overrides: Vec::new() },
+                origin: RuleOrigin::Builtin {
+                    overrides: Vec::new(),
+                },
                 program: RuleProgram::bare("codex"),
-                args: vec![CommandElement::Literal("resume".to_owned()), CommandElement::Uuid],
+                args: vec![
+                    CommandElement::Literal("resume".to_owned()),
+                    CommandElement::Uuid,
+                ],
                 dirs: None,
                 flags: None,
             },
             BuiltinRule::Opencode => TrustRule {
                 name: "opencode".to_owned(),
-                origin: RuleOrigin::Builtin { overrides: Vec::new() },
+                origin: RuleOrigin::Builtin {
+                    overrides: Vec::new(),
+                },
                 program: RuleProgram::bare("opencode"),
-                args: vec![CommandElement::Literal("--session".to_owned()), CommandElement::Id],
+                args: vec![
+                    CommandElement::Literal("--session".to_owned()),
+                    CommandElement::Id,
+                ],
                 dirs: None,
                 flags: None,
             },
@@ -156,7 +166,9 @@ impl NormalizedAbsPath {
         }
         let expanded = if raw == "~" || raw.starts_with("~/") {
             let Some(home) = home else {
-                return Err(format!("cannot expand {raw:?}: HOME is not set to an absolute path"));
+                return Err(format!(
+                    "cannot expand {raw:?}: HOME is not set to an absolute path"
+                ));
             };
             let home_str = home
                 .to_str()
@@ -169,7 +181,9 @@ impl NormalizedAbsPath {
         } else if raw.starts_with('/') {
             raw.to_owned()
         } else {
-            return Err(format!("directory {raw:?} must be an absolute path or start with ~/"));
+            return Err(format!(
+                "directory {raw:?} must be an absolute path or start with ~/"
+            ));
         };
         if has_parent_component(&expanded) {
             return Err(format!("directory {raw:?} must not contain '..'"));
@@ -358,7 +372,11 @@ pub struct ResumeConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigState {
     Loaded(ResumeConfig),
-    Incomplete { path: Option<PathBuf>, error: String, warnings: Vec<String> },
+    Incomplete {
+        path: Option<PathBuf>,
+        error: String,
+        warnings: Vec<String>,
+    },
 }
 
 impl ConfigState {
@@ -379,17 +397,20 @@ impl ConfigState {
 #[must_use]
 pub fn config_path() -> Option<PathBuf> {
     let abs = |name: &str| {
-        env::var_os(name).map(PathBuf::from).filter(|path| path.is_absolute())
+        env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
     };
-    let dir = abs("XDG_CONFIG_HOME")
-        .or_else(|| abs("HOME").map(|home| home.join(".config")))?;
+    let dir = abs("XDG_CONFIG_HOME").or_else(|| abs("HOME").map(|home| home.join(".config")))?;
     Some(dir.join("lune").join("config.toml"))
 }
 
 #[must_use]
 pub fn load() -> ConfigState {
     let path = config_path();
-    let home = env::var_os("HOME").map(PathBuf::from).filter(|path| path.is_absolute());
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
     load_from(path, home.as_deref())
 }
 
@@ -402,8 +423,12 @@ pub fn load_from(path: Option<PathBuf>, home: Option<&Path>) -> ConfigState {
         Ok(Some(text)) => text,
         Ok(None) => return ConfigState::Loaded(default_config(Some(path))),
         Err(error) => {
-            return ConfigState::Incomplete { path: Some(path), error, warnings: Vec::new() };
-        },
+            return ConfigState::Incomplete {
+                path: Some(path),
+                error,
+                warnings: Vec::new(),
+            };
+        }
     };
     parse_config_toml(&text, Some(path), home)
 }
@@ -418,7 +443,7 @@ pub fn parse_config_toml(text: &str, path: Option<PathBuf>, home: Option<&Path>)
                 error: format!("invalid TOML: {error}"),
                 warnings: Vec::new(),
             };
-        },
+        }
     };
     let Some(resume_val) = root.get("resume") else {
         return ConfigState::Loaded(default_config(path));
@@ -446,7 +471,7 @@ pub fn parse_config_toml(text: &str, path: Option<PathBuf>, home: Option<&Path>)
                     };
                 };
                 defaults = flag;
-            },
+            }
             "allow_root" => {
                 let Some(flag) = value.as_bool() else {
                     return ConfigState::Incomplete {
@@ -456,7 +481,7 @@ pub fn parse_config_toml(text: &str, path: Option<PathBuf>, home: Option<&Path>)
                     };
                 };
                 allow_root = flag;
-            },
+            }
             "trust" => {
                 let Some(table) = value.as_table() else {
                     return ConfigState::Incomplete {
@@ -466,14 +491,14 @@ pub fn parse_config_toml(text: &str, path: Option<PathBuf>, home: Option<&Path>)
                     };
                 };
                 trust_table = Some(table);
-            },
+            }
             other => {
                 return ConfigState::Incomplete {
                     path,
                     error: format!("unknown setting resume.{other}"),
                     warnings: Vec::new(),
                 };
-            },
+            }
         }
     }
 
@@ -498,23 +523,26 @@ pub fn parse_config_toml(text: &str, path: Option<PathBuf>, home: Option<&Path>)
         if trust.len() > RULES_MAX {
             return ConfigState::Incomplete {
                 path,
-                error: format!("resume.trust defines {} rules, over {RULES_MAX}", trust.len()),
+                error: format!(
+                    "resume.trust defines {} rules, over {RULES_MAX}",
+                    trust.len()
+                ),
                 warnings,
             };
         }
         for (name, spec) in trust {
             match evaluate_rule_entry(name, spec, defaults, home) {
-                RuleOutcome::KeepExisting => {},
+                RuleOutcome::KeepExisting => {}
                 RuleOutcome::WarnOnly { warning } => warnings.push(warning),
                 RuleOutcome::Disable { reason } => {
                     rules.remove(name);
                     disabled.insert(name.clone(), reason);
-                },
+                }
                 RuleOutcome::Invalid { warning, reason } => {
                     rules.remove(name);
                     warnings.push(warning);
                     disabled.insert(name.clone(), reason);
-                },
+                }
                 RuleOutcome::Enable(rule) => {
                     if !rules.contains_key(name) && rules.len() >= RULES_MAX {
                         return ConfigState::Incomplete {
@@ -527,13 +555,20 @@ pub fn parse_config_toml(text: &str, path: Option<PathBuf>, home: Option<&Path>)
                     }
                     disabled.remove(name);
                     rules.insert(name.clone(), rule);
-                },
+                }
             }
         }
     }
 
     assert!(rules.len() <= RULES_MAX);
-    ConfigState::Loaded(ResumeConfig { path, defaults, allow_root, rules, disabled, warnings })
+    ConfigState::Loaded(ResumeConfig {
+        path,
+        defaults,
+        allow_root,
+        rules,
+        disabled,
+        warnings,
+    })
 }
 
 fn default_config(path: Option<PathBuf>) -> ResumeConfig {
@@ -558,14 +593,19 @@ fn read_config_file(path: &Path) -> Result<Option<String>, String> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
-    let meta = file.metadata().map_err(|error| format!("{}: {error}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     if !meta.is_file() {
         return Err(format!("{} is not a regular file", path.display()));
     }
     let uid = rustix::process::getuid().as_raw();
     let owner = meta.uid();
     if owner != uid && owner != 0 {
-        return Err(format!("{} is owned by another user (uid {owner})", path.display()));
+        return Err(format!(
+            "{} is owned by another user (uid {owner})",
+            path.display()
+        ));
     }
     if meta.mode() & 0o022 != 0 {
         return Err(format!("{} is writable by group or others", path.display()));
@@ -576,7 +616,10 @@ fn read_config_file(path: &Path) -> Result<Option<String>, String> {
         .read_to_end(&mut bytes)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     if bytes.len() > CONFIG_BYTES_MAX {
-        return Err(format!("{} exceeds {CONFIG_BYTES_MAX} bytes", path.display()));
+        return Err(format!(
+            "{} exceeds {CONFIG_BYTES_MAX} bytes",
+            path.display()
+        ));
     }
     assert!(bytes.len() <= CONFIG_BYTES_MAX);
     String::from_utf8(bytes)
@@ -599,7 +642,9 @@ fn evaluate_rule_entry(
     home: Option<&Path>,
 ) -> RuleOutcome {
     if name.is_empty()
-        || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        || !name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
     {
         return RuleOutcome::WarnOnly {
             warning: format!("resume.trust.{name}: invalid rule name, ignored"),
@@ -625,7 +670,9 @@ fn evaluate_rule_entry(
             }
             return RuleOutcome::KeepExisting;
         }
-        return RuleOutcome::Disable { reason: "disabled in config".to_owned() };
+        return RuleOutcome::Disable {
+            reason: "disabled in config".to_owned(),
+        };
     }
 
     let Some(table) = spec.as_table() else {
@@ -646,14 +693,15 @@ fn evaluate_rule_entry(
 
     if let Some(enabled_val) = table.get("enabled") {
         let Some(enabled) = enabled_val.as_bool() else {
-            let warning = format!(
-                "resume.trust.{name}: enabled must be a boolean, so this rule is ignored"
-            );
+            let warning =
+                format!("resume.trust.{name}: enabled must be a boolean, so this rule is ignored");
             let reason = format!("left out for a mistake: {warning}");
             return RuleOutcome::Invalid { warning, reason };
         };
         if !enabled {
-            return RuleOutcome::Disable { reason: "disabled in config".to_owned() };
+            return RuleOutcome::Disable {
+                reason: "disabled in config".to_owned(),
+            };
         }
     }
 
@@ -669,9 +717,8 @@ fn evaluate_rule_entry(
         }
         patch_builtin_rule(builtin, table, home)
     } else {
-        let warning = format!(
-            "resume.trust.{name}: custom rule requires command, so this rule is ignored"
-        );
+        let warning =
+            format!("resume.trust.{name}: custom rule requires command, so this rule is ignored");
         let reason = format!("left out for a mistake: {warning}");
         return RuleOutcome::Invalid { warning, reason };
     };
@@ -690,7 +737,9 @@ fn parse_full_rule(
     table: &toml::Table,
     home: Option<&Path>,
 ) -> Result<TrustRule, String> {
-    let command_val = table.get("command").ok_or_else(|| "missing command".to_owned())?;
+    let command_val = table
+        .get("command")
+        .ok_or_else(|| "missing command".to_owned())?;
     let (program, args) = parse_command(command_val, home)?;
     let dirs = match table.get("dir") {
         Some(dir_val) => Some(parse_dirs(dir_val, home)?),
@@ -759,7 +808,10 @@ fn parse_command(
         return Err("command must not be empty".to_owned());
     }
     if items.len() > COMMAND_ELEMENTS_MAX {
-        return Err(format!("command has {} elements, over {COMMAND_ELEMENTS_MAX}", items.len()));
+        return Err(format!(
+            "command has {} elements, over {COMMAND_ELEMENTS_MAX}",
+            items.len()
+        ));
     }
     let Some(raw_program) = items[0].as_str() else {
         return Err("command[0] must be a string program name or absolute path".to_owned());
@@ -797,7 +849,9 @@ fn parse_command_element(
                 return Err(format!("command[{index}] choices must be strings"));
             };
             if text.chars().any(char::is_control) {
-                return Err(format!("command[{index}] choice contains a control character"));
+                return Err(format!(
+                    "command[{index}] choice contains a control character"
+                ));
             }
             options.push(text.to_owned());
         }
@@ -808,7 +862,9 @@ fn parse_command_element(
     }
     if let Some(table) = value.as_table() {
         if table.len() != 1 {
-            return Err(format!("command[{index}] matcher table must have exactly one key"));
+            return Err(format!(
+                "command[{index}] matcher table must have exactly one key"
+            ));
         }
         if let Some(kind) = table.get("match") {
             let Some(kind) = kind.as_str() else {
@@ -827,9 +883,13 @@ fn parse_command_element(
             let expanded = NormalizedAbsPath::parse_expanded(raw, home)?;
             return Ok(CommandElement::Under(expanded));
         }
-        return Err(format!("command[{index}] matcher must use 'match' or 'under'"));
+        return Err(format!(
+            "command[{index}] matcher must use 'match' or 'under'"
+        ));
     }
-    Err(format!("command[{index}] must be a string, string array, or matcher table"))
+    Err(format!(
+        "command[{index}] must be a string, string array, or matcher table"
+    ))
 }
 
 fn parse_dirs(
@@ -837,13 +897,18 @@ fn parse_dirs(
     home: Option<&Path>,
 ) -> Result<NonEmptyVec<NormalizedAbsPath>, String> {
     if let Some(single) = value.as_str() {
-        return Ok(NonEmptyVec::single(NormalizedAbsPath::parse_expanded(single, home)?));
+        return Ok(NonEmptyVec::single(NormalizedAbsPath::parse_expanded(
+            single, home,
+        )?));
     }
     let Some(list) = value.as_array() else {
         return Err("dir must be a string or array of strings".to_owned());
     };
     if list.len() > DIRS_PER_RULE_MAX {
-        return Err(format!("dir has {} entries, over {DIRS_PER_RULE_MAX}", list.len()));
+        return Err(format!(
+            "dir has {} entries, over {DIRS_PER_RULE_MAX}",
+            list.len()
+        ));
     }
     let mut dirs = Vec::with_capacity(list.len());
     for entry in list {
@@ -859,7 +924,9 @@ fn parse_dirs(
 
 #[must_use]
 pub(crate) fn has_parent_component(path: &str) -> bool {
-    Path::new(path).components().any(|component| matches!(component, Component::ParentDir))
+    Path::new(path)
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
 }
 
 #[must_use]
@@ -871,9 +938,11 @@ pub(crate) fn normalize_lexical(path: &str) -> String {
                 if let Some(text) = segment.to_str() {
                     parts.push(text);
                 }
-            },
-            Component::RootDir | Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
-            },
+            }
+            Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir
+            | Component::Prefix(_) => {}
         }
     }
     if parts.is_empty() {
@@ -888,7 +957,10 @@ fn parse_new_flags(value: &Value) -> Result<BTreeMap<String, FlagRule>, String> 
         return Err("flags must be a table".to_owned());
     };
     if table.len() > FLAGS_PER_RULE_MAX {
-        return Err(format!("flags has {} entries, over {FLAGS_PER_RULE_MAX}", table.len()));
+        return Err(format!(
+            "flags has {} entries, over {FLAGS_PER_RULE_MAX}",
+            table.len()
+        ));
     }
     let mut flags = BTreeMap::new();
     for (flag_name, spec) in table {
@@ -915,10 +987,15 @@ fn validate_flag_name(flag_name: &str) -> Result<(), String> {
 fn parse_flag_spec(flag_name: &str, spec: &Value) -> Result<FlagRule, String> {
     if let Some(action_str) = spec.as_str() {
         let action = parse_flag_action(flag_name, action_str)?;
-        return Ok(FlagRule { action, values: FlagValues::None });
+        return Ok(FlagRule {
+            action,
+            values: FlagValues::None,
+        });
     }
     let Some(table) = spec.as_table() else {
-        return Err(format!("flags.{flag_name}: expected \"keep\", \"drop\", false, or a table"));
+        return Err(format!(
+            "flags.{flag_name}: expected \"keep\", \"drop\", false, or a table"
+        ));
     };
     for key in table.keys() {
         if !matches!(key.as_str(), "action" | "values") {
@@ -939,7 +1016,7 @@ fn parse_flag_spec(flag_name: &str, spec: &Value) -> Result<FlagRule, String> {
                 return Err(format!(
                     "flags.{flag_name}: unsupported values count {other}, want 0, 1, \"optional\", or \"many\""
                 ));
-            },
+            }
             None => match val.as_str() {
                 Some("optional") => FlagValues::Optional,
                 Some("many") => FlagValues::Many,
@@ -947,12 +1024,12 @@ fn parse_flag_spec(flag_name: &str, spec: &Value) -> Result<FlagRule, String> {
                     return Err(format!(
                         "flags.{flag_name}: unknown values {other:?}, want 0, 1, \"optional\", or \"many\""
                     ));
-                },
+                }
                 None => {
                     return Err(format!(
                         "flags.{flag_name}: values must be 0, 1, \"optional\", or \"many\""
                     ));
-                },
+                }
             },
         },
     };
@@ -1055,7 +1132,14 @@ fn claude_builtin_rule() -> TrustRule {
     );
     insert_flags(
         &mut flags,
-        &["-c", "--continue", "--fork-session", "--init", "--init-only", "--maintenance"],
+        &[
+            "-c",
+            "--continue",
+            "--fork-session",
+            "--init",
+            "--init-only",
+            "--maintenance",
+        ],
         FlagAction::Drop,
         FlagValues::None,
     );
@@ -1074,9 +1158,14 @@ fn claude_builtin_rule() -> TrustRule {
     assert!(flags.len() <= FLAGS_PER_RULE_MAX);
     TrustRule {
         name: "claude".to_owned(),
-        origin: RuleOrigin::Builtin { overrides: Vec::new() },
+        origin: RuleOrigin::Builtin {
+            overrides: Vec::new(),
+        },
         program: RuleProgram::bare("claude"),
-        args: vec![CommandElement::Literal("--resume".to_owned()), CommandElement::Uuid],
+        args: vec![
+            CommandElement::Literal("--resume".to_owned()),
+            CommandElement::Uuid,
+        ],
         dirs: None,
         flags: Some(flags),
     }
@@ -1134,9 +1223,14 @@ fn pi_builtin_rule() -> TrustRule {
     assert!(flags.len() <= FLAGS_PER_RULE_MAX);
     TrustRule {
         name: "pi".to_owned(),
-        origin: RuleOrigin::Builtin { overrides: Vec::new() },
+        origin: RuleOrigin::Builtin {
+            overrides: Vec::new(),
+        },
         program: RuleProgram::bare("pi"),
-        args: vec![CommandElement::Literal("--session".to_owned()), CommandElement::Id],
+        args: vec![
+            CommandElement::Literal("--session".to_owned()),
+            CommandElement::Id,
+        ],
         dirs: None,
         flags: Some(flags),
     }
@@ -1146,7 +1240,13 @@ fn agy_builtin_rule() -> TrustRule {
     let mut flags = BTreeMap::new();
     insert_flags(
         &mut flags,
-        &["--dangerously-skip-permissions", "--no-sandbox", "--sandbox", "--verbose", "--yolo"],
+        &[
+            "--dangerously-skip-permissions",
+            "--no-sandbox",
+            "--sandbox",
+            "--verbose",
+            "--yolo",
+        ],
         FlagAction::Keep,
         FlagValues::None,
     );
@@ -1172,19 +1272,36 @@ fn agy_builtin_rule() -> TrustRule {
         FlagAction::Keep,
         FlagValues::Many,
     );
-    insert_flags(&mut flags, &["-c", "--continue"], FlagAction::Drop, FlagValues::None);
     insert_flags(
         &mut flags,
-        &["--conversation", "-i", "-r", "--prompt-interactive", "--resume", "--session-id"],
+        &["-c", "--continue"],
+        FlagAction::Drop,
+        FlagValues::None,
+    );
+    insert_flags(
+        &mut flags,
+        &[
+            "--conversation",
+            "-i",
+            "-r",
+            "--prompt-interactive",
+            "--resume",
+            "--session-id",
+        ],
         FlagAction::Drop,
         FlagValues::One,
     );
     assert!(flags.len() <= FLAGS_PER_RULE_MAX);
     TrustRule {
         name: "agy".to_owned(),
-        origin: RuleOrigin::Builtin { overrides: Vec::new() },
+        origin: RuleOrigin::Builtin {
+            overrides: Vec::new(),
+        },
         program: RuleProgram::bare("agy"),
-        args: vec![CommandElement::Literal("--resume".to_owned()), CommandElement::Id],
+        args: vec![
+            CommandElement::Literal("--resume".to_owned()),
+            CommandElement::Id,
+        ],
         dirs: None,
         flags: Some(flags),
     }
@@ -1223,13 +1340,15 @@ dir = "~/code"
 [resume.trust.nvim]
 command = ["nvim", "-S", { under = "~/.local/state/nvim/sessions" }]
 "#;
-        let ConfigState::Loaded(config) =
-            parse_config_toml(text, None, Some(Path::new("/home/u")))
+        let ConfigState::Loaded(config) = parse_config_toml(text, None, Some(Path::new("/home/u")))
         else {
             panic!("valid config loads");
         };
         assert!(!config.defaults);
-        assert_eq!(config.rules.keys().map(String::as_str).collect::<Vec<_>>(), ["nvim"]);
+        assert_eq!(
+            config.rules.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["nvim"]
+        );
         assert_eq!(config.disabled.len(), 5);
         assert_eq!(config.warnings.len(), 1);
         assert!(config.warnings[0].contains("resume.trust.claude"));
@@ -1280,7 +1399,10 @@ enabled = false
 
         let mut text = String::from("[resume]\ndefaults = true\n");
         for index in 0..RULES_MAX {
-            let _ = writeln!(text, "[resume.trust.custom_{index}]\ncommand = [\"tool_{index}\"]");
+            let _ = writeln!(
+                text,
+                "[resume.trust.custom_{index}]\ncommand = [\"tool_{index}\"]"
+            );
         }
         assert!(parse_config_toml(&text, None, Some(Path::new("/home/u"))).is_incomplete());
     }
@@ -1301,8 +1423,18 @@ enabled = false
         };
         assert!(!config.rules.contains_key("nvim"));
         assert!(!config.rules.contains_key("many"));
-        assert!(config.warnings.iter().any(|w| w.contains("resume.trust.nvim")));
-        assert!(config.warnings.iter().any(|w| w.contains("resume.trust.many")));
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.contains("resume.trust.nvim"))
+        );
+        assert!(
+            config
+                .warnings
+                .iter()
+                .any(|w| w.contains("resume.trust.many"))
+        );
         assert!(config.disabled.contains_key("nvim"));
         assert!(config.disabled.contains_key("many"));
     }
@@ -1310,7 +1442,9 @@ enabled = false
     #[test]
     fn pi_builtin_flags_match_typescript_extension_table() {
         let ts = include_str!("../pi/lune.ts");
-        let start = ts.find("const PI_RESUME_FLAGS:").expect("PI_RESUME_FLAGS exists");
+        let start = ts
+            .find("const PI_RESUME_FLAGS:")
+            .expect("PI_RESUME_FLAGS exists");
         let block = &ts[start..];
         let open = block.find("= {").expect("opening brace") + 3;
         let close = block[open..].find("};").expect("closing brace");

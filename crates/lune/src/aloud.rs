@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -20,14 +20,16 @@ use crate::brief::Asking;
 use crate::host::Event;
 use crate::machines::{self, Machine};
 use crate::models::Fetched;
-use crate::sidebar::{cut, ACCENT, NAME};
+use crate::sidebar::{ACCENT, NAME, cut};
 use crate::spots::Spots;
 use crate::voice::{self, Reading, Voice};
 
 pub const KEY: (KeyCode, KeyModifiers) = (KeyCode::Char('u'), KeyModifiers::ALT);
 
-pub const STOPS: (KeyCode, KeyModifiers) =
-    (KeyCode::Char('u'), KeyModifiers::ALT.union(KeyModifiers::SHIFT));
+pub const STOPS: (KeyCode, KeyModifiers) = (
+    KeyCode::Char('u'),
+    KeyModifiers::ALT.union(KeyModifiers::SHIFT),
+);
 
 pub fn stops((code, modifiers): (KeyCode, KeyModifiers)) -> bool {
     matches!(code, KeyCode::Char('u' | 'U')) && modifiers == STOPS.1
@@ -81,8 +83,15 @@ pub enum Whose {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Shown {
-    Reading { whose: Whose, text: String, paused: bool },
-    Fetching { got: u64, paused: bool },
+    Reading {
+        whose: Whose,
+        text: String,
+        paused: bool,
+    },
+    Fetching {
+        got: u64,
+        paused: bool,
+    },
 }
 
 impl Shown {
@@ -95,12 +104,17 @@ impl Shown {
     pub fn line(&self, width: usize) -> (Line<'static>, Spots<Button>) {
         let room = width.saturating_sub(2 * BUTTON);
         let mut line = self.said(room);
-        let toggle = if self.paused() { Button::GoOn } else { Button::Pause };
+        let toggle = if self.paused() {
+            Button::GoOn
+        } else {
+            Button::Pause
+        };
         let said = drawn_width(&line, width);
         let from = room.max(said);
         let filler = " ".repeat(from - said);
         let buttons = format!("{filler} {}  {} ", toggle.icon(), Button::Stop.icon());
-        line.spans.push(Span::styled(buttons, Style::new().fg(ACCENT)));
+        line.spans
+            .push(Span::styled(buttons, Style::new().fg(ACCENT)));
         let mut spots = Spots::default();
         for (at, button) in [(from, toggle), (from + BUTTON, Button::Stop)] {
             if at + 1 < width {
@@ -119,12 +133,14 @@ impl Shown {
                 let (got, of) = (got / 1_000_000, voice::BYTES / 1_000_000);
                 let said = cut(&format!("voice: {got} of {of} MB"), room);
                 Line::from(vec![mark, Span::raw(" "), Span::styled(said, dim)])
-            },
+            }
             Shown::Reading { whose, text, .. } => {
                 let who = match whose {
                     Whose::Selection => "selection".to_owned(),
                     Whose::Said { on: Machine::Local } => machines::local_name(),
-                    Whose::Said { on: Machine::Remote(on) } => on.to_string(),
+                    Whose::Said {
+                        on: Machine::Remote(on),
+                    } => on.to_string(),
                 };
                 let who = cut(&who, room);
                 let rest = room.saturating_sub(who.width() + 3);
@@ -134,7 +150,7 @@ impl Shown {
                     said.push(Span::styled(format!(" · {}", cut(text, rest)), dim));
                 }
                 Line::from(said)
-            },
+            }
         }
     }
 }
@@ -155,7 +171,9 @@ struct Waiting {
 impl Waiting {
     fn stale(&self, now: Instant) -> bool {
         self.came.is_some_and(|came| {
-            now.checked_duration_since(came).expect("steady clock does not move backwards") > STALE
+            now.checked_duration_since(came)
+                .expect("steady clock does not move backwards")
+                > STALE
         })
     }
 }
@@ -214,13 +232,17 @@ impl Queue {
         let does = saying.say.and_then(|say| say.does);
         let waiting = |utterance: Utterance| {
             let Utterance { text } = utterance;
-            Waiting { whose: Whose::Said { on: on.clone() }, text, came: Some(now) }
+            Waiting {
+                whose: Whose::Said { on: on.clone() },
+                text,
+                came: Some(now),
+            }
         };
         match does {
             Some(Does::InTurn(utterance)) => self.after(waiting(utterance)),
             Some(Does::Now(utterance)) => self.first(waiting(utterance)),
             Some(Does::Stop(())) => self.stop(),
-            None => {},
+            None => {}
         }
     }
 
@@ -271,14 +293,21 @@ impl Queue {
     }
 
     fn next(&mut self, now: Instant) -> Option<Next> {
-        assert!(self.in_turn.len() <= WAITING, "queued utterances stay within WAITING");
+        assert!(
+            self.in_turn.len() <= WAITING,
+            "queued utterances stay within WAITING"
+        );
         loop {
             let next = self.at_once.take().or_else(|| self.in_turn.pop_front())?;
             if !self.paused && next.stale(now) {
                 continue;
             }
             let Waiting { whose, text, .. } = next;
-            return Some(Next { spoken: text.clone(), whose, text });
+            return Some(Next {
+                spoken: text.clone(),
+                whose,
+                text,
+            });
         }
     }
 
@@ -358,13 +387,21 @@ impl Aloud {
 
     pub fn key(&mut self, selected: Option<&str>) -> Result<(), NothingToRead> {
         if self.queue.busy() {
-            self.press(if self.queue.paused { Button::GoOn } else { Button::Pause });
+            self.press(if self.queue.paused {
+                Button::GoOn
+            } else {
+                Button::Pause
+            });
             return Ok(());
         }
         let selected = selected.map(plain).filter(|text| !text.is_empty());
         let text = selected.ok_or(NothingToRead)?;
         let came = Some(Instant::now());
-        self.queue.after(Waiting { whose: Whose::Selection, text, came });
+        self.queue.after(Waiting {
+            whose: Whose::Selection,
+            text,
+            came,
+        });
         self.go_on();
         Ok(())
     }
@@ -384,7 +421,8 @@ impl Aloud {
     }
 
     fn keep_held(&self) {
-        self.held.store(self.dictating || self.queue.paused, Ordering::Relaxed);
+        self.held
+            .store(self.dictating || self.queue.paused, Ordering::Relaxed);
     }
 
     pub fn ended(&mut self, number: u64, ended: Result<(), String>) -> Option<String> {
@@ -400,7 +438,7 @@ impl Aloud {
                     fetching.got = got;
                 }
                 None
-            },
+            }
             Fetched::Ended(ended) => {
                 self.fetching = None;
                 match ended {
@@ -408,13 +446,13 @@ impl Aloud {
                         self.fetched = true;
                         self.go_on();
                         None
-                    },
+                    }
                     Err(why) => {
                         self.press(Button::Stop);
                         Some(format!("the voice did not come: {why}"))
-                    },
+                    }
                 }
-            },
+            }
         }
     }
 
@@ -430,29 +468,51 @@ impl Aloud {
         self.fetched = self.fetched || voice::fetched();
         if !self.fetched {
             if self.fetching.is_none() {
-                self.fetching = Some(Fetching { _asking: voice::fetch(&self.events), got: 0 });
+                self.fetching = Some(Fetching {
+                    _asking: voice::fetch(&self.events),
+                    got: 0,
+                });
             }
             return;
         }
-        let Some(Next { spoken, whose, text }) = self.queue.next(Instant::now()) else {
+        let Some(Next {
+            spoken,
+            whose,
+            text,
+        }) = self.queue.next(Instant::now())
+        else {
             return;
         };
         let held = &self.held;
-        let voice = self.voice.get_or_insert_with(|| Voice::start(Arc::clone(held)));
+        let voice = self
+            .voice
+            .get_or_insert_with(|| Voice::start(Arc::clone(held)));
         self.queue.numbered += 1;
         let number = self.queue.numbered;
         let reading = voice.read(number, spoken, &self.events);
         let text = one_line(&text, SHOWN_CHARS);
-        self.queue.now = Some(Now { number, whose, text, _reading: reading });
+        self.queue.now = Some(Now {
+            number,
+            whose,
+            text,
+            _reading: reading,
+        });
     }
 
     pub fn shown(&self) -> Option<Shown> {
         let paused = self.queue.paused;
         if let Some(Now { whose, text, .. }) = &self.queue.now {
-            return Some(Shown::Reading { whose: whose.clone(), text: text.clone(), paused });
+            return Some(Shown::Reading {
+                whose: whose.clone(),
+                text: text.clone(),
+                paused,
+            });
         }
         let fetching = self.fetching.as_ref().filter(|_| self.queue.waits());
-        fetching.map(|fetching| Shown::Fetching { got: fetching.got, paused })
+        fetching.map(|fetching| Shown::Fetching {
+            got: fetching.got,
+            paused,
+        })
     }
 }
 
@@ -461,8 +521,8 @@ mod tests {
     use std::sync::LazyLock;
     use std::time::Duration;
 
-    use luned::api::Say;
     use luned::Destination;
+    use luned::api::Say;
     use ratatui::layout::Position;
 
     use super::*;
@@ -482,11 +542,17 @@ mod tests {
     }
 
     fn saying(number: u64, does: Does) -> Saying {
-        Saying { pid: PID, number, say: Some(Say { does: Some(does) }) }
+        Saying {
+            pid: PID,
+            number,
+            say: Some(Say { does: Some(does) }),
+        }
     }
 
     fn utterance(text: &str) -> Utterance {
-        Utterance { text: text.to_owned() }
+        Utterance {
+            text: text.to_owned(),
+        }
     }
 
     fn in_turn(number: u64, text: &str) -> Saying {
@@ -499,19 +565,29 @@ mod tests {
 
     fn hearing() -> Queue {
         let mut queue = Queue::default();
-        let quiet = vec![(Machine::Local, Some(Vec::new())), (far(), Some(Vec::new()))];
+        let quiet = vec![
+            (Machine::Local, Some(Vec::new())),
+            (far(), Some(Vec::new())),
+        ];
         queue.hear(quiet, true, at(0));
         queue
     }
 
     fn spoken(queue: &mut Queue, now: Instant) -> Vec<String> {
-        std::iter::from_fn(|| queue.next(now)).map(|next| next.spoken).collect()
+        std::iter::from_fn(|| queue.next(now))
+            .map(|next| next.spoken)
+            .collect()
     }
 
     fn reading(queue: &mut Queue, number: u64) -> Quiet {
         let (reading, quiet) = Reading::new(Arc::default());
         let whose = Whose::Selection;
-        queue.now = Some(Now { number, whose, text: String::new(), _reading: reading });
+        queue.now = Some(Now {
+            number,
+            whose,
+            text: String::new(),
+            _reading: reading,
+        });
         quiet
     }
 
@@ -520,7 +596,11 @@ mod tests {
         let mut queue = Queue::default();
         queue.hear(here(vec![in_turn(1, "before")]), true, at(0));
         assert!(!queue.busy());
-        queue.hear(here(vec![in_turn(1, "before"), in_turn(2, "after")]), true, at(1));
+        queue.hear(
+            here(vec![in_turn(1, "before"), in_turn(2, "after")]),
+            true,
+            at(1),
+        );
         assert_eq!(spoken(&mut queue, at(1)), ["after"]);
     }
 
@@ -538,7 +618,10 @@ mod tests {
     fn a_daemon_started_again_counts_afresh_and_is_heard() {
         let mut queue = hearing();
         queue.hear(here(vec![in_turn(5, "old")]), true, at(1));
-        let again = Saying { pid: PID + 1, ..in_turn(1, "new") };
+        let again = Saying {
+            pid: PID + 1,
+            ..in_turn(1, "new")
+        };
         queue.hear(here(vec![again]), true, at(2));
         assert_eq!(spoken(&mut queue, at(2)), ["old", "new"]);
     }
@@ -551,7 +634,11 @@ mod tests {
         queue.hear(far_said(Some(vec![in_turn(1, "while away")])), true, at(2));
         assert_eq!(spoken(&mut queue, at(2)), ["while away"]);
         queue.hear(here(Vec::new()), true, at(3));
-        queue.hear(far_said(Some(vec![in_turn(2, "gone a while")])), true, at(4));
+        queue.hear(
+            far_said(Some(vec![in_turn(2, "gone a while")])),
+            true,
+            at(4),
+        );
         assert!(!queue.busy());
     }
 
@@ -568,7 +655,9 @@ mod tests {
     #[test]
     fn past_the_most_that_wait_the_oldest_goes() {
         let mut queue = hearing();
-        let many = (1..=WAITING as u64 + 2).map(|n| in_turn(n, &n.to_string())).collect();
+        let many = (1..=WAITING as u64 + 2)
+            .map(|n| in_turn(n, &n.to_string()))
+            .collect();
         queue.hear(here(many), true, at(1));
         let read = spoken(&mut queue, at(1));
         assert_eq!(read.len(), WAITING);
@@ -613,8 +702,10 @@ mod tests {
     #[test]
     fn stop_lets_go_of_what_was_to_go_first_too() {
         let mut queue = hearing();
-        let said =
-            vec![saying(1, Does::Now(utterance("first"))), saying(2, Does::Stop(()))];
+        let said = vec![
+            saying(1, Does::Now(utterance("first"))),
+            saying(2, Does::Stop(())),
+        ];
         queue.hear(here(said), true, at(1));
         assert!(!queue.busy());
     }
@@ -622,9 +713,16 @@ mod tests {
     #[test]
     fn what_was_to_go_first_goes_once_it_has_waited_too_long() {
         let mut queue = hearing();
-        queue.hear(here(vec![saying(1, Does::Now(utterance("early")))]), true, at(1));
+        queue.hear(
+            here(vec![saying(1, Does::Now(utterance("early")))]),
+            true,
+            at(1),
+        );
         queue.hear(here(vec![in_turn(2, "late")]), true, at(1) + STALE);
-        assert_eq!(queue.next(at(2) + STALE).map(|next| next.spoken).as_deref(), Some("late"));
+        assert_eq!(
+            queue.next(at(2) + STALE).map(|next| next.spoken).as_deref(),
+            Some("late")
+        );
     }
 
     #[test]
@@ -655,7 +753,10 @@ mod tests {
     fn what_waits_for_exactly_stale_is_read_and_one_nanosecond_past_is_dropped() {
         let mut fresh = hearing();
         fresh.hear(here(vec![in_turn(1, "in time")]), true, at(1));
-        assert_eq!(fresh.next(at(1) + STALE).map(|next| next.spoken).as_deref(), Some("in time"));
+        assert_eq!(
+            fresh.next(at(1) + STALE).map(|next| next.spoken).as_deref(),
+            Some("in time")
+        );
 
         let mut old = hearing();
         old.hear(here(vec![in_turn(1, "too late")]), true, at(1));
@@ -684,7 +785,12 @@ mod tests {
         let mut aloud = Aloud::new(std::sync::mpsc::channel().0);
         let (reading, quiet) = Reading::new(Arc::clone(&aloud.held));
         let whose = Whose::Selection;
-        aloud.queue.now = Some(Now { number: 1, whose, text: String::new(), _reading: reading });
+        aloud.queue.now = Some(Now {
+            number: 1,
+            whose,
+            text: String::new(),
+            _reading: reading,
+        });
         (aloud, quiet)
     }
 
@@ -693,10 +799,16 @@ mod tests {
         let (mut aloud, quiet) = aloud_reading();
         aloud.key(Some("selected")).expect("it pauses");
         assert!(quiet.held.load(Ordering::Relaxed));
-        assert!(matches!(aloud.shown(), Some(Shown::Reading { paused: true, .. })));
+        assert!(matches!(
+            aloud.shown(),
+            Some(Shown::Reading { paused: true, .. })
+        ));
         aloud.key(Some("selected")).expect("it goes on");
         assert!(!quiet.held.load(Ordering::Relaxed));
-        assert!(matches!(aloud.shown(), Some(Shown::Reading { paused: false, .. })));
+        assert!(matches!(
+            aloud.shown(),
+            Some(Shown::Reading { paused: false, .. })
+        ));
         assert!(!quiet.cut.load(Ordering::Relaxed));
         assert!(!aloud.queue.waits());
     }
@@ -754,7 +866,10 @@ mod tests {
         assert!(!quiet.held.load(Ordering::Relaxed), "what plays plays on");
         aloud.press(Button::Pause);
         aloud.press(Button::Pause);
-        assert!(quiet.held.load(Ordering::Relaxed), "what is paused stays paused");
+        assert!(
+            quiet.held.load(Ordering::Relaxed),
+            "what is paused stays paused"
+        );
     }
 
     #[test]
@@ -773,7 +888,11 @@ mod tests {
         let mut queue = hearing();
         let quiet = reading(&mut queue, 1);
         queue.pause(at(1));
-        queue.hear(here(vec![saying(1, Does::Now(utterance("first")))]), true, at(2));
+        queue.hear(
+            here(vec![saying(1, Does::Now(utterance("first")))]),
+            true,
+            at(2),
+        );
         assert!(quiet.cut.load(Ordering::Relaxed));
         assert!(queue.paused);
         assert_eq!(spoken(&mut queue, at(2)), ["first"]);
@@ -784,7 +903,11 @@ mod tests {
         let mut queue = hearing();
         drop(reading(&mut queue, 1));
         queue.pause(at(1));
-        queue.hear(here(vec![saying(1, Does::Now(utterance("first")))]), true, at(1));
+        queue.hear(
+            here(vec![saying(1, Does::Now(utterance("first")))]),
+            true,
+            at(1),
+        );
         let last = WAITING as u64 + 1;
         let rest = (2..=last).map(|n| in_turn(n, &n.to_string())).collect();
         queue.hear(here(rest), true, at(2));
@@ -810,8 +933,14 @@ mod tests {
         queue.unpause();
         queue.hear(here(vec![in_turn(2, "behind")]), true, at(2));
         let late = at(2) + STALE * 5;
-        assert_eq!(queue.next(late).map(|next| next.spoken).as_deref(), Some("waited"));
-        assert_eq!(queue.next(late).map(|next| next.spoken).as_deref(), Some("behind"));
+        assert_eq!(
+            queue.next(late).map(|next| next.spoken).as_deref(),
+            Some("waited")
+        );
+        assert_eq!(
+            queue.next(late).map(|next| next.spoken).as_deref(),
+            Some("behind")
+        );
         queue.hear(here(vec![in_turn(3, "after")]), true, at(3));
         assert_eq!(queue.next(late), None, "it waited on nothing of yours");
     }
@@ -819,14 +948,20 @@ mod tests {
     #[test]
     fn a_pause_does_not_bring_back_what_had_waited_too_long() {
         let mut queue = hearing();
-        let early = vec![saying(1, Does::Now(utterance("first"))), in_turn(2, "early")];
+        let early = vec![
+            saying(1, Does::Now(utterance("first"))),
+            in_turn(2, "early"),
+        ];
         queue.hear(here(early), true, at(1));
         queue.hear(here(vec![in_turn(3, "late")]), true, at(1) + STALE);
         drop(reading(&mut queue, 1));
         queue.pause(at(2) + STALE);
         queue.unpause();
         let later = at(3) + STALE * 5;
-        assert_eq!(queue.next(later).map(|next| next.spoken).as_deref(), Some("late"));
+        assert_eq!(
+            queue.next(later).map(|next| next.spoken).as_deref(),
+            Some("late")
+        );
         assert_eq!(queue.next(later), None);
     }
 
@@ -858,7 +993,13 @@ mod tests {
         queue.pause(at(1));
         assert!(queue.ended(1));
         assert!(queue.paused, "what waits is what you paused too");
-        assert_eq!(queue.next(at(2) + STALE * 5).map(|next| next.spoken).as_deref(), Some("rest"));
+        assert_eq!(
+            queue
+                .next(at(2) + STALE * 5)
+                .map(|next| next.spoken)
+                .as_deref(),
+            Some("rest")
+        );
     }
 
     #[test]
@@ -885,7 +1026,12 @@ mod tests {
             for width in 0..=48 {
                 for (paused, toggle) in [(false, Button::Pause), (true, Button::GoOn)] {
                     let (whose, text) = (Whose::Selection, one_line(text, SHOWN_CHARS));
-                    let (line, spots) = Shown::Reading { whose, text, paused }.line(width.into());
+                    let (line, spots) = Shown::Reading {
+                        whose,
+                        text,
+                        paused,
+                    }
+                    .line(width.into());
                     let area = Rect::new(0, 0, width, 1);
                     let mut buffer = Buffer::empty(area);
                     buffer.set_line(0, 0, &line, width);
@@ -908,20 +1054,35 @@ mod tests {
     fn what_is_not_drawn_does_not_push_the_buttons_along() {
         for text in ["\u{1b}[31mFAIL\u{1b}[0m", "a\u{7}b\u{7}c"] {
             let (whose, text) = (Whose::Selection, text.to_owned());
-            let (line, spots) = Shown::Reading { whose, text, paused: false }.line(31);
+            let (line, spots) = Shown::Reading {
+                whose,
+                text,
+                paused: false,
+            }
+            .line(31);
             let area = Rect::new(0, 0, 31, 1);
             let mut buffer = Buffer::empty(area);
             buffer.set_line(0, 0, &line, 31);
             assert_eq!(buffer[(29, 0)].symbol(), STOP);
-            assert_eq!(spots.placed(area).at(Position::new(29, 0)), Some(&Button::Stop));
+            assert_eq!(
+                spots.placed(area).at(Position::new(29, 0)),
+                Some(&Button::Stop)
+            );
         }
     }
 
     #[test]
     fn the_fetch_says_how_far_it_got_at_the_width_the_sidebar_starts_at() {
-        let shown = Shown::Fetching { got: 12_000_000, paused: false };
+        let shown = Shown::Fetching {
+            got: 12_000_000,
+            paused: false,
+        };
         let (line, _) = shown.line(usize::from(COLUMNS) - 1);
-        let said: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        let said: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
         let far = format!("12 of {} MB", voice::BYTES / 1_000_000);
         assert!(said.contains(&far), "{said}");
     }
@@ -939,8 +1100,14 @@ mod tests {
     #[test]
     fn a_view_s_frames_and_marks_are_not_read() {
         let selected = "⏺ The fix is in. The daemon keeps what\n  was said.\n\n  ⎿  ok\n";
-        assert_eq!(plain(selected), "The fix is in. The daemon keeps what was said. ok");
-        assert_eq!(plain("✳ Thinking… (esc to interrupt)"), "Thinking… (esc to interrupt)");
+        assert_eq!(
+            plain(selected),
+            "The fix is in. The daemon keeps what was said. ok"
+        );
+        assert_eq!(
+            plain("✳ Thinking… (esc to interrupt)"),
+            "Thinking… (esc to interrupt)"
+        );
         assert_eq!(plain("\u{f057e} ● a"), "a");
         assert_eq!(plain("──────\n│ │\n"), "");
     }
@@ -957,10 +1124,24 @@ mod tests {
     fn what_is_being_read_has_a_line_of_whose_it_is_and_what_it_says() {
         let line = |whose| {
             let text = "the tests pass".to_owned();
-            let line = Shown::Reading { whose, text, paused: false }.said(40);
-            line.spans.iter().map(|span| span.content.as_ref()).collect::<String>()
+            let line = Shown::Reading {
+                whose,
+                text,
+                paused: false,
+            }
+            .said(40);
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
         };
-        assert_eq!(line(Whose::Selection), format!("{MARK} selection · the tests pass"));
-        assert_eq!(line(Whose::Said { on: far() }), format!("{MARK} far · the tests pass"));
+        assert_eq!(
+            line(Whose::Selection),
+            format!("{MARK} selection · the tests pass")
+        );
+        assert_eq!(
+            line(Whose::Said { on: far() }),
+            format!("{MARK} far · the tests pass")
+        );
     }
 }

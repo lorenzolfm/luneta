@@ -70,7 +70,13 @@ impl Rolled {
     fn check(self) -> Option<Check> {
         let given = |link: Option<String>| link.filter(|link| !link.is_empty());
         match self {
-            Rolled::CheckRun { name, workflow_name, status, conclusion, details_url } => {
+            Rolled::CheckRun {
+                name,
+                workflow_name,
+                status,
+                conclusion,
+                details_url,
+            } => {
                 let stands = match (status.as_str(), conclusion.as_deref()) {
                     ("COMPLETED", Some("SUCCESS" | "NEUTRAL" | "SKIPPED")) => Stands::Passed,
                     ("COMPLETED", _) => Stands::Failed,
@@ -80,16 +86,28 @@ impl Rolled {
                     Some(workflow) => format!("{workflow} / {name}"),
                     None => name,
                 };
-                Some(Check { name, stands, link: given(details_url) })
-            },
-            Rolled::StatusContext { context, state, target_url } => {
+                Some(Check {
+                    name,
+                    stands,
+                    link: given(details_url),
+                })
+            }
+            Rolled::StatusContext {
+                context,
+                state,
+                target_url,
+            } => {
                 let stands = match state.as_str() {
                     "SUCCESS" => Stands::Passed,
                     "PENDING" | "EXPECTED" => Stands::Pending,
                     _ => Stands::Failed,
                 };
-                Some(Check { name: context, stands, link: given(target_url) })
-            },
+                Some(Check {
+                    name: context,
+                    stands,
+                    link: given(target_url),
+                })
+            }
             Rolled::Other => None,
         }
     }
@@ -106,9 +124,16 @@ fn checks_of(rollup: Option<serde_json::Value>) -> Option<Vec<Check>> {
 fn counted(checks: &[Check]) -> Checks {
     let count = |stands| checks.iter().filter(|check| check.stands == stands).count();
     let count = |stands| u32::try_from(count(stands)).unwrap_or(u32::MAX);
-    let (pending, failed, passed) =
-        (count(Stands::Pending), count(Stands::Failed), count(Stands::Passed));
-    Checks { pending, failed, passed }
+    let (pending, failed, passed) = (
+        count(Stands::Pending),
+        count(Stands::Failed),
+        count(Stands::Passed),
+    );
+    Checks {
+        pending,
+        failed,
+        passed,
+    }
 }
 
 pub(crate) fn rolled_up(rollup: Option<serde_json::Value>) -> Option<Checks> {
@@ -142,7 +167,11 @@ fn job_of(link: &str) -> Option<Job> {
         return None;
     }
     let id = job.parse().ok().filter(|_| number(job))?;
-    Some(Job { host: (*host).to_owned(), repository: format!("{owner}/{name}"), id })
+    Some(Job {
+        host: (*host).to_owned(),
+        repository: format!("{owner}/{name}"),
+        id,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,7 +226,9 @@ pub(crate) fn kept_failing(page: &PullPage) -> Result<Failing, String> {
     git::local(gh.args(["pr", "view", url, "--json", VIEWED]));
     let ran = program::run(&mut gh, LIMIT)
         .map_err(|error| format!("gh pr view {url} could not be run: {error}"))?;
-    let said = ran.answer().map_err(|why| format!("gh pr view {url}: {why}"))?;
+    let said = ran
+        .answer()
+        .map_err(|why| format!("gh pr view {url}: {why}"))?;
     let viewed: Viewed = serde_json::from_slice(&said)
         .map_err(|why| format!("gh pr view {url} said what does not read: {why}"))?;
     if viewed.state != "OPEN" {
@@ -210,10 +241,19 @@ pub(crate) fn kept_failing(page: &PullPage) -> Result<Failing, String> {
         (Some(Owner { login }), Some(Named { name })) => Some(format!("{host}/{login}/{name}")),
         _ => None,
     };
-    let repositories: Vec<&str> =
-        [page.repository()].into_iter().chain(head.as_deref()).collect();
+    let repositories: Vec<&str> = [page.repository()]
+        .into_iter()
+        .chain(head.as_deref())
+        .collect();
     let runtime = folder::find().map_err(|unfound| format!("{unfound}, to keep it in"))?;
-    Ok(keep(&runtime, viewed.head_ref_oid, &checks, &repositories, fetch, SystemTime::now()))
+    Ok(keep(
+        &runtime,
+        viewed.head_ref_oid,
+        &checks,
+        &repositories,
+        fetch,
+        SystemTime::now(),
+    ))
 }
 
 fn fetch(job: &Job) -> Result<(Vec<u8>, u64), String> {
@@ -221,7 +261,9 @@ fn fetch(job: &Job) -> Result<(Vec<u8>, u64), String> {
     let asked = format!("gh api --hostname {} {logs}", job.host);
     let ask = |flags: &[&str]| {
         let mut gh = Command::new("gh");
-        gh.args(["api", "--hostname", &job.host]).args(flags).arg(&logs);
+        gh.args(["api", "--hostname", &job.host])
+            .args(flags)
+            .arg(&logs);
         program::run_tail(git::local(&mut gh), LIMIT, program::SAID_MAX)
             .map_err(|error| format!("{asked} could not be run: {error}"))
     };
@@ -231,7 +273,7 @@ fn fetch(job: &Job) -> Result<(Vec<u8>, u64), String> {
             if String::from_utf8_lossy(&stderr).contains(&unknown) =>
         {
             ask(&[])?
-        },
+        }
         ran => ran,
     };
     let log = ran.answer().map_err(|why| format!("{asked}: {why}"))?;
@@ -253,9 +295,9 @@ enum Fetching<'scope> {
 impl Fetching<'_> {
     fn log(self) -> Log {
         match self {
-            Fetching::Running(running) => {
-                running.join().unwrap_or_else(|Panicked| Log::Unkept(PANICKED.to_owned()))
-            },
+            Fetching::Running(running) => running
+                .join()
+                .unwrap_or_else(|Panicked| Log::Unkept(PANICKED.to_owned())),
             Fetching::Done(log) => log,
         }
     }
@@ -269,21 +311,27 @@ fn keep(
     fetch: impl Fn(&Job) -> Result<(Vec<u8>, u64), String> + Sync,
     now: SystemTime,
 ) -> Failing {
-    let Checks { pending, passed, .. } = counted(checks);
-    let failed: Vec<&Check> =
-        checks.iter().filter(|check| check.stands == Stands::Failed).collect();
+    let Checks {
+        pending, passed, ..
+    } = counted(checks);
+    let failed: Vec<&Check> = checks
+        .iter()
+        .filter(|check| check.stands == Stands::Failed)
+        .collect();
     let mut jobs = 0;
-    let plans = failed.iter().map(|check| match check.link.as_deref().and_then(job_of) {
-        None => Plan::NoJob,
-        Some(job) if !repositories.iter().any(|repository| job.ran_in(repository)) => {
-            Plan::Elsewhere(job)
-        },
-        Some(_) if jobs >= LOGS_MAX => Plan::Past,
-        Some(job) => {
-            jobs += 1;
-            Plan::Fetch(job)
-        },
-    });
+    let plans = failed
+        .iter()
+        .map(|check| match check.link.as_deref().and_then(job_of) {
+            None => Plan::NoJob,
+            Some(job) if !repositories.iter().any(|repository| job.ran_in(repository)) => {
+                Plan::Elsewhere(job)
+            }
+            Some(_) if jobs >= LOGS_MAX => Plan::Past,
+            Some(job) => {
+                jobs += 1;
+                Plan::Fetch(job)
+            }
+        });
     let plans: Vec<Plan> = plans.collect();
     let fetched = |job: Job| {
         let kept = fetch(&job).and_then(|(log, before)| write(runtime, &log, before, now));
@@ -295,13 +343,15 @@ fn keep(
             .into_iter()
             .map(|plan| match plan {
                 Plan::NoJob => Fetching::Done(Log::Unkept(NO_JOB.to_owned())),
-                Plan::Elsewhere(Job { host, repository, .. }) => Fetching::Done(Log::Unkept(format!(
+                Plan::Elsewhere(Job {
+                    host, repository, ..
+                }) => Fetching::Done(Log::Unkept(format!(
                     "its job ran in {host}/{repository}, which is neither the pull request's \
                      repository nor its head's"
                 ))),
-                Plan::Past => {
-                    Fetching::Done(Log::Unkept(format!("lune fetches no more than {LOGS_MAX} logs")))
-                },
+                Plan::Past => Fetching::Done(Log::Unkept(format!(
+                    "lune fetches no more than {LOGS_MAX} logs"
+                ))),
                 Plan::Fetch(job) => {
                     let named = thread::Builder::new().name("check log".to_owned());
                     match panics::spawn_in(named, scope, move || fetched(job)) {
@@ -310,17 +360,25 @@ fn keep(
                             "no thread fetches its log: {error}"
                         ))),
                     }
-                },
+                }
             })
             .collect();
         fetching.into_iter().map(Fetching::log).collect()
     });
-    let failed = failed.into_iter().zip(logs).map(|(Check { name, link, .. }, log)| Failed {
-        name: name.clone(),
-        link: link.clone(),
-        log,
-    });
-    Failing { head, failed: failed.collect(), pending, passed }
+    let failed = failed
+        .into_iter()
+        .zip(logs)
+        .map(|(Check { name, link, .. }, log)| Failed {
+            name: name.clone(),
+            link: link.clone(),
+            log,
+        });
+    Failing {
+        head,
+        failed: failed.collect(),
+        pending,
+        passed,
+    }
 }
 
 fn write(runtime: &Path, log: &[u8], before: u64, now: SystemTime) -> Result<Kept, String> {
@@ -341,7 +399,11 @@ fn write(runtime: &Path, log: &[u8], before: u64, now: SystemTime) -> Result<Kep
     let mut text = lines.join("\n");
     text.push('\n');
     draft.write(text.as_bytes())?;
-    Ok(Kept { file: draft.keep()?, lines: lines.len(), left_out })
+    Ok(Kept {
+        file: draft.keep()?,
+        lines: lines.len(),
+        left_out,
+    })
 }
 
 fn plain(line: &str) -> String {
@@ -351,10 +413,13 @@ fn plain(line: &str) -> String {
         match c {
             '\u{1b}' if chars.peek() == Some(&'[') => {
                 chars.next();
-                while chars.next_if(|c| ('\u{20}'..='\u{3f}').contains(c)).is_some() {}
+                while chars
+                    .next_if(|c| ('\u{20}'..='\u{3f}').contains(c))
+                    .is_some()
+                {}
                 chars.next_if(|c| ('\u{40}'..='\u{7e}').contains(c));
-            },
-            '\u{feff}' => {},
+            }
+            '\u{feff}' => {}
             c => plain.push(c),
         }
     }
@@ -407,9 +472,19 @@ mod tests {
             status("ci/expected", "EXPECTED"),
             r#"{"__typename":"SomethingNew","name":"x"}"#.to_owned(),
         ]);
-        assert_eq!(rolled_up(Some(checks)), Some(Checks { pending: 4, failed: 6, passed: 4 }));
+        assert_eq!(
+            rolled_up(Some(checks)),
+            Some(Checks {
+                pending: 4,
+                failed: 6,
+                passed: 4
+            })
+        );
         assert_eq!(rolled_up(None), Some(Checks::default()));
-        assert_eq!(rolled_up(Some(serde_json::Value::Null)), Some(Checks::default()));
+        assert_eq!(
+            rolled_up(Some(serde_json::Value::Null)),
+            Some(Checks::default())
+        );
         assert_eq!(rolled_up(Some(rollup(&[]))), Some(Checks::default()));
         let unread = serde_json::json!([{"__typename": "CheckRun", "name": 1}]);
         assert_eq!(rolled_up(Some(unread)), None);
@@ -418,7 +493,11 @@ mod tests {
     #[test]
     fn a_job_s_page_says_where_it_ran() {
         let job = |host: &str, repository: &str, id| {
-            Some(Job { host: host.to_owned(), repository: repository.to_owned(), id })
+            Some(Job {
+                host: host.to_owned(),
+                repository: repository.to_owned(),
+                id,
+            })
         };
         let page = "https://github.com/owner/repo/actions/runs/42/job/128712805531";
         assert_eq!(job_of(page), job("github.com", "owner/repo", 128712805531));
@@ -480,19 +559,54 @@ mod tests {
                 _ => panic!("fetched job {job:?}"),
             }
         };
-        let failing = keep(&runtime, "abc".to_owned(), &checks, &repositories, fetch, now);
-        assert_eq!((failing.head.as_str(), failing.pending, failing.passed), ("abc", 1, 1));
-        let names: Vec<&str> = failing.failed.iter().map(|failed| failed.name.as_str()).collect();
-        let all = ["ci / test", "ci/bad", "ci / mac", "ci / empty", "ci / fork", "ci / other"];
+        let failing = keep(
+            &runtime,
+            "abc".to_owned(),
+            &checks,
+            &repositories,
+            fetch,
+            now,
+        );
+        assert_eq!(
+            (failing.head.as_str(), failing.pending, failing.passed),
+            ("abc", 1, 1)
+        );
+        let names: Vec<&str> = failing
+            .failed
+            .iter()
+            .map(|failed| failed.name.as_str())
+            .collect();
+        let all = [
+            "ci / test",
+            "ci/bad",
+            "ci / mac",
+            "ci / empty",
+            "ci / fork",
+            "ci / other",
+        ];
         assert_eq!(names, all);
-        let Log::Kept(Kept { file, lines: 2, left_out: 0 }) = &failing.failed[0].log else {
+        let Log::Kept(Kept {
+            file,
+            lines: 2,
+            left_out: 0,
+        }) = &failing.failed[0].log
+        else {
             panic!("{:?}", failing.failed[0].log);
         };
         let path = Path::new(file);
         let folder = path.parent().and_then(Path::file_name);
-        assert_eq!((path.extension(), folder), (Some("log".as_ref()), Some("checks".as_ref())));
-        assert_eq!(fs::read_to_string(file).unwrap(), "test\tRun\tgo\ntest\tRun\tfailed\n");
-        assert_eq!(failing.failed[1].link.as_deref(), Some("https://ci.example.com/1"));
+        assert_eq!(
+            (path.extension(), folder),
+            (Some("log".as_ref()), Some("checks".as_ref()))
+        );
+        assert_eq!(
+            fs::read_to_string(file).unwrap(),
+            "test\tRun\tgo\ntest\tRun\tfailed\n"
+        );
+        assert_eq!(
+            failing.failed[1].link.as_deref(),
+            Some("https://ci.example.com/1")
+        );
         let unkept = |at: usize| match &failing.failed[at].log {
             Log::Unkept(why) => why.clone(),
             Log::Kept(kept) => panic!("{kept:?}"),
@@ -500,15 +614,21 @@ mod tests {
         assert_eq!(unkept(1), NO_JOB);
         assert_eq!(unkept(2), "gh: HTTP 404: Not Found");
         assert_eq!(unkept(3), "gh fetched a log with nothing in it");
-        let Log::Kept(Kept { lines: 1, left_out: 41, .. }) = &failing.failed[4].log else {
+        let Log::Kept(Kept {
+            lines: 1,
+            left_out: 41,
+            ..
+        }) = &failing.failed[4].log
+        else {
             panic!("{:?}", failing.failed[4].log);
         };
         let elsewhere = "its job ran in github.com/other/repo, which is neither the pull request's \
                          repository nor its head's";
         assert_eq!(unkept(5), elsewhere);
 
-        let many: Vec<String> =
-            (1..=LOGS_MAX as u64 + 1).map(|job| run("m", "COMPLETED", "FAILURE", job)).collect();
+        let many: Vec<String> = (1..=LOGS_MAX as u64 + 1)
+            .map(|job| run("m", "COMPLETED", "FAILURE", job))
+            .collect();
         let fetch = |job: &Job| {
             assert!(job.id <= LOGS_MAX as u64, "fetched job {}", job.id);
             Ok((b"failed\n".to_vec(), 0))
@@ -516,21 +636,40 @@ mod tests {
         let many = checks_of(Some(rollup(&many))).unwrap();
         let failing = keep(&runtime, "abc".to_owned(), &many, &repositories, fetch, now);
         assert_eq!(failing.failed.len(), LOGS_MAX + 1);
-        assert!(failing.failed[..LOGS_MAX].iter().all(|failed| matches!(failed.log, Log::Kept(_))));
+        assert!(
+            failing.failed[..LOGS_MAX]
+                .iter()
+                .all(|failed| matches!(failed.log, Log::Kept(_)))
+        );
         let last = &failing.failed[LOGS_MAX].log;
-        assert_eq!(last, &Log::Unkept(format!("lune fetches no more than {LOGS_MAX} logs")));
+        assert_eq!(
+            last,
+            &Log::Unkept(format!("lune fetches no more than {LOGS_MAX} logs"))
+        );
 
-        let mut first: Vec<String> =
-            (0..LOGS_MAX).map(|at| status(&format!("ext/{at}"), "FAILURE")).collect();
+        let mut first: Vec<String> = (0..LOGS_MAX)
+            .map(|at| status(&format!("ext/{at}"), "FAILURE"))
+            .collect();
         first.push(run("test", "COMPLETED", "FAILURE", 2));
         let fetch = |job: &Job| {
             assert_eq!(job.id, 2, "fetched job {}", job.id);
             Ok((b"failed\n".to_vec(), 0))
         };
         let first = checks_of(Some(rollup(&first))).unwrap();
-        let failing = keep(&runtime, "abc".to_owned(), &first, &repositories, fetch, now);
+        let failing = keep(
+            &runtime,
+            "abc".to_owned(),
+            &first,
+            &repositories,
+            fetch,
+            now,
+        );
         let no_job = Log::Unkept(NO_JOB.to_owned());
-        assert!(failing.failed[..LOGS_MAX].iter().all(|failed| failed.log == no_job));
+        assert!(
+            failing.failed[..LOGS_MAX]
+                .iter()
+                .all(|failed| failed.log == no_job)
+        );
         assert!(matches!(failing.failed[LOGS_MAX].log, Log::Kept(_)));
     }
 

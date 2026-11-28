@@ -14,9 +14,9 @@ use serde_json::Value;
 
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, On};
-use crate::transcripts::SessionId;
 use crate::mux;
 use crate::program::{self, Wanted};
+use crate::transcripts::SessionId;
 use crate::work::{self, Item};
 use crate::{git, log};
 
@@ -37,7 +37,7 @@ const _: () = assert!(LINES_QUEUED_MAX > 0);
 const _: () = assert!(LINES_PER_TURN_MAX > 0);
 const _: () = assert!(LINE_BYTES_MAX as u64 <= program::SAID_MAX);
 
-pub use lune_protocol::turn::{Turn, BEFORE_VAR, TURN_VAR};
+pub use lune_protocol::turn::{BEFORE_VAR, TURN_VAR, Turn};
 
 pub const ALLOWED: [&str; 11] = [
     "Bash(lune start:*)",
@@ -141,7 +141,10 @@ impl Marked {
                 return Err(format!("marked: at most {} {kind}", work::LISTED_MAX));
             }
             if !self.marked.insert(item) {
-                return Err(format!("marked: #{} is among the {kind} twice", item.number()));
+                return Err(format!(
+                    "marked: #{} is among the {kind} twice",
+                    item.number()
+                ));
             }
         }
         Ok(())
@@ -151,7 +154,10 @@ impl Marked {
         if self.marked.remove(&item) {
             return;
         }
-        assert!(self.like(item) < work::LISTED_MAX, "at most so many of a kind are listed to mark");
+        assert!(
+            self.like(item) < work::LISTED_MAX,
+            "at most so many of a kind are listed to mark"
+        );
         self.marked.insert(item);
     }
 
@@ -174,7 +180,10 @@ impl Marked {
 
     fn like(&self, item: Item) -> usize {
         let kind = |item: &Item| matches!(item, Item::Issue(_));
-        self.marked.iter().filter(|marked| kind(marked) == kind(&item)).count()
+        self.marked
+            .iter()
+            .filter(|marked| kind(marked) == kind(&item))
+            .count()
     }
 
     fn issues(&self) -> impl Iterator<Item = NonZeroU32> + '_ {
@@ -194,7 +203,9 @@ impl Marked {
     fn read(issues: Vec<u32>, pulls: Vec<u32>) -> Result<Marked, String> {
         let numbered = |numbers: Vec<u32>| {
             let numbers = numbers.into_iter().map(NonZeroU32::new);
-            numbers.collect::<Option<Vec<_>>>().ok_or("marked: no issue or pull request is #0")
+            numbers
+                .collect::<Option<Vec<_>>>()
+                .ok_or("marked: no issue or pull request is #0")
         };
         Marked::new(numbered(issues)?, numbered(pulls)?)
     }
@@ -259,7 +270,10 @@ impl Asked {
 
     #[must_use]
     pub fn review_only(self) -> Asked {
-        Asked { review_only: true, ..self }
+        Asked {
+            review_only: true,
+            ..self
+        }
     }
 
     pub fn of(request: AskRequest) -> Result<(Option<On>, Asked), String> {
@@ -286,7 +300,11 @@ impl Asked {
         let cwd = cwd.map(PathBuf::from);
         let marked = Marked::read(marked_issues, marked_pulls)?;
         let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?.marking(marked);
-        let asked = if review_only { asked.review_only() } else { asked };
+        let asked = if review_only {
+            asked.review_only()
+        } else {
+            asked
+        };
         Ok((on, asked))
     }
 
@@ -294,9 +312,15 @@ impl Asked {
     pub fn asked(&self, on: Option<On>) -> AskRequest {
         AskRequest {
             on,
-            cwd: self.cwd.as_ref().map(|cwd| cwd.to_string_lossy().into_owned()),
+            cwd: self
+                .cwd
+                .as_ref()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
             words: self.words.clone(),
-            resumed: self.resumed.as_ref().map(|resumed| resumed.as_str().to_owned()),
+            resumed: self
+                .resumed
+                .as_ref()
+                .map(|resumed| resumed.as_str().to_owned()),
             highlighted: self.highlighted.clone(),
             turn: self.turn.key(),
             before: self.turn.before(),
@@ -306,25 +330,39 @@ impl Asked {
         }
     }
 
-    pub(crate) fn talk(
-        &self,
-        wanted: &Wanted,
-        hear: &dyn Fn(Step),
-    ) -> Option<Result<(), String>> {
-        talk(self.claude(), &told(&self.marked, &self.words), TURN, LINES_PER_TURN_MAX, wanted, hear)
+    pub(crate) fn talk(&self, wanted: &Wanted, hear: &dyn Fn(Step)) -> Option<Result<(), String>> {
+        talk(
+            self.claude(),
+            &told(&self.marked, &self.words),
+            TURN,
+            LINES_PER_TURN_MAX,
+            wanted,
+            hear,
+        )
     }
 
     fn claude(&self) -> Command {
         let mut claude = Command::new("claude");
-        claude.args(["-p", "--model", MODEL, "--safe-mode", "--setting-sources", "user"]);
+        claude.args([
+            "-p",
+            "--model",
+            MODEL,
+            "--safe-mode",
+            "--setting-sources",
+            "user",
+        ]);
         if self.review_only {
             claude.args(["--permission-mode", "dontAsk", "--tools", ""]);
             claude.args(["--output-format", "stream-json", "--verbose"]);
-            claude.arg("--append-system-prompt").arg(review_system(&self.highlighted));
+            claude
+                .arg("--append-system-prompt")
+                .arg(review_system(&self.highlighted));
         } else {
             claude.args(["--permission-mode", "dontAsk", "--tools", "Bash"]);
             claude.args(["--output-format", "stream-json", "--verbose"]);
-            claude.arg("--append-system-prompt").arg(system(&self.highlighted));
+            claude
+                .arg("--append-system-prompt")
+                .arg(system(&self.highlighted));
         }
         if let Some(session) = &self.resumed {
             claude.args(["--resume", session.as_str()]);
@@ -388,26 +426,46 @@ fn read(line: &str) -> Vec<Read> {
     match record["type"].as_str() {
         Some("system") if record["subtype"] == "init" => {
             let session = record["session_id"].as_str().and_then(SessionId::parse);
-            session.map(|session| Read::Step(Step::Session(session))).into_iter().collect()
-        },
+            session
+                .map(|session| Read::Step(Step::Session(session)))
+                .into_iter()
+                .collect()
+        }
         Some("assistant") if record["parent_tool_use_id"].is_null() => {
-            let blocks = record["message"]["content"].as_array().into_iter().flatten();
+            let blocks = record["message"]["content"]
+                .as_array()
+                .into_iter()
+                .flatten();
             blocks.filter_map(step).map(Read::Step).collect()
-        },
+        }
         Some("result") => {
-            let denials = record["permission_denials"].as_array().into_iter().flatten();
+            let denials = record["permission_denials"]
+                .as_array()
+                .into_iter()
+                .flatten();
             let denied = denials.filter_map(|denial| denial["tool_use_id"].as_str());
-            let mut read: Vec<_> = denied.map(|id| Read::Step(Step::Denied(id.to_owned()))).collect();
-            let said = record["result"].as_str().unwrap_or_default().trim().to_owned();
-            let failed = record["is_error"].as_bool() != Some(false) || record["subtype"] != "success";
+            let mut read: Vec<_> = denied
+                .map(|id| Read::Step(Step::Denied(id.to_owned())))
+                .collect();
+            let said = record["result"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            let failed =
+                record["is_error"].as_bool() != Some(false) || record["subtype"] != "success";
             let why = || match record["subtype"].as_str() {
                 _ if !said.is_empty() => said.clone(),
                 Some(subtype) => subtype.to_owned(),
                 None => "the turn failed".to_owned(),
             };
-            read.push(Read::Ended(if failed { Err(why()) } else { Ok(said.clone()) }));
+            read.push(Read::Ended(if failed {
+                Err(why())
+            } else {
+                Ok(said.clone())
+            }));
             read
-        },
+        }
         _ => Vec::new(),
     }
 }
@@ -417,12 +475,17 @@ fn step(block: &Value) -> Option<Step> {
         "text" => {
             let text = block["text"].as_str()?.trim();
             (!text.is_empty()).then(|| Step::Said(text.to_owned()))
-        },
+        }
         "tool_use" => {
-            let ran = block["input"]["command"].as_str().or_else(|| block["name"].as_str())?;
+            let ran = block["input"]["command"]
+                .as_str()
+                .or_else(|| block["name"].as_str())?;
             let id = block["id"].as_str().unwrap_or_default().to_owned();
-            Some(Step::Ran { id, command: ran.to_owned() })
-        },
+            Some(Step::Ran {
+                id,
+                command: ran.to_owned(),
+            })
+        }
         _ => None,
     }
 }
@@ -442,7 +505,10 @@ enum Producer {
 }
 
 enum LinesState {
-    Open { queued: VecDeque<String>, producer: Producer },
+    Open {
+        queued: VecDeque<String>,
+        producer: Producer,
+    },
     GivenUp,
     Closed,
 }
@@ -473,15 +539,23 @@ fn line_channel() -> (LineWriter, LineReader, LineCancel) {
         changed: Condvar::new(),
     });
     (
-        LineWriter { lines: Arc::clone(&lines) },
-        LineReader { lines: Arc::clone(&lines) },
+        LineWriter {
+            lines: Arc::clone(&lines),
+        },
+        LineReader {
+            lines: Arc::clone(&lines),
+        },
         LineCancel { lines },
     )
 }
 
 impl LineCancel {
     fn give_up(&self) {
-        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .lines
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if matches!(*state, LinesState::Open { .. }) {
             *state = LinesState::GivenUp;
             self.lines.changed.notify_all();
@@ -491,7 +565,11 @@ impl LineCancel {
 
 impl LineWriter {
     fn push(&mut self, line: String) -> bool {
-        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .lines
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for _ in 0..SPURIOUS_WAKES_MAX {
             match &mut *state {
                 LinesState::Open { queued, producer } => {
@@ -501,12 +579,19 @@ impl LineWriter {
                     );
                     if queued.len() < LINES_QUEUED_MAX {
                         queued.push_back(line);
-                        assert!(queued.len() <= LINES_QUEUED_MAX, "queued lines stay within bound");
+                        assert!(
+                            queued.len() <= LINES_QUEUED_MAX,
+                            "queued lines stay within bound"
+                        );
                         self.lines.changed.notify_all();
                         return true;
                     }
-                    state = self.lines.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
-                },
+                    state = self
+                        .lines
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
                 LinesState::GivenUp | LinesState::Closed => return false,
             }
         }
@@ -522,7 +607,11 @@ impl LineWriter {
     }
 
     fn finish(self, outcome: io::Result<()>) {
-        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .lines
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let LinesState::Open { producer, .. } = &mut *state
             && matches!(producer, Producer::Reading)
         {
@@ -537,7 +626,11 @@ impl LineWriter {
 
 impl Drop for LineWriter {
     fn drop(&mut self) {
-        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .lines
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let LinesState::Open { producer, .. } = &mut *state
             && matches!(producer, Producer::Reading)
         {
@@ -551,7 +644,11 @@ impl Drop for LineWriter {
 
 impl LineReader {
     fn next(&mut self, deadline: Instant, wanted: &Wanted) -> NextLine {
-        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .lines
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for _ in 0..SPURIOUS_WAKES_MAX {
             if !wanted.still() {
                 return NextLine::GivenUp;
@@ -567,20 +664,25 @@ impl LineReader {
                         return NextLine::Line(line);
                     }
                     match producer {
-                        Producer::Reading => {},
+                        Producer::Reading => {}
                         Producer::Eof => return NextLine::Eof,
                         Producer::Failed(_) => {
-                            if let LinesState::Open { producer: Producer::Failed(error), .. } =
-                                mem::replace(&mut *state, LinesState::Closed)
+                            if let LinesState::Open {
+                                producer: Producer::Failed(error),
+                                ..
+                            } = mem::replace(&mut *state, LinesState::Closed)
                             {
                                 return NextLine::Failed(error);
                             }
-                        },
+                        }
                     }
-                },
+                }
             }
-            let (next, result) =
-                self.lines.changed.wait_timeout(state, left).unwrap_or_else(PoisonError::into_inner);
+            let (next, result) = self
+                .lines
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner);
             state = next;
             if result.timed_out() {
                 if matches!(*state, LinesState::GivenUp | LinesState::Closed) || !wanted.still() {
@@ -601,7 +703,11 @@ impl LineReader {
 
 impl Drop for LineReader {
     fn drop(&mut self) {
-        let mut state = self.lines.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut state = self
+            .lines
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         *state = LinesState::Closed;
         self.lines.changed.notify_all();
     }
@@ -656,7 +762,10 @@ fn talk(
     if !wanted.still() {
         return None;
     }
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -665,7 +774,7 @@ fn talk(
                 Some(cwd) => format!("{}, where the agent works, is gone", cwd.display()),
                 None => "claude is not on the PATH".to_owned(),
             }));
-        },
+        }
         Err(error) => return Some(Err(format!("claude could not be run: {error}"))),
     };
     if let Some(mut stdin) = child.stdin.take()
@@ -683,36 +792,40 @@ fn talk(
     let _watching = wanted.on_give_up(move || {
         cancel_lines.give_up();
     });
-    let reading = thread::Builder::new().name("claude says".to_owned()).spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        for _ in 0..=lines_max {
-            match read_line_bounded(&mut reader, LINE_BYTES_MAX) {
-                Ok(Some(line)) => {
-                    if !writer.push(line) {
+    let reading = thread::Builder::new()
+        .name("claude says".to_owned())
+        .spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            for _ in 0..=lines_max {
+                match read_line_bounded(&mut reader, LINE_BYTES_MAX) {
+                    Ok(Some(line)) => {
+                        if !writer.push(line) {
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        writer.finish(Ok(()));
                         return;
                     }
-                },
-                Ok(None) => {
-                    writer.finish(Ok(()));
-                    return;
-                },
-                Err(error) => {
-                    writer.finish(Err(error));
-                    return;
-                },
+                    Err(error) => {
+                        writer.finish(Err(error));
+                        return;
+                    }
+                }
             }
-        }
-        writer.finish(Ok(()));
-    });
+            writer.finish(Ok(()));
+        });
     if let Err(error) = reading {
         return unread(&mut child, error);
     }
     let stderr = child.stderr.take().expect("its stderr is piped");
-    let stderr = thread::Builder::new().name("claude's stderr".to_owned()).spawn(move || {
-        let mut said = Vec::new();
-        let _ = stderr.take(program::SAID_MAX).read_to_end(&mut said);
-        said
-    });
+    let stderr = thread::Builder::new()
+        .name("claude's stderr".to_owned())
+        .spawn(move || {
+            let mut said = Vec::new();
+            let _ = stderr.take(program::SAID_MAX).read_to_end(&mut said);
+            said
+        });
     let stderr = match stderr {
         Ok(stderr) => stderr,
         Err(error) => return unread(&mut child, error),
@@ -731,25 +844,27 @@ fn talk(
                         Read::Step(step) => {
                             spoke |= matches!(step, Step::Said(_));
                             hear(step);
-                        },
+                        }
                         Read::Ended(end) => ended = Some(end),
                     }
                 }
-            },
+            }
             NextLine::Failed(error) => {
                 stop_child(&mut child);
                 return Some(Err(format!("claude's output could not be read: {error}")));
-            },
+            }
             NextLine::Eof => break,
             NextLine::GivenUp => {
                 stop_child(&mut child);
                 return None;
-            },
+            }
             NextLine::Late => {
                 stop_child(&mut child);
                 let minutes = TURN.as_secs() / 60;
-                return Some(Err(format!("claude was still at it after {minutes} minutes")));
-            },
+                return Some(Err(format!(
+                    "claude was still at it after {minutes} minutes"
+                )));
+            }
         }
     }
     if !wanted.still() {
@@ -765,7 +880,7 @@ fn talk(
                 hear(Step::Said(last));
             }
             Ok(())
-        },
+        }
         (_, Ok(status)) => Err(failed(&stderr, status)),
         (_, Err(error)) => Err(format!("claude could not be waited for: {error}")),
     })
@@ -798,13 +913,18 @@ mod tests {
     }
 
     fn args(command: &Command) -> Vec<String> {
-        command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect()
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
     }
 
     #[test]
     fn the_agent_runs_where_it_is_asked_for() {
         let var = |command: &Command, name: &str| {
-            let set = command.get_envs().find(|(key, _)| key.to_str() == Some(name));
+            let set = command
+                .get_envs()
+                .find(|(key, _)| key.to_str() == Some(name));
             set.map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
         };
         let highlighted = "The row highlighted is terminal 4 of lune.".to_owned();
@@ -813,7 +933,14 @@ mod tests {
         let claude = first.claude();
         assert_eq!(claude.get_current_dir(), Some(Path::new("/w/lune")));
         let said = args(&claude);
-        let model = ["-p", "--model", "sonnet", "--safe-mode", "--setting-sources", "user"];
+        let model = [
+            "-p",
+            "--model",
+            "sonnet",
+            "--safe-mode",
+            "--setting-sources",
+            "user",
+        ];
         let permissions = ["--permission-mode", "dontAsk", "--tools", "Bash"];
         let output = ["--output-format", "stream-json", "--verbose"];
         assert_eq!(said[..13], [&model[..], &permissions, &output].concat());
@@ -826,18 +953,32 @@ mod tests {
         for name in terminal.into_iter().chain(git::REPOSITORY_VARS) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
         }
-        assert_eq!(var(&claude, TURN_VAR), Some(Some("00000000000000ff".to_owned())));
-        assert_eq!(var(&claude, BEFORE_VAR), Some(Some("000000000000000a".to_owned())));
+        assert_eq!(
+            var(&claude, TURN_VAR),
+            Some(Some("00000000000000ff".to_owned()))
+        );
+        assert_eq!(
+            var(&claude, BEFORE_VAR),
+            Some(Some("000000000000000a".to_owned()))
+        );
 
         let resumed = Some(session("7c22"));
         let next = Asked::new(None, "yes", resumed, String::new(), turn());
         let claude = next.unwrap().claude();
-        assert_eq!(claude.get_current_dir(), env::var_os("HOME").as_deref().map(Path::new));
+        assert_eq!(
+            claude.get_current_dir(),
+            env::var_os("HOME").as_deref().map(Path::new)
+        );
         assert_eq!(args(&claude)[15..17], ["--resume", "7c22"]);
 
         let first = Turn::new(10, None).unwrap();
-        let claude = Asked::new(None, "yes", None, String::new(), first).unwrap().claude();
-        assert_eq!(var(&claude, TURN_VAR), Some(Some("000000000000000a".to_owned())));
+        let claude = Asked::new(None, "yes", None, String::new(), first)
+            .unwrap()
+            .claude();
+        assert_eq!(
+            var(&claude, TURN_VAR),
+            Some(Some("000000000000000a".to_owned()))
+        );
         assert_eq!(var(&claude, BEFORE_VAR), Some(None));
 
         let reviewed = Asked::new(
@@ -860,31 +1001,48 @@ mod tests {
     #[test]
     fn the_agent_s_commands_read_the_turn() {
         let var = |command: &Command, name: &str| {
-            let set = command.get_envs().find(|(key, _)| key.to_str() == Some(name));
-            set.and_then(|(_, value)| value).map(|value| value.to_string_lossy().into_owned())
+            let set = command
+                .get_envs()
+                .find(|(key, _)| key.to_str() == Some(name));
+            set.and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
         };
         let first = Turn::new(10, None).unwrap();
         for turn in [first, turn()] {
-            let claude = Asked::new(None, "yes", None, String::new(), turn).unwrap().claude();
+            let claude = Asked::new(None, "yes", None, String::new(), turn)
+                .unwrap()
+                .claude();
             let [key, before] = [TURN_VAR, BEFORE_VAR].map(|name| var(&claude, name));
-            assert_eq!(Turn::read(key.as_deref(), before.as_deref()), Ok(Some(turn)));
+            assert_eq!(
+                Turn::read(key.as_deref(), before.as_deref()),
+                Ok(Some(turn))
+            );
         }
         assert_eq!(Turn::read(None, None), Ok(None));
     }
 
     fn marked(issues: &[u32], pulls: &[u32]) -> Marked {
-        let numbers = |numbers: &[u32]| numbers.iter().map(|it| NonZeroU32::new(*it).unwrap()).collect::<Vec<_>>();
+        let numbers = |numbers: &[u32]| {
+            numbers
+                .iter()
+                .map(|it| NonZeroU32::new(*it).unwrap())
+                .collect::<Vec<_>>()
+        };
         Marked::new(numbers(issues), numbers(pulls)).unwrap()
     }
 
     #[test]
     fn marks_go_to_the_most_listed_and_none_twice() {
-        let numbers = |numbers: std::ops::RangeInclusive<u32>| numbers.map(|it| NonZeroU32::new(it).unwrap());
+        let numbers =
+            |numbers: std::ops::RangeInclusive<u32>| numbers.map(|it| NonZeroU32::new(it).unwrap());
         assert!(Marked::new(numbers(1..=50), numbers(1..=50)).is_ok());
         let refused = Err("marked: at most 50 issues".to_owned());
         assert_eq!(Marked::new(numbers(1..=51), numbers(1..=1)), refused);
         let twice = Marked::new(numbers(1..=1), [NonZeroU32::MIN, NonZeroU32::MIN]);
-        assert_eq!(twice, Err("marked: #1 is among the pull requests twice".to_owned()));
+        assert_eq!(
+            twice,
+            Err("marked: #1 is among the pull requests twice".to_owned())
+        );
     }
 
     #[test]
@@ -895,7 +1053,11 @@ mod tests {
         marked.toggle(Item::Pull(one));
         assert_eq!(marked, Marked::new([one], [one]).unwrap());
         marked.toggle(Item::Issue(one));
-        assert_eq!(marked, Marked::new([], [one]).unwrap(), "a second mark takes it off");
+        assert_eq!(
+            marked,
+            Marked::new([], [one]).unwrap(),
+            "a second mark takes it off"
+        );
         marked.retain(|item| matches!(item, Item::Issue(_)));
         assert_eq!(marked, Marked::default());
     }
@@ -911,12 +1073,20 @@ mod tests {
         assert!(marks(told(marked(&[3], &[]))).contains("marked issue #3:"));
         assert!(marks(told(marked(&[1, 2, 3], &[]))).contains("marked issues #1, #2 and #3:"));
         assert!(marks(told(marked(&[], &[7, 9]))).contains("marked pull requests #7 and #9:"));
-        assert_eq!(told(Marked::default()), "tackle these", "an unmarked turn is the words alone");
+        assert_eq!(
+            told(Marked::default()),
+            "tackle these",
+            "an unmarked turn is the words alone"
+        );
     }
 
     #[test]
     fn a_turn_is_asked_of_a_daemon_as_it_is() {
-        let on = || Some(On { destination: "nixos".to_owned() });
+        let on = || {
+            Some(On {
+                destination: "nixos".to_owned(),
+            })
+        };
         for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
             let asked = Asked::new(cwd, "prune it", resumed, "row".to_owned(), turn()).unwrap();
             assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked.clone())));
@@ -928,14 +1098,39 @@ mod tests {
             asked.unwrap().asked(None)
         };
         let invalid = [
-            AskRequest { cwd: Some(String::new()), ..request() },
-            AskRequest { cwd: Some("w".to_owned()), ..request() },
-            AskRequest { words: " \n".to_owned(), ..request() },
-            AskRequest { resumed: Some("--debug".to_owned()), ..request() },
-            AskRequest { turn: 7, before: Some(7), ..request() },
-            AskRequest { marked_issues: vec![12, 0], ..request() },
-            AskRequest { marked_pulls: (1..=51).collect(), ..request() },
-            AskRequest { marked_issues: vec![12, 12], ..request() },
+            AskRequest {
+                cwd: Some(String::new()),
+                ..request()
+            },
+            AskRequest {
+                cwd: Some("w".to_owned()),
+                ..request()
+            },
+            AskRequest {
+                words: " \n".to_owned(),
+                ..request()
+            },
+            AskRequest {
+                resumed: Some("--debug".to_owned()),
+                ..request()
+            },
+            AskRequest {
+                turn: 7,
+                before: Some(7),
+                ..request()
+            },
+            AskRequest {
+                marked_issues: vec![12, 0],
+                ..request()
+            },
+            AskRequest {
+                marked_pulls: (1..=51).collect(),
+                ..request()
+            },
+            AskRequest {
+                marked_issues: vec![12, 12],
+                ..request()
+            },
         ];
         for request in invalid {
             assert!(Asked::of(request.clone()).is_err(), "{request:?}");
@@ -944,7 +1139,10 @@ mod tests {
 
     #[test]
     fn a_step_is_handed_on_as_it_is() {
-        let ran = Step::Ran { id: "toolu_1".to_owned(), command: "lune agents".to_owned() };
+        let ran = Step::Ran {
+            id: "toolu_1".to_owned(),
+            command: "lune agents".to_owned(),
+        };
         let steps = [
             Step::Session(session("7c22")),
             ran,
@@ -955,8 +1153,13 @@ mod tests {
             assert_eq!(Step::of(step.clone().answer()), Ok(Some(step)));
         }
         assert_eq!(Step::of(AskResponse { step: None }), Ok(None));
-        let unnamed = AskResponse { step: Some(ask_response::Step::Session("../x".to_owned())) };
-        assert_eq!(Step::of(unnamed), Err("session: \"../x\" names no session".to_owned()));
+        let unnamed = AskResponse {
+            step: Some(ask_response::Step::Session("../x".to_owned())),
+        };
+        assert_eq!(
+            Step::of(unnamed),
+            Err("session: \"../x\" names no session".to_owned())
+        );
     }
 
     #[test]
@@ -977,7 +1180,9 @@ mod tests {
         let line = |record: Value| record.to_string();
         let assistant = |content: Value| json!({"type": "assistant", "parent_tool_use_id": null, "message": {"content": content}});
         assert_eq!(
-            read(&line(json!({"type": "system", "subtype": "init", "session_id": "7c22"}))),
+            read(&line(
+                json!({"type": "system", "subtype": "init", "session_id": "7c22"})
+            )),
             [Read::Step(Step::Session(session("7c22")))]
         );
         let unnamed = json!({"type": "system", "subtype": "init", "session_id": "../x"});
@@ -992,8 +1197,14 @@ mod tests {
             ])))),
             [
                 Read::Step(Step::Said("Looking.".to_owned())),
-                Read::Step(Step::Ran { id: "toolu_1".to_owned(), command: "lune agents".to_owned() }),
-                Read::Step(Step::Ran { id: "toolu_2".to_owned(), command: "Read".to_owned() }),
+                Read::Step(Step::Ran {
+                    id: "toolu_1".to_owned(),
+                    command: "lune agents".to_owned()
+                }),
+                Read::Step(Step::Ran {
+                    id: "toolu_2".to_owned(),
+                    command: "Read".to_owned()
+                }),
             ]
         );
         let mut subagent = assistant(json!([{"type": "text", "text": "a subagent's"}]));
@@ -1008,11 +1219,22 @@ mod tests {
         }
         assert_eq!(read("not json"), []);
         let result = |subtype: &str, is_error: bool, result: &str| {
-            line(json!({"type": "result", "subtype": subtype, "is_error": is_error, "result": result}))
+            line(
+                json!({"type": "result", "subtype": subtype, "is_error": is_error, "result": result}),
+            )
         };
-        assert_eq!(read(&result("success", false, "Done.\n")), [Read::Ended(Ok("Done.".to_owned()))]);
-        assert_eq!(read(&result("success", true, "Not logged in")), [Read::Ended(Err("Not logged in".to_owned()))]);
-        assert_eq!(read(&result("error_max_turns", true, "")), [Read::Ended(Err("error_max_turns".to_owned()))]);
+        assert_eq!(
+            read(&result("success", false, "Done.\n")),
+            [Read::Ended(Ok("Done.".to_owned()))]
+        );
+        assert_eq!(
+            read(&result("success", true, "Not logged in")),
+            [Read::Ended(Err("Not logged in".to_owned()))]
+        );
+        assert_eq!(
+            read(&result("error_max_turns", true, "")),
+            [Read::Ended(Err("error_max_turns".to_owned()))]
+        );
         let denied = json!({
             "type": "result", "subtype": "success", "is_error": false, "result": "Done.",
             "permission_denials": [
@@ -1021,7 +1243,10 @@ mod tests {
         });
         assert_eq!(
             read(&line(denied)),
-            [Read::Step(Step::Denied("toolu_3".to_owned())), Read::Ended(Ok("Done.".to_owned()))]
+            [
+                Read::Step(Step::Denied("toolu_3".to_owned())),
+                Read::Ended(Ok("Done.".to_owned()))
+            ]
         );
     }
 
@@ -1040,36 +1265,74 @@ mod tests {
         let init = r#"{"type":"system","subtype":"init","session_id":"7c22"}"#;
         let ran = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"lune agents"}}]}}"#;
         let done = r#"{"type":"result","subtype":"success","is_error":false,"result":"You are in lune:2."}"#;
-        let script = format!("read words; echo '{init}'; echo '{ran}'; echo \"$words\" >&2; echo '{done}'");
+        let script =
+            format!("read words; echo '{init}'; echo '{ran}'; echo \"$words\" >&2; echo '{done}'");
         let (said, ended) = heard(&script, "where am I\n");
-        assert_eq!(said, [
-            Step::Session(session("7c22")),
-            Step::Ran { id: "toolu_1".to_owned(), command: "lune agents".to_owned() },
-            Step::Said("You are in lune:2.".to_owned()),
-        ]);
+        assert_eq!(
+            said,
+            [
+                Step::Session(session("7c22")),
+                Step::Ran {
+                    id: "toolu_1".to_owned(),
+                    command: "lune agents".to_owned()
+                },
+                Step::Said("You are in lune:2.".to_owned()),
+            ]
+        );
         assert_eq!(ended, Some(Ok(())));
 
-        let failed = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}"#;
-        assert_eq!(heard(&format!("echo '{failed}'"), "").1, Some(Err("Not logged in".to_owned())));
+        let failed =
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in"}"#;
+        assert_eq!(
+            heard(&format!("echo '{failed}'"), "").1,
+            Some(Err("Not logged in".to_owned()))
+        );
         let ended = heard("echo 'No conversation found' >&2; exit 1", "").1;
-        assert_eq!(ended, Some(Err("claude failed: No conversation found".to_owned())));
+        assert_eq!(
+            ended,
+            Some(Err("claude failed: No conversation found".to_owned()))
+        );
         let ended = heard("exit 0", "").1;
-        assert_eq!(ended, Some(Err("claude ended without saying how the turn went".to_owned())));
+        assert_eq!(
+            ended,
+            Some(Err(
+                "claude ended without saying how the turn went".to_owned()
+            ))
+        );
 
         let mut gone = Command::new("sh");
         gone.current_dir("/w/gone");
         let ended = talk(gone, "", TURN, LINES_PER_TURN_MAX, &always, &|_| {});
-        assert_eq!(ended, Some(Err("/w/gone, where the agent works, is gone".to_owned())));
-        let ended =
-            talk(Command::new("/w/gone/claude"), "", TURN, LINES_PER_TURN_MAX, &always, &|_| {});
+        assert_eq!(
+            ended,
+            Some(Err("/w/gone, where the agent works, is gone".to_owned()))
+        );
+        let ended = talk(
+            Command::new("/w/gone/claude"),
+            "",
+            TURN,
+            LINES_PER_TURN_MAX,
+            &always,
+            &|_| {},
+        );
         assert_eq!(ended, Some(Err("claude is not on the PATH".to_owned())));
     }
 
     #[test]
     fn a_turn_given_up_kills_claude() {
-        let ended = given_up("claude, which ends only if killed, ends", |ready, wanted| {
-            talk(outlasting_patience(ready), "", TURN, LINES_PER_TURN_MAX, wanted, &|_| {})
-        });
+        let ended = given_up(
+            "claude, which ends only if killed, ends",
+            |ready, wanted| {
+                talk(
+                    outlasting_patience(ready),
+                    "",
+                    TURN,
+                    LINES_PER_TURN_MAX,
+                    wanted,
+                    &|_| {},
+                )
+            },
+        );
         assert_eq!(ended, None);
     }
 
@@ -1079,8 +1342,18 @@ mod tests {
 
         let mut flood = Command::new("sh");
         flood.args(["-c", r"while echo '{}'; do :; done"]);
-        let ended = talk(flood, "", DEADLINE, LINES_PER_TURN_MAX, &Wanted::always(), &|_| {});
-        assert_eq!(ended, Some(Err("claude was still at it after 10 minutes".to_owned())));
+        let ended = talk(
+            flood,
+            "",
+            DEADLINE,
+            LINES_PER_TURN_MAX,
+            &Wanted::always(),
+            &|_| {},
+        );
+        assert_eq!(
+            ended,
+            Some(Err("claude was still at it after 10 minutes".to_owned()))
+        );
     }
 
     #[test]
@@ -1091,12 +1364,17 @@ mod tests {
         let mut exact = Command::new("sh");
         exact.args(["-c", &format!("echo '{{}}'; echo '{{}}'; echo '{done}'")]);
         let heard = RefCell::new(Vec::new());
-        let ended = talk(exact, "", TURN, 3, &always, &|step| heard.borrow_mut().push(step));
+        let ended = talk(exact, "", TURN, 3, &always, &|step| {
+            heard.borrow_mut().push(step);
+        });
         assert_eq!(ended, Some(Ok(())));
         assert_eq!(heard.into_inner(), [Step::Said("Ok.".to_owned())]);
 
         let mut over = Command::new("sh");
-        over.args(["-c", &format!("echo '{{}}'; echo '{{}}'; echo '{{}}'; echo '{done}'")]);
+        over.args([
+            "-c",
+            &format!("echo '{{}}'; echo '{{}}'; echo '{{}}'; echo '{done}'"),
+        ]);
         let ended = talk(over, "", TURN, 3, &always, &|_| {});
         assert_eq!(ended, Some(Err("claude said more than 3 lines".to_owned())));
     }
@@ -1112,8 +1390,14 @@ mod tests {
     #[test]
     fn a_bounded_line_reads_up_to_its_limit_and_refuses_longer() {
         let mut cursor = io::Cursor::new(b"ok\r\nsecond\n".as_slice());
-        assert_eq!(read_line_bounded(&mut cursor, 16).unwrap(), Some("ok".to_owned()));
-        assert_eq!(read_line_bounded(&mut cursor, 16).unwrap(), Some("second".to_owned()));
+        assert_eq!(
+            read_line_bounded(&mut cursor, 16).unwrap(),
+            Some("ok".to_owned())
+        );
+        assert_eq!(
+            read_line_bounded(&mut cursor, 16).unwrap(),
+            Some("second".to_owned())
+        );
         assert_eq!(read_line_bounded(&mut cursor, 16).unwrap(), None);
 
         let mut huge = io::Cursor::new(b"123456789\n".as_slice());

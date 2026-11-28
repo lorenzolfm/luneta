@@ -6,14 +6,14 @@ use std::process::{ChildStdin, ChildStdout, Stdio};
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::AgentStatus;
-use lune_protocol::program_status::{Message, MESSAGE_BYTES_MAX};
+use lune_protocol::program_status::{MESSAGE_BYTES_MAX, Message};
 use lune_waits::eventually;
 use luned::api::agent::Status as Reported;
 use luned::api::{Agent, Harness, Status};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::agents::{hidden, process, terminal, Host, MADE_NANOS};
-use crate::host::{start, start_as, Daemon, Running, Vars, LUNED};
+use crate::agents::{Host, MADE_NANOS, hidden, process, terminal};
+use crate::host::{Daemon, LUNED, Running, Vars, start, start_as};
 
 const PI: &str = r#"
 import { createInterface } from "node:readline";
@@ -55,7 +55,9 @@ fn with_pi() -> (Host, Daemon) {
     let host = Host::new();
     fs::create_dir_all(host.pi_folder()).unwrap();
     let daemon = start(host.vars()).unwrap();
-    eventually("the extension is there", || extension(&host).is_file().then_some(()));
+    eventually("the extension is there", || {
+        extension(&host).is_file().then_some(())
+    });
     (host, daemon)
 }
 
@@ -82,7 +84,11 @@ impl Pi {
             .stdout(Stdio::piped());
         let mut process = Running::spawn(&mut command);
         let (events, told) = process.piped();
-        Pi { process, events, told: BufReader::new(told) }
+        Pi {
+            process,
+            events,
+            told: BufReader::new(told),
+        }
     }
 
     fn says(&mut self, event: &Value) {
@@ -95,7 +101,6 @@ impl Pi {
     fn event(&mut self, name: &str) {
         self.says(&json!({ "type": name }));
     }
-
 }
 
 fn as_status(host: &Host, pid: u32, status: Status) -> Agent {
@@ -116,7 +121,12 @@ fn says(id: &str) -> Value {
 
 fn backdate(path: &Path) {
     let times = FileTimes::new().set_modified(SystemTime::UNIX_EPOCH);
-    fs::File::options().write(true).open(path).unwrap().set_times(times).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(times)
+        .unwrap();
 }
 
 fn status_in(path: &Path) -> String {
@@ -136,7 +146,9 @@ fn the_extension_goes_where_pi_finds_it_once_pi_has_run() {
     eventually("the extension is written over", || {
         (fs::read_to_string(extension(&host)).unwrap() != older).then_some(())
     });
-    let there: Vec<_> = fs::read_dir(extension(&host).parent().unwrap()).unwrap().collect();
+    let there: Vec<_> = fs::read_dir(extension(&host).parent().unwrap())
+        .unwrap()
+        .collect();
     assert_eq!(there.len(), 1, "it leaves only itself: {there:?}");
 }
 
@@ -145,10 +157,16 @@ fn a_pi_in_a_shell_that_moved_tmpdir_is_listed() {
     let host = Host::new();
     fs::create_dir_all(host.pi_folder()).unwrap();
     let _daemon = start(host.vars()).unwrap();
-    eventually("the extension is there", || extension(&host).is_file().then_some(()));
+    eventually("the extension is there", || {
+        extension(&host).is_file().then_some(())
+    });
 
     let moved = tempfile::tempdir().unwrap();
-    let shell = Vars { runtime: None, temp: Some(moved.path()), ..host.vars() };
+    let shell = Vars {
+        runtime: None,
+        temp: Some(moved.path()),
+        ..host.vars()
+    };
     let mut pi = Pi::start_with(&host, shell, "tui");
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
     as_status(&host, pi.process.pid(), Status::Stopped);
@@ -161,12 +179,21 @@ fn a_folder_s_spelling_is_no_code_in_the_extension() {
     fs::create_dir_all(host.pi_folder()).unwrap();
     let root = host.runtime().join(r#"a"b\c"#);
     fs::create_dir(&root).unwrap();
-    let _daemon = start(Vars { runtime: Some(&root), ..host.vars() }).unwrap();
-    eventually("the extension is there", || extension(&host).is_file().then_some(()));
+    let _daemon = start(Vars {
+        runtime: Some(&root),
+        ..host.vars()
+    })
+    .unwrap();
+    eventually("the extension is there", || {
+        extension(&host).is_file().then_some(())
+    });
 
     let mut pi = Pi::start(&host, "tui");
     pi.says(&json!({ "type": "session_start", "reason": "startup" }));
-    assert!(root.join(format!("lune/pi/{}.json", pi.process.pid())).is_file());
+    assert!(
+        root.join(format!("lune/pi/{}.json", pi.process.pid()))
+            .is_file()
+    );
 }
 
 #[test]
@@ -175,7 +202,12 @@ fn a_daemon_takes_the_extension_back_from_one_that_took_it_and_went() {
     let its_own = fs::read_to_string(extension(&host)).unwrap();
     let (elsewhere, its_home) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let (runtime, home) = (Some(elsewhere.path()), Some(its_home.path()));
-    let mut other = Vars { runtime, home, ..host.vars() }.command(LUNED);
+    let mut other = Vars {
+        runtime,
+        home,
+        ..host.vars()
+    }
+    .command(LUNED);
     other.env("PI_CODING_AGENT_DIR", host.pi_folder());
     let other = start_as(other).unwrap();
     eventually("the other daemon has the extension", || {
@@ -202,13 +234,23 @@ fn a_pi_agent_is_listed_by_what_its_extension_hears() {
     let stopped = as_status(&host, pid, Status::Stopped);
     assert!(!stopped.is_finished_turn());
     assert_eq!(stopped.runs_in(), Harness::Pi);
-    assert_eq!((stopped.session_id.as_deref(), stopped.cwd.as_str()), (Some("first"), "/home/you/work"));
+    assert_eq!(
+        (stopped.session_id.as_deref(), stopped.cwd.as_str()),
+        (Some("first"), "/home/you/work")
+    );
     assert_eq!(stopped.entrypoint.as_deref(), Some("tui"));
     assert!(stopped.at_a_prompt());
     assert_eq!(stopped.terminal, Some(terminal(3)));
     let since: SystemTime = stopped.status_since.unwrap().try_into().unwrap();
-    let millis = |at: SystemTime| at.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-    assert!(millis(before) <= millis(since), "dated {since:?}, after {before:?}");
+    let millis = |at: SystemTime| {
+        at.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
+    assert!(
+        millis(before) <= millis(since),
+        "dated {since:?}, after {before:?}"
+    );
     assert!(stopped.started_at.is_some());
 
     pi.event("agent_start");
@@ -260,7 +302,9 @@ fn a_prompt_restores_the_state_from_before_it() {
     let failed = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&failed),
-        AgentStatus::Error { message: Message::parse("message", "boom").ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", "boom").ok()
+        }
     );
 
     pi.event("ui_prompt_start");
@@ -269,7 +313,9 @@ fn a_prompt_restores_the_state_from_before_it() {
     let restored = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&restored),
-        AgentStatus::Error { message: Message::parse("message", "boom").ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", "boom").ok()
+        }
     );
 
     pi.event("agent_start");
@@ -313,7 +359,9 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     assert!(!failed.is_finished_turn());
     assert_eq!(
         AgentStatus::of_api(&failed),
-        AgentStatus::Error { message: Message::parse("message", "rate limited").ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", "rate limited").ok()
+        }
     );
 
     pi.event("agent_start");
@@ -375,7 +423,9 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     let capped = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&capped),
-        AgentStatus::Error { message: Message::parse("message", &prefix).ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", &prefix).ok()
+        }
     );
 
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
@@ -383,7 +433,9 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     assert_eq!(status_in(&file), "error");
     assert_eq!(
         AgentStatus::of_api(&as_status(&host, pid, Status::Error)),
-        AgentStatus::Error { message: Message::parse("message", &prefix).ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", &prefix).ok()
+        }
     );
 
     pi.event("agent_start");
@@ -394,7 +446,10 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     }));
     pi.says(&json!({ "type": "agent_settled", "aborted": false }));
     let invisible = as_status(&host, pid, Status::Error);
-    assert_eq!(AgentStatus::of_api(&invisible), AgentStatus::Error { message: None });
+    assert_eq!(
+        AgentStatus::of_api(&invisible),
+        AgentStatus::Error { message: None }
+    );
     let written: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
     assert!(written.get("statusMessage").is_none(), "{written}");
 
@@ -413,7 +468,9 @@ fn a_pi_turn_reports_error_on_error_stop_reason_and_stopped_when_aborted() {
     let leading_invisible = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&leading_invisible),
-        AgentStatus::Error { message: Message::parse("message", &full).ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", &full).ok()
+        }
     );
 }
 
@@ -431,12 +488,20 @@ fn a_pi_agent_goes_on_through_a_new_session_and_goes_as_it_quits() {
     let said = fs::read(&file).unwrap();
     pi.says(&json!({ "type": "session_shutdown", "reason": "reload" }));
     pi.says(&json!({ "load": "first" }));
-    assert_eq!(fs::read(&file).unwrap(), said, "it goes on as the extension loads");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        said,
+        "it goes on as the extension loads"
+    );
     pi.says(&json!({ "type": "session_start", "reason": "reload" }));
     assert_eq!(fs::read(&file).unwrap(), said, "the reload said nothing");
 
     pi.says(&json!({ "type": "session_shutdown", "reason": "new" }));
-    assert_eq!(fs::read(&file).unwrap(), said, "it goes on as the next session loads");
+    assert_eq!(
+        fs::read(&file).unwrap(),
+        said,
+        "it goes on as the next session loads"
+    );
     pi.says(&json!({ "load": "second" }));
     pi.says(&json!({ "type": "session_start", "reason": "new" }));
     eventually("the agent is on its new session", || {
@@ -448,7 +513,9 @@ fn a_pi_agent_goes_on_through_a_new_session_and_goes_as_it_quits() {
 
     pi.says(&json!({ "type": "session_shutdown", "reason": "quit" }));
     assert!(!file.exists());
-    eventually("the agent has gone", || host.agents().is_empty().then_some(()));
+    eventually("the agent has gone", || {
+        host.agents().is_empty().then_some(())
+    });
     pi.event("agent_settled");
     assert!(!file.exists(), "a late event brings no file back");
 }
@@ -462,7 +529,9 @@ fn a_pi_agent_that_is_killed_leaves_the_list_as_it_ends() {
     as_status(&host, pid, Status::Stopped);
 
     pi.process.kill();
-    eventually("the agent has gone", || host.agents().is_empty().then_some(()));
+    eventually("the agent has gone", || {
+        host.agents().is_empty().then_some(())
+    });
     assert!(file_of(&host, pid).exists(), "it left its file");
 }
 
@@ -543,10 +612,16 @@ fn a_file_stands_only_for_the_process_that_wrote_it() {
     fs::write(file(running.pid()), says("running").to_string()).unwrap();
     let found = eventually("the agent is listed", || {
         let list = host.list();
-        list.agents.iter().any(|agent| agent.session_id.as_deref() == Some("running")).then_some(list)
+        list.agents
+            .iter()
+            .any(|agent| agent.session_id.as_deref() == Some("running"))
+            .then_some(list)
     });
-    let ids: Vec<Option<&str>> =
-        found.agents.iter().map(|agent| agent.session_id.as_deref()).collect();
+    let ids: Vec<Option<&str>> = found
+        .agents
+        .iter()
+        .map(|agent| agent.session_id.as_deref())
+        .collect();
     assert_eq!(ids, [Some("running")]);
     assert_eq!(found.unread, 0);
 }
@@ -567,7 +642,10 @@ fn a_file_no_process_of_its_pid_wrote_says_nothing_of_that_process_s_terminal() 
         let log = host.logged();
         log.contains(&unwritten).then_some(log)
     });
-    assert!(!log.contains(&format!("agent {pid} shows in no view")), "{log}");
+    assert!(
+        !log.contains(&format!("agent {pid} shows in no view")),
+        "{log}"
+    );
 }
 
 #[test]
@@ -582,9 +660,15 @@ fn a_file_that_names_its_process_s_start_stands_however_old_it_looks() {
     fs::write(file_of(&host, running.pid()), says("running").to_string()).unwrap();
     let agents = eventually("the other agent is listed", || {
         let agents = host.agents();
-        agents.iter().any(|agent| agent.session_id.as_deref() == Some("running")).then_some(agents)
+        agents
+            .iter()
+            .any(|agent| agent.session_id.as_deref() == Some("running"))
+            .then_some(agents)
     });
-    assert_eq!(agents.iter().any(|agent| agent.pid == pid), cfg!(target_os = "linux"));
+    assert_eq!(
+        agents.iter().any(|agent| agent.pid == pid),
+        cfg!(target_os = "linux")
+    );
 }
 
 #[test]
@@ -653,7 +737,9 @@ fn a_turn_goes_on_through_a_reload() {
     let restored = as_status(&host, pid, Status::Error);
     assert_eq!(
         AgentStatus::of_api(&restored),
-        AgentStatus::Error { message: Message::parse("message", "rate limited").ok() }
+        AgentStatus::Error {
+            message: Message::parse("message", "rate limited").ok()
+        }
     );
 
     pi.event("agent_start");

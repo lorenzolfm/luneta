@@ -81,11 +81,9 @@ stdenv.mkDerivation {
     cp -a . "$out/libexec/terminal-browser/"
     makeWrapper "$out/libexec/terminal-browser/bin/terminal-browser" "$out/bin/terminal-browser" \
       --prefix PATH : "${lib.makeBinPath [ pkgs.openssh ]}" \
-      ${
-        lib.optionalString stdenv.hostPlatform.isLinux ''
-          --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath linuxLibs}:$out/libexec/terminal-browser/electron"
-        ''
-      }
+      ${lib.optionalString stdenv.hostPlatform.isLinux ''
+        --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath linuxLibs}:$out/libexec/terminal-browser/electron"
+      ''}
     runHook postInstall
   '';
 

@@ -10,7 +10,9 @@ pub struct TerminalId(NonZeroU32);
 
 impl TerminalId {
     pub fn parse(field: &str, raw: u32) -> Result<TerminalId, Status> {
-        NonZeroU32::new(raw).map(TerminalId).ok_or_else(|| refused(field, "is missing"))
+        NonZeroU32::new(raw)
+            .map(TerminalId)
+            .ok_or_else(|| refused(field, "is missing"))
     }
 
     pub fn next(last: &mut Option<TerminalId>) -> TerminalId {

@@ -58,7 +58,9 @@ pub fn prepare(
         .map_err(|error| format!("resume staging directory failed: {error}"))?;
     let launch_dir = create_launch_dir(&base)
         .map_err(|error| format!("resume launch directory failed: {error}"))?;
-    let guard = Guard { dir: launch_dir.clone() };
+    let guard = Guard {
+        dir: launch_dir.clone(),
+    };
     let argv_path = launch_dir.join(ARGV_FILE);
     write_argv_file(&argv_path, resume_argv)
         .map_err(|error| format!("resume argv file failed: {error}"))?;
@@ -79,7 +81,7 @@ pub fn prepare(
             write_private_file(&rc_path, script.as_bytes())
                 .map_err(|error| format!("bash resume rc failed: {error}"))?;
             vec!["--rcfile".to_owned(), rc_str.to_owned(), "-i".to_owned()]
-        },
+        }
         ShellKind::Zsh => {
             let original_zdotdir = read_optional_env_utf8("ZDOTDIR")?;
             let zshenv = zsh_env_script(original_zdotdir.as_deref(), launch_dir_str);
@@ -90,11 +92,11 @@ pub fn prepare(
                 .map_err(|error| format!("zsh resume .zshrc failed: {error}"))?;
             vars.push(("ZDOTDIR".to_owned(), launch_dir_str.to_owned()));
             vec!["-i".to_owned()]
-        },
+        }
         ShellKind::Fish => {
             let init = fish_init_command(&exe, argv_path_str);
             vec!["-i".to_owned(), "-C".to_owned(), init]
-        },
+        }
         ShellKind::Posix => {
             let original_env = read_optional_env_utf8("ENV")?;
             let env_path = launch_dir.join("env");
@@ -106,13 +108,17 @@ pub fn prepare(
                 .map_err(|error| format!("posix resume env failed: {error}"))?;
             vars.push(("ENV".to_owned(), env_str.to_owned()));
             vec!["-i".to_owned()]
-        },
+        }
         ShellKind::Nushell => {
             let command = nushell_execute_command(&exe, argv_path_str);
             vec!["-i".to_owned(), "-e".to_owned(), command]
-        },
+        }
     };
-    let spec = SpawnSpec { cwd: cwd.clone(), program: shell.to_owned(), args };
+    let spec = SpawnSpec {
+        cwd: cwd.clone(),
+        program: shell.to_owned(),
+        args,
+    };
     Ok(Prepared { spec, vars, guard })
 }
 
@@ -131,7 +137,7 @@ pub fn run(argv_path: &Path) -> ExitCode {
         Err(why) => {
             eprintln!("lune-mux: resume failed: {why}");
             return ExitCode::FAILURE;
-        },
+        }
     };
     let program = argv.program().to_owned();
     let error = Command::new(&program).args(argv.args()).exec();
@@ -150,8 +156,8 @@ pub fn consume_argv_file(path: &Path) -> Result<ResumeArgv, String> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let fd = rustix::fs::open(path, flags, Mode::empty())
         .map_err(|error| format!("cannot open argv file: {error}"))?;
-    let stat = rustix::fs::fstat(&fd)
-        .map_err(|error| format!("cannot inspect argv file: {error}"))?;
+    let stat =
+        rustix::fs::fstat(&fd).map_err(|error| format!("cannot inspect argv file: {error}"))?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         return Err("argv path is not a regular file".to_owned());
     }
@@ -222,8 +228,8 @@ fn decode_argv_bytes(raw: &[u8]) -> Result<ResumeArgv, String> {
         if words.len() >= ARGV_ELEMENTS_MAX {
             return Err("argv file has too many arguments".to_owned());
         }
-        let word =
-            String::from_utf8(slice.to_vec()).map_err(|_| "argv element is not UTF-8".to_owned())?;
+        let word = String::from_utf8(slice.to_vec())
+            .map_err(|_| "argv element is not UTF-8".to_owned())?;
         words.push(word);
     }
     ResumeArgv::parse(words)
@@ -248,18 +254,27 @@ fn write_private_file(path: &Path, content: &[u8]) -> io::Result<()> {
 fn private_resume_base(runtime_dir: Option<&Path>) -> io::Result<PathBuf> {
     let base = match runtime_dir {
         Some(dir) => dir.join(RESUME_SUBDIR),
-        None => env::temp_dir().join(format!("lune-mux-resume-{}", rustix::process::getuid().as_raw())),
+        None => env::temp_dir().join(format!(
+            "lune-mux-resume-{}",
+            rustix::process::getuid().as_raw()
+        )),
     };
     match DirBuilder::new().mode(0o700).create(&base) {
-        Ok(()) => {},
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {},
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
     let meta = fs::symlink_metadata(&base)?;
-    if !meta.is_dir() || meta.uid() != rustix::process::getuid().as_raw() || meta.mode() & 0o077 != 0 {
+    if !meta.is_dir()
+        || meta.uid() != rustix::process::getuid().as_raw()
+        || meta.mode() & 0o077 != 0
+    {
         return Err(io::Error::new(
             ErrorKind::PermissionDenied,
-            format!("{} is not a private 0700 directory owned by this user", base.display()),
+            format!(
+                "{} is not a private 0700 directory owned by this user",
+                base.display()
+            ),
         ));
     }
     Ok(base)
@@ -474,8 +489,12 @@ mod tests {
         fs::set_permissions(&launch, fs::Permissions::from_mode(0o700)).unwrap();
 
         let argv_path = launch.join(ARGV_FILE);
-        let argv = ResumeArgv::parse(vec!["nvim".to_owned(), "-S".to_owned(), "/tmp/s".to_owned()])
-            .unwrap();
+        let argv = ResumeArgv::parse(vec![
+            "nvim".to_owned(),
+            "-S".to_owned(),
+            "/tmp/s".to_owned(),
+        ])
+        .unwrap();
         write_argv_file(&argv_path, &argv).unwrap();
         write_private_file(&launch.join("rc"), b"echo hi").unwrap();
 
@@ -484,7 +503,10 @@ mod tests {
         assert!(!argv_path.exists());
         assert!(!launch.exists());
         assert!(consume_argv_file(&argv_path).is_err());
-        assert_eq!(cleanup_consumed(&argv_path).unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(
+            cleanup_consumed(&argv_path).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
 
         let open_path = dir.path().join("open-argv");
         write_argv_file(&open_path, &argv).unwrap();

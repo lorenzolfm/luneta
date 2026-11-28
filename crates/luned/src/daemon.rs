@@ -6,23 +6,23 @@ use std::num::NonZeroU32;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::agent::Harness;
 use lune_domain::mux::TerminalKey;
-use lune_domain::projects::{folder_has_one_worktree, Holders, Made, Opens, OwnedFolder};
 use lune_domain::projects::{Dir, ProjectId, WorktreeId};
+use lune_domain::projects::{Holders, Made, Opens, OwnedFolder, folder_has_one_worktree};
 use lune_protocol::said::Said;
 use lune_protocol::socket::{self, Bound, Found};
 use lune_protocol::watch::{HostVersion, LocalVersion};
 use notify::RecursiveMode;
 use tokio::net::UnixListener;
 use tokio::runtime::Handle;
-use tokio::sync::{oneshot, OwnedSemaphorePermit};
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio::task;
 use tokio::time::{timeout, timeout_at};
 use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
@@ -31,50 +31,49 @@ use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status, Streaming};
 use tower::layer::layer_fn;
 
+use crate::answers::{self, Answer, Runs, Unanswered};
 use crate::api::change_projects_request::{self, AddWorktree};
 use crate::api::change_projects_response;
-use crate::api::make_worktree_response::Landed;
 use crate::api::daemon_server::{Daemon, DaemonServer};
-use crate::api::keep_image_request::{Image, Part};
 use crate::api::keep_checks_response::{self, Failed as FailedCheck};
+use crate::api::keep_image_request::{Image, Part};
 use crate::api::list_repositories_response::Repository;
 use crate::api::list_skills_response::Skill;
+use crate::api::make_worktree_response::Landed;
 use crate::api::{
-    self, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
-    FileIssueRequest, FileIssueResponse, InfoResponse, IssueRepositoriesRequest,
+    self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
+    FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse, IssueRepositoriesRequest,
     IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
-    KeepPrintedRequest, KeepPrintedResponse,
-    KeepImageResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
-    ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest, ListResumeResponse,
-    ListSkillsRequest, ListSkillsResponse,
-    ListWorkRequest, ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest,
-    PasteResponse, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse,
-    ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse, ReloadResumeRequest,
-    ReloadResumeResponse, SayRequest, ShowRequest, ShowResponse, TranscriptEndsRequest,
-    TranscriptEndsResponse, FramesRequest, AnswerRequest, WaitingRequest, WaitingResponse,
+    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse,
+    ListContentsRequest, ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse,
+    ListResumeRequest, ListResumeResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
+    ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse,
+    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, ReadDiffRequest, ReadDiffResponse,
+    RebaseRequest, RebaseResponse, ReloadResumeRequest, ReloadResumeResponse, SayRequest,
+    ShowRequest, ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest,
+    WaitingResponse,
 };
-use crate::answers::{self, Answer, Runs, Unanswered};
-use crate::mux::Failure;
-use crate::panics::Hooked;
 use crate::asks::{Asked, Step};
+use crate::checks::{Failing, Log};
 use crate::core::{self, AllSnapshot, Command, LocalSnapshot, Wakes, WatchDecision};
 use crate::directory::Directory;
-use crate::projects::{Changed, Lock, Opened, Store};
-use crate::layouts::{self, Root, Unrooted};
-use crate::mux::own::api::{FromViewer, ToViewer};
-use crate::mux::own::viewer;
-use crate::prunes::{self, Lunes, Occupied};
-use crate::rebases;
-use crate::folder::{self, Refusal, LOCK, SOCKET};
+use crate::folder::{self, LOCK, Refusal, SOCKET};
 use crate::images::{self, Keeping, Size};
 use crate::issues::{self, Filing, Remote, Unfiled};
+use crate::layouts::{self, Root, Unrooted};
 use crate::links::{self, Branch, Of, Pasted, Unready};
-use crate::sayings::ToSay;
-use crate::remote::{Bridges, Bridging, Destination, Standing};
+use crate::mux::Failure;
+use crate::mux::own::api::{FromViewer, ToViewer};
+use crate::mux::own::viewer;
+use crate::panics::Hooked;
 use crate::printed::Kept as KeptFile;
-use crate::transcripts::{self, Reading, SessionId};
+use crate::projects::{Changed, Lock, Opened, Store};
+use crate::prunes::{self, Lunes, Occupied};
+use crate::rebases;
+use crate::remote::{Bridges, Bridging, Destination, Standing};
+use crate::sayings::ToSay;
 use crate::statuses::ReportedAgent;
-use crate::checks::{Failing, Log};
+use crate::transcripts::{self, Reading, SessionId};
 use crate::{
     agy, changes, checks, claude, client, devices, eza, fetches, git, github, keeps, log, owns, pi,
     printed, program, projects, release, remote, repositories, skills, state, tailnet, topics,
@@ -128,8 +127,10 @@ const IN_FLIGHT: u32 = 128 * 1024;
 
 pub const ALONE: Duration = Duration::from_secs(30);
 
-const _: () =
-    assert!(ALONE.as_secs() > SWEEP.as_secs(), "luned is alone over more than one look");
+const _: () = assert!(
+    ALONE.as_secs() > SWEEP.as_secs(),
+    "luned is alone over more than one look"
+);
 
 const DRAIN: Duration = client::ANSWER.waits();
 
@@ -150,17 +151,21 @@ impl Claim {
             .open(&path)
             .map_err(|error| Refusal::Io(path.clone(), error))?;
         match lock.try_lock() {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(Refusal::Running(folder.to_owned())),
             Err(TryLockError::Error(error)) => return Err(Refusal::Io(path, error)),
         }
         let socket = folder.join(SOCKET);
         match fs::remove_file(&socket) {
-            Ok(()) => {},
-            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(Refusal::Io(socket, error)),
         }
-        Ok(Claim { folder: folder.to_owned(), socket, _lock: lock })
+        Ok(Claim {
+            folder: folder.to_owned(),
+            socket,
+            _lock: lock,
+        })
     }
 
     #[must_use]
@@ -189,9 +194,8 @@ pub async fn serve(
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
     let devices_file = if projects.is_ok() {
-        let devices_file = tailnet::in_own_home().and_then(|()| {
-            state::path(devices::FILE).map_err(|unset| unset.to_string())
-        });
+        let devices_file = tailnet::in_own_home()
+            .and_then(|()| state::path(devices::FILE).map_err(|unset| unset.to_string()));
         if let Err(why) = &devices_file {
             log::say(&format!("{why}, so luned stays off the tailnet"));
         }
@@ -204,7 +208,11 @@ pub async fn serve(
     let (wake_github, github_woken) = mpsc::sync_channel(1);
     let (wake_projects, projects_woken) = mpsc::sync_channel(1);
     let github = wake_github.clone();
-    let wakes = Wakes { git: wake_git.clone(), github, projects: wake_projects.clone() };
+    let wakes = Wakes {
+        git: wake_git.clone(),
+        github,
+        projects: wake_projects.clone(),
+    };
     let core = core::start(wakes)?;
     let store = Store::open(projects, core.clone())?;
     if let Some(why) = store.unkept() {
@@ -212,25 +220,47 @@ pub async fn serve(
     }
     let (wake_owns, owns_woken) = mpsc::sync_channel(1);
     let layouts = layouts::start(core.clone(), store, wake_owns.clone(), SWEEP)?;
-    projects::follow(core.clone(), layouts.clone(), wake_projects, projects_woken, SWEEP)?;
+    projects::follow(
+        core.clone(),
+        layouts.clone(),
+        wake_projects,
+        projects_woken,
+        SWEEP,
+    )?;
     let (end, ending) = oneshot::channel();
     let claude_folder = claude::folder();
     let agy_folder = agy::folder();
     let watchers = Arc::new(Watchers::default());
     let owns = Arc::new(AtomicBool::new(false));
-    follow(&core, &claim.folder, claude_folder.clone(), agy_folder.clone())?;
+    follow(
+        &core,
+        &claim.folder,
+        claude_folder.clone(),
+        agy_folder.clone(),
+    )?;
     tokio::spawn(stand(watchers.clone(), owns.clone(), bound.clone(), end));
-    owns::follow(core.clone(), layouts.clone(), (wake_owns, owns_woken), owns, SWEEP)?;
+    owns::follow(
+        core.clone(),
+        layouts.clone(),
+        (wake_owns, owns_woken),
+        owns,
+        SWEEP,
+    )?;
     git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
-    let rests = github::Rests { pending: PENDING_CHECKS_SWEEP, settled: PULL_REQUEST_SWEEP };
+    let rests = github::Rests {
+        pending: PENDING_CHECKS_SWEEP,
+        settled: PULL_REQUEST_SWEEP,
+    };
     github::follow(core.clone(), wake_github, github_woken, rests)?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();
     remote::follow(core.clone(), standing, SWEEP, folder, Arc::clone(&bridges))?;
-    let transcript_folders =
-        transcripts::Folders { claude: claude_folder.clone(), agy: agy_folder.clone() };
+    let transcript_folders = transcripts::Folders {
+        claude: claude_folder.clone(),
+        agy: agy_folder.clone(),
+    };
     if transcript_folders.any() {
         topics::follow(
             core.clone(),
@@ -260,7 +290,11 @@ pub async fn serve(
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
     let browser_socket = browser_bound.map(|bound| {
-        tokio::spawn(crate::terminal_socket::serve(bound, host.layouts.clone(), closed.clone()))
+        tokio::spawn(crate::terminal_socket::serve(
+            bound,
+            host.layouts.clone(),
+            closed.clone(),
+        ))
     });
     let ended = async move {
         if ending.await.is_err() {
@@ -328,7 +362,7 @@ pub async fn serve(
             let secs = DRAIN.as_secs();
             log::say(&format!("clients still connected after {secs}s are left"));
             Ok(())
-        },
+        }
     }
 }
 
@@ -348,7 +382,7 @@ fn announce_ready(socket: &Path) {
             if let Err(error) = rustix::stdio::dup2_stdout(&null) {
                 log::say(&format!("stdout did not turn to /dev/null: {error}"));
             }
-        },
+        }
         Err(error) => log::say(&format!("/dev/null did not open for stdout: {error}")),
     }
 }
@@ -399,8 +433,17 @@ fn follow(
             let tell = move |found| core.send(Command::Agents(found)).is_ok();
             let any = |_: &Path| true;
             let mode = RecursiveMode::NonRecursive;
-            watch::watch_ending("claude", dir, mode, any, SWEEP, read, claude::Scan::pids, tell)?;
-        },
+            watch::watch_ending(
+                "claude",
+                dir,
+                mode,
+                any,
+                SWEEP,
+                read,
+                claude::Scan::pids,
+                tell,
+            )?;
+        }
         None => log::say("neither CLAUDE_CONFIG_DIR nor HOME is set, to find agents in"),
     }
     let mut files = pi::AgentFiles::new(folder, pi::folder());
@@ -413,7 +456,10 @@ fn follow(
     let any = |_: &Path| true;
     let mode = RecursiveMode::NonRecursive;
     let pids = |agents: &Vec<ReportedAgent>| {
-        agents.iter().map(|agent| agent.seen().id.pid().get()).collect()
+        agents
+            .iter()
+            .map(|agent| agent.seen().id.pid().get())
+            .collect()
     };
     watch::watch_ending("pi", dir, mode, any, SWEEP, read, pids, tell)?;
     let mut files = agy::AgentFiles::new(folder, agy_folder);
@@ -443,22 +489,28 @@ async fn stand(
                 log::say(&format!("{unreached}: luned ends"));
                 let _ = end.send(());
                 return;
-            },
+            }
             Err(error) => {
                 if !unlooked_said {
                     let socket = bound.socket().display();
-                    log::say(&format!("{socket} is not looked at, so luned runs on: {error}"));
+                    log::say(&format!(
+                        "{socket} is not looked at, so luned runs on: {error}"
+                    ));
                 }
                 unlooked_said = true;
-            },
+            }
         }
         let (clients, daemons) = (watchers.clients.looked(), watchers.daemons.looked());
         let (window, far_window) = (watchers.windows.looked(), watchers.far_windows.looked());
         let terminals = owns.load(Ordering::Relaxed);
         let standing = Standing::of(terminals || clients || window, window);
-        watchers.standing.send_if_modified(|was| mem::replace(was, standing) != standing);
+        watchers
+            .standing
+            .send_if_modified(|was| mem::replace(was, standing) != standing);
         let shown = window || far_window;
-        watchers.shown.send_if_modified(|was| mem::replace(was, shown) != shown);
+        watchers
+            .shown
+            .send_if_modified(|was| mem::replace(was, shown) != shown);
         if alone.saw(standing == Standing::Idle && !daemons, Instant::now()) >= ALONE {
             let secs = ALONE.as_secs();
             let none = format!("lune-mux has had no terminal for {secs}s, nor luned a watcher");
@@ -488,7 +540,7 @@ impl Watchers {
             Waiter::Client(ClientWaiter::Client) => (&self.clients, None, Some(Standing::Kept)),
             Waiter::Client(ClientWaiter::Window) => {
                 (&self.clients, Some(&self.windows), Some(Standing::Window))
-            },
+            }
         };
         let waits = (Waits::on(watching), showing.map(Waits::on));
         if let Some(standing) = standing {
@@ -517,7 +569,7 @@ impl ClientWaiter {
             Ok(api::ClientWaiter::Window) => Ok(ClientWaiter::Window),
             Ok(api::ClientWaiter::Unspecified) | Err(_) => {
                 Err(Status::invalid_argument("waiter: unknown watch waiter"))
-            },
+            }
         }
     }
 }
@@ -534,9 +586,9 @@ impl Waiter {
             (None, false) => Ok(Waiter::Client(ClientWaiter::Client)),
             (None, true) => Ok(Waiter::Client(ClientWaiter::Window)),
             (Some(false), false) => Ok(Waiter::Daemon(Standing::Idle)),
-            (Some(false), true) => {
-                Err(Status::invalid_argument("a daemon cannot be both idle and showing a window"))
-            },
+            (Some(false), true) => Err(Status::invalid_argument(
+                "a daemon cannot be both idle and showing a window",
+            )),
             (Some(true), false) => Ok(Waiter::Daemon(Standing::Kept)),
             (Some(true), true) => Ok(Waiter::Daemon(Standing::Window)),
         }
@@ -590,9 +642,15 @@ impl Daemon for Host {
             version: release::VERSION.to_owned(),
             pid: std::process::id(),
             started_at: Some(self.started.into()),
-            claude_folder: self.claude_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
+            claude_folder: self
+                .claude_folder
+                .as_ref()
+                .map(|it| it.as_os_str().as_bytes().to_vec()),
             built: release::BUILT,
-            agy_folder: self.agy_folder.as_ref().map(|it| it.as_os_str().as_bytes().to_vec()),
+            agy_folder: self
+                .agy_folder
+                .as_ref()
+                .map(|it| it.as_os_str().as_bytes().to_vec()),
         }))
     }
 
@@ -613,16 +671,22 @@ impl Daemon for Host {
                     .map(HostVersion::of_api)
                     .transpose()
                     .map_err(|why| Status::invalid_argument(format!("after: {why}")))?;
-                self.watch_all(waiter, after).await?.into_snapshot().to_api()
-            },
+                self.watch_all(waiter, after)
+                    .await?
+                    .into_snapshot()
+                    .to_api()
+            }
             Waiter::Daemon(standing) => {
                 let after = request
                     .after
                     .map(LocalVersion::of_legacy_api)
                     .transpose()
                     .map_err(|why| Status::invalid_argument(format!("after: {why}")))?;
-                self.watch_local(standing, after).await?.into_snapshot().to_legacy_api()
-            },
+                self.watch_local(standing, after)
+                    .await?
+                    .into_snapshot()
+                    .to_legacy_api()
+            }
         };
         Ok(Response::new(host))
     }
@@ -641,7 +705,7 @@ impl Daemon for Host {
         let response = match self.watch_all(waiter, after).await? {
             WatchAnswer::Changed(snapshot) => {
                 api::WatchResponse::host(snapshot.version(), snapshot.to_api())
-            },
+            }
             WatchAnswer::Unchanged(snapshot) => api::WatchResponse::unchanged(snapshot.version()),
         };
         Ok(Response::new(response))
@@ -662,10 +726,10 @@ impl Daemon for Host {
         let response = match self.watch_local(standing, after).await? {
             WatchAnswer::Changed(snapshot) => {
                 api::WatchLocalResponse::host(snapshot.version(), snapshot.to_remote_api())
-            },
+            }
             WatchAnswer::Unchanged(snapshot) => {
                 api::WatchLocalResponse::unchanged(snapshot.version())
-            },
+            }
         };
         Ok(Response::new(response))
     }
@@ -677,7 +741,11 @@ impl Daemon for Host {
         let ListSkillsRequest { on, dir, harness } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let asked = ListSkillsRequest { on: None, dir: dir.into(), harness };
+            let asked = ListSkillsRequest {
+                on: None,
+                dir: dir.into(),
+                harness,
+            };
             return daemon.list_skills(asked).await;
         }
         let harness = Harness::said(harness)
@@ -685,16 +753,21 @@ impl Daemon for Host {
         let found = task::spawn_blocking(move || skills::found_in(&dir, harness)).await;
         let found = found.map_err(|error| unfinished(&error))?;
         let skills = found.map_err(Status::failed_precondition)?;
-        let skill = |skills::Skill { name, description, runs }| Skill {
+        let skill = |skills::Skill {
+                         name,
+                         description,
+                         runs,
+                     }| Skill {
             name: name.to_string(),
             description,
             only_you: runs == skills::Runs::OnlyForYou,
         };
-        Ok(Response::new(ListSkillsResponse { skills: skills.into_iter().map(skill).collect() }))
+        Ok(Response::new(ListSkillsResponse {
+            skills: skills.into_iter().map(skill).collect(),
+        }))
     }
 
-    type KeepChecksStream =
-        Pin<Box<dyn Stream<Item = Result<KeepChecksResponse, Status>> + Send>>;
+    type KeepChecksStream = Pin<Box<dyn Stream<Item = Result<KeepChecksResponse, Status>> + Send>>;
 
     async fn keep_checks(
         &self,
@@ -704,7 +777,9 @@ impl Daemon for Host {
         let page = checks::PullPage::parse(&url)
             .map_err(|why| Status::invalid_argument(format!("url: {why}")))?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let answer = daemon.keep_checks(KeepChecksRequest { on: None, url }).await?;
+            let answer = daemon
+                .keep_checks(KeepChecksRequest { on: None, url })
+                .await?;
             return Ok(Response::new(Box::pin(answer.into_inner())));
         }
         let answer = late(move || {
@@ -718,15 +793,23 @@ impl Daemon for Host {
         &self,
         request: Request<KeepPrintedRequest>,
     ) -> Result<Response<KeepPrintedResponse>, Status> {
-        let KeepPrintedRequest { on, terminal, typed } = request.into_inner();
+        let KeepPrintedRequest {
+            on,
+            terminal,
+            typed,
+        } = request.into_inner();
         let (terminal, _) = terminal_named(terminal)?;
         let typed = Said::new(typed).ok_or_else(|| Status::invalid_argument("typed: nothing"))?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.keep_printed(printed::asked(None, terminal, &typed)).await;
+            return daemon
+                .keep_printed(printed::asked(None, terminal, &typed))
+                .await;
         }
         let kept = task::spawn_blocking(move || printed::kept_in(terminal, &typed)).await;
         let kept = kept.map_err(|error| unfinished(&error))?;
-        Ok(Response::new(kept.map_err(Status::failed_precondition)?.to_api()))
+        Ok(Response::new(
+            kept.map_err(Status::failed_precondition)?.to_api(),
+        ))
     }
 
     async fn list_repositories(
@@ -735,17 +818,30 @@ impl Daemon for Host {
     ) -> Result<Response<ListRepositoriesResponse>, Status> {
         let ListRepositoriesRequest { on } = request.into_inner();
         if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.list_repositories(ListRepositoriesRequest { on: None }).await;
+            return daemon
+                .list_repositories(ListRepositoriesRequest { on: None })
+                .await;
         }
         let found = task::spawn_blocking(repositories::found).await;
-        let repositories::Found { repositories, owned, unread } =
-            found.map_err(|error| unfinished(&error))?;
-        let repository =
-            |it: repositories::Repository| Repository { path: it.path().as_str().to_owned() };
+        let repositories::Found {
+            repositories,
+            owned,
+            unread,
+        } = found.map_err(|error| unfinished(&error))?;
+        let repository = |it: repositories::Repository| Repository {
+            path: it.path().as_str().to_owned(),
+        };
         let repositories = repositories.into_iter().map(repository).collect();
-        let owned = owned.iter().flat_map(OwnedFolder::folders).map(|it| it.as_str().to_owned());
+        let owned = owned
+            .iter()
+            .flat_map(OwnedFolder::folders)
+            .map(|it| it.as_str().to_owned());
         let owned = owned.collect();
-        Ok(Response::new(ListRepositoriesResponse { repositories, unread, owned }))
+        Ok(Response::new(ListRepositoriesResponse {
+            repositories,
+            unread,
+            owned,
+        }))
     }
 
     async fn list_contents(
@@ -755,7 +851,12 @@ impl Daemon for Host {
         let ListContentsRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.list_contents(ListContentsRequest { on: None, dir: dir.into() }).await;
+            return daemon
+                .list_contents(ListContentsRequest {
+                    on: None,
+                    dir: dir.into(),
+                })
+                .await;
         }
         let listed = task::spawn_blocking(move || eza::listed(&dir)).await;
         let listed = listed.map_err(|error| unfinished(&error))?;
@@ -775,20 +876,36 @@ impl Daemon for Host {
         let runs = self.runs_in(&asked).await;
         let waiting = task::spawn_blocking(move || answers::waiting(key, &runs));
         let waiting = waiting.await.map_err(|error| unfinished(&error))?;
-        waiting.map(Response::new).map_err(|failure| unanswered(&Unanswered::Unreached(failure)))
+        waiting
+            .map(Response::new)
+            .map_err(|failure| unanswered(&Unanswered::Unreached(failure)))
     }
 
     async fn answer(&self, request: Request<AnswerRequest>) -> Result<Response<()>, Status> {
-        let AnswerRequest { on, terminal, shown, answer } = request.into_inner();
+        let AnswerRequest {
+            on,
+            terminal,
+            shown,
+            answer,
+        } = request.into_inner();
         if let Some(mut daemon) = self.bridged(on).await? {
-            return daemon.answer(AnswerRequest { on: None, terminal, shown, answer }).await;
+            return daemon
+                .answer(AnswerRequest {
+                    on: None,
+                    terminal,
+                    shown,
+                    answer,
+                })
+                .await;
         }
         let (key, asked) = terminal_named(terminal)?;
         let answer = Answer::of(shown, answer).map_err(Status::invalid_argument)?;
         let runs = self.runs_in(&asked).await;
         let answered = task::spawn_blocking(move || answers::answer(key, &runs, answer));
         let answered = answered.await.map_err(|error| unfinished(&error))?;
-        answered.map(Response::new).map_err(|refused| unanswered(&refused))
+        answered
+            .map(Response::new)
+            .map_err(|refused| unanswered(&refused))
     }
 
     async fn transcript_ends(
@@ -887,7 +1004,11 @@ impl Daemon for Host {
         let PruneRequest { on, dir, agreed } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let told = PruneRequest { on: None, dir: dir.into(), agreed };
+            let told = PruneRequest {
+                on: None,
+                dir: dir.into(),
+                agreed,
+            };
             let answer = daemon.prune(told).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -916,7 +1037,9 @@ impl Daemon for Host {
         let RebaseRequest { on, dir, branch } = request.into_inner();
         let dir = directory("dir", dir)?;
         let unnamed = || Status::invalid_argument("branch: it names no branch");
-        let branch = branch.map(|branch| Said::new(branch).ok_or_else(unnamed)).transpose()?;
+        let branch = branch
+            .map(|branch| Said::new(branch).ok_or_else(unnamed))
+            .transpose()?;
         if let Some(mut daemon) = self.bridged(on).await? {
             let asked = rebases::asked(None, &dir, branch.as_ref());
             let answer = daemon.rebase(asked).await?.into_inner();
@@ -930,8 +1053,7 @@ impl Daemon for Host {
         Ok(Response::new(Box::pin(answer)))
     }
 
-    type FileIssueStream =
-        Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
+    type FileIssueStream = Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
 
     async fn file_issue(
         &self,
@@ -954,7 +1076,10 @@ impl Daemon for Host {
         let IssueRepositoriesRequest { on, dir } = request.into_inner();
         let dir = directory("dir", dir)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let request = IssueRepositoriesRequest { on: None, dir: dir.to_string() };
+            let request = IssueRepositoriesRequest {
+                on: None,
+                dir: dir.to_string(),
+            };
             return daemon.issue_repositories(request).await;
         }
         let listed = task::spawn_blocking(move || issues::remotes(&dir)).await;
@@ -974,20 +1099,41 @@ impl Daemon for Host {
     ) -> Result<Response<Self::ShowStream>, Status> {
         use crate::api::show_request::{Event, Hello};
         let mut heard = request.into_inner();
-        let Some(ShowRequest { event: Some(Event::Hello(hello)), asked }) = heard.message().await?
+        let Some(ShowRequest {
+            event: Some(Event::Hello(hello)),
+            asked,
+        }) = heard.message().await?
         else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
-        let Hello { worktree, size, runs_in, again, on } = hello;
+        let Hello {
+            worktree,
+            size,
+            runs_in,
+            again,
+            on,
+        } = hello;
         if on.is_some() && runs_in.is_some() {
             return Err(Status::invalid_argument(RUNS_IN_ON));
         }
         if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
-            let hello = Hello { worktree, size, runs_in: None, again, on: None };
-            let first = ShowRequest { event: Some(Event::Hello(hello)), asked };
+            let hello = Hello {
+                worktree,
+                size,
+                runs_in: None,
+                again,
+                on: None,
+            };
+            let first = ShowRequest {
+                event: Some(Event::Hello(hello)),
+                asked,
+            };
             let rest = heard.map_while(Result::ok);
             let answer = daemon.show(tokio_stream::once(first).chain(rest)).await?;
-            let held = Held { stream: answer.into_inner(), _permit: permit };
+            let held = Held {
+                stream: answer.into_inner(),
+                _permit: permit,
+            };
             return Ok(Response::new(Box::pin(held)));
         }
         let asked_number = crate::AskNumber::of(asked);
@@ -1016,17 +1162,25 @@ impl Daemon for Host {
         tokio::spawn(async move {
             loop {
                 let (asked_number, asked) = match heard.message().await {
-                    Ok(Some(ShowRequest { event: Some(event), asked })) => {
-                        (crate::AskNumber::of(asked), layouts::Asked::of_api(event))
-                    },
-                    Ok(Some(ShowRequest { event: None, asked })) => {
-                        (crate::AskNumber::of(asked), Err("a word says nothing".to_owned()))
-                    },
+                    Ok(Some(ShowRequest {
+                        event: Some(event),
+                        asked,
+                    })) => (crate::AskNumber::of(asked), layouts::Asked::of_api(event)),
+                    Ok(Some(ShowRequest { event: None, asked })) => (
+                        crate::AskNumber::of(asked),
+                        Err("a word says nothing".to_owned()),
+                    ),
                     Ok(None) | Err(_) => break,
                 };
                 let layouts = layouts.clone();
                 let told = task::spawn_blocking(move || {
-                    layouts.send(layouts::Command::Asked { client, asked_number, asked }).is_ok()
+                    layouts
+                        .send(layouts::Command::Asked {
+                            client,
+                            asked_number,
+                            asked,
+                        })
+                        .is_ok()
                 });
                 if !matches!(told.await, Ok(true)) {
                     return;
@@ -1054,12 +1208,16 @@ impl Daemon for Host {
         let ChangeProjectsRequest { on, change } = request.into_inner();
         let unsent = |unreached: Status| changes::unsent(&unreached);
         if let Some(mut daemon) = self.bridged(on).await.map_err(unsent)? {
-            return daemon.change_projects(ChangeProjectsRequest { on: None, change }).await;
+            return daemon
+                .change_projects(ChangeProjectsRequest { on: None, change })
+                .await;
         }
         let change = change.ok_or_else(|| Status::invalid_argument("it says nothing to change"))?;
         let layouts = self.layouts.clone();
         let changed = task::spawn_blocking(move || change_answered(&layouts, change));
-        Ok(Response::new(changed.await.map_err(|error| unfinished(&error))??))
+        Ok(Response::new(
+            changed.await.map_err(|error| unfinished(&error))??,
+        ))
     }
 
     type MakeWorktreeStream =
@@ -1069,13 +1227,23 @@ impl Daemon for Host {
         &self,
         request: Request<MakeWorktreeRequest>,
     ) -> Result<Response<Self::MakeWorktreeStream>, Status> {
-        let MakeWorktreeRequest { on, project, branch, opens } = request.into_inner();
+        let MakeWorktreeRequest {
+            on,
+            project,
+            branch,
+            opens,
+        } = request.into_inner();
         let unnamed = || Status::invalid_argument("project: no id is 0");
         let project = ProjectId::of(project).ok_or_else(unnamed)?;
         let branch = asked_branch(&branch)?;
         if let Some(mut daemon) = self.bridged(on).await? {
             let (project, branch) = (project.get(), branch.as_str().to_owned());
-            let asked = MakeWorktreeRequest { on: None, project, branch, opens };
+            let asked = MakeWorktreeRequest {
+                on: None,
+                project,
+                branch,
+                opens,
+            };
             let answer = daemon.make_worktree(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -1092,16 +1260,23 @@ impl Daemon for Host {
                 Root::Folder { name, .. } => {
                     let one = folder_has_one_worktree(name.as_str());
                     return Err(Status::failed_precondition(one));
-                },
+                }
             };
             let of = Of::Branch(branch);
             let folder = links::worktree(root.as_str(), &of).map_err(branch_unready)?;
             let unopened = |status: Status| {
                 let why = status.message();
-                Status::aborted(format!("{folder} is {of}'s worktree, and it is not opened: {why}"))
+                Status::aborted(format!(
+                    "{folder} is {of}'s worktree, and it is not opened: {why}"
+                ))
             };
             let (project, opens) = (project.get(), Some(opens.to_api()));
-            let add = AddWorktree { project, folder: folder.to_string(), name: None, opens };
+            let add = AddWorktree {
+                project,
+                folder: folder.to_string(),
+                name: None,
+                opens,
+            };
             let add = change_projects_request::Change::AddWorktree(add);
             let Changed { made, .. } = change_made(&layouts, add).map_err(unopened)?;
             let landed = match made {
@@ -1110,7 +1285,9 @@ impl Daemon for Host {
                 Some(Made::Found(found)) => Landed::Found(found.get()),
                 made => unreachable!("an added worktree is made or found, not {made:?}"),
             };
-            Ok(MakeWorktreeResponse { landed: Some(landed) })
+            Ok(MakeWorktreeResponse {
+                landed: Some(landed),
+            })
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -1125,14 +1302,19 @@ impl Daemon for Host {
         let unnamed = || Status::invalid_argument("project: no id is 0");
         let project = ProjectId::of(project).ok_or_else(unnamed)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let asked = ListWorkRequest { on: None, project: project.get() };
+            let asked = ListWorkRequest {
+                on: None,
+                project: project.get(),
+            };
             let answer = daemon.list_work(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
         let (layouts, listings) = (self.layouts.clone(), Arc::clone(&self.listings));
         let answer = late(move || {
             let root = rooted(&layouts, project)?;
-            let listed = listings.list(root.dir()).map_err(Status::failed_precondition)?;
+            let listed = listings
+                .list(root.dir())
+                .map_err(Status::failed_precondition)?;
             Ok(listed.answer())
         });
         Ok(Response::new(Box::pin(answer)))
@@ -1148,7 +1330,10 @@ impl Daemon for Host {
         let unnamed = || Status::invalid_argument("worktree: no id is 0");
         let worktree = WorktreeId::of(worktree).ok_or_else(unnamed)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let asked = ReadDiffRequest { on: None, worktree: worktree.get() };
+            let asked = ReadDiffRequest {
+                on: None,
+                worktree: worktree.get(),
+            };
             let answer = daemon.read_diff(asked).await?.into_inner();
             return Ok(Response::new(Box::pin(answer)));
         }
@@ -1166,23 +1351,34 @@ impl Daemon for Host {
         request: Request<Streaming<KeepImageRequest>>,
     ) -> Result<Response<Self::KeepImageStream>, Status> {
         let mut parts = request.into_inner();
-        let Some(KeepImageRequest { part: Some(Part::Image(Image { on, size })) }) =
-            parts.message().await?
+        let Some(KeepImageRequest {
+            part: Some(Part::Image(Image { on, size })),
+        }) = parts.message().await?
         else {
-            return Err(Status::invalid_argument("the first part does not say what the image is"));
+            return Err(Status::invalid_argument(
+                "the first part does not say what the image is",
+            ));
         };
         let size = Size::new(size).map_err(Status::invalid_argument)?;
         if let Some(mut daemon) = self.bridged(on).await? {
-            let image = Image { on: None, size: size.get() };
-            let image = KeepImageRequest { part: Some(Part::Image(image)) };
+            let image = Image {
+                on: None,
+                size: size.get(),
+            };
+            let image = KeepImageRequest {
+                part: Some(Part::Image(image)),
+            };
             let rest = parts.map_while(Result::ok);
-            let answer = daemon.keep_image(tokio_stream::once(image).chain(rest)).await?;
+            let answer = daemon
+                .keep_image(tokio_stream::once(image).chain(rest))
+                .await?;
             return Ok(Response::new(Box::pin(answer.into_inner())));
         }
         let handle = Handle::current();
         let answer = late(move || {
             let kept = kept_image(&handle, parts, size);
-            kept.map(|path| KeepImageResponse { path }).map_err(Status::failed_precondition)
+            kept.map(|path| KeepImageResponse { path })
+                .map_err(Status::failed_precondition)
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -1200,11 +1396,19 @@ impl Daemon for Host {
             .transpose()?;
         if let Some(mut daemon) = self.bridged(on).await? {
             let terminal_id = terminal_id.map(NonZeroU32::get);
-            return daemon.list_resume(ListResumeRequest { on: None, terminal_id }).await;
+            return daemon
+                .list_resume(ListResumeRequest {
+                    on: None,
+                    terminal_id,
+                })
+                .await;
         }
         let layouts = self.layouts.clone();
         let listed = task::spawn_blocking(move || {
-            layouts::ask(&layouts, |answer| layouts::Command::ListResume { terminal_id, answer })
+            layouts::ask(&layouts, |answer| layouts::Command::ListResume {
+                terminal_id,
+                answer,
+            })
         })
         .await
         .map_err(|error| unfinished(&error))?;
@@ -1241,32 +1445,49 @@ fn kept_image(
     let deadline = tokio::time::Instant::now() + images::PATIENCE;
     let minutes = images::PATIENCE.as_secs() / 60;
     loop {
-        let next = handle.block_on(async {
-            tokio::time::timeout_at(deadline, parts.message()).await
-        });
-        let next = next.map_err(|_| format!("the image had not all come after {minutes} minutes"))?;
-        let next = next.map_err(|status| format!("the image did not all come: {}", status.message()))?;
+        let next =
+            handle.block_on(async { tokio::time::timeout_at(deadline, parts.message()).await });
+        let next =
+            next.map_err(|_| format!("the image had not all come after {minutes} minutes"))?;
+        let next =
+            next.map_err(|status| format!("the image did not all come: {}", status.message()))?;
         match next {
             None => return keeping.kept(),
-            Some(KeepImageRequest { part: Some(Part::Bytes(bytes)) }) => {
+            Some(KeepImageRequest {
+                part: Some(Part::Bytes(bytes)),
+            }) => {
                 keeping = keeping.write(&bytes)?;
-            },
+            }
             Some(_) => return Err("a part after the first is not the image's bytes".to_owned()),
         }
     }
 }
 
-fn kept_checks(Failing { head, failed, pending, passed }: Failing) -> KeepChecksResponse {
+fn kept_checks(
+    Failing {
+        head,
+        failed,
+        pending,
+        passed,
+    }: Failing,
+) -> KeepChecksResponse {
     let file = |kept: KeptFile| kept.to_api();
-    let failed = failed.into_iter().map(|checks::Failed { name, link, log }| FailedCheck {
-        name,
-        link: link.unwrap_or_default(),
-        log: Some(match log {
-            Log::Kept(kept) => keep_checks_response::failed::Log::Kept(file(kept)),
-            Log::Unkept(why) => keep_checks_response::failed::Log::Unkept(why),
-        }),
-    });
-    KeepChecksResponse { head, failed: failed.collect(), pending, passed }
+    let failed = failed
+        .into_iter()
+        .map(|checks::Failed { name, link, log }| FailedCheck {
+            name,
+            link: link.unwrap_or_default(),
+            log: Some(match log {
+                Log::Kept(kept) => keep_checks_response::failed::Log::Kept(file(kept)),
+                Log::Unkept(why) => keep_checks_response::failed::Log::Unkept(why),
+            }),
+        });
+    KeepChecksResponse {
+        head,
+        failed: failed.collect(),
+        pending,
+        passed,
+    }
 }
 
 struct Held<S> {
@@ -1310,11 +1531,11 @@ fn holders(projects: &api::projects::Held) -> Result<Holders, Status> {
     match projects {
         api::projects::Held::Kept(kept) => {
             Holders::of_api(&kept.projects).map_err(Status::internal)
-        },
+        }
         api::projects::Held::Unkept(why) => {
             let unkept = format!("nothing made: luned keeps no projects: {why}");
             Err(Status::failed_precondition(unkept))
-        },
+        }
     }
 }
 
@@ -1392,8 +1613,10 @@ fn worktree_folder(
     layouts: &SyncSender<layouts::Command>,
     worktree: WorktreeId,
 ) -> Result<Dir, Status> {
-    let asked =
-        layouts::ask(layouts, |answer| layouts::Command::WorktreeFolder { worktree, answer });
+    let asked = layouts::ask(layouts, |answer| layouts::Command::WorktreeFolder {
+        worktree,
+        answer,
+    });
     let dir = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
     dir.map_err(|not| match not {
         Unrooted::Unkept(why) => Status::failed_precondition(why),
@@ -1413,7 +1636,10 @@ fn change_made(
     change: change_projects_request::Change,
 ) -> Result<Changed, Status> {
     let change = projects::asked(change).map_err(Status::invalid_argument)?;
-    let asked = layouts::ask(layouts, |answer| layouts::Command::Change { change, answer });
+    let asked = layouts::ask(layouts, |answer| layouts::Command::Change {
+        change,
+        answer,
+    });
     let changed = asked.ok_or_else(|| Status::unavailable("the layouts have stopped"))?;
     changed.map_err(changes::status)
 }
@@ -1431,7 +1657,11 @@ fn change_answered(
         Made::Untaken => change_projects_response::Made::Untaken(()),
     });
     let opened = opened.map(Opened::to_api);
-    Ok(ChangeProjectsResponse { made, kept: Some(kept.to_api()), opened })
+    Ok(ChangeProjectsResponse {
+        made,
+        kept: Some(kept.to_api()),
+        opened,
+    })
 }
 
 fn unfinished(error: &task::JoinError) -> Status {
@@ -1454,7 +1684,7 @@ fn unanswered(unanswered: &Unanswered) -> Status {
         Unanswered::Refused(_) => Status::failed_precondition(said),
         Unanswered::Unreached(Failure::Called(reply)) if reply.code() == Code::NotFound => {
             Status::not_found(said)
-        },
+        }
         Unanswered::Unreached(Failure::Called(_) | Failure::Own(_)) => Status::unavailable(said),
         Unanswered::Unreached(Failure::Unread(_)) => Status::internal(said),
     }
@@ -1469,12 +1699,14 @@ impl Host {
         use crate::api::frames_request::{Event, Hello};
         use crate::mux::own::api::from_viewer;
         let mut heard = request.into_inner();
-        let Some(FramesRequest { event: Some(Event::Hello(Hello { on, greeting })) }) =
-            heard.message().await?
+        let Some(FramesRequest {
+            event: Some(Event::Hello(Hello { on, greeting })),
+        }) = heard.message().await?
         else {
             return Err(Status::invalid_argument("the first word is no hello"));
         };
-        let greeting = greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
+        let greeting =
+            greeting.ok_or_else(|| Status::invalid_argument("the hello greets nobody"))?;
         if on.is_some() && greeting.runs_in.is_some() {
             return Err(Status::invalid_argument(RUNS_IN_ON));
         }
@@ -1483,29 +1715,45 @@ impl Host {
         let said = heard.map_while(move |word| {
             let unread = |why: &str| Status::invalid_argument(why);
             let refusal = match word {
-                Ok(FramesRequest { event: Some(Event::Said(said)) }) => match served(&said) {
+                Ok(FramesRequest {
+                    event: Some(Event::Said(said)),
+                }) => match served(&said) {
                     Ok(()) => return Some(said),
                     Err(unserved) => unserved,
                 },
-                Ok(FramesRequest { event: Some(Event::Hello(_)) }) => {
-                    unread("a hello comes only first")
-                },
+                Ok(FramesRequest {
+                    event: Some(Event::Hello(_)),
+                }) => unread("a hello comes only first"),
                 Ok(FramesRequest { event: None }) => unread("a word of the frames says nothing"),
                 Err(_) => return None,
             };
-            let refuse = refuse.take().expect("the words for frames end at the first refused");
+            let refuse = refuse
+                .take()
+                .expect("the words for frames end at the first refused");
             drop(refuse.send(refusal));
             None
         });
         if let Some((mut daemon, permit)) = self.bridged_held(on).await? {
-            let hello = Hello { on: None, greeting: Some(greeting) };
-            let first = FramesRequest { event: Some(Event::Hello(hello)) };
-            let rest = said.map(|said| FramesRequest { event: Some(Event::Said(said)) });
+            let hello = Hello {
+                on: None,
+                greeting: Some(greeting),
+            };
+            let first = FramesRequest {
+                event: Some(Event::Hello(hello)),
+            };
+            let rest = said.map(|said| FramesRequest {
+                event: Some(Event::Said(said)),
+            });
             let answer = daemon.frames(tokio_stream::once(first).chain(rest)).await?;
             let stream = ended_by(answer.into_inner(), refused);
-            return Ok(Response::new(Box::pin(Held { stream, _permit: permit })));
+            return Ok(Response::new(Box::pin(Held {
+                stream,
+                _permit: permit,
+            })));
         }
-        let first = FromViewer { event: Some(from_viewer::Event::Hello(greeting)) };
+        let first = FromViewer {
+            event: Some(from_viewer::Event::Hello(greeting)),
+        };
         let answer = viewer::relayed(tokio_stream::once(first).chain(said)).await?;
         Ok(Response::new(ended_by(answer, refused)))
     }
@@ -1517,34 +1765,42 @@ impl Host {
             Err(status) => {
                 let why = status.message();
                 return Runs::Unread(format!("luned could not list terminal {id}'s agent: {why}"));
-            },
+            }
         };
-        let agent = agents.into_iter().find(|agent| agent.terminal.as_ref() == Some(terminal));
+        let agent = agents
+            .into_iter()
+            .find(|agent| agent.terminal.as_ref() == Some(terminal));
         let Some(agent) = agent else {
             return Runs::Unread(format!("terminal {id} runs no agent luned knows"));
         };
         match agent.runs_in() {
-            api::Harness::ClaudeCode => {},
+            api::Harness::ClaudeCode => {}
             api::Harness::Pi => {
                 let why = format!("terminal {id} runs Pi, whose menus luned does not read");
                 return Runs::Unread(why);
-            },
+            }
             api::Harness::Antigravity => {
-                let why = format!("terminal {id} runs Antigravity, whose menus luned does not read");
+                let why =
+                    format!("terminal {id} runs Antigravity, whose menus luned does not read");
                 return Runs::Unread(why);
-            },
+            }
             api::Harness::Unspecified => {
                 return Runs::Unread(format!("terminal {id} runs a harness luned does not know"));
-            },
+            }
         }
-        let projects = self.claude_folder.as_ref().map(|folder| folder.join("projects"));
+        let projects = self
+            .claude_folder
+            .as_ref()
+            .map(|folder| folder.join("projects"));
         let session = agent.session_id.as_deref().and_then(SessionId::parse);
         let Some((projects, session)) = projects.zip(session) else {
             return Runs::Claude { transcript: None };
         };
         let found = task::spawn_blocking(move || transcripts::find(&projects, &session)).await;
         let transcript = found.unwrap_or_else(|error| {
-            log::say(&format!("terminal {id}: no transcript is looked for: {error}"));
+            log::say(&format!(
+                "terminal {id}: no transcript is looked for: {error}"
+            ));
             None
         });
         Runs::Claude { transcript }
@@ -1562,23 +1818,26 @@ impl Host {
             return Ok(None);
         };
         let full = |_| {
-            let held = format!("{} shows and frames open to {destination}", remote::HELD_MAX);
+            let held = format!(
+                "{} shows and frames open to {destination}",
+                remote::HELD_MAX
+            );
             Status::resource_exhausted(format!("luned's bridge holds {held}, its most"))
         };
         Ok(Some((daemon, held.try_acquire_owned().map_err(full)?)))
     }
 
-    async fn bridge(
-        &self,
-        on: Option<api::On>,
-    ) -> Result<Option<(Destination, Bridging)>, Status> {
+    async fn bridge(&self, on: Option<api::On>) -> Result<Option<(Destination, Bridging)>, Status> {
         let Some(api::On { destination }) = on else {
             return Ok(None);
         };
-        let destination: Destination =
-            destination.parse().map_err(|why: String| Status::invalid_argument(why))?;
+        let destination: Destination = destination
+            .parse()
+            .map_err(|why: String| Status::invalid_argument(why))?;
         let Some(bridging) = self.bridges.to(&destination).await else {
-            return Err(Status::unavailable(format!("luned does not reach {destination} now")));
+            return Err(Status::unavailable(format!(
+                "luned does not reach {destination} now"
+            )));
         };
         Ok(Some((destination, bridging)))
     }
@@ -1590,9 +1849,9 @@ impl Host {
         let (answer, answered) = oneshot::channel();
         match self.core.try_send(question(answer)) {
             Ok(()) => Ok(answered),
-            Err(TrySendError::Full(_)) => {
-                Err(Status::resource_exhausted("the daemon has too many questions open"))
-            },
+            Err(TrySendError::Full(_)) => Err(Status::resource_exhausted(
+                "the daemon has too many questions open",
+            )),
             Err(TrySendError::Disconnected(_)) => Err(stopped()),
         }
     }
@@ -1622,8 +1881,10 @@ impl Host {
         let Some(version) = after else {
             return Ok(WatchAnswer::Changed(self.host_all().await?));
         };
-        let decided =
-            self.send_question(|decision| Command::WatchAll { after: version, decision })?;
+        let decided = self.send_question(|decision| Command::WatchAll {
+            after: version,
+            decision,
+        })?;
         await_decision(decided, || {
             if waiter == ClientWaiter::Client {
                 log::say(&parked_watch(version));
@@ -1641,8 +1902,10 @@ impl Host {
         let Some(version) = after else {
             return Ok(WatchAnswer::Changed(self.host_local().await?));
         };
-        let decided =
-            self.send_question(|decision| Command::WatchLocal { after: version, decision })?;
+        let decided = self.send_question(|decision| Command::WatchLocal {
+            after: version,
+            decision,
+        })?;
         await_decision(decided, || {}).await
     }
 }
@@ -1654,9 +1917,9 @@ async fn await_decision<S>(
     let deadline = tokio::time::Instant::now() + WATCH;
     match timeout_at(deadline, decided).await {
         Ok(Ok(WatchDecision::Now(snapshot))) => Ok(WatchAnswer::Changed(snapshot)),
-        Ok(Ok(WatchDecision::Full)) => {
-            Err(Status::resource_exhausted("too many clients wait for the host"))
-        },
+        Ok(Ok(WatchDecision::Full)) => Err(Status::resource_exhausted(
+            "too many clients wait for the host",
+        )),
         Ok(Ok(WatchDecision::Parked { at, woken })) => {
             on_parked();
             match timeout_at(deadline, woken).await {
@@ -1664,7 +1927,7 @@ async fn await_decision<S>(
                 Ok(Err(_)) => Err(stopped()),
                 Err(_) => Ok(WatchAnswer::Unchanged(at)),
             }
-        },
+        }
         Ok(Err(_)) => Err(stopped()),
         Err(_) => Err(Status::deadline_exceeded(client::unanswered(WATCH))),
     }
@@ -1689,14 +1952,14 @@ fn stopped() -> Status {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc;
     use std::sync::Arc;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant, SystemTime};
 
     use tokio_stream::StreamExt as _;
     use tonic::{Code, Request};
 
-    use super::{talked, Alone, ClientWaiter, Host, Waiter, Watchers, UNTALKED};
+    use super::{Alone, ClientWaiter, Host, UNTALKED, Waiter, Watchers, talked};
     use crate::api::daemon_server::Daemon as _;
     use crate::api::watch_local_response::Answer as LocalAnswer;
     use crate::api::watch_response::Answer;
@@ -1709,13 +1972,37 @@ mod tests {
 
     #[test]
     fn a_watch_request_says_who_waits() {
-        let asked = |kept, shown| Waiter::parse_legacy(&WatchRequest { after: None, kept, shown });
-        assert_eq!(asked(None, false).unwrap(), Waiter::Client(ClientWaiter::Client));
-        assert_eq!(asked(None, true).unwrap(), Waiter::Client(ClientWaiter::Window));
-        assert_eq!(asked(Some(false), false).unwrap(), Waiter::Daemon(Standing::Idle));
-        assert_eq!(asked(Some(false), true).unwrap_err().code(), Code::InvalidArgument);
-        assert_eq!(asked(Some(true), false).unwrap(), Waiter::Daemon(Standing::Kept));
-        assert_eq!(asked(Some(true), true).unwrap(), Waiter::Daemon(Standing::Window));
+        let asked = |kept, shown| {
+            Waiter::parse_legacy(&WatchRequest {
+                after: None,
+                kept,
+                shown,
+            })
+        };
+        assert_eq!(
+            asked(None, false).unwrap(),
+            Waiter::Client(ClientWaiter::Client)
+        );
+        assert_eq!(
+            asked(None, true).unwrap(),
+            Waiter::Client(ClientWaiter::Window)
+        );
+        assert_eq!(
+            asked(Some(false), false).unwrap(),
+            Waiter::Daemon(Standing::Idle)
+        );
+        assert_eq!(
+            asked(Some(false), true).unwrap_err().code(),
+            Code::InvalidArgument
+        );
+        assert_eq!(
+            asked(Some(true), false).unwrap(),
+            Waiter::Daemon(Standing::Kept)
+        );
+        assert_eq!(
+            asked(Some(true), true).unwrap(),
+            Waiter::Daemon(Standing::Window)
+        );
         assert_eq!(
             ClientWaiter::parse(api::ClientWaiter::Client.into()).unwrap(),
             ClientWaiter::Client
@@ -1725,7 +2012,9 @@ mod tests {
             ClientWaiter::Window
         );
         assert_eq!(
-            ClientWaiter::parse(api::ClientWaiter::Unspecified.into()).unwrap_err().code(),
+            ClientWaiter::parse(api::ClientWaiter::Unspecified.into())
+                .unwrap_err()
+                .code(),
             Code::InvalidArgument
         );
         for standing in [Standing::Idle, Standing::Kept, Standing::Window] {
@@ -1773,7 +2062,10 @@ mod tests {
 
     #[test]
     fn a_turn_whose_runner_failed_does_not_end_well() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let ended: Vec<_> = runtime.block_on(async {
             let steps = talked(|_, hear| {
                 hear(Step::Said("Looking.".to_owned()));
@@ -1785,7 +2077,10 @@ mod tests {
             panic!("{ended:?}");
         };
         assert_eq!(*heard, Step::Said("Looking.".to_owned()).answer());
-        assert_eq!((failed.code(), failed.message()), (Code::Internal, UNTALKED));
+        assert_eq!(
+            (failed.code(), failed.message()),
+            (Code::Internal, UNTALKED)
+        );
     }
 
     #[test]
@@ -1803,11 +2098,19 @@ mod tests {
                 listings: Arc::default(),
             }
         };
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
             let wake = || mpsc::sync_channel(1).0;
             let host = host_with(
-                core::start(Wakes { git: wake(), github: wake(), projects: wake() }).unwrap(),
+                core::start(Wakes {
+                    git: wake(),
+                    github: wake(),
+                    projects: wake(),
+                })
+                .unwrap(),
             );
             let first = host
                 .watch_changes(Request::new(WatchChangesRequest {
@@ -1875,35 +2178,41 @@ mod tests {
             let asked = Version { pid: 1, seq: 0 };
             let asked_local = LocalVersion { pid: 1, seq: 0 };
 
-            let (timed_out, stalled, local_timed_out, local_stalled, legacy_timed_out, legacy_stalled) =
-                tokio::join!(
-                    host.watch_changes(Request::new(WatchChangesRequest {
-                        after: Some(version.to_api()),
-                        waiter: api::ClientWaiter::Window.into(),
-                    })),
-                    wedged.watch_changes(Request::new(WatchChangesRequest {
-                        after: Some(asked),
-                        waiter: api::ClientWaiter::Window.into(),
-                    })),
-                    host.watch_local_changes(Request::new(WatchLocalChangesRequest {
-                        after: Some(local_version.to_api()),
-                        standing: api::DaemonStanding::Kept.into(),
-                    })),
-                    wedged.watch_local_changes(Request::new(WatchLocalChangesRequest {
-                        after: Some(asked_local),
-                        standing: api::DaemonStanding::Kept.into(),
-                    })),
-                    host.watch(Request::new(WatchRequest {
-                        after: Some(version.to_api()),
-                        kept: None,
-                        shown: true,
-                    })),
-                    wedged.watch(Request::new(WatchRequest {
-                        after: Some(asked),
-                        kept: None,
-                        shown: true,
-                    })),
-                );
+            let (
+                timed_out,
+                stalled,
+                local_timed_out,
+                local_stalled,
+                legacy_timed_out,
+                legacy_stalled,
+            ) = tokio::join!(
+                host.watch_changes(Request::new(WatchChangesRequest {
+                    after: Some(version.to_api()),
+                    waiter: api::ClientWaiter::Window.into(),
+                })),
+                wedged.watch_changes(Request::new(WatchChangesRequest {
+                    after: Some(asked),
+                    waiter: api::ClientWaiter::Window.into(),
+                })),
+                host.watch_local_changes(Request::new(WatchLocalChangesRequest {
+                    after: Some(local_version.to_api()),
+                    standing: api::DaemonStanding::Kept.into(),
+                })),
+                wedged.watch_local_changes(Request::new(WatchLocalChangesRequest {
+                    after: Some(asked_local),
+                    standing: api::DaemonStanding::Kept.into(),
+                })),
+                host.watch(Request::new(WatchRequest {
+                    after: Some(version.to_api()),
+                    kept: None,
+                    shown: true,
+                })),
+                wedged.watch(Request::new(WatchRequest {
+                    after: Some(asked),
+                    kept: None,
+                    shown: true,
+                })),
+            );
             assert_eq!(
                 timed_out.unwrap().into_inner().answer,
                 Some(Answer::Unchanged(version.to_api()))
@@ -1914,7 +2223,10 @@ mod tests {
                 Some(LocalAnswer::Unchanged(local_version.to_api()))
             );
             assert_eq!(local_stalled.unwrap_err().code(), Code::DeadlineExceeded);
-            assert_eq!(legacy_timed_out.unwrap().into_inner().version, Some(version.to_api()));
+            assert_eq!(
+                legacy_timed_out.unwrap().into_inner().version,
+                Some(version.to_api())
+            );
             assert_eq!(legacy_stalled.unwrap_err().code(), Code::DeadlineExceeded);
         });
     }

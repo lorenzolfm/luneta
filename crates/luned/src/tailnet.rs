@@ -13,12 +13,12 @@ use std::time::Duration;
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 use tokio::net::{TcpListener, TcpStream, UnixStream};
-use tokio::sync::{mpsc, watch, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::server::{Connected, TcpConnectInfo};
 use tonic::transport::Server;
+use tonic::transport::server::{Connected, TcpConnectInfo};
 
 use crate::devices::{self, Allowed, DeviceId};
 use crate::log;
@@ -79,11 +79,11 @@ impl TryFrom<IpAddr> for TailnetAddress {
             IpAddr::V4(address) => {
                 let [first, second, _, _] = address.octets();
                 first == 100 && (64..128).contains(&second)
-            },
+            }
             IpAddr::V6(address) => {
                 let [first, second, third, ..] = address.segments();
                 [first, second, third] == [0xfd7a, 0x115c, 0xa1e0]
-            },
+            }
         };
         if inside {
             Ok(TailnetAddress(address))
@@ -107,7 +107,11 @@ enum Seen {
 
 enum Listening {
     Not,
-    On { machine: Machine, accepting: JoinSet<()>, _epoch: watch::Sender<()> },
+    On {
+        machine: Machine,
+        accepting: JoinSet<()>,
+        _epoch: watch::Sender<()>,
+    },
 }
 
 impl Listening {
@@ -169,8 +173,15 @@ struct Device {
 impl Device {
     fn line(&self) -> String {
         let name = self.name.trim_end_matches('.').escape_debug().to_string();
-        let line = if name.is_empty() { self.id.to_string() } else { format!("{} {name}", self.id) };
-        assert!(!line.chars().any(char::is_control), "{line:?} goes into luned.log as one line");
+        let line = if name.is_empty() {
+            self.id.to_string()
+        } else {
+            format!("{} {name}", self.id)
+        };
+        assert!(
+            !line.chars().any(char::is_control),
+            "{line:?} goes into luned.log as one line"
+        );
         line
     }
 }
@@ -216,7 +227,11 @@ pub fn in_own_home() -> Result<(), String> {
     let own = uzers::os::unix::UserExt::home_dir(&you);
     match std::env::var_os("HOME") {
         Some(home) if Path::new(&home) == own => Ok(()),
-        Some(home) => Err(format!("HOME is {}, not {}", Path::new(&home).display(), own.display())),
+        Some(home) => Err(format!(
+            "HOME is {}, not {}",
+            Path::new(&home).display(),
+            own.display()
+        )),
         None => Err("HOME is unset".to_owned()),
     }
 }
@@ -228,10 +243,22 @@ pub fn server() -> Server {
 }
 
 pub fn incoming(sweep: Duration, devices_file: PathBuf) -> ReceiverStream<io::Result<Admitted>> {
-    assert!(!sweep.is_zero(), "luned asks tailscaled again some time later, not at once");
-    assert!(devices_file.is_absolute(), "{} is absolute", devices_file.display());
+    assert!(
+        !sweep.is_zero(),
+        "luned asks tailscaled again some time later, not at once"
+    );
+    assert!(
+        devices_file.is_absolute(),
+        "{} is absolute",
+        devices_file.display()
+    );
     let (admitted, coming) = mpsc::channel(ADMITTED_MAX);
-    tokio::spawn(admit_all(Path::new(TAILSCALED), devices_file.into(), admitted, sweep));
+    tokio::spawn(admit_all(
+        Path::new(TAILSCALED),
+        devices_file.into(),
+        admitted,
+        sweep,
+    ));
     ReceiverStream::new(coming)
 }
 
@@ -250,7 +277,9 @@ async fn admit_all(
         let changed = followed.changed(allowed_in(&devices_file).await);
         if changed && matches!(listening, Listening::On { .. }) {
             let devices_file = devices_file.display();
-            log::say(&format!("{devices_file} changed, so each device is admitted again"));
+            log::say(&format!(
+                "{devices_file} changed, so each device is admitted again"
+            ));
             listening.stop().await;
         }
         let unlistened = match see_machine(tailscaled).await {
@@ -274,29 +303,35 @@ async fn admit_all(
                         for listener in listeners {
                             accepting.spawn(accept(listener, admission.clone()));
                         }
-                        listening = Listening::On { machine, accepting, _epoch: epoch };
+                        listening = Listening::On {
+                            machine,
+                            accepting,
+                            _epoch: epoch,
+                        };
                         None
-                    },
+                    }
                     Err(why) => Some(why),
                 }
-            },
+            }
             Seen::Unowned(why) => {
                 listening.stop().await;
                 Some(why)
-            },
+            }
             Seen::Unseen(why) => Some(why),
         };
         match unlistened {
             None => said = None,
-            Some(why) if said.as_ref() == Some(&why) => {},
+            Some(why) if said.as_ref() == Some(&why) => {}
             Some(why) => {
                 if matches!(listening, Listening::On { .. }) {
                     log::say(&format!("{why}, so luned listens on the tailnet as it did"));
                 } else {
-                    log::say(&format!("{why}, so no device reaches luned over the tailnet yet"));
+                    log::say(&format!(
+                        "{why}, so no device reaches luned over the tailnet yet"
+                    ));
                 }
                 said = Some(why);
-            },
+            }
         }
         tokio::select! {
             () = admitted.closed() => return,
@@ -306,10 +341,19 @@ async fn admit_all(
 }
 
 fn say_listening(machine: &Machine, devices_file: &Path) {
-    let addresses = machine.addresses.iter().map(|address| SocketAddr::new(address.0, PORT));
+    let addresses = machine
+        .addresses
+        .iter()
+        .map(|address| SocketAddr::new(address.0, PORT));
     let addresses: Vec<String> = addresses.map(|address| address.to_string()).collect();
-    let (addresses, user, file) = (addresses.join(" and "), machine.user, devices_file.display());
-    log::say(&format!("listening on {addresses} for the devices of {user} that {file} lets in"));
+    let (addresses, user, file) = (
+        addresses.join(" and "),
+        machine.user,
+        devices_file.display(),
+    );
+    log::say(&format!(
+        "listening on {addresses} for the devices of {user} that {file} lets in"
+    ));
 }
 
 async fn see_machine(tailscaled: &Path) -> Seen {
@@ -345,18 +389,24 @@ async fn accept(listener: TcpListener, admission: Admission) {
                 log::say(&format!("a tailnet connection is not accepted: {error}"));
                 tokio::time::sleep(UNACCEPTED_PAUSE).await;
                 continue;
-            },
+            }
         };
         let Ok(connection) = Arc::clone(&admission.connected).try_acquire_owned() else {
-            log::say(&format!("{peer} is turned away: {CONNECTED_MAX} devices are connected"));
+            log::say(&format!(
+                "{peer} is turned away: {CONNECTED_MAX} devices are connected"
+            ));
             continue;
         };
         let Ok(lookup) = Arc::clone(&admission.admitting).try_acquire_owned() else {
-            log::say(&format!("{peer} is turned away: {ADMITTING_MAX} are being looked up"));
+            log::say(&format!(
+                "{peer} is turned away: {ADMITTING_MAX} are being looked up"
+            ));
             continue;
         };
         if let Err(error) = stream.set_nodelay(true) {
-            log::say(&format!("{peer}'s answers wait to be sent with more: {error}"));
+            log::say(&format!(
+                "{peer}'s answers wait to be sent with more: {error}"
+            ));
         }
         let admission = admission.clone();
         tokio::spawn(async move {
@@ -366,7 +416,7 @@ async fn accept(listener: TcpListener, admission: Admission) {
                     log::say(&format!("{peer} is admitted as {}", device.line()));
                     let admitted = Admitted::new(stream, admission.epoch.clone(), connection);
                     let _ = admission.admitted.send(Ok(admitted)).await;
-                },
+                }
                 Err(why) => log::say(&format!("{peer} is turned away: {why}")),
             }
             drop(lookup);
@@ -396,13 +446,18 @@ async fn admits(
     let path = format!("/localapi/v0/whois?addr={}", query_of(address, peer.port()));
     let device = device_of(&ask(tailscaled, &path).await?)?;
     if device.user != user {
-        return Err(format!("it is {}'s, and luned answers only {user}", device.user));
+        return Err(format!(
+            "it is {}'s, and luned answers only {user}",
+            device.user
+        ));
     }
     if allowed_in(devices_file).await?.lets_in(&device.id) {
         return Ok(device);
     }
     let (devices_file, line) = (devices_file.display(), device.line());
-    Err(format!("it is not in {devices_file}; the line \"{line}\" there lets it in"))
+    Err(format!(
+        "it is not in {devices_file}; the line \"{line}\" there lets it in"
+    ))
 }
 
 fn query_of(TailnetAddress(address): TailnetAddress, port: u16) -> String {
@@ -411,7 +466,7 @@ fn query_of(TailnetAddress(address): TailnetAddress, port: u16) -> String {
         IpAddr::V6(address) => {
             let address = address.to_string().replace(':', "%3A");
             format!("%5B{address}%5D%3A{port}")
-        },
+        }
     };
     let word = |byte: u8| byte.is_ascii_hexdigit() || byte == b'.' || byte == b'%';
     assert!(query.bytes().all(word), "{query} is one query word");
@@ -419,21 +474,38 @@ fn query_of(TailnetAddress(address): TailnetAddress, port: u16) -> String {
 }
 
 async fn ask(tailscaled: &Path, path: &str) -> Result<Vec<u8>, String> {
-    assert!(path.starts_with(LOCAL_API), "{path} is a path of tailscaled's local API");
+    assert!(
+        path.starts_with(LOCAL_API),
+        "{path} is a path of tailscaled's local API"
+    );
     let one_word = |c: char| !c.is_ascii_whitespace() && !c.is_ascii_control();
-    assert!(path.chars().all(one_word), "{path:?} is one word of a request line");
-    let unasked = |error: io::Error| format!("tailscaled at {} is not asked: {error}", tailscaled.display());
+    assert!(
+        path.chars().all(one_word),
+        "{path:?} is one word of a request line"
+    );
+    let unasked = |error: io::Error| {
+        format!(
+            "tailscaled at {} is not asked: {error}",
+            tailscaled.display()
+        )
+    };
     let asked = async {
         let mut stream = UnixStream::connect(tailscaled).await?;
         let request = format!("GET {path} HTTP/1.0\r\nHost: local-tailscaled.sock\r\n\r\n");
         stream.write_all(request.as_bytes()).await?;
         let mut answer = Vec::new();
-        stream.take(u64::from(ANSWER_MAX) + 1).read_to_end(&mut answer).await?;
+        stream
+            .take(u64::from(ANSWER_MAX) + 1)
+            .read_to_end(&mut answer)
+            .await?;
         Ok(answer)
     };
     let Ok(answer) = timeout(ASKED_WITHIN, asked).await else {
         let secs = ASKED_WITHIN.as_secs();
-        return Err(format!("tailscaled at {} answered nothing in {secs}s", tailscaled.display()));
+        return Err(format!(
+            "tailscaled at {} answered nothing in {secs}s",
+            tailscaled.display()
+        ));
     };
     let answer = answer.map_err(unasked)?;
     if answer.len() > ANSWER_MAX as usize {
@@ -462,11 +534,19 @@ fn machine_of(body: &[u8]) -> Result<Machine, String> {
     if status.state != "Running" {
         return Err(format!("Tailscale is {}, not running", status.state));
     }
-    let Some(Node { user, addresses, tags }) = status.machine else {
+    let Some(Node {
+        user,
+        addresses,
+        tags,
+    }) = status.machine
+    else {
         return Err("tailscaled names no node of this machine".to_owned());
     };
     if !tags.is_empty() {
-        return Err(format!("this machine is tagged {}, so no one user owns it", tags.join(", ")));
+        return Err(format!(
+            "this machine is tagged {}, so no one user owns it",
+            tags.join(", ")
+        ));
     }
     if addresses.is_empty() {
         return Err("this machine has no tailnet address".to_owned());
@@ -477,17 +557,33 @@ fn machine_of(body: &[u8]) -> Result<Machine, String> {
 fn device_of(body: &[u8]) -> Result<Device, String> {
     let whois: Whois = serde_json::from_slice(body)
         .map_err(|error| format!("tailscaled's whois does not read: {error}"))?;
-    let Peer { user, id, name, tags } = whois.node;
+    let Peer {
+        user,
+        id,
+        name,
+        tags,
+    } = whois.node;
     if !tags.is_empty() {
-        return Err(format!("it is tagged {}, so no one user owns it", tags.join(", ")));
+        return Err(format!(
+            "it is tagged {}, so no one user owns it",
+            tags.join(", ")
+        ));
     }
     Ok(Device { user, id, name })
 }
 
 impl Admitted {
-    fn new(stream: TcpStream, mut epoch: watch::Receiver<()>, connection: OwnedSemaphorePermit) -> Admitted {
+    fn new(
+        stream: TcpStream,
+        mut epoch: watch::Receiver<()>,
+        connection: OwnedSemaphorePermit,
+    ) -> Admitted {
         let unlistened = async move { while epoch.changed().await.is_ok() {} };
-        Admitted { stream, listened: Listened::On(Box::pin(unlistened)), _connection: connection }
+        Admitted {
+            stream,
+            listened: Listened::On(Box::pin(unlistened)),
+            _connection: connection,
+        }
     }
 
     fn ended(&mut self, context: &mut Context<'_>) -> io::Result<()> {
@@ -584,10 +680,16 @@ mod tests {
     }
 
     fn runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
     }
 
-    fn tailscaled(folder: &Path, answers: &'static [(&'static str, &'static str)]) -> std::path::PathBuf {
+    fn tailscaled(
+        folder: &Path,
+        answers: &'static [(&'static str, &'static str)],
+    ) -> std::path::PathBuf {
         let socket = folder.join("tailscaled.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
@@ -617,7 +719,10 @@ mod tests {
     #[test]
     fn another_status_says_what_tailscaled_said() {
         let answer = answered("403 Forbidden", "access denied\n");
-        assert_eq!(body_of(&answer).unwrap_err(), "tailscaled answered HTTP/1.0 403 Forbidden: access denied");
+        assert_eq!(
+            body_of(&answer).unwrap_err(),
+            "tailscaled answered HTTP/1.0 403 Forbidden: access denied"
+        );
     }
 
     #[test]
@@ -628,15 +733,27 @@ mod tests {
     #[test]
     fn the_status_names_this_machine_s_user_and_addresses() {
         let machine = machine_of(STATUS.as_bytes()).unwrap();
-        let addresses = [IpAddr::V4(Ipv4Addr::new(100, 101, 2, 3)), "fd7a:115c:a1e0::1".parse().unwrap()];
+        let addresses = [
+            IpAddr::V4(Ipv4Addr::new(100, 101, 2, 3)),
+            "fd7a:115c:a1e0::1".parse().unwrap(),
+        ];
         let addresses = addresses.map(|address| TailnetAddress::try_from(address).unwrap());
-        assert_eq!(machine, Machine { user: user(7), addresses: BTreeSet::from(addresses) });
+        assert_eq!(
+            machine,
+            Machine {
+                user: user(7),
+                addresses: BTreeSet::from(addresses)
+            }
+        );
     }
 
     #[test]
     fn an_address_named_twice_or_in_another_order_is_the_same_machine() {
         let again = r#"{"BackendState":"Running","Self":{"UserID":7,"TailscaleIPs":["fd7a:115c:a1e0::1","100.101.2.3","100.101.2.3"]}}"#;
-        assert_eq!(machine_of(again.as_bytes()).unwrap(), machine_of(STATUS.as_bytes()).unwrap());
+        assert_eq!(
+            machine_of(again.as_bytes()).unwrap(),
+            machine_of(STATUS.as_bytes()).unwrap()
+        );
     }
 
     #[test]
@@ -645,7 +762,8 @@ mod tests {
             "/localapi/v0/status?peers=false",
             r#"{"BackendState":"Running","Self":{"UserID":7,"TailscaleIPs":["100.101.2.3"],"Tags":["tag:server"]}}"#,
         )];
-        const UNREAD: &[(&str, &str)] = &[("/localapi/v0/status?peers=false", r#"{"BackendState":"#)];
+        const UNREAD: &[(&str, &str)] =
+            &[("/localapi/v0/status?peers=false", r#"{"BackendState":"#)];
         const OWNED: &[(&str, &str)] = &[("/localapi/v0/status?peers=false", STATUS)];
         runtime().block_on(async {
             let tagged = tempfile::tempdir().unwrap();
@@ -656,9 +774,16 @@ mod tests {
             let unread = tailscaled(unread.path(), UNREAD);
             let owned = tailscaled(owned.path(), OWNED);
             let missing = missing.path().join("tailscaled.sock");
-            assert!(matches!(see_machine(&owned).await, Seen::Owned(machine) if machine.user == user(7)));
-            let Seen::Unowned(why) = see_machine(&tagged).await else { panic!("a tagged machine is owned") };
-            assert_eq!(why, "this machine is tagged tag:server, so no one user owns it");
+            assert!(
+                matches!(see_machine(&owned).await, Seen::Owned(machine) if machine.user == user(7))
+            );
+            let Seen::Unowned(why) = see_machine(&tagged).await else {
+                panic!("a tagged machine is owned")
+            };
+            assert_eq!(
+                why,
+                "this machine is tagged tag:server, so no one user owns it"
+            );
             assert!(matches!(see_machine(&unread).await, Seen::Unowned(_)));
             assert!(matches!(see_machine(&missing).await, Seen::Unseen(_)));
         });
@@ -668,7 +793,9 @@ mod tests {
     fn a_connection_ends_with_the_machine_it_was_admitted_for() {
         runtime().block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut device = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let mut device = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
             let (stream, _) = listener.accept().await.unwrap();
             let connection = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
             let (epoch, admitted_in) = watch::channel(());
@@ -678,9 +805,18 @@ mod tests {
             admitted.read_exact(&mut read).await.unwrap();
             assert_eq!(&read, b"ping");
             drop(epoch);
-            assert_eq!(admitted.read(&mut read).await.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
-            assert_eq!(admitted.write(b"pong").await.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
-            assert_eq!(admitted.read(&mut read).await.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+            assert_eq!(
+                admitted.read(&mut read).await.unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
+            assert_eq!(
+                admitted.write(b"pong").await.unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
+            assert_eq!(
+                admitted.read(&mut read).await.unwrap_err().kind(),
+                io::ErrorKind::ConnectionAborted
+            );
         });
     }
 
@@ -688,16 +824,25 @@ mod tests {
     fn a_connection_waiting_to_read_ends_once_its_machine_is_no_longer_listened_on() {
         runtime().block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let _device = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let _device = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
             let (stream, _) = listener.accept().await.unwrap();
             let connection = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
             let (epoch, admitted_in) = watch::channel(());
             let mut admitted = Admitted::new(stream, admitted_in, connection);
             let reading = tokio::spawn(async move { admitted.read(&mut [0; 4]).await });
             tokio::task::yield_now().await;
-            assert!(!reading.is_finished(), "the device sent nothing, so the read waits");
+            assert!(
+                !reading.is_finished(),
+                "the device sent nothing, so the read waits"
+            );
             drop(epoch);
-            let read = lune_waits::awaited("the read ends with the epoch, not with the next byte", reading).await;
+            let read = lune_waits::awaited(
+                "the read ends with the epoch, not with the next byte",
+                reading,
+            )
+            .await;
             let read = read.unwrap();
             assert_eq!(read.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
         });
@@ -708,7 +853,11 @@ mod tests {
         runtime().block_on(async {
             let machine = machine_of(STATUS.as_bytes()).unwrap();
             let (epoch, admitted_in) = watch::channel(());
-            let mut listening = Listening::On { machine, accepting: JoinSet::new(), _epoch: epoch };
+            let mut listening = Listening::On {
+                machine,
+                accepting: JoinSet::new(),
+                _epoch: epoch,
+            };
             assert!(listening.is_for(&machine_of(STATUS.as_bytes()).unwrap()));
             listening.stop().await;
             assert!(matches!(listening, Listening::Not));
@@ -719,53 +868,85 @@ mod tests {
     #[test]
     fn a_stopped_tailscale_has_no_machine() {
         let stopped = r#"{"BackendState":"Stopped","Self":{"UserID":7,"TailscaleIPs":[]}}"#;
-        assert_eq!(machine_of(stopped.as_bytes()).unwrap_err(), "Tailscale is Stopped, not running");
+        assert_eq!(
+            machine_of(stopped.as_bytes()).unwrap_err(),
+            "Tailscale is Stopped, not running"
+        );
     }
 
     #[test]
     fn a_node_with_no_address_is_not_listened_on() {
         let bare = r#"{"BackendState":"Running","Self":{"UserID":7}}"#;
-        assert_eq!(machine_of(bare.as_bytes()).unwrap_err(), "this machine has no tailnet address");
+        assert_eq!(
+            machine_of(bare.as_bytes()).unwrap_err(),
+            "this machine has no tailnet address"
+        );
     }
 
     #[test]
     fn a_tagged_machine_is_not_listened_on() {
         let tagged = r#"{"BackendState":"Running","Self":{"UserID":7,"TailscaleIPs":["100.101.2.3"],"Tags":["tag:server"]}}"#;
         let refused = machine_of(tagged.as_bytes()).unwrap_err();
-        assert_eq!(refused, "this machine is tagged tag:server, so no one user owns it");
+        assert_eq!(
+            refused,
+            "this machine is tagged tag:server, so no one user owns it"
+        );
     }
 
     #[test]
     fn user_0_is_no_one() {
-        let nobody = r#"{"BackendState":"Running","Self":{"UserID":0,"TailscaleIPs":["100.101.2.3"]}}"#;
+        let nobody =
+            r#"{"BackendState":"Running","Self":{"UserID":0,"TailscaleIPs":["100.101.2.3"]}}"#;
         let refused = machine_of(nobody.as_bytes()).unwrap_err();
         assert!(refused.contains("user 0 is no one"), "{refused}");
     }
 
     #[test]
     fn an_address_off_the_tailnet_is_not_listened_on() {
-        let lan = r#"{"BackendState":"Running","Self":{"UserID":7,"TailscaleIPs":["192.168.1.2"]}}"#;
+        let lan =
+            r#"{"BackendState":"Running","Self":{"UserID":7,"TailscaleIPs":["192.168.1.2"]}}"#;
         let refused = machine_of(lan.as_bytes()).unwrap_err();
-        assert!(refused.contains("192.168.1.2 is not a tailnet address"), "{refused}");
+        assert!(
+            refused.contains("192.168.1.2 is not a tailnet address"),
+            "{refused}"
+        );
     }
 
     #[test]
     fn the_tailnet_is_100_64_0_0_10_and_fd7a_115c_a1e0_48() {
-        let inside = ["100.64.0.0", "100.127.255.255", "fd7a:115c:a1e0::", "fd7a:115c:a1e0:ffff::1"];
-        let outside = ["100.63.255.255", "100.128.0.0", "10.0.0.1", "fd7a:115c:a1e1::1", "::1"];
+        let inside = [
+            "100.64.0.0",
+            "100.127.255.255",
+            "fd7a:115c:a1e0::",
+            "fd7a:115c:a1e0:ffff::1",
+        ];
+        let outside = [
+            "100.63.255.255",
+            "100.128.0.0",
+            "10.0.0.1",
+            "fd7a:115c:a1e1::1",
+            "::1",
+        ];
         let tailnet = |address: &str| TailnetAddress::try_from(address.parse::<IpAddr>().unwrap());
         for address in inside {
             assert!(tailnet(address).is_ok(), "{address}");
         }
         for address in outside {
-            assert_eq!(tailnet(address), Err(format!("{address} is not a tailnet address")));
+            assert_eq!(
+                tailnet(address),
+                Err(format!("{address} is not a tailnet address"))
+            );
         }
     }
 
     #[test]
     fn a_peer_is_asked_for_in_one_query_word() {
-        let tailnet = |address: &str| TailnetAddress::try_from(address.parse::<IpAddr>().unwrap()).unwrap();
-        assert_eq!(query_of(tailnet("100.101.2.4"), 51000), "100.101.2.4%3A51000");
+        let tailnet =
+            |address: &str| TailnetAddress::try_from(address.parse::<IpAddr>().unwrap()).unwrap();
+        assert_eq!(
+            query_of(tailnet("100.101.2.4"), 51000),
+            "100.101.2.4%3A51000"
+        );
         let v6 = query_of(tailnet("fd7a:115c:a1e0::2"), 51000);
         assert_eq!(v6, "%5Bfd7a%3A115c%3Aa1e0%3A%3A2%5D%3A51000");
     }
@@ -789,7 +970,10 @@ mod tests {
                 "/localapi/v0/whois?addr=100.101.2.8%3A51000",
                 r#"{"Node":{"User":7,"StableID":"nPad8CNTRL","Name":"pad.tail1.ts.net.\nluned: spoofed"}}"#,
             ),
-            ("/localapi/v0/whois?addr=100.101.2.9%3A51000", r#"{"Node":{"User":7,"Name":"unstable"}}"#),
+            (
+                "/localapi/v0/whois?addr=100.101.2.9%3A51000",
+                r#"{"Node":{"User":7,"Name":"unstable"}}"#,
+            ),
         ];
         runtime().block_on(async {
             let folder = tempfile::tempdir().unwrap();
@@ -842,7 +1026,10 @@ mod tests {
             let file = folder.path().join(devices::FILE);
             let lan: SocketAddr = "192.168.1.5:51000".parse().unwrap();
             let machine = machine_of(STATUS.as_bytes()).unwrap();
-            assert_eq!(admits(&missing, &file, &machine, lan).await.unwrap_err(), "it is not on the tailnet");
+            assert_eq!(
+                admits(&missing, &file, &machine, lan).await.unwrap_err(),
+                "it is not on the tailnet"
+            );
         });
     }
 
@@ -856,7 +1043,11 @@ mod tests {
             let refusal = "it is this machine, where any of its users may connect";
             for own in ["100.101.2.3:51000", "[fd7a:115c:a1e0::1]:51000"] {
                 let own: SocketAddr = own.parse().unwrap();
-                assert_eq!(admits(&missing, &file, &machine, own).await.unwrap_err(), refusal, "{own}");
+                assert_eq!(
+                    admits(&missing, &file, &machine, own).await.unwrap_err(),
+                    refusal,
+                    "{own}"
+                );
             }
         });
     }

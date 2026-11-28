@@ -158,7 +158,9 @@ impl<const MAX: usize> BoundedText<MAX> {
             return Err(format!("{field} is {} bytes, over {MAX}", raw.len()));
         }
         if raw.chars().any(is_invisible_formatting) {
-            return Err(format!("{field} holds control or invisible formatting characters"));
+            return Err(format!(
+                "{field} holds control or invisible formatting characters"
+            ));
         }
         Ok(Self(raw.to_owned()))
     }
@@ -228,16 +230,28 @@ impl OscBlockedKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramPhase {
     Idle,
-    Working { progress: Option<Progress> },
-    Done { message: Option<Message> },
-    Blocked { kind: Option<OscBlockedKind>, message: Option<Message> },
-    Error { message: Option<Message> },
+    Working {
+        progress: Option<Progress>,
+    },
+    Done {
+        message: Option<Message>,
+    },
+    Blocked {
+        kind: Option<OscBlockedKind>,
+        message: Option<Message>,
+    },
+    Error {
+        message: Option<Message>,
+    },
 }
 
 impl ProgramPhase {
     #[must_use]
     pub const fn is_active(&self) -> bool {
-        matches!(self, ProgramPhase::Working { .. } | ProgramPhase::Blocked { .. })
+        matches!(
+            self,
+            ProgramPhase::Working { .. } | ProgramPhase::Blocked { .. }
+        )
     }
 
     #[must_use]
@@ -245,7 +259,9 @@ impl ProgramPhase {
         match self {
             ProgramPhase::Done { message } => Some(TerminalPhase::Done { message }),
             ProgramPhase::Error { message } => Some(TerminalPhase::Error { message }),
-            ProgramPhase::Idle | ProgramPhase::Working { .. } | ProgramPhase::Blocked { .. } => None,
+            ProgramPhase::Idle | ProgramPhase::Working { .. } | ProgramPhase::Blocked { .. } => {
+                None
+            }
         }
     }
 
@@ -254,19 +270,19 @@ impl ProgramPhase {
         use mux::program_status::Phase;
         match self {
             ProgramPhase::Idle => Phase::Idle(mux::ProgramStatusIdle {}),
-            ProgramPhase::Working { progress } => {
-                Phase::Working(mux::ProgramStatusWorking { progress: progress.map(|p| u32::from(p.get())) })
-            },
-            ProgramPhase::Done { message } => {
-                Phase::Done(mux::ProgramStatusDone { message: message.clone().map(String::from) })
-            },
+            ProgramPhase::Working { progress } => Phase::Working(mux::ProgramStatusWorking {
+                progress: progress.map(|p| u32::from(p.get())),
+            }),
+            ProgramPhase::Done { message } => Phase::Done(mux::ProgramStatusDone {
+                message: message.clone().map(String::from),
+            }),
             ProgramPhase::Blocked { kind, message } => Phase::Blocked(mux::ProgramStatusBlocked {
                 kind: kind.map(|k| k.to_mux().into()),
                 message: message.clone().map(String::from),
             }),
-            ProgramPhase::Error { message } => {
-                Phase::Error(mux::ProgramStatusError { message: message.clone().map(String::from) })
-            },
+            ProgramPhase::Error { message } => Phase::Error(mux::ProgramStatusError {
+                message: message.clone().map(String::from),
+            }),
         }
     }
 
@@ -278,7 +294,11 @@ impl ProgramPhase {
                 progress: working.progress.map(Progress::of_u32).transpose()?,
             }),
             Phase::Done(done) => Ok(ProgramPhase::Done {
-                message: done.message.as_deref().map(|m| Message::parse("message", m)).transpose()?,
+                message: done
+                    .message
+                    .as_deref()
+                    .map(|m| Message::parse("message", m))
+                    .transpose()?,
             }),
             Phase::Blocked(blocked) => Ok(ProgramPhase::Blocked {
                 kind: blocked.kind.map(OscBlockedKind::of_mux).transpose()?,
@@ -334,15 +354,27 @@ impl ProgramStatus {
     }
 
     pub fn of_mux(raw: &mux::ProgramStatus) -> Result<Self, String> {
-        let phase = raw.phase.as_ref().ok_or_else(|| "phase is missing".to_owned())?;
+        let phase = raw
+            .phase
+            .as_ref()
+            .ok_or_else(|| "phase is missing".to_owned())?;
         let phase = ProgramPhase::of_mux(phase)?;
         let app = raw.app.as_deref().map(AppName::parse).transpose()?;
-        let title = raw.title.as_deref().map(|t| Title::parse("title", t)).transpose()?;
+        let title = raw
+            .title
+            .as_deref()
+            .map(|t| Title::parse("title", t))
+            .transpose()?;
         let at = raw
             .at
             .map(|ts| SystemTime::try_from(ts).map_err(|_| "timestamp is out of range".to_owned()))
             .transpose()?;
-        Ok(ProgramStatus { phase, app, title, at })
+        Ok(ProgramStatus {
+            phase,
+            app,
+            title,
+            at,
+        })
     }
 }
 
@@ -399,17 +431,25 @@ impl ProgramStatuses {
         let mut warnings = Vec::new();
         let root = match raw.root {
             Some(raw_root) => match ProgramStatus::of_mux(&raw_root) {
-                Ok(status) if ended && !matches!(status.phase, ProgramPhase::Done { .. } | ProgramPhase::Error { .. }) => {
+                Ok(status)
+                    if ended
+                        && !matches!(
+                            status.phase,
+                            ProgramPhase::Done { .. } | ProgramPhase::Error { .. }
+                        ) =>
+                {
                     warnings.push(format!(
                         "terminal {terminal_id}'s ended root program status is non-terminal"
                     ));
                     None
-                },
+                }
                 Ok(status) => Some(status),
                 Err(why) => {
-                    warnings.push(format!("terminal {terminal_id}'s root program status: {why}"));
+                    warnings.push(format!(
+                        "terminal {terminal_id}'s root program status: {why}"
+                    ));
                     None
-                },
+                }
             },
             None => None,
         };
@@ -419,9 +459,11 @@ impl ProgramStatuses {
             let id = match ChildId::parse(&raw_child.id) {
                 Ok(id) => id,
                 Err(why) => {
-                    warnings.push(format!("terminal {terminal_id}'s child program status: {why}"));
+                    warnings.push(format!(
+                        "terminal {terminal_id}'s child program status: {why}"
+                    ));
                     continue;
-                },
+                }
             };
             let Some(raw_status) = raw_child.status else {
                 warnings.push(format!(
@@ -431,13 +473,19 @@ impl ProgramStatuses {
                 continue;
             };
             let status = match ProgramStatus::of_mux(&raw_status) {
-                Ok(status) if ended && !matches!(status.phase, ProgramPhase::Done { .. } | ProgramPhase::Error { .. }) => {
+                Ok(status)
+                    if ended
+                        && !matches!(
+                            status.phase,
+                            ProgramPhase::Done { .. } | ProgramPhase::Error { .. }
+                        ) =>
+                {
                     warnings.push(format!(
                         "terminal {terminal_id}'s ended child program status {:?} is non-terminal",
                         id.as_str()
                     ));
                     continue;
-                },
+                }
                 Ok(status) => status,
                 Err(why) => {
                     warnings.push(format!(
@@ -445,7 +493,7 @@ impl ProgramStatuses {
                         id.as_str()
                     ));
                     continue;
-                },
+                }
             };
             if seen.insert(id.clone()) {
                 children.push(ChildProgramStatus { id, status });
@@ -621,7 +669,10 @@ mod tests {
         assert!(ChildId::parse("a\u{202e}b").is_err());
         assert!(ChildId::parse("a\nb").is_err());
         assert!(ChildId::parse(&"a".repeat(ID_BYTES_MAX + 1)).is_err());
-        let too_deep = (0..=ID_DEPTH_MAX).map(|i| format!("s{i}")).collect::<Vec<_>>().join("/");
+        let too_deep = (0..=ID_DEPTH_MAX)
+            .map(|i| format!("s{i}"))
+            .collect::<Vec<_>>()
+            .join("/");
         assert!(ChildId::parse(&too_deep).is_err());
 
         let id = ChildId::parse("build/test/unit").unwrap();
@@ -635,8 +686,12 @@ mod tests {
 
     #[test]
     fn sanitize_strips_controls_and_invisible_formatting_characters() {
-        let input = "allow \u{202e}rm -rf\u{202c}\u{200b}\u{feff}\u{00ad}\u{2066}safe\u{2069}\x07\n";
-        assert_eq!(sanitize(input.as_bytes(), MESSAGE_BYTES_MAX), "allow rm -rfsafe");
+        let input =
+            "allow \u{202e}rm -rf\u{202c}\u{200b}\u{feff}\u{00ad}\u{2066}safe\u{2069}\x07\n";
+        assert_eq!(
+            sanitize(input.as_bytes(), MESSAGE_BYTES_MAX),
+            "allow rm -rfsafe"
+        );
         assert_eq!(sanitize("café 👍".as_bytes(), MESSAGE_BYTES_MAX), "café 👍");
         assert_eq!(sanitize("café".as_bytes(), 4), "caf");
     }

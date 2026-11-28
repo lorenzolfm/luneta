@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use lune_domain::projects::{Dir, OwnedFolder, ProjectName};
 
 use crate::projects::spot;
-use crate::{zoxide, Directory};
+use crate::{Directory, zoxide};
 
 pub const OWNED_FOLDER: &str = "lune";
 
@@ -48,10 +48,16 @@ pub struct Found {
 #[must_use]
 pub fn owned_folder() -> Option<OwnedFolder> {
     let home = env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
-    let home = home.as_deref().and_then(Path::to_str).map(|home| home.trim_end_matches('/'));
+    let home = home
+        .as_deref()
+        .and_then(Path::to_str)
+        .map(|home| home.trim_end_matches('/'));
     let named = home.and_then(|home| Dir::parse(&format!("{home}/{OWNED_FOLDER}")).ok())?;
     let led = fs::canonicalize(named.as_str()).ok();
-    let led = led.as_deref().and_then(Path::to_str).and_then(|led| Dir::parse(led).ok());
+    let led = led
+        .as_deref()
+        .and_then(Path::to_str)
+        .and_then(|led| Dir::parse(led).ok());
     Some(OwnedFolder::of(named, led))
 }
 
@@ -64,29 +70,46 @@ pub(crate) fn found() -> Found {
                 unread.push(left);
             }
             folders
-        },
+        }
         Err(why) => {
             unread.push(why);
             Vec::new()
-        },
+        }
     };
     let visited = match zoxide::visited() {
         Ok(visited) => visited,
         Err(why) => {
-            unread.push(format!("{why}, so only the clones in ~/{OWNED_FOLDER} are listed"));
+            unread.push(format!(
+                "{why}, so only the clones in ~/{OWNED_FOLDER} are listed"
+            ));
             Vec::new()
-        },
+        }
     };
     let folders = owned.iter().map(Directory::from).chain(visited);
-    let Roots { repositories, unnamed, cut } = roots(folders, spot::bare_in);
+    let Roots {
+        repositories,
+        unnamed,
+        cut,
+    } = roots(folders, spot::bare_in);
     if unnamed > 0 {
-        unread.push(format!("left out {unnamed} clones whose folder names no project"));
+        unread.push(format!(
+            "left out {unnamed} clones whose folder names no project"
+        ));
     }
     if cut {
-        unread.push(format!("listed the first {REPOSITORIES_MAX} clones, and no more"));
+        unread.push(format!(
+            "listed the first {REPOSITORIES_MAX} clones, and no more"
+        ));
     }
-    assert!(repositories.len() <= REPOSITORIES_MAX, "roots stops at REPOSITORIES_MAX");
-    Found { repositories, owned: owned_folder(), unread }
+    assert!(
+        repositories.len() <= REPOSITORIES_MAX,
+        "roots stops at REPOSITORIES_MAX"
+    );
+    Found {
+        repositories,
+        owned: owned_folder(),
+        unread,
+    }
 }
 
 struct Owned {
@@ -96,14 +119,19 @@ struct Owned {
 
 fn owned() -> Result<Owned, String> {
     let Some(home) = env::var_os("HOME") else {
-        return Err(format!("HOME is not set, so no clone in ~/{OWNED_FOLDER} is listed"));
+        return Err(format!(
+            "HOME is not set, so no clone in ~/{OWNED_FOLDER} is listed"
+        ));
     };
     let folder = Path::new(&home).join(OWNED_FOLDER);
     let entries = match fs::read_dir(&folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(Owned { folders: Vec::new(), left_out: 0 });
-        },
+            return Ok(Owned {
+                folders: Vec::new(),
+                left_out: 0,
+            });
+        }
         Err(error) => return Err(format!("{}: {error}", folder.display())),
     };
     let (mut folders, mut left_out) = (Vec::new(), 0);
@@ -124,7 +152,10 @@ fn owned() -> Result<Owned, String> {
         folders.push(path);
     }
     folders.sort_by(|one, other| one.as_str().cmp(other.as_str()));
-    assert!(folders.len() <= OWNED_ENTRIES_MAX, "~/lune's folders stop at OWNED_ENTRIES_MAX");
+    assert!(
+        folders.len() <= OWNED_ENTRIES_MAX,
+        "~/lune's folders stop at OWNED_ENTRIES_MAX"
+    );
     Ok(Owned { folders, left_out })
 }
 
@@ -152,12 +183,20 @@ fn roots(folders: impl IntoIterator<Item = Directory>, bare: fn(&Path) -> bool) 
             continue;
         }
         if repositories.len() == REPOSITORIES_MAX {
-            return Roots { repositories, unnamed, cut: true };
+            return Roots {
+                repositories,
+                unnamed,
+                cut: true,
+            };
         }
         repositories.push(repository);
     }
     assert_eq!(repositories.len(), seen.len(), "each root is listed once");
-    Roots { repositories, unnamed, cut: false }
+    Roots {
+        repositories,
+        unnamed,
+        cut: false,
+    }
 }
 
 fn root_of(
@@ -182,7 +221,12 @@ fn root_of(
         rooted.insert(walked, root.clone());
     }
     if let Some(root) = &root {
-        assert!(folder.starts_with(root), "{} is in its root {}", folder.display(), root.display());
+        assert!(
+            folder.starts_with(root),
+            "{} is in its root {}",
+            folder.display(),
+            root.display()
+        );
     }
     root
 }
@@ -200,8 +244,16 @@ mod tests {
     }
 
     fn bare(folder: &Path) -> bool {
-        let roots = ["/home/you/lune/app", "/home/you/Work/api", "/srv/cdk", "/srv/-dash"];
-        roots.into_iter().chain(["/srv/odd "]).any(|root| Path::new(root) == folder)
+        let roots = [
+            "/home/you/lune/app",
+            "/home/you/Work/api",
+            "/srv/cdk",
+            "/srv/-dash",
+        ];
+        roots
+            .into_iter()
+            .chain(["/srv/odd "])
+            .any(|root| Path::new(root) == folder)
     }
 
     #[test]
@@ -216,7 +268,11 @@ mod tests {
             "/srv/-dash/main",
             "/srv/odd /main",
         ];
-        let Roots { repositories, unnamed, cut } = roots(folders.map(directory), bare);
+        let Roots {
+            repositories,
+            unnamed,
+            cut,
+        } = roots(folders.map(directory), bare);
         let listed = [
             repository("/home/you/lune/app"),
             repository("/home/you/Work/api"),
@@ -224,8 +280,16 @@ mod tests {
             repository("/srv/-dash"),
         ];
         assert_eq!(repositories, listed);
-        assert_eq!(repositories[3].name().as_str(), "-dash", "a project may start with -");
-        assert_eq!((unnamed, cut), (1, false), "a name ending in a space names no project");
+        assert_eq!(
+            repositories[3].name().as_str(),
+            "-dash",
+            "a project may start with -"
+        );
+        assert_eq!(
+            (unnamed, cut),
+            (1, false),
+            "a name ending in a space names no project"
+        );
     }
 
     #[test]
@@ -239,14 +303,24 @@ mod tests {
         let through = [link.join("app").join("main"), real.join("app")];
         let through = through.map(|it| directory(it.to_str().unwrap()));
         let Roots { repositories, .. } = roots(through, spot::bare_in);
-        assert_eq!(repositories, [repository(real.join("app").to_str().unwrap())]);
+        assert_eq!(
+            repositories,
+            [repository(real.join("app").to_str().unwrap())]
+        );
     }
 
     #[test]
     fn the_clones_listed_stop_at_their_most() {
         let every = |_: &Path| true;
         let folders = (0..=REPOSITORIES_MAX).map(|at| directory(&format!("/w/c{at}")));
-        let Roots { repositories, unnamed, cut } = roots(folders, every);
-        assert_eq!((repositories.len(), unnamed, cut), (REPOSITORIES_MAX, 0, true));
+        let Roots {
+            repositories,
+            unnamed,
+            cut,
+        } = roots(folders, every);
+        assert_eq!(
+            (repositories.len(), unnamed, cut),
+            (REPOSITORIES_MAX, 0, true)
+        );
     }
 }

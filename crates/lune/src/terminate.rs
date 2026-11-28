@@ -5,8 +5,8 @@ use std::hash::{DefaultHasher, Hash, Hasher as _};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
 
@@ -19,9 +19,9 @@ use luned::terminate::{self, Folders, Id, Running, Unended, Unreadable};
 use luned::{Destination, HostsLine, HostsParsed};
 use signal_hook::consts::SIGHUP;
 
+use crate::agreed::{self, Agreed, PLANNED};
 use crate::close::Doing;
 use crate::commands;
-use crate::agreed::{self, Agreed, PLANNED};
 use crate::machines::{self, Machine};
 
 const ROUNDS: usize = 3;
@@ -58,8 +58,10 @@ pub fn run(yes: Option<Agreed>, here: bool, ending: Option<Key>, folder: &Path) 
     let hosts = match machines::parsed() {
         Ok(hosts) => hosts,
         Err(why) => {
-            return failed(&format!("ended nothing, as the hosts file does not read: {why}"));
-        },
+            return failed(&format!(
+                "ended nothing, as the hosts file does not read: {why}"
+            ));
+        }
     };
     let planned = plan(hosts, &folders);
     let agreed_in = |turn| Agreed::of_terminate(&planned.keys(), &planned.unread, turn);
@@ -80,7 +82,8 @@ pub fn run(yes: Option<Agreed>, here: bool, ending: Option<Key>, folder: &Path) 
 
 pub fn key(spelled: &str) -> Result<Key, String> {
     let read = u64::from_str_radix(spelled, 16);
-    read.map(Key).map_err(|_| format!("{spelled} is no key lune said"))
+    read.map(Key)
+        .map_err(|_| format!("{spelled} is no key lune said"))
 }
 
 fn unagreed(yes: Option<Agreed>, agreed: Agreed) -> String {
@@ -135,23 +138,37 @@ struct Kept {
 
 impl Kept {
     fn of(projects: &Projects) -> Kept {
-        Kept { projects: projects.all().len(), worktrees: projects.worktrees().count() }
+        Kept {
+            projects: projects.all().len(),
+            worktrees: projects.worktrees().count(),
+        }
     }
 }
 
 impl Here {
     fn now(folders: &Folders) -> Here {
         let running = terminate::running(folders);
-        let agents =
-            if running.served.is_empty() { Counted::Unasked } else { agents_in(&running.served) };
+        let agents = if running.served.is_empty() {
+            Counted::Unasked
+        } else {
+            agents_in(&running.served)
+        };
         let projects = projects::kept().map(|projects| Kept::of(&projects));
-        Here { running, agents, projects }
+        Here {
+            running,
+            agents,
+            projects,
+        }
     }
 
     fn key(&self) -> Key {
         let mut hasher = DefaultHasher::new();
         let roles = Roles::of(self.running.lunes.iter().map(|it| role(&it.argv)));
-        let counts = (roles.fronts, self.running.luneds.len(), self.running.muxes.len());
+        let counts = (
+            roles.fronts,
+            self.running.luneds.len(),
+            self.running.muxes.len(),
+        );
         let agents = match &self.agents {
             Counted::Unasked => None,
             Counted::Agents(agents) => Some(Some(agents.count)),
@@ -170,12 +187,15 @@ impl Here {
                 Counted::Agents(agents) if agents.count > 0 => {
                     let busy = (agents.busy > 0).then(|| format!(", {} busy", agents.busy));
                     let busy = busy.unwrap_or_default();
-                    format!(", and {} with them{busy}", counted(agents.count, "agent", "agents"))
-                },
+                    format!(
+                        ", and {} with them{busy}",
+                        counted(agents.count, "agent", "agents")
+                    )
+                }
                 Counted::Unasked if !self.running.muxes.is_empty() => {
                     ", and the agents in its terminals with them, which no luned runs to count"
                         .to_owned()
-                },
+                }
                 Counted::Unasked | Counted::Agents(_) => String::new(),
                 Counted::Uncounted(why) => uncounted_said(why),
             };
@@ -186,7 +206,10 @@ impl Here {
             Ok(kept) => format!("forgets {}", kept_said(*kept)),
             Err(why) => format!("forgets its projects file, which does not read: {why}"),
         };
-        format!("{runs}; {kept}{}", unreadable_said(&self.running.unreadable, Tense::Plan))
+        format!(
+            "{runs}; {kept}{}",
+            unreadable_said(&self.running.unreadable, Tense::Plan)
+        )
     }
 }
 
@@ -205,9 +228,17 @@ fn unreadable_said(unreadable: &[Unreadable], tense: Tense) -> String {
         Tense::Done => ("left", "did not read"),
     };
     let each = |it: &Unreadable| {
-        format!("{} (pid {}), whose arguments {read}: {}", it.program.name(), it.id.pid, it.why)
+        format!(
+            "{} (pid {}), whose arguments {read}: {}",
+            it.program.name(),
+            it.id.pid,
+            it.why
+        )
     };
-    format!("; {leaves} {}", listed(&unreadable.iter().map(each).collect::<Vec<_>>()))
+    format!(
+        "; {leaves} {}",
+        listed(&unreadable.iter().map(each).collect::<Vec<_>>())
+    )
 }
 
 fn uncounted_said(why: &str) -> String {
@@ -224,12 +255,12 @@ fn agents_in(served: &[PathBuf]) -> Counted {
         for agent in &listed.agents {
             let in_mux = agent.terminal.is_some();
             match Doing::from(agent) {
-                Doing::Shell => {},
-                _ if !in_mux => {},
+                Doing::Shell => {}
+                _ if !in_mux => {}
                 doing => {
                     agents.count += 1;
                     agents.busy += usize::from(doing == Doing::Busy);
-                },
+                }
             }
         }
     }
@@ -287,12 +318,12 @@ fn runs_of(roles: Roles, luneds: usize, muxes: usize) -> Vec<String> {
         runs.push(counted(roles.commands, "lune command", "lune commands"));
     }
     match luneds {
-        0 => {},
+        0 => {}
         1 => runs.push("luned".to_owned()),
         n => runs.push(format!("{n} luneds")),
     }
     match muxes {
-        0 => {},
+        0 => {}
         1 => runs.push("lune-mux".to_owned()),
         n => runs.push(format!("{n} lune-muxes")),
     }
@@ -300,7 +331,11 @@ fn runs_of(roles: Roles, luneds: usize, muxes: usize) -> Vec<String> {
 }
 
 fn counted(count: usize, one: &str, many: &str) -> String {
-    if count == 1 { format!("1 {one}") } else { format!("{count} {many}") }
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {many}")
+    }
 }
 
 fn listed(parts: &[String]) -> String {
@@ -340,14 +375,16 @@ fn end_alone(key: Key, folders: &Folders) -> ExitCode {
     let here = Here::now(folders);
     if here.key() != key {
         let says = here.says();
-        return failed(&format!("ended nothing, as what would end here changed since: {says}"));
+        return failed(&format!(
+            "ended nothing, as what would end here changed since: {says}"
+        ));
     }
     hold_on_through_hangups();
     match Ending::default().all(here.agents, folders) {
         Ok(ended) => {
             say(&ended.says());
             ExitCode::SUCCESS
-        },
+        }
         Err(why) => failed(&why),
     }
 }
@@ -444,19 +481,27 @@ fn plan(hosts: HostsParsed, folders: &Folders) -> Planned {
         let here = Here::now(folders);
         let remotes = lines.iter().zip(asked).map(|(line, asked)| {
             let panicked = || Far::Skipped(Skip::Unsaid("asking it panicked".to_owned()));
-            let far = asked.map_or(Far::Here, |asked| asked.join().unwrap_or_else(|_| panicked()));
+            let far = asked.map_or(Far::Here, |asked| {
+                asked.join().unwrap_or_else(|_| panicked())
+            });
             (line.destination().clone(), far)
         });
         (here, remotes.collect())
     });
-    Planned { local: machines::local_name(), here, remotes, unread }
+    Planned {
+        local: machines::local_name(),
+        here,
+        remotes,
+        unread,
+    }
 }
 
 fn ssh(destination: &Destination, ending: Option<Key>) -> Command {
     let mut ssh = Command::new("ssh");
     let connect = format!("ConnectTimeout={CONNECT_SECS}");
     ssh.args(["-T", "-o", "BatchMode=yes", "-o", &connect]);
-    ssh.arg(destination.to_string()).args(["lune", "terminate", "--here"]);
+    ssh.arg(destination.to_string())
+        .args(["lune", "terminate", "--here"]);
     if let Some(key) = ending {
         ssh.args(["--ending", &key.to_string()]);
     }
@@ -482,22 +527,32 @@ fn planned_far(said: &str) -> Option<Far> {
     let mut lines = said.lines().map(str::trim);
     let key = key(lines.next()?).ok()?;
     let says = lines.next().filter(|says| !says.is_empty())?;
-    Some(Far::Ends { key, says: says.to_owned() })
+    Some(Far::Ends {
+        key,
+        says: says.to_owned(),
+    })
 }
 
 fn answer(ran: Ran, limit: Duration) -> Result<String, Skip> {
     match ran {
         Ran::Ended { status, stdout, .. } if status.success() => {
             Ok(String::from_utf8_lossy(&stdout).into_owned())
-        },
+        }
         Ran::Ended { status, stderr, .. } => {
             let stderr = String::from_utf8_lossy(&stderr);
             let last = stderr.lines().map(str::trim).rfind(|line| !line.is_empty());
             let why = last.map_or_else(|| status.to_string(), str::to_owned);
             let unreached = status.code() == Some(SSH_FAILED);
-            Err(if unreached { Skip::Unreached(why) } else { Skip::Unsaid(why) })
-        },
-        Ran::Stuck => Err(Skip::Unreached(format!("it did not answer in {}s", limit.as_secs()))),
+            Err(if unreached {
+                Skip::Unreached(why)
+            } else {
+                Skip::Unsaid(why)
+            })
+        }
+        Ran::Stuck => Err(Skip::Unreached(format!(
+            "it did not answer in {}s",
+            limit.as_secs()
+        ))),
     }
 }
 
@@ -514,7 +569,7 @@ fn terminated(planned: &Planned, folders: &Folders) -> ExitCode {
                     Far::Ends { key, .. } => {
                         let key = *key;
                         Ok(scope.spawn(move || ended_far(destination, key)))
-                    },
+                    }
                     Far::Skipped(_) | Far::Here => Err(far_said(far)),
                 };
                 (destination, ending)
@@ -542,7 +597,7 @@ fn terminated(planned: &Planned, folders: &Folders) -> ExitCode {
         Err(why) => {
             well = false;
             let _ = writeln!(io::stderr(), "lune: {local} (this machine): {why}");
-        },
+        }
     }
     for (destination, came) in remotes {
         match came {
@@ -550,13 +605,17 @@ fn terminated(planned: &Planned, folders: &Folders) -> ExitCode {
             Err(why) => {
                 well = false;
                 let _ = writeln!(io::stderr(), "lune: {destination}: {why}");
-            },
+            }
         }
     }
     for why in &planned.unread {
         say(&unread_said(why));
     }
-    if well { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if well {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 fn ended_far(destination: &Destination, key: Key) -> Result<String, String> {
@@ -566,10 +625,10 @@ fn ended_far(destination: &Destination, key: Key) -> Result<String, String> {
         Ok(said) => {
             let said = said.lines().map(str::trim).find(|line| !line.is_empty());
             Ok(said.unwrap_or("ended, and said nothing of what").to_owned())
-        },
+        }
         Err(Skip::Unreached(why)) => {
             Err(format!("ssh reaches it no more, and it may run on: {why}"))
-        },
+        }
         Err(Skip::Unsaid(why)) => Err(why),
     }
 }
@@ -592,7 +651,8 @@ impl Ending {
     fn daemons(&mut self, folders: &Folders) -> Result<(), String> {
         let running = terminate::running(folders);
         end_or(&running.lune_ids(), terminate::LUNE)?;
-        self.lunes.extend(running.lunes.into_iter().map(|it| (it.id, role(&it.argv))));
+        self.lunes
+            .extend(running.lunes.into_iter().map(|it| (it.id, role(&it.argv))));
         let luned = terminate::running(folders);
         end_or(&luned.luneds, terminate::LUNED)?;
         end_or(&luned.helpers, terminate::LUNED)?;
@@ -623,7 +683,10 @@ impl Ending {
         }
         let running = terminate::running(folders);
         if !running.is_empty() {
-            let of_lune = running.lune_ids().into_iter().map(|id| (terminate::LUNE, id));
+            let of_lune = running
+                .lune_ids()
+                .into_iter()
+                .map(|id| (terminate::LUNE, id));
             let luneds = running.luneds.into_iter().chain(running.helpers);
             let of_luned = luneds.map(|id| (terminate::LUNED, id));
             let of_mux = running.muxes.into_iter().map(|id| (terminate::MUX, id));
@@ -638,13 +701,22 @@ impl Ending {
             ));
         }
         let forgot = forgot.map_err(|why| format!("ended lune, and forgot no project: {why}"))?;
-        Ok(Ended { ending: self, agents, forgot, unread: running.unreadable })
+        Ok(Ended {
+            ending: self,
+            agents,
+            forgot,
+            unread: running.unreadable,
+        })
     }
 }
 
 impl Ended {
     fn says(&self) -> String {
-        let Ending { lunes, luneds, muxes } = &self.ending;
+        let Ending {
+            lunes,
+            luneds,
+            muxes,
+        } = &self.ending;
         let roles = Roles::of(lunes.values().copied());
         let runs = runs_of(roles, luneds.len(), muxes.len());
         let runs = if runs.is_empty() {
@@ -653,12 +725,15 @@ impl Ended {
             let agents = match &self.agents {
                 _ if muxes.is_empty() => String::new(),
                 Counted::Agents(agents) if agents.count > 0 => {
-                    format!(", and {} with them", counted(agents.count, "agent", "agents"))
-                },
+                    format!(
+                        ", and {} with them",
+                        counted(agents.count, "agent", "agents")
+                    )
+                }
                 Counted::Unasked => {
                     ", and the agents in its terminals with them, which no luned ran to count"
                         .to_owned()
-                },
+                }
                 Counted::Agents(_) => String::new(),
                 Counted::Uncounted(why) => uncounted_said(why),
             };
@@ -667,13 +742,16 @@ impl Ended {
         let forgot = match &self.forgot {
             Forgotten::Read(projects) if projects.all().is_empty() => {
                 "kept no project to forget".to_owned()
-            },
+            }
             Forgotten::Read(projects) => format!("forgot {}", kept_said(Kept::of(projects))),
             Forgotten::Unread(why) => {
                 format!("forgot its projects file, which did not read: {why}")
-            },
+            }
         };
-        format!("{runs}; {forgot}{}", unreadable_said(&self.unread, Tense::Done))
+        format!(
+            "{runs}; {forgot}{}",
+            unreadable_said(&self.unread, Tense::Done)
+        )
     }
 }
 
@@ -682,7 +760,10 @@ fn end_or(ids: &[Id], name: &str) -> Result<(), String> {
     if left.is_empty() {
         return Ok(());
     }
-    let left: Vec<String> = left.iter().map(|(id, why)| left_said(name, id, *why)).collect();
+    let left: Vec<String> = left
+        .iter()
+        .map(|(id, why)| left_said(name, id, *why))
+        .collect();
     Err(listed(&left))
 }
 
@@ -691,8 +772,11 @@ fn left_said(name: &str, id: &Id, why: Unended) -> String {
     match why {
         Unended::Outlived => format!("{name} (pid {pid}) still ran after a SIGKILL"),
         Unended::Unsignalled(error) => {
-            format!("{name} (pid {pid}) took no signal to end: {}", io::Error::from(error))
-        },
+            format!(
+                "{name} (pid {pid}) took no signal to end: {}",
+                io::Error::from(error)
+            )
+        }
         Unended::Unwatched(error) => format!(
             "{name} (pid {pid}) was told to end, and its end could not be watched for: {}",
             io::Error::from(error)
@@ -707,12 +791,20 @@ mod tests {
     use super::*;
 
     fn lune(pid: u32, after: &[&str]) -> Lune {
-        let argv = std::iter::once("lune").chain(after.iter().copied()).map(OsString::from);
-        Lune { id: id(pid), argv: argv.collect() }
+        let argv = std::iter::once("lune")
+            .chain(after.iter().copied())
+            .map(OsString::from);
+        Lune {
+            id: id(pid),
+            argv: argv.collect(),
+        }
     }
 
     fn id(pid: u32) -> Id {
-        Id { pid, start: Start::spelled("1".to_owned()).unwrap() }
+        Id {
+            pid,
+            start: Start::spelled("1".to_owned()).unwrap(),
+        }
     }
 
     #[test]
@@ -726,8 +818,15 @@ mod tests {
             unreadable: Vec::new(),
         };
         let agents = Counted::Agents(Agents { count: 3, busy: 1 });
-        let projects = Ok(Kept { projects: 4, worktrees: 9 });
-        let here = Here { running: running.clone(), agents, projects };
+        let projects = Ok(Kept {
+            projects: 4,
+            worktrees: 9,
+        });
+        let here = Here {
+            running: running.clone(),
+            agents,
+            projects,
+        };
         assert_eq!(
             here.says(),
             "ends 2 lunes, 1 lune command, luned and lune-mux, and 3 agents with them, 1 \
@@ -735,8 +834,15 @@ mod tests {
         );
 
         let agents = Counted::Uncounted("luned did not answer".to_owned());
-        let projects = Ok(Kept { projects: 1, worktrees: 0 });
-        let here = Here { running, agents, projects };
+        let projects = Ok(Kept {
+            projects: 1,
+            worktrees: 0,
+        });
+        let here = Here {
+            running,
+            agents,
+            projects,
+        };
         assert_eq!(
             here.says(),
             "ends 2 lunes, 1 lune command, luned and lune-mux, and the agents in its \
@@ -744,18 +850,35 @@ mod tests {
              project"
         );
 
-        let running = Running { muxes: vec![id(5), id(6)], ..Running::default() };
+        let running = Running {
+            muxes: vec![id(5), id(6)],
+            ..Running::default()
+        };
         let projects = Err("it is over 32 bytes".to_owned());
-        let here = Here { running, agents: Counted::Unasked, projects };
+        let here = Here {
+            running,
+            agents: Counted::Unasked,
+            projects,
+        };
         assert_eq!(
             here.says(),
             "ends 2 lune-muxes, and the agents in its terminals with them, which no luned runs \
              to count; forgets its projects file, which does not read: it is over 32 bytes"
         );
 
-        let running = Running { lunes: vec![lune(1, &[])], ..Running::default() };
-        let projects = Ok(Kept { projects: 0, worktrees: 0 });
-        let here = Here { running, agents: Counted::Unasked, projects };
+        let running = Running {
+            lunes: vec![lune(1, &[])],
+            ..Running::default()
+        };
+        let projects = Ok(Kept {
+            projects: 0,
+            worktrees: 0,
+        });
+        let here = Here {
+            running,
+            agents: Counted::Unasked,
+            projects,
+        };
         assert_eq!(here.says(), "ends 1 lune; keeps no project to forget");
 
         let unreadable = |pid: u32, program: Program| Unreadable {
@@ -764,9 +887,20 @@ mod tests {
             why: "KERN_PROCARGS2 holds a negative argc".to_owned(),
         };
         let unreadable = vec![unreadable(2, Program::Luned), unreadable(3, Program::Mux)];
-        let running = Running { lunes: vec![lune(1, &[])], unreadable, ..Running::default() };
-        let projects = Ok(Kept { projects: 0, worktrees: 0 });
-        let here = Here { running, agents: Counted::Unasked, projects };
+        let running = Running {
+            lunes: vec![lune(1, &[])],
+            unreadable,
+            ..Running::default()
+        };
+        let projects = Ok(Kept {
+            projects: 0,
+            worktrees: 0,
+        });
+        let here = Here {
+            running,
+            agents: Counted::Unasked,
+            projects,
+        };
         assert_eq!(
             here.says(),
             "ends 1 lune; keeps no project to forget; leaves luned (pid 2), whose arguments do \
@@ -778,11 +912,25 @@ mod tests {
     #[test]
     fn a_plan_s_key_holds_whether_an_agent_is_busy_or_a_command_or_a_helper_runs() {
         let lunes = vec![lune(1, &[])];
-        let running = Running { lunes, luneds: vec![id(2)], ..Running::default() };
-        let projects = Ok(Kept { projects: 1, worktrees: 0 });
+        let running = Running {
+            lunes,
+            luneds: vec![id(2)],
+            ..Running::default()
+        };
+        let projects = Ok(Kept {
+            projects: 1,
+            worktrees: 0,
+        });
         let agents = Counted::Agents(Agents { count: 1, busy: 0 });
-        let idle = Here { running, agents, projects };
-        let busy = Here { agents: Counted::Agents(Agents { count: 1, busy: 1 }), ..idle.clone() };
+        let idle = Here {
+            running,
+            agents,
+            projects,
+        };
+        let busy = Here {
+            agents: Counted::Agents(Agents { count: 1, busy: 1 }),
+            ..idle.clone()
+        };
         assert_eq!(idle.key(), busy.key());
         let mut commanded = idle.clone();
         commanded.running.lunes.push(lune(7, &["watch"]));
@@ -794,10 +942,25 @@ mod tests {
 
         let mut fronted = idle.clone();
         fronted.running.lunes.push(lune(8, &[]));
-        let more = Here { agents: Counted::Agents(Agents { count: 2, busy: 0 }), ..idle.clone() };
-        let kept = Here { projects: Ok(Kept { projects: 1, worktrees: 1 }), ..idle.clone() };
-        let uncounted = Here { agents: Counted::Uncounted("no".to_owned()), ..idle.clone() };
-        let unasked = Here { agents: Counted::Unasked, ..idle.clone() };
+        let more = Here {
+            agents: Counted::Agents(Agents { count: 2, busy: 0 }),
+            ..idle.clone()
+        };
+        let kept = Here {
+            projects: Ok(Kept {
+                projects: 1,
+                worktrees: 1,
+            }),
+            ..idle.clone()
+        };
+        let uncounted = Here {
+            agents: Counted::Uncounted("no".to_owned()),
+            ..idle.clone()
+        };
+        let unasked = Here {
+            agents: Counted::Unasked,
+            ..idle.clone()
+        };
         for changed in [fronted, more, kept, uncounted, unasked] {
             assert_ne!(idle.key(), changed.key(), "{}", changed.says());
         }
@@ -806,7 +969,10 @@ mod tests {
     #[test]
     fn another_machine_s_plan_is_its_key_and_then_its_words() {
         let said = "00000000000000ff\nends luned; forgets 1 project\n";
-        let far = Far::Ends { key: Key(255), says: "ends luned; forgets 1 project".to_owned() };
+        let far = Far::Ends {
+            key: Key(255),
+            says: "ends luned; forgets 1 project".to_owned(),
+        };
         assert_eq!(planned_far(said), Some(far));
         for unread in ["", "ends luned\n", "00ff\n\n", "zz\nends luned\n"] {
             assert_eq!(planned_far(unread), None, "{unread:?}");
@@ -817,7 +983,12 @@ mod tests {
     fn only_a_lune_with_no_command_is_a_front_end() {
         assert_eq!(role(&lune(1, &[]).argv), Role::Front);
         assert_eq!(role(&lune(1, &["floresta"]).argv), Role::Front);
-        for command in [&["bridge"][..], &["terminate", "--here"], &["--version"], &["clicked"]] {
+        for command in [
+            &["bridge"][..],
+            &["terminate", "--here"],
+            &["--version"],
+            &["clicked"],
+        ] {
             assert_eq!(role(&lune(1, command).argv), Role::Command, "{command:?}");
         }
     }
@@ -825,13 +996,20 @@ mod tests {
     #[test]
     fn what_ended_says_each_lune_once_whether_a_front_end_or_a_command() {
         let mut ending = Ending::default();
-        ending.lunes.extend([(id(1), Role::Front), (id(2), Role::Command)]);
+        ending
+            .lunes
+            .extend([(id(1), Role::Front), (id(2), Role::Command)]);
         ending.lunes.insert(id(1), Role::Front);
         ending.luneds.insert(id(3));
         ending.muxes.insert(id(4));
         let agents = Counted::Agents(Agents { count: 2, busy: 0 });
         let forgot = Forgotten::Read(Projects::default());
-        let ended = Ended { ending, agents, forgot, unread: Vec::new() };
+        let ended = Ended {
+            ending,
+            agents,
+            forgot,
+            unread: Vec::new(),
+        };
         assert_eq!(
             ended.says(),
             "ended 1 lune, 1 lune command, luned and lune-mux, and 2 agents with them; \
@@ -844,7 +1022,12 @@ mod tests {
         let mut ending = Ending::default();
         ending.muxes.insert(id(4));
         let forgot = Forgotten::Read(Projects::default());
-        let ended = Ended { ending, agents: Counted::Unasked, forgot, unread: Vec::new() };
+        let ended = Ended {
+            ending,
+            agents: Counted::Unasked,
+            forgot,
+            unread: Vec::new(),
+        };
         assert_eq!(
             ended.says(),
             "ended lune-mux, and the agents in its terminals with them, which no luned ran to \
@@ -862,7 +1045,12 @@ mod tests {
             program: Program::Luned,
             why: "Permission denied (os error 13)".to_owned(),
         }];
-        let ended = Ended { ending, agents: Counted::Unasked, forgot, unread };
+        let ended = Ended {
+            ending,
+            agents: Counted::Unasked,
+            forgot,
+            unread,
+        };
         assert_eq!(
             ended.says(),
             "ended 1 lune; kept no project to forget; left luned (pid 2), whose arguments did \

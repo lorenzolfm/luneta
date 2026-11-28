@@ -38,7 +38,10 @@ struct Word<'a> {
 
 impl<'a> Word<'a> {
     fn new(text: &'a str) -> Self {
-        Word { text, letters: letters(text) }
+        Word {
+            text,
+            letters: letters(text),
+        }
     }
 
     fn mark(&self) -> Option<Mark> {
@@ -53,7 +56,9 @@ impl<'a> Word<'a> {
         if self.letters == SLASH {
             return Some(1);
         }
-        let bare = self.text.trim_matches(|c: char| !c.is_alphanumeric() && c != '/');
+        let bare = self
+            .text
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '/');
         let name = bare.strip_prefix('/').filter(|name| !name.contains('/'))?;
         Some(usize::from(name.is_empty()))
     }
@@ -79,7 +84,11 @@ pub struct Written {
 
 impl Written {
     pub fn said(said: &str) -> Self {
-        Written { command: None, text: said.to_owned(), only_first: Vec::new() }
+        Written {
+            command: None,
+            text: said.to_owned(),
+            only_first: Vec::new(),
+        }
     }
 }
 
@@ -117,12 +126,24 @@ pub fn written(said: &str, skills: &[Skill]) -> Written {
             continue;
         }
         let the = other.from > at && words[other.from - 1].letters == "the";
-        parts.extend(words[at..other.from - usize::from(the)].iter().map(|w| w.text.to_owned()));
-        parts.push(format!("the `{}` skill{}", other.skill.name, words[other.to - 1].ending()));
+        parts.extend(
+            words[at..other.from - usize::from(the)]
+                .iter()
+                .map(|w| w.text.to_owned()),
+        );
+        parts.push(format!(
+            "the `{}` skill{}",
+            other.skill.name,
+            words[other.to - 1].ending()
+        ));
         at = other.to;
     }
     parts.extend(words[at..].iter().map(|word| word.text.to_owned()));
-    Written { command: Some(first.skill.name.clone()), text: parts.join(" "), only_first }
+    Written {
+        command: Some(first.skill.name.clone()),
+        text: parts.join(" "),
+        only_first,
+    }
 }
 
 fn before_it(before: &[Word<'_>], ended: &str, more: bool) -> Vec<String> {
@@ -155,7 +176,11 @@ fn named_in<'s>(words: &[Word<'_>], skills: &'s [Skill]) -> Vec<Named<'s>> {
                 let end = name + span;
                 let said = words.get(end).and_then(Word::mark) == Some(Mark::Said);
                 let to = end + usize::from(said);
-                named.push(Named { from: at, to, skill });
+                named.push(Named {
+                    from: at,
+                    to,
+                    skill,
+                });
                 (taken, at) = (to, to);
                 continue;
             }
@@ -165,7 +190,11 @@ fn named_in<'s>(words: &[Word<'_>], skills: &'s [Skill]) -> Vec<Named<'s>> {
             if let Some((span, skill)) = closest(spans, skills)
                 && (mark == Mark::Said || led_in(&words[taken..at - span]))
             {
-                named.push(Named { from: at - span, to: at + 1, skill });
+                named.push(Named {
+                    from: at - span,
+                    to: at + 1,
+                    skill,
+                });
                 taken = at + 1;
             }
         }
@@ -186,7 +215,10 @@ fn closest<'w, 's>(
 ) -> Option<(usize, &'s Skill)> {
     let mut best: Option<(u32, usize, &Skill)> = None;
     for span in spans {
-        if span.first().is_some_and(|word| ARTICLES.contains(&word.letters.as_str())) {
+        if span
+            .first()
+            .is_some_and(|word| ARTICLES.contains(&word.letters.as_str()))
+        {
             continue;
         }
         let said: String = span.iter().map(|word| word.letters.as_str()).collect();
@@ -201,17 +233,25 @@ fn closest<'w, 's>(
 }
 
 fn closest_skill<'s>(said: &str, skills: &'s [Skill]) -> Option<(u32, &'s Skill)> {
-    let mut fits = skills.iter().filter_map(|skill| Some((fit(said, skill.name.as_str())?, skill)));
+    let mut fits = skills
+        .iter()
+        .filter_map(|skill| Some((fit(said, skill.name.as_str())?, skill)));
     let first = fits.next()?;
     let (best, next) = fits.fold((first, 0), |(best, next), other| {
-        if other.0 > best.0 { (other, best.0) } else { (best, next.max(other.0)) }
+        if other.0 > best.0 {
+            (other, best.0)
+        } else {
+            (best, next.max(other.0))
+        }
     });
     (best.0 >= next + MARGIN).then_some(best)
 }
 
 fn fit(said: &str, name: &str) -> Option<u32> {
     let whole = letters_fit(said, name);
-    let bare = name.rsplit_once(':').and_then(|(_, bare)| letters_fit(said, bare));
+    let bare = name
+        .rsplit_once(':')
+        .and_then(|(_, bare)| letters_fit(said, bare));
     whole.max(bare.map(|fit| fit.saturating_sub(PLUGINS_COST)))
 }
 
@@ -242,7 +282,10 @@ fn edits(one: &[char], other: &[char]) -> usize {
 }
 
 fn letters(text: &str) -> String {
-    text.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[cfg(test)]
@@ -291,8 +334,14 @@ mod tests {
             ("Slash, Tiger Style.", "/tigerstyle"),
             ("/tigerstyle review this", "/tigerstyle review this"),
             ("/ tiger style review this", "/tigerstyle review this"),
-            ("Slash tiger style skill on this branch.", "/tigerstyle on this branch."),
-            ("Review this with slash tiger style.", "/tigerstyle Review this"),
+            (
+                "Slash tiger style skill on this branch.",
+                "/tigerstyle on this branch.",
+            ),
+            (
+                "Review this with slash tiger style.",
+                "/tigerstyle Review this",
+            ),
             (
                 "Make sure this passes the make illegal states unrepresentable skill.",
                 "/make-illegal-states-unrepresentable Make sure this passes",
@@ -307,11 +356,20 @@ mod tests {
         for (said, command) in [
             ("Use the handoff skill.", "/handoff"),
             ("Now use the hand off skill.", "/handoff"),
-            ("Hand-off skill. Next session fixes CI.", "/handoff Next session fixes CI."),
-            ("slash hand off next session fixes CI", "/handoff next session fixes CI"),
+            (
+                "Hand-off skill. Next session fixes CI.",
+                "/handoff Next session fixes CI.",
+            ),
+            (
+                "slash hand off next session fixes CI",
+                "/handoff next session fixes CI",
+            ),
             ("Use the hand of skill.", "/handoff"),
             ("Use the handoff scale", "/handoff"),
-            ("The next session fixes CI, so use the handoff skill.", "/handoff The next session fixes CI, so"),
+            (
+                "The next session fixes CI, so use the handoff skill.",
+                "/handoff The next session fixes CI, so",
+            ),
         ] {
             assert_eq!(written_for(said), command, "{said:?}");
         }
@@ -329,13 +387,22 @@ mod tests {
     #[test]
     fn a_name_is_matched_loosely() {
         for (said, command) in [
-            ("make unavailable states unrepresentable skill", "/make-illegal-states-unrepresentable"),
-            ("make legal statements unrepresentable skill", "/make-illegal-states-unrepresentable"),
+            (
+                "make unavailable states unrepresentable skill",
+                "/make-illegal-states-unrepresentable",
+            ),
+            (
+                "make legal statements unrepresentable skill",
+                "/make-illegal-states-unrepresentable",
+            ),
             (
                 "Make sure this passes the make illegal state's unrepresentable skill",
                 "/make-illegal-states-unrepresentable Make sure this passes",
             ),
-            ("Run the thermonuclear review scale", "/thermo-nuclear-review"),
+            (
+                "Run the thermonuclear review scale",
+                "/thermo-nuclear-review",
+            ),
             ("slash thermal nuclear review", "/thermo-nuclear-review"),
             ("the tigers style skill", "/tigerstyle"),
             ("Use the Tiger-Style queue", "/tigerstyle"),
@@ -363,7 +430,10 @@ mod tests {
         ] {
             assert_eq!(written_for(said), said);
         }
-        let close = skills(&["thermo-nuclear-review", "thermo-nuclear-code-quality-review"]);
+        let close = skills(&[
+            "thermo-nuclear-review",
+            "thermo-nuclear-code-quality-review",
+        ]);
         let said = "the thermonuclear code review skill";
         assert_eq!(written(said, &close), Written::said(said));
         let spaced = "slash  tiger style";
@@ -402,7 +472,10 @@ mod tests {
             written_for("the thermo nuclear code quality review skill"),
             "/thermo-nuclear-code-quality-review"
         );
-        assert_eq!(written_for("the thermo nuclear review skill"), "/thermo-nuclear-review");
+        assert_eq!(
+            written_for("the thermo nuclear review skill"),
+            "/thermo-nuclear-review"
+        );
         assert_eq!(written_for("the grilling skill"), "/grilling");
         assert_eq!(written_for("the grill me skill"), "/grill-me");
     }
@@ -412,8 +485,14 @@ mod tests {
         let both = skills(&["handoff", "tools:handoff"]);
         assert_eq!(written("the handoff skill", &both).to_string(), "/handoff");
         let two = skills(&["other:handoff", "tools:handoff"]);
-        assert_eq!(written("the handoff skill", &two).to_string(), "the handoff skill");
-        assert_eq!(written("the tools handoff skill", &two).to_string(), "/tools:handoff");
+        assert_eq!(
+            written("the handoff skill", &two).to_string(),
+            "the handoff skill"
+        );
+        assert_eq!(
+            written("the tools handoff skill", &two).to_string(),
+            "/tools:handoff"
+        );
     }
 
     #[test]
@@ -440,7 +519,10 @@ mod tests {
     fn a_later_skill_only_you_can_run_stays_as_it_was_said() {
         let mut list = skills(&["handoff", "tigerstyle"]);
         list[0].runs = Runs::OnlyForYou;
-        let later = written("Run the tiger style skill and then the handoff skill.", &list);
+        let later = written(
+            "Run the tiger style skill and then the handoff skill.",
+            &list,
+        );
         assert_eq!(later.to_string(), "/tigerstyle and then the handoff skill.");
         assert_eq!(later.only_first, [list[0].name.clone()]);
         let first = written("Use the handoff skill, then the tiger style skill.", &list);
@@ -459,9 +541,18 @@ mod tests {
                 "Review this with the tiger style skill. Open a PR after.",
                 "/tigerstyle Review this. Open a PR after.",
             ),
-            ("Review this, with the tiger style skill.", "/tigerstyle Review this"),
-            ("Review this — tiger style skill, and fix it.", "/tigerstyle Review this and fix it."),
-            ("Look in /etc/nginx with slash tiger style.", "/tigerstyle Look in /etc/nginx"),
+            (
+                "Review this, with the tiger style skill.",
+                "/tigerstyle Review this",
+            ),
+            (
+                "Review this — tiger style skill, and fix it.",
+                "/tigerstyle Review this and fix it.",
+            ),
+            (
+                "Look in /etc/nginx with slash tiger style.",
+                "/tigerstyle Look in /etc/nginx",
+            ),
         ] {
             assert_eq!(written_for(said), command, "{said:?}");
         }
@@ -469,7 +560,12 @@ mod tests {
 
     #[test]
     fn a_mark_is_what_can_change_what_is_written() {
-        for said in ["the tiger style skill", "Slash tiger style", "/tigerstyle", "/ tigerstyle"] {
+        for said in [
+            "the tiger style skill",
+            "Slash tiger style",
+            "/tigerstyle",
+            "/ tigerstyle",
+        ] {
             assert!(marked(said), "{said:?}");
         }
         for said in ["Run the tests.", "Look in /etc/nginx first.", "and/or", ""] {

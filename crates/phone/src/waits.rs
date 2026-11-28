@@ -7,7 +7,11 @@ pub struct NonZeroDuration(Duration);
 impl NonZeroDuration {
     #[must_use]
     pub const fn new(duration: Duration) -> Option<NonZeroDuration> {
-        if duration.is_zero() { None } else { Some(NonZeroDuration(duration)) }
+        if duration.is_zero() {
+            None
+        } else {
+            Some(NonZeroDuration(duration))
+        }
     }
 
     #[must_use]
@@ -53,7 +57,7 @@ pub(crate) mod positive {
     use std::time::Duration;
 
     use super::{
-        NonZeroDuration, ANSWER, DELETING, FILING, LISTING, MAKING, PLANNING, REBASING, TURN,
+        ANSWER, DELETING, FILING, LISTING, MAKING, NonZeroDuration, PLANNING, REBASING, TURN,
     };
 
     const fn of(duration: Duration) -> NonZeroDuration {
@@ -77,8 +81,14 @@ pub fn again(failed: NonZeroU32, chance: u64) -> NonZeroDuration {
     let most_ms = AGAIN.saturating_mul(multiple).min(AGAIN_MOST).as_millis() as u64;
     let least_ms = most_ms / 2;
     let waited = Duration::from_millis(least_ms + chance % (most_ms - least_ms + 1));
-    assert!(waited >= AGAIN, "{failed} failed: {waited:?} retries sooner than the core did before backing off");
-    assert!(waited <= AGAIN_MOST, "{failed} failed: {waited:?} waits past the cap");
+    assert!(
+        waited >= AGAIN,
+        "{failed} failed: {waited:?} retries sooner than the core did before backing off"
+    );
+    assert!(
+        waited <= AGAIN_MOST,
+        "{failed} failed: {waited:?} waits past the cap"
+    );
     NonZeroDuration(waited)
 }
 
@@ -101,8 +111,9 @@ mod tests {
     #[test]
     fn a_failed_watch_waits_twice_as_long_as_the_one_before_up_to_a_cap() {
         let bounds = |times| {
-            let longest =
-                (0..=AGAIN_MOST.as_millis() as u64).map(|chance| again(failed(times), chance).get()).max();
+            let longest = (0..=AGAIN_MOST.as_millis() as u64)
+                .map(|chance| again(failed(times), chance).get())
+                .max();
             (again(failed(times), 0).get(), longest.unwrap())
         };
         assert_eq!(bounds(1), (AGAIN, AGAIN * 2));
@@ -110,7 +121,11 @@ mod tests {
         assert_eq!(bounds(3), (AGAIN * 4, AGAIN * 8));
         assert_eq!(bounds(4), (AGAIN_MOST / 2, AGAIN_MOST));
         for times in [5, 31, 32, 33, u32::MAX] {
-            assert_eq!(bounds(times), (AGAIN_MOST / 2, AGAIN_MOST), "{times} failed");
+            assert_eq!(
+                bounds(times),
+                (AGAIN_MOST / 2, AGAIN_MOST),
+                "{times} failed"
+            );
         }
     }
 
@@ -118,8 +133,15 @@ mod tests {
     fn a_failed_watch_waits_anywhere_in_its_span_so_phones_do_not_retry_in_step() {
         let spread = AGAIN.as_millis() as u64;
         assert_eq!(again(failed(1), spread).get(), AGAIN * 2);
-        assert_eq!(again(failed(1), spread + 1).get(), AGAIN, "the chance wraps around the span");
-        assert_eq!(again(failed(1), 250).get(), AGAIN + Duration::from_millis(250));
+        assert_eq!(
+            again(failed(1), spread + 1).get(),
+            AGAIN,
+            "the chance wraps around the span"
+        );
+        assert_eq!(
+            again(failed(1), 250).get(),
+            AGAIN + Duration::from_millis(250)
+        );
         for chance in [0, 1, 999, 1_000, 1_001, u64::MAX] {
             for times in 1..=8 {
                 let waited = again(failed(times), chance).get();

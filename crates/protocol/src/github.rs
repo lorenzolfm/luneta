@@ -20,7 +20,9 @@ const HTTPS: &str = "https://";
 
 impl PullPage {
     pub fn parse(url: &str) -> Result<PullPage, String> {
-        let path = url.strip_prefix(HTTPS).ok_or_else(|| format!("{url} is no https page"))?;
+        let path = url
+            .strip_prefix(HTTPS)
+            .ok_or_else(|| format!("{url} is no https page"))?;
         let parts: Vec<&str> = path.split('/').collect();
         let named = |part: &&str| !part.is_empty() && !part.contains(['?', '#']);
         let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
@@ -29,11 +31,14 @@ impl PullPage {
                 if [host, owner, name].into_iter().all(named) && digits(pull) =>
             {
                 pull.parse().ok()
-            },
+            }
             _ => None,
         };
         let number = number.ok_or_else(|| format!("{url} is no page of a pull request"))?;
-        Ok(PullPage { url: url.to_owned(), number })
+        Ok(PullPage {
+            url: url.to_owned(),
+            number,
+        })
     }
 
     #[must_use]
@@ -49,12 +54,17 @@ impl PullPage {
     #[must_use]
     pub fn repository(&self) -> &str {
         let path = &self.url[HTTPS.len()..];
-        path.rsplit_once("/pull/").expect("a pull request's page holds /pull/").0
+        path.rsplit_once("/pull/")
+            .expect("a pull request's page holds /pull/")
+            .0
     }
 
     #[must_use]
     pub fn host(&self) -> &str {
-        self.repository().split('/').next().expect("split yields at least once")
+        self.repository()
+            .split('/')
+            .next()
+            .expect("split yields at least once")
     }
 }
 
@@ -118,11 +128,17 @@ impl PullRequest {
             dir: dir.to_owned(),
             state: state.into(),
             url: self.page.url().to_owned(),
-            checks: self.checks.map(|Checks { pending, failed, passed }| v1::Checks {
-                pending,
-                failed,
-                passed,
-            }),
+            checks: self.checks.map(
+                |Checks {
+                     pending,
+                     failed,
+                     passed,
+                 }| v1::Checks {
+                    pending,
+                    failed,
+                    passed,
+                },
+            ),
             stale: self.stale,
         }
     }
@@ -137,27 +153,47 @@ impl PullRequest {
             v1::PullRequestState::Closed => State::Closed,
         };
         let page = PullPage::parse(&pull_request.url).ok()?;
-        let checks = pull_request.checks.map(|v1::Checks { pending, failed, passed }| Checks {
-            pending,
-            failed,
-            passed,
-        });
-        Some(PullRequest { page, state, checks, stale: pull_request.stale })
+        let checks = pull_request.checks.map(
+            |v1::Checks {
+                 pending,
+                 failed,
+                 passed,
+             }| Checks {
+                pending,
+                failed,
+                passed,
+            },
+        );
+        Some(PullRequest {
+            page,
+            state,
+            checks,
+            stale: pull_request.stale,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{v1, Checks, PullPage, PullRequest, State, Verdict};
+    use super::{Checks, PullPage, PullRequest, State, Verdict, v1};
 
     #[test]
     fn a_pull_request_reads_back_as_the_daemon_wrote_it() {
         let page = PullPage::parse("https://github.com/owner/repo/pull/126").unwrap();
-        let checks = Some(Checks { pending: 1, failed: 2, passed: 3 });
+        let checks = Some(Checks {
+            pending: 1,
+            failed: 2,
+            passed: 3,
+        });
         for state in [State::Open, State::Draft, State::Merged, State::Closed] {
             let none = Some(Checks::default());
             for (checks, stale) in [(checks, false), (None, false), (none, true)] {
-                let pull_request = PullRequest { page: page.clone(), state, checks, stale };
+                let pull_request = PullRequest {
+                    page: page.clone(),
+                    state,
+                    checks,
+                    stale,
+                };
                 let api = pull_request.to_api("/w/repo");
                 assert_eq!(PullRequest::of_api(&api), Some(pull_request));
             }
@@ -175,7 +211,13 @@ mod tests {
         for (url, state) in unread {
             let (dir, url) = ("/w/repo".to_owned(), url.to_owned());
             let (checks, stale) = (None, false);
-            let pull_request = v1::PullRequest { dir, state, url, checks, stale };
+            let pull_request = v1::PullRequest {
+                dir,
+                state,
+                url,
+                checks,
+                stale,
+            };
             assert_eq!(PullRequest::of_api(&pull_request), None, "{pull_request:?}");
         }
     }
@@ -185,7 +227,10 @@ mod tests {
         let url = "https://github.com/owner/repo/pull/328";
         let page = PullPage::parse(url).unwrap();
         assert_eq!((page.url(), page.number().get()), (url, 328));
-        assert_eq!((page.repository(), page.host()), ("github.com/owner/repo", "github.com"));
+        assert_eq!(
+            (page.repository(), page.host()),
+            ("github.com/owner/repo", "github.com")
+        );
         for url in [
             "http://github.com/owner/repo/pull/328",
             "https://github.com/owner/repo/issues/328",
@@ -206,7 +251,14 @@ mod tests {
 
     #[test]
     fn checks_come_to_the_worst_of_them() {
-        let checks = |pending, failed, passed| Checks { pending, failed, passed }.verdict();
+        let checks = |pending, failed, passed| {
+            Checks {
+                pending,
+                failed,
+                passed,
+            }
+            .verdict()
+        };
         assert_eq!(checks(3, 1, 5), Some(Verdict::Failing));
         assert_eq!(checks(0, 2, 0), Some(Verdict::Failing));
         assert_eq!(checks(1, 0, 5), Some(Verdict::Pending));
@@ -217,9 +269,19 @@ mod tests {
     #[test]
     fn only_an_open_pull_request_says_its_checks() {
         let page = PullPage::parse("https://github.com/owner/repo/pull/126").unwrap();
-        let failed = Some(Checks { pending: 0, failed: 1, passed: 0 });
+        let failed = Some(Checks {
+            pending: 0,
+            failed: 1,
+            passed: 0,
+        });
         let verdict = |state, checks| {
-            PullRequest { page: page.clone(), state, checks, stale: false }.verdict()
+            PullRequest {
+                page: page.clone(),
+                state,
+                checks,
+                stale: false,
+            }
+            .verdict()
         };
         assert_eq!(verdict(State::Open, failed), Some(Verdict::Failing));
         assert_eq!(verdict(State::Draft, failed), Some(Verdict::Failing));

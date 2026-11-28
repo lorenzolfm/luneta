@@ -3,10 +3,10 @@ pub mod diff;
 pub mod git;
 pub mod github;
 pub mod made;
+pub mod process;
 pub mod program_resume;
 pub mod program_status;
 pub mod release;
-pub mod process;
 pub mod said;
 pub mod shell;
 pub mod socket;
@@ -102,7 +102,8 @@ pub const PROGRAM_STATUS_PROGRESS_PERCENT_MAX: u8 = program_status::PROGRESS_PER
 
 const _: () = assert!(matches!(TERMINAL_BROWSER_SOCKET.as_bytes(), [_, ..]));
 const _: () = assert!(MUX_TERMINALS_MAX >= 64);
-const _: () = assert!(LISTING_CHILDREN_BYTES_MAX + LISTING_RESUMES_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
+const _: () =
+    assert!(LISTING_CHILDREN_BYTES_MAX + LISTING_RESUMES_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
 const _: () = assert!(LIST_RESUME_RECORDS_BYTES_MAX < RPC_MESSAGE_BYTES_MAX);
 const _: () = assert!(HOST_SUBAGENTS_BYTES_MAX * 17 < RPC_MESSAGE_BYTES_MAX);
 const _: () = assert!(UNTRACKED_BYTES_MAX <= UNTRACKED_TOTAL_BYTES_MAX);
@@ -191,7 +192,10 @@ impl v1::Name {
     #[must_use]
     pub fn given(&self) -> Option<&str> {
         let source = self.source.map(v1::NameSource::try_from);
-        let given = matches!(source, None | Some(Ok(v1::NameSource::User | v1::NameSource::Peer)));
+        let given = matches!(
+            source,
+            None | Some(Ok(v1::NameSource::User | v1::NameSource::Peer))
+        );
         Some(self.text.trim()).filter(|text| given && !text.is_empty())
     }
 
@@ -209,7 +213,7 @@ impl v1::Name {
 
 #[cfg(test)]
 mod tests {
-    use super::v1::{agent::Status as Reported, Agent, Status, StatusRung};
+    use super::v1::{Agent, Status, StatusRung, agent::Status as Reported};
 
     fn with_status(status: Status, rung: Option<StatusRung>) -> Agent {
         Agent {
@@ -232,7 +236,7 @@ mod tests {
 
     #[test]
     fn ready_prefix_rejects_empty_single_byte_multiline_and_oversize_values() {
-        use super::{ReadyPrefix, READY_BYTES_MAX};
+        use super::{READY_BYTES_MAX, ReadyPrefix};
 
         const TOO_LONG_BYTES: [u8; READY_BYTES_MAX] = [b'x'; READY_BYTES_MAX];
 
@@ -269,7 +273,10 @@ mod tests {
         assert_eq!(named("fold", None).auto(), None);
         assert_eq!(named("fold", Some(NameSource::User)).auto(), None);
         assert_eq!(named("fold", Some(NameSource::Derived)).auto(), None);
-        let unknown = Name { text: "fold".to_owned(), source: Some(99) };
+        let unknown = Name {
+            text: "fold".to_owned(),
+            source: Some(99),
+        };
         assert_eq!(unknown.given(), None);
         assert_eq!(unknown.auto(), None);
     }
@@ -283,6 +290,9 @@ mod tests {
         assert_eq!(with_topic(None).live_topic(), None);
         assert_eq!(with_topic(Some("")).live_topic(), None);
         assert_eq!(with_topic(Some("   \n\t  ")).live_topic(), None);
-        assert_eq!(with_topic(Some("  View tabs  ")).live_topic(), Some("View tabs"));
+        assert_eq!(
+            with_topic(Some("  View tabs  ")).live_topic(),
+            Some("View tabs")
+        );
     }
 }

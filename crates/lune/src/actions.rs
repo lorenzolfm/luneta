@@ -45,8 +45,13 @@ pub const QUIT: char = 'q';
 
 pub const GIT: char = 'g';
 
-pub const MENU_GROUPS: [(char, &str); 5] =
-    [(SKILLS, "Skills"), ('n', "New"), ('d', "Close"), ('b', "Brief"), (GIT, "Git")];
+pub const MENU_GROUPS: [(char, &str); 5] = [
+    (SKILLS, "Skills"),
+    ('n', "New"),
+    ('d', "Close"),
+    ('b', "Brief"),
+    (GIT, "Git"),
+];
 
 pub const ROW_GROUPS: [(char, &str); 2] = [(YANK, "Yank"), (OPEN, "Open")];
 
@@ -216,7 +221,12 @@ const fn spec(
     key: Key,
     nouns: &'static [Noun],
 ) -> Spec {
-    Spec { name, keywords, key, nouns }
+    Spec {
+        name,
+        keywords,
+        key,
+        nouns,
+    }
 }
 
 const fn anywhere(name: &'static str, keywords: &'static [&'static str], chord: Chord) -> Spec {
@@ -228,13 +238,19 @@ impl Action {
     pub const fn spec(self) -> Spec {
         let menu = Key::Menu;
         match self {
-            Action::SearchSkills => {
-                spec("Search skills", &["slash command", "find"], menu(&['/']), VIEW)
-            },
+            Action::SearchSkills => spec(
+                "Search skills",
+                &["slash command", "find"],
+                menu(&['/']),
+                VIEW,
+            ),
             Action::Ask => spec("Ask", &["question", "chat"], menu(&['a']), EVERY),
-            Action::FileIssue => {
-                spec("File issue", &["bug", "report", "github"], menu(&['i']), CHECKED_OUT)
-            },
+            Action::FileIssue => spec(
+                "File issue",
+                &["bug", "report", "github"],
+                menu(&['i']),
+                CHECKED_OUT,
+            ),
             Action::Review => spec(
                 "/thermo-nuclear-review",
                 &["critique", "audit"],
@@ -249,10 +265,13 @@ impl Action {
             ),
             Action::TigerStyle => {
                 spec("/tigerstyle", &["style", "safety"], menu(&['c', 's']), VIEW)
-            },
-            Action::FixLast => {
-                spec("fix the last command", &["error", "shell"], menu(&['c', 'f']), VIEW)
-            },
+            }
+            Action::FixLast => spec(
+                "fix the last command",
+                &["error", "shell"],
+                menu(&['c', 'f']),
+                VIEW,
+            ),
             Action::ExplainLast => spec(
                 "explain the last command",
                 &["error", "shell", "why"],
@@ -261,51 +280,91 @@ impl Action {
             ),
             Action::FixChecks => {
                 let checks = menu(&['c', 'c']);
-                spec("fix the failing checks", &["ci", "pull request"], checks, VIEW)
-            },
+                spec(
+                    "fix the failing checks",
+                    &["ci", "pull request"],
+                    checks,
+                    VIEW,
+                )
+            }
             Action::NewView => {
                 let new = menu(&['n', 'v']);
-                spec("new view", &["pane", "split", "tab", "terminal", "shell"], new, VIEW)
-            },
+                spec(
+                    "new view",
+                    &["pane", "split", "tab", "terminal", "shell"],
+                    new,
+                    VIEW,
+                )
+            }
             Action::NewWelcome => {
                 let new = menu(&['n', 'h']);
-                spec("new welcome view", &["home", "start", "greeting"], new, VIEW)
-            },
+                spec(
+                    "new welcome view",
+                    &["home", "start", "greeting"],
+                    new,
+                    VIEW,
+                )
+            }
             Action::NewBrowser => {
                 let new = menu(&['n', 'b']);
-                spec("new browser view…", &["url", "page", "site", "http"], new, CHECKED_OUT)
-            },
+                spec(
+                    "new browser view…",
+                    &["url", "page", "site", "http"],
+                    new,
+                    CHECKED_OUT,
+                )
+            }
             Action::NewReview => {
                 let new = menu(&['n', 'r']);
-                spec("new review view", &["changes", "patch", "pull request", "split"], new, VIEW)
-            },
-            Action::ShowTabs => {
-                spec("Show as tabs", &["arrange", "layout", "views"], menu(&['t']), VIEW)
-            },
-            Action::ShowPanes => {
-                spec("Show as panes", &["arrange", "layout", "split"], menu(&['s']), VIEW)
-            },
+                spec(
+                    "new review view",
+                    &["changes", "patch", "pull request", "split"],
+                    new,
+                    VIEW,
+                )
+            }
+            Action::ShowTabs => spec(
+                "Show as tabs",
+                &["arrange", "layout", "views"],
+                menu(&['t']),
+                VIEW,
+            ),
+            Action::ShowPanes => spec(
+                "Show as panes",
+                &["arrange", "layout", "split"],
+                menu(&['s']),
+                VIEW,
+            ),
             Action::NewWorktree => {
                 let keywords = &["branch", "task"];
                 spec("new worktree…", keywords, menu(&['n', 'w']), IN_A_PROJECT)
-            },
-            Action::NewMachine => {
-                spec("new machine…", &["ssh", "host", "remote"], menu(&['n', 'm']), EVERY)
-            },
+            }
+            Action::NewMachine => spec(
+                "new machine…",
+                &["ssh", "host", "remote"],
+                menu(&['n', 'm']),
+                EVERY,
+            ),
             Action::RenameView => {
                 let keywords = &["name", "pane", "terminal", "title"];
                 spec("Rename the view…", keywords, menu(&['r']), VIEW)
-            },
-            Action::RenameWorktree => {
-                spec("Rename the worktree…", &["name", "title"], menu(&['r']), WORKTREE)
-            },
-            Action::RenameProject => {
-                spec("Rename the project…", &["name", "title"], menu(&['r']), PROJECT)
-            },
+            }
+            Action::RenameWorktree => spec(
+                "Rename the worktree…",
+                &["name", "title"],
+                menu(&['r']),
+                WORKTREE,
+            ),
+            Action::RenameProject => spec(
+                "Rename the project…",
+                &["name", "title"],
+                menu(&['r']),
+                PROJECT,
+            ),
             Action::CloseView => {
                 let keywords = &["pane", "kill", "exit", "terminal"];
                 spec("close the view", keywords, menu(&['d', 'd']), VIEW)
-            },
+            }
             Action::CloseWorktree => spec(
                 "close the worktree",
                 &["kill", "end", "terminals"],
@@ -320,8 +379,13 @@ impl Action {
             ),
             Action::ForgetMachine => {
                 let forget = menu(&['d', 'd']);
-                spec("forget the machine", &["remove", "ssh", "host"], forget, MACHINE)
-            },
+                spec(
+                    "forget the machine",
+                    &["remove", "ssh", "host"],
+                    forget,
+                    MACHINE,
+                )
+            }
             Action::DeleteMerged => spec(
                 "delete merged worktrees",
                 &["prune", "clean", "branches"],
@@ -334,74 +398,91 @@ impl Action {
                 menu(&[GIT, 'r']),
                 CHECKED_OUT,
             ),
-            Action::BriefEvery => {
-                spec("Brief every session", &["summary", "all"], menu(&['b', 'z']), EVERY)
-            },
-            Action::BriefThis => {
-                spec("Brief this session", &["summary", "project"], menu(&['b', 's']), EVERY)
-            },
+            Action::BriefEvery => spec(
+                "Brief every session",
+                &["summary", "all"],
+                menu(&['b', 'z']),
+                EVERY,
+            ),
+            Action::BriefThis => spec(
+                "Brief this session",
+                &["summary", "project"],
+                menu(&['b', 's']),
+                EVERY,
+            ),
             Action::BriefHighlighted => {
                 let keywords = &["summary", "row", "agent"];
                 spec("Brief the highlighted", keywords, menu(&['b', 'h']), EVERY)
-            },
+            }
             Action::Search => spec("Search", &["find", "filter"], Key::Row(&['/']), EVERY),
             Action::Unread => spec("Unread", &["mark", "read", "dot"], Key::Row(&['u']), VIEW),
-            Action::Reorder => {
-                spec("Reorder", &["move", "select"], Key::Row(&['v']), IN_A_PROJECT)
-            },
+            Action::Reorder => spec(
+                "Reorder",
+                &["move", "select"],
+                Key::Row(&['v']),
+                IN_A_PROJECT,
+            ),
             Action::OpenPull => {
                 let keywords = &["browser", "pull request"];
                 spec("Open the PR", keywords, Key::Row(&[OPEN, 'p']), CHECKED_OUT)
-            },
+            }
             Action::OpenWorktree => {
                 let keywords = &["checkout", "branch", "unopened"];
-                spec("Open a worktree", keywords, Key::Row(&[OPEN, 'w']), IN_A_PROJECT)
-            },
+                spec(
+                    "Open a worktree",
+                    keywords,
+                    Key::Row(&[OPEN, 'w']),
+                    IN_A_PROJECT,
+                )
+            }
             Action::YankPull => {
                 let yank = Key::Row(&[YANK, YANK_PULL]);
                 spec("Yank the PR link", &["copy", "url"], yank, CHECKED_OUT)
-            },
+            }
             Action::Quit => {
                 let quit = Key::RowAndMenu(&[QUIT]);
                 spec("Quit lune", &["detach", "exit", "leave"], quit, EVERY)
-            },
+            }
             Action::PastedWorktree => {
                 let worktree = Key::Pasted(Pasted::Worktree.key());
                 spec("worktree", &["checkout", "branch"], worktree, EVERY)
-            },
+            }
             Action::PastedReview => {
                 let review = Key::Pasted(Pasted::Review.key());
-                spec("/thermo-nuclear-review", &["critique", "pull request"], review, EVERY)
-            },
+                spec(
+                    "/thermo-nuclear-review",
+                    &["critique", "pull request"],
+                    review,
+                    EVERY,
+                )
+            }
             Action::PastedTackle => {
                 let tackle = Key::Pasted(Pasted::Tackle.key());
                 spec("tackle", &["issue", "work"], tackle, EVERY)
-            },
+            }
             Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
             Action::ViewLeft => {
                 let name = "View left, the worktree before, or the sidebar";
                 anywhere(name, &["focus", "move"], LEFT)
-            },
+            }
             Action::ViewDown => anywhere("View below", &["focus", "move"], DOWN),
             Action::ViewUp => anywhere("View above", &["focus", "move"], UP),
-            Action::ViewRight => {
-                anywhere("View right, or the worktree after", &["focus", "move"], RIGHT)
-            },
+            Action::ViewRight => anywhere(
+                "View right, or the worktree after",
+                &["focus", "move"],
+                RIGHT,
+            ),
             Action::Grow => anywhere("Grow the view", &["resize", "bigger"], GROW),
             Action::Shrink => anywhere("Shrink the view", &["resize", "smaller"], SHRINK),
             Action::Collapse => anywhere("Collapse sidebar", &["hide", "fold"], COLLAPSE),
             Action::Menu => anywhere("Menu over views", &["which-key", "actions"], MENU),
-            Action::Palette => {
-                anywhere("Pick an action", &["palette", "command", "run"], PALETTE)
-            },
-            Action::Worktrees => {
-                anywhere("Pick a worktree", &["finder", "switch"], WORKTREES)
-            },
+            Action::Palette => anywhere("Pick an action", &["palette", "command", "run"], PALETTE),
+            Action::Worktrees => anywhere("Pick a worktree", &["finder", "switch"], WORKTREES),
             Action::Agents => anywhere("Pick an agent", &["finder", "claude"], AGENTS),
             Action::Projects => {
                 let keywords = &["finder", "folder", "directory", "repository", "new", "add"];
                 anywhere("Open a project", keywords, PROJECTS)
-            },
+            }
             Action::Dictate => anywhere("Hold to dictate", &["voice", "speech"], dictation::KEY),
             Action::ReadAloud => anywhere("Read aloud, pause", &["speak", "voice"], aloud::KEY),
             Action::StopAloud => anywhere("Stop reading", &["speak", "voice"], aloud::STOPS),
@@ -447,37 +528,48 @@ impl Action {
     }
 
     pub fn menu() -> impl Iterator<Item = (Action, &'static [char])> {
-        Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Menu(path) | Key::RowAndMenu(path) => Some((action, path)),
-            Key::Row(_) | Key::Pasted(_) | Key::Chord(_) => None,
-        })
+        Action::ALL
+            .into_iter()
+            .filter_map(|action| match action.key() {
+                Key::Menu(path) | Key::RowAndMenu(path) => Some((action, path)),
+                Key::Row(_) | Key::Pasted(_) | Key::Chord(_) => None,
+            })
     }
 
     pub fn row() -> impl Iterator<Item = (Action, &'static [char])> {
-        Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Row(path) | Key::RowAndMenu(path) => Some((action, path)),
-            Key::Menu(_) | Key::Pasted(_) | Key::Chord(_) => None,
-        })
+        Action::ALL
+            .into_iter()
+            .filter_map(|action| match action.key() {
+                Key::Row(path) | Key::RowAndMenu(path) => Some((action, path)),
+                Key::Menu(_) | Key::Pasted(_) | Key::Chord(_) => None,
+            })
     }
 
     pub fn pasted() -> impl Iterator<Item = (Action, char)> {
-        Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Pasted(key) => Some((action, key)),
-            Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Chord(_) => None,
-        })
+        Action::ALL
+            .into_iter()
+            .filter_map(|action| match action.key() {
+                Key::Pasted(key) => Some((action, key)),
+                Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Chord(_) => None,
+            })
     }
 
     pub fn anywhere() -> impl Iterator<Item = (Action, Chord)> {
-        Action::ALL.into_iter().filter_map(|action| match action.key() {
-            Key::Chord(chord) => Some((action, chord)),
-            Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Pasted(_) => None,
-        })
+        Action::ALL
+            .into_iter()
+            .filter_map(|action| match action.key() {
+                Key::Chord(chord) => Some((action, chord)),
+                Key::Menu(_) | Key::Row(_) | Key::RowAndMenu(_) | Key::Pasted(_) => None,
+            })
     }
 }
 
 #[must_use]
 pub fn group_name(groups: &[(char, &'static str)], key: char) -> Option<&'static str> {
-    groups.iter().find(|(group, _)| *group == key).map(|(_, name)| *name)
+    groups
+        .iter()
+        .find(|(group, _)| *group == key)
+        .map(|(_, name)| *name)
 }
 
 const fn is_group(groups: &[(char, &str)], key: char) -> bool {
@@ -510,11 +602,11 @@ const _: () = {
             Key::Menu(path) => {
                 let menu = "a menu path is a key, or a named group's key then one of its own";
                 assert!(grouped(path, &MENU_GROUPS), "{}", menu);
-            },
+            }
             Key::Row(path) => {
                 let row = "a sidebar path is a key, or a named group's key then one of its own";
                 assert!(grouped(path, &ROW_GROUPS), "{}", row);
-            },
+            }
             Key::RowAndMenu(path) => {
                 let one = "a path of the sidebar and the menu is one key";
                 assert!(path.len() == 1, "{}", one);
@@ -522,12 +614,12 @@ const _: () = {
                 assert!(!is_group(&ROW_GROUPS, path[0]), "{}", row);
                 let menu = "a key of the sidebar and the menu opens no group of the menu";
                 assert!(!is_group(&MENU_GROUPS, path[0]), "{}", menu);
-            },
+            }
             Key::Pasted(key) => {
                 let answers = "a key for a pasted link is a Pasted's key";
                 assert!(pasted_key(key), "{}", answers);
-            },
-            Key::Chord(_) => {},
+            }
+            Key::Chord(_) => {}
         }
         at += 1;
     }
@@ -569,7 +661,11 @@ mod tests {
                 let in_the_menu = menu(one).is_some_and(|path| menu(other) == Some(path));
                 let in_the_sidebar = row(one).is_some_and(|path| row(other) == Some(path));
                 if one.key() == other.key() || in_the_menu || in_the_sidebar {
-                    assert!(!overlap(one, other), "{one:?} and {other:?} on {:?}", one.key());
+                    assert!(
+                        !overlap(one, other),
+                        "{one:?} and {other:?} on {:?}",
+                        one.key()
+                    );
                 }
             }
         }
@@ -577,16 +673,21 @@ mod tests {
 
     #[test]
     fn the_skills_group_s_actions_alone_start_an_agent() {
-        let starting = Action::ALL.into_iter().filter(|action| action.starts_agent());
+        let starting = Action::ALL
+            .into_iter()
+            .filter(|action| action.starts_agent());
         let starting: Vec<Action> = starting.collect();
-        assert_eq!(starting, [
-            Action::Review,
-            Action::IllegalStates,
-            Action::TigerStyle,
-            Action::FixLast,
-            Action::ExplainLast,
-            Action::FixChecks,
-        ]);
+        assert_eq!(
+            starting,
+            [
+                Action::Review,
+                Action::IllegalStates,
+                Action::TigerStyle,
+                Action::FixLast,
+                Action::ExplainLast,
+                Action::FixChecks,
+            ]
+        );
     }
 
     #[test]
@@ -605,7 +706,10 @@ mod tests {
             assert!(!keywords.is_empty(), "{action:?}");
             let named: Vec<String> = name.split([' ', '/', '-']).map(str::to_lowercase).collect();
             for keyword in keywords {
-                assert!(!named.contains(&(*keyword).to_owned()), "{action:?} has {keyword}");
+                assert!(
+                    !named.contains(&(*keyword).to_owned()),
+                    "{action:?} has {keyword}"
+                );
             }
         }
     }

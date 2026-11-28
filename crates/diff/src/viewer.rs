@@ -252,7 +252,11 @@ impl Viewer {
         let patch = patch.into();
         let split = SplitLayout::build(&patch);
         let unified = UnifiedLayout::build(&patch);
-        assert_eq!(split.files.len(), patch.files.len(), "split layout covers all files");
+        assert_eq!(
+            split.files.len(),
+            patch.files.len(),
+            "split layout covers all files"
+        );
         assert_eq!(
             unified.files.len(),
             patch.files.len(),
@@ -478,7 +482,10 @@ impl Viewer {
         let Some(file_index) = self.current_file() else {
             return;
         };
-        assert!(file_index < self.patch.files.len(), "current file index in bounds");
+        assert!(
+            file_index < self.patch.files.len(),
+            "current file index in bounds"
+        );
         let path = self.patch.files[file_index].path().as_str().to_owned();
         if !self.viewed.remove(&path) {
             self.viewed.insert(path);
@@ -513,11 +520,7 @@ impl Viewer {
                         .find(|span| row >= span.start_row && row < span.end_row)
                         .map(|span| span.file)
                 }),
-            ActiveLayout::Unified => self
-                .unified
-                .rows
-                .get(row)
-                .map(UnifiedRow::file_index),
+            ActiveLayout::Unified => self.unified.rows.get(row).map(UnifiedRow::file_index),
         }
     }
 
@@ -581,7 +584,10 @@ impl Viewer {
                 .saturating_add(viewport.saturating_sub(1))
                 .min(count - 1);
             self.cursor = self.cursor.clamp(self.scroll, end);
-            assert!(self.cursor < count, "cursor remains within rows after scroll");
+            assert!(
+                self.cursor < count,
+                "cursor remains within rows after scroll"
+            );
             self.sync_tree_cursor();
         }
     }
@@ -745,7 +751,10 @@ impl Viewer {
         let end_row = (*range.end()).min(count - 1);
         assert!(start_row <= end_row, "excerpt row range is ordered");
         let file_index = self.diff_file_at(start_row)?;
-        assert!(file_index < self.patch.files.len(), "excerpt file index in bounds");
+        assert!(
+            file_index < self.patch.files.len(),
+            "excerpt file index in bounds"
+        );
         let path = self.patch.files[file_index].path().clone();
         let mut lines: Option<LineRange> = None;
         let mut snippet = String::new();
@@ -901,8 +910,14 @@ impl Viewer {
 
     pub fn search_next(&mut self, viewport: usize) {
         let target = match &mut self.search {
-            SearchState::Editing { found: Some(matches), .. }
-            | SearchState::Committed { found: Some(matches), .. } => Some(matches.step_next()),
+            SearchState::Editing {
+                found: Some(matches),
+                ..
+            }
+            | SearchState::Committed {
+                found: Some(matches),
+                ..
+            } => Some(matches.step_next()),
             _ => None,
         };
         if let Some(target) = target {
@@ -912,8 +927,14 @@ impl Viewer {
 
     pub fn search_prev(&mut self, viewport: usize) {
         let target = match &mut self.search {
-            SearchState::Editing { found: Some(matches), .. }
-            | SearchState::Committed { found: Some(matches), .. } => Some(matches.step_prev()),
+            SearchState::Editing {
+                found: Some(matches),
+                ..
+            }
+            | SearchState::Committed {
+                found: Some(matches),
+                ..
+            } => Some(matches.step_prev()),
             _ => None,
         };
         if let Some(target) = target {
@@ -1025,7 +1046,10 @@ impl Viewer {
 
     fn cursor_location(&self) -> Option<(String, Option<u32>)> {
         let file_index = self.current_file()?;
-        assert!(file_index < self.patch.files.len(), "cursor file index in bounds");
+        assert!(
+            file_index < self.patch.files.len(),
+            "cursor file index in bounds"
+        );
         let path = self.patch.files[file_index].path().as_str().to_owned();
         let line = match self.active_layout {
             ActiveLayout::Split => self
@@ -1063,7 +1087,9 @@ impl Viewer {
         if let Some(target_line) = line {
             let found = (span.start_row..span.end_row).find(|&index| match self.active_layout {
                 ActiveLayout::Split => self.split.rows[index].has_line(target_line),
-                ActiveLayout::Unified => self.unified.rows[index].primary_line() == Some(target_line),
+                ActiveLayout::Unified => {
+                    self.unified.rows[index].primary_line() == Some(target_line)
+                }
             });
             if let Some(row) = found {
                 self.cursor = row;
@@ -1076,7 +1102,12 @@ impl Viewer {
     }
 }
 
-fn push_excerpt_line(out: &mut String, prefix: Option<char>, text: &str, byte_budget: usize) -> bool {
+fn push_excerpt_line(
+    out: &mut String,
+    prefix: Option<char>,
+    text: &str,
+    byte_budget: usize,
+) -> bool {
     let separator = usize::from(!out.is_empty());
     let prefix_len = prefix.map_or(0, char::len_utf8);
     let needed = separator + prefix_len + text.len();
@@ -1090,7 +1121,10 @@ fn push_excerpt_line(out: &mut String, prefix: Option<char>, text: &str, byte_bu
         out.push(ch);
     }
     out.push_str(text);
-    assert!(out.len() <= byte_budget, "excerpt line respects byte budget");
+    assert!(
+        out.len() <= byte_budget,
+        "excerpt line respects byte budget"
+    );
     true
 }
 
@@ -1145,10 +1179,15 @@ pub fn find_case_insensitive_range(haystack: &str, needle: &str) -> Option<Range
         }
         if ok && matched == needle_lower.len() {
             let start = hay_chars[start_idx].0;
-            let end = hay_chars.get(cursor).map_or(haystack.len(), |(pos, _)| *pos);
+            let end = hay_chars
+                .get(cursor)
+                .map_or(haystack.len(), |(pos, _)| *pos);
             assert!(start < end, "Unicode match is non-empty");
             assert!(end <= haystack.len(), "Unicode match stays in haystack");
-            assert!(haystack.is_char_boundary(start), "Unicode match start aligned");
+            assert!(
+                haystack.is_char_boundary(start),
+                "Unicode match start aligned"
+            );
             assert!(haystack.is_char_boundary(end), "Unicode match end aligned");
             return Some(start..end);
         }
@@ -1233,13 +1272,18 @@ diff --git a/src/b.rs b/src/b.rs
 
         viewer.sync_layout(60);
         assert!(!viewer.is_split());
-        assert!(!viewer.is_selecting(), "layout switch clears stale selection");
+        assert!(
+            !viewer.is_selecting(),
+            "layout switch clears stale selection"
+        );
         let unified_match_row = viewer.search().found().unwrap().current().row;
         assert_ne!(unified_match_row, split_match_row);
         assert_eq!(viewer.current_file(), Some(1));
-        assert!(viewer.unified().rows[unified_match_row]
-            .text(viewer.patch())
-            .contains("added_line"));
+        assert!(
+            viewer.unified().rows[unified_match_row]
+                .text(viewer.patch())
+                .contains("added_line")
+        );
 
         viewer.toggle_layout(60);
         assert!(viewer.is_split());
@@ -1290,7 +1334,10 @@ diff --git a/src/b.rs b/src/b.rs
         for _ in 0..SEARCH_QUERY_BYTES_MAX + 50 {
             viewer.search_push('a', 20);
         }
-        assert_eq!(viewer.search().query().map(str::len), Some(SEARCH_QUERY_BYTES_MAX));
+        assert_eq!(
+            viewer.search().query().map(str::len),
+            Some(SEARCH_QUERY_BYTES_MAX)
+        );
     }
 
     #[test]

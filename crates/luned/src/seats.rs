@@ -11,7 +11,11 @@ use crate::api::{Agent, UnreadFile};
 pub fn seated(agents: &[Agent]) -> HashMap<TerminalKey, &Agent> {
     let mut seated: HashMap<TerminalKey, &Agent> = HashMap::new();
     for agent in agents {
-        let Some(seat) = agent.terminal.as_ref().and_then(|key| TerminalKey::of(key).ok()) else {
+        let Some(seat) = agent
+            .terminal
+            .as_ref()
+            .and_then(|key| TerminalKey::of(key).ok())
+        else {
             continue;
         };
         let rank = |agent: &Agent| {
@@ -37,7 +41,10 @@ pub fn unread(told: u32, files: &[UnreadFile]) -> Result<Vec<Unread>, Unplaced> 
     let mut placed = Vec::with_capacity(files.len());
     for file in files {
         match file.terminal.as_ref().map(TerminalKey::of).transpose() {
-            Ok(terminal) => placed.push(Unread { pid: file.pid, terminal }),
+            Ok(terminal) => placed.push(Unread {
+                pid: file.pid,
+                terminal,
+            }),
             Err(_) => unplaced += 1,
         }
     }
@@ -56,7 +63,10 @@ mod tests {
     use crate::mux::OwnMade;
 
     fn file(pid: u32) -> UnreadFile {
-        UnreadFile { pid, terminal: None }
+        UnreadFile {
+            pid,
+            terminal: None,
+        }
     }
 
     fn unplaced(unread: u32, unplaced: u32) -> Unplaced {
@@ -65,21 +75,39 @@ mod tests {
     }
 
     fn key(id: u32, made: u64) -> TerminalKey {
-        TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(made) }
+        TerminalKey {
+            id: NonZeroU32::new(id).unwrap(),
+            made: OwnMade::from_nanos(made),
+        }
     }
 
     #[test]
     fn a_file_is_where_its_process_runs_unless_luned_cannot_follow_it() {
         let said = api::TerminalKey::from(key(3, 60));
-        let placed = [UnreadFile { terminal: Some(said), ..file(10) }, file(11)];
+        let placed = [
+            UnreadFile {
+                terminal: Some(said),
+                ..file(10)
+            },
+            file(11),
+        ];
         let seats = vec![
-            Unread { pid: 10, terminal: Some(key(3, 60)) },
-            Unread { pid: 11, terminal: None },
+            Unread {
+                pid: 10,
+                terminal: Some(key(3, 60)),
+            },
+            Unread {
+                pid: 11,
+                terminal: None,
+            },
         ];
         assert_eq!(unread(2, &placed), Ok(seats));
         assert_eq!(unread(0, &[]), Ok(Vec::new()));
 
-        let lost = [UnreadFile { terminal: Some(api::TerminalKey { id: 0, ..said }), ..file(10) }];
+        let lost = [UnreadFile {
+            terminal: Some(api::TerminalKey { id: 0, ..said }),
+            ..file(10)
+        }];
         assert_eq!(unread(1, &lost), Err(unplaced(1, 1)));
         assert_eq!(unread(3, &[]), Err(unplaced(3, 3)));
         assert_eq!(unread(3, &lost), Err(unplaced(3, 3)));
@@ -87,14 +115,25 @@ mod tests {
 
     #[test]
     fn a_file_in_a_terminal_is_in_the_terminal_of_its_key() {
-        let in_terminal =
-            |key: api::TerminalKey| UnreadFile { terminal: Some(key), ..file(10) };
+        let in_terminal = |key: api::TerminalKey| UnreadFile {
+            terminal: Some(key),
+            ..file(10)
+        };
         let said = api::TerminalKey::from(key(7, 60));
         let placed = [in_terminal(said)];
-        assert_eq!(unread(1, &placed), Ok(vec![Unread { pid: 10, terminal: Some(key(7, 60)) }]));
+        assert_eq!(
+            unread(1, &placed),
+            Ok(vec![Unread {
+                pid: 10,
+                terminal: Some(key(7, 60))
+            }])
+        );
 
         let zero = in_terminal(api::TerminalKey { id: 0, ..said });
-        let unmade = in_terminal(api::TerminalKey { made_at: None, ..said });
+        let unmade = in_terminal(api::TerminalKey {
+            made_at: None,
+            ..said
+        });
         for unplaceable in [zero, unmade] {
             let files = std::slice::from_ref(&unplaceable);
             assert_eq!(unread(1, files), Err(unplaced(1, 1)), "{unplaceable:?}");
@@ -108,14 +147,28 @@ mod tests {
             terminal: Some(key.into()),
             ..Agent::default()
         };
-        let agents = [in_terminal(10, key(3, 60)), in_terminal(11, key(3, 70)), unkeyed(12)];
+        let agents = [
+            in_terminal(10, key(3, 60)),
+            in_terminal(11, key(3, 70)),
+            unkeyed(12),
+        ];
         let seated = seated(&agents);
         let pids = |key| seated.get(&key).map(|agent| agent.pid);
-        assert_eq!((pids(key(3, 60)), pids(key(3, 70)), seated.len()), (Some(10), Some(11), 2));
+        assert_eq!(
+            (pids(key(3, 60)), pids(key(3, 70)), seated.len()),
+            (Some(10), Some(11), 2)
+        );
     }
 
     fn unkeyed(pid: u32) -> Agent {
-        let zero = api::TerminalKey { id: 0, made_at: None };
-        Agent { pid, terminal: Some(zero), ..Agent::default() }
+        let zero = api::TerminalKey {
+            id: 0,
+            made_at: None,
+        };
+        Agent {
+            pid,
+            terminal: Some(zero),
+            ..Agent::default()
+        }
     }
 }

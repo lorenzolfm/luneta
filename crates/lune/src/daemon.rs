@@ -6,20 +6,20 @@ use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
 use std::task::Poll;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use luned::api::InfoResponse;
-use luned::folder::{self, Folder, ANOTHER_RUNS, LOCK, LOG, SOCKET};
-use luned::{
-    log, program, FolderMark, FolderNames, FolderWatch, PeerPid, ProcessExit, ReadyLine, Shared,
-    LISTENING,
-};
-use luned::release::{self, Build, Other, OWN};
+use luned::folder::{self, ANOTHER_RUNS, Folder, LOCK, LOG, SOCKET};
+use luned::release::{self, Build, OWN, Other};
 use luned::terminate::LUNED;
+use luned::{
+    FolderMark, FolderNames, FolderWatch, LISTENING, PeerPid, ProcessExit, ReadyLine, Shared, log,
+    program,
+};
 use rustix::process::{Pid, Signal};
 
 use crate::commands::causes;
@@ -98,14 +98,18 @@ pub async fn running(path: &Path) -> Result<Shared, Unreached> {
             } else {
                 Err(Unreached::NoneRuns(path.to_owned()))
             }
-        },
+        }
         Err(luned::Unreached::Connect(error)) => {
             if folder::held(&folder).map_err(refused)? {
-                Err(Unreached::Failed(format!("{}: {}", folder.socket().display(), causes(&error))))
+                Err(Unreached::Failed(format!(
+                    "{}: {}",
+                    folder.socket().display(),
+                    causes(&error)
+                )))
             } else {
                 Err(Unreached::NoneRuns(path.to_owned()))
             }
-        },
+        }
         Err(luned::Unreached::Asked(status)) => Err(Unreached::Failed(causes(&status))),
     }
 }
@@ -118,11 +122,15 @@ pub async fn info(path: &Path) -> Result<InfoResponse, Unreached> {
         Ok(info) => Ok(info),
         Err(luned::Unreached::Connect(error)) => {
             if folder::held(&folder).map_err(refused)? {
-                Err(Unreached::Failed(format!("{}: {}", folder.socket().display(), causes(&error))))
+                Err(Unreached::Failed(format!(
+                    "{}: {}",
+                    folder.socket().display(),
+                    causes(&error)
+                )))
             } else {
                 Err(Unreached::NoneRuns(path.to_owned()))
             }
-        },
+        }
         Err(error) => Err(Unreached::Failed(causes(&error))),
     }
 }
@@ -133,8 +141,8 @@ pub async fn current(path: &Path) -> Result<Current, String> {
             if let Some(daemon) = luned::kept(&folder) {
                 return Ok(Current { folder, daemon });
             }
-        },
-        Ok(None) => {},
+        }
+        Ok(None) => {}
         Err(refusal) => return Err(refusal.to_string()),
     }
     let (path, tasks) = (path.to_owned(), luned::tasks::shared());
@@ -204,27 +212,27 @@ async fn probe(
                              so lune stops none",
                             *release::SAID
                         ));
-                    },
+                    }
                     Listener::Other => {
                         *doubted = Some(pid);
                         let why = format!("luned {other} (pid {pid}) is not the one that listens");
                         return Ok(Probe::Waiting { why, recheck: true });
-                    },
+                    }
                     Listener::Gone => {
                         let why = format!("luned {other} (pid {pid}) has ended since it answered");
                         return Ok(Probe::Waiting { why, recheck: true });
-                    },
+                    }
                     Listener::It => match stop(pid)? {
                         StopOutcome::Exited => {
                             let why =
                                 format!("luned {other} (pid {pid}) has ended since it answered");
                             return Ok(Probe::Waiting { why, recheck: true });
-                        },
+                        }
                         StopOutcome::Stopping(stopping) => {
                             *stopped = Some(stopping);
                             let older = format!("luned {other} (pid {pid})");
                             format!("{older} is older than lune, and ends")
-                        },
+                        }
                     },
                 }
             } else {
@@ -234,17 +242,20 @@ async fn probe(
                     *release::SAID
                 ));
             }
-        },
+        }
         Err(luned::Unreached::Busy) => return Err(luned::Unreached::Busy.to_string()),
         Err(luned::Unreached::Changed) => luned::Unreached::Changed.to_string(),
         Err(luned::Unreached::Asked(status)) => {
             format!("{}: {}", socket.display(), causes(&status))
-        },
+        }
         Err(luned::Unreached::Connect(error)) => {
             format!("{}: {}", socket.display(), causes(&error))
-        },
+        }
     };
-    Ok(Probe::Waiting { why, recheck: false })
+    Ok(Probe::Waiting {
+        why,
+        recheck: false,
+    })
 }
 
 async fn reach(path: &Path) -> Result<Current, String> {
@@ -275,12 +286,12 @@ async fn reach(path: &Path) -> Result<Current, String> {
                 Ok(Probe::Reached(daemon)) => {
                     reap(started);
                     return Ok(Current { folder, daemon });
-                },
+                }
                 Ok(Probe::Waiting { why, recheck }) => (why, recheck, false),
                 Err(why) => {
                     reap(started);
                     return Err(why);
-                },
+                }
             },
         };
         last_why.clone_from(&why);
@@ -296,21 +307,21 @@ async fn reach(path: &Path) -> Result<Current, String> {
                     spawns += 1;
                     started = Starting::Started(start(&folder)?);
                 }
-            },
+            }
             Starting::Started(daemon) => match daemon.child.try_wait() {
-                Ok(None) => {},
+                Ok(None) => {}
                 Ok(Some(ended)) if ended.code() == Some(ANOTHER_RUNS.into()) => {
                     started = Starting::NotYet;
                     try_now = true;
-                },
+                }
                 Ok(Some(ended)) if ended.signal() == Some(Signal::TERM.as_raw()) => {
                     started = Starting::Stopped;
                     try_now = true;
-                },
+                }
                 Ok(Some(ended)) => return Err(daemon.failed(ended)),
                 Err(error) => return Err(format!("{LUNED}: {error}")),
             },
-            Starting::Stopped => {},
+            Starting::Stopped => {}
         }
         if Instant::now() >= deadline {
             break;
@@ -326,8 +337,13 @@ async fn reach(path: &Path) -> Result<Current, String> {
             &started,
             Starting::Started(daemon) if matches!(daemon.exit, ExitWait::Unavailable)
         );
-        let stopped_exit_watching =
-            matches!(&stopped, Some(Stopped { exit: ExitWait::Watching(_), .. }));
+        let stopped_exit_watching = matches!(
+            &stopped,
+            Some(Stopped {
+                exit: ExitWait::Watching(_),
+                ..
+            })
+        );
         let retry_bind = !recheck
             && !child_exited
             && !stopped_exit_watching
@@ -368,10 +384,10 @@ async fn reach(path: &Path) -> Result<Current, String> {
 
 fn log_ready_outcome(outcome: io::Result<ReadyLine>) {
     match outcome {
-        Ok(ReadyLine::Matched | ReadyLine::Ended) => {},
+        Ok(ReadyLine::Matched | ReadyLine::Ended) => {}
         Ok(ReadyLine::Overflow) => {
             log::say(&format!("{LUNED} stdout passed its readiness byte limit"));
-        },
+        }
         Err(error) => log::say(&format!("{LUNED} stdout readiness read failed: {error}")),
     }
 }
@@ -405,7 +421,7 @@ async fn wait_for_event(
                     Err(error) => {
                         log::say(&format!("{LUNED} exit wait failed: {error}"));
                         ExitWait::Unavailable
-                    },
+                    }
                 };
                 return Poll::Ready(Woke::Process);
             }
@@ -420,7 +436,7 @@ async fn wait_for_event(
                 Err(error) => {
                     log::say(&format!("{LUNED} (pid {pid}) exit wait failed: {error}"));
                     ExitWait::Unavailable
-                },
+                }
             };
             return Poll::Ready(Woke::Process);
         }
@@ -429,7 +445,9 @@ async fn wait_for_event(
         }
         Poll::Pending
     });
-    tokio::time::timeout_at(until.into(), wait).await.unwrap_or(Woke::TimedOut)
+    tokio::time::timeout_at(until.into(), wait)
+        .await
+        .unwrap_or(Woke::TimedOut)
 }
 
 pub fn unmatched(other: &Other, pid: Option<PeerPid>) -> String {
@@ -439,7 +457,10 @@ pub fn unmatched(other: &Other, pid: Option<PeerPid>) -> String {
 fn kept(other: &Other, pid: Option<PeerPid>, starting: Option<Build>) -> String {
     if other.is_newer() {
         let unmatched = unmatched(other, pid);
-        let end = pid.map_or_else(|| "end it".to_owned(), |pid| format!("end it (`kill {pid}`)"));
+        let end = pid.map_or_else(
+            || "end it".to_owned(),
+            |pid| format!("end it (`kill {pid}`)"),
+        );
         return format!("{unmatched}, or {end} for this one to start its own");
     }
     let (own, program) = (release::SAID.as_str(), luned());
@@ -454,7 +475,9 @@ fn kept(other: &Other, pid: Option<PeerPid>, starting: Option<Build>) -> String 
 
 fn reap(started: Starting) {
     if let Starting::Started(Started { mut child, .. }) = started {
-        let _ = thread::Builder::new().name(LUNED.to_owned()).spawn(move || child.wait());
+        let _ = thread::Builder::new()
+            .name(LUNED.to_owned())
+            .spawn(move || child.wait());
     }
 }
 
@@ -496,7 +519,11 @@ impl Started {
 fn start(folder: &Folder) -> Result<Started, String> {
     let path = folder.path().join(LOG);
     let opened = || {
-        let log = OpenOptions::new().create(true).append(true).mode(0o600).open(&path)?;
+        let log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&path)?;
         let mut from = log.metadata()?.len();
         if from > LOG_MAX {
             log.set_len(0)?;
@@ -522,9 +549,15 @@ fn start(folder: &Folder) -> Result<Started, String> {
         Err(error) => {
             log::say(&format!("{LUNED} exit watch failed: {error}"));
             ExitWait::Unavailable
-        },
+        }
     };
-    Ok(Started { child, log: path, from, ready, exit })
+    Ok(Started {
+        child,
+        log: path,
+        from,
+        ready,
+        exit,
+    })
 }
 
 fn luned() -> PathBuf {
@@ -539,7 +572,10 @@ fn makes_way(running: Option<Build>, own: Build, starting: impl FnOnce() -> Opti
 fn build() -> Option<Build> {
     let mut luned = Command::new(luned());
     luned.arg("--version");
-    let said = program::run(&mut luned, VERSION_LIMIT).ok()?.answer().ok()?;
+    let said = program::run(&mut luned, VERSION_LIMIT)
+        .ok()?
+        .answer()
+        .ok()?;
     let said = String::from_utf8_lossy(&said);
     Build::parse(said.trim().strip_prefix(LUNED)?.strip_prefix(' ')?)
 }
@@ -572,11 +608,14 @@ fn stop(pid: PeerPid) -> Result<StopOutcome, String> {
         Err(error) => {
             log::say(&format!("{LUNED} (pid {pid}) exit watch failed: {error}"));
             match rustix::process::kill_process(pid.as_pid(), Signal::TERM) {
-                Ok(()) => Ok(StopOutcome::Stopping(Stopped { pid, exit: ExitWait::Unavailable })),
+                Ok(()) => Ok(StopOutcome::Stopping(Stopped {
+                    pid,
+                    exit: ExitWait::Unavailable,
+                })),
                 Err(rustix::io::Errno::SRCH) => Ok(StopOutcome::Exited),
                 Err(error) => Err(format!("{LUNED} (pid {pid}) could not be stopped: {error}")),
             }
-        },
+        }
     }
 }
 
@@ -587,7 +626,9 @@ mod tests {
     #[test]
     fn a_daemon_makes_way_for_a_newer_build_alone() {
         let way = |running, own, starting| {
-            makes_way(Build::parse(running), Build::parse(own).unwrap(), || Build::parse(starting))
+            makes_way(Build::parse(running), Build::parse(own).unwrap(), || {
+                Build::parse(starting)
+            })
         };
         assert!(way("0.2.2", "0.2.2+2", "0.2.2+2"));
         assert!(way("0.2.2+1", "0.2.2+2", "0.2.2+2"));
@@ -611,7 +652,11 @@ mod tests {
         let reaching = tasks.spawn(async move { current(&path).await.map(|_| ()) });
         let reached = tasks.block_on(reaching).unwrap();
         let refused = folder::Refusal::Open(open.path().to_owned()).to_string();
-        assert_eq!(reached, Err(refused), "an open folder is refused without blocking");
+        assert_eq!(
+            reached,
+            Err(refused),
+            "an open folder is refused without blocking"
+        );
 
         let blocked = tempfile::tempdir().unwrap();
         std::fs::set_permissions(blocked.path(), std::fs::Permissions::from_mode(0o500)).unwrap();

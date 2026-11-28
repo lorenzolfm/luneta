@@ -92,11 +92,19 @@ impl Synthesizer {
         }
 
         for (terminal, record) in seen_terminals {
-            self.active.insert(terminal, ActiveSynthesized { record, exited_at: None });
+            self.active.insert(
+                terminal,
+                ActiveSynthesized {
+                    record,
+                    exited_at: None,
+                },
+            );
         }
 
-        let live_terminal_set: BTreeMap<TerminalViewId, bool> =
-            terminals.iter().map(|item| (item.terminal, item.has_osc_7577)).collect();
+        let live_terminal_set: BTreeMap<TerminalViewId, bool> = terminals
+            .iter()
+            .map(|item| (item.terminal, item.has_osc_7577))
+            .collect();
         self.active.retain(|terminal, entry| {
             let Some(&has_osc) = live_terminal_set.get(terminal) else {
                 return false;
@@ -104,7 +112,10 @@ impl Synthesizer {
             if has_osc {
                 return false;
             }
-            if live_pids.iter().any(|pid| pid.get() == entry.record.pid().get()) {
+            if live_pids
+                .iter()
+                .any(|pid| pid.get() == entry.record.pid().get())
+            {
                 entry.exited_at = None;
                 return true;
             }
@@ -131,7 +142,10 @@ impl Synthesizer {
         assert_ne!(session_id, "");
         let pid = ProcessPid::new(agent.pid.get())?;
         let proc_start = ProcStart::parse(process::start(pid.get())?.as_str().to_owned()).ok()?;
-        let cached = self.cache.get(&agent.pid).filter(|c| c.proc_start == proc_start);
+        let cached = self
+            .cache
+            .get(&agent.pid)
+            .filter(|c| c.proc_start == proc_start);
         let (meta, placement) = if let Some(cached) = cached {
             (cached.meta.clone(), cached.placement)
         } else {
@@ -139,7 +153,11 @@ impl Synthesizer {
             let placement = process::placement(pid.get(), root_pid);
             self.cache.insert(
                 agent.pid,
-                CachedAgent { proc_start: proc_start.clone(), meta: meta.clone(), placement },
+                CachedAgent {
+                    proc_start: proc_start.clone(),
+                    meta: meta.clone(),
+                    placement,
+                },
             );
             (meta, placement)
         };
@@ -162,7 +180,8 @@ impl Synthesizer {
             agent.harness.resumes().to_owned(),
             session_id.to_owned(),
         ];
-        let rule_flags = active_rule.map_or(default_rule.flags.as_ref(), |rule| rule.flags.as_ref());
+        let rule_flags =
+            active_rule.map_or(default_rule.flags.as_ref(), |rule| rule.flags.as_ref());
         if let Some(flags_spec) = rule_flags
             && let Some(launch_argv) = meta.argv.as_ref()
         {
@@ -170,7 +189,9 @@ impl Synthesizer {
             words.extend(kept);
         }
         let argv = ResumeArgv::parse(words).ok()?;
-        let cwd = ResumeCwd::parse(agent.cwd.as_str()).ok().map(ResumeCwdSource::Explicit);
+        let cwd = ResumeCwd::parse(agent.cwd.as_str())
+            .ok()
+            .map(ResumeCwdSource::Explicit);
         let reported_at =
             ReportedAt::from_system_time(agent.started_at.unwrap_or_else(SystemTime::now)).ok()?;
         let process_name = ProcessName::from_os(&meta.name);

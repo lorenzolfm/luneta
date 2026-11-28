@@ -19,14 +19,25 @@ impl Folder {
 
     #[must_use]
     pub fn at(folder: PathBuf) -> Folder {
-        assert!(folder.is_absolute(), "{} is no absolute state folder", folder.display());
+        assert!(
+            folder.is_absolute(),
+            "{} is no absolute state folder",
+            folder.display()
+        );
         Folder(Ok(folder))
     }
 
     pub fn path(&self, name: &str) -> Result<PathBuf, Unset> {
         let file = Path::new(name).file_name();
-        assert_eq!(file, Some(OsStr::new(name)), "lune keeps its state in the folder itself");
-        self.0.as_ref().map(|folder| folder.join(name)).map_err(|unset| *unset)
+        assert_eq!(
+            file,
+            Some(OsStr::new(name)),
+            "lune keeps its state in the folder itself"
+        );
+        self.0
+            .as_ref()
+            .map(|folder| folder.join(name))
+            .map_err(|unset| *unset)
     }
 }
 
@@ -47,8 +58,12 @@ pub fn watch_file(
     events: Sender<Event>,
     event: fn() -> Event,
 ) -> notify::Result<RecommendedWatcher> {
-    let dir = file.parent().ok_or_else(|| notify::Error::generic("a file in no folder"))?;
-    let name = file.file_name().ok_or_else(|| notify::Error::generic("a file with no name"))?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| notify::Error::generic("a file in no folder"))?;
+    let name = file
+        .file_name()
+        .ok_or_else(|| notify::Error::generic("a file with no name"))?;
     let name = name.to_owned();
     let wanted = move |change: &notify::Event| {
         let named = |path: &PathBuf| path.file_name() == Some(name.as_os_str());
