@@ -426,6 +426,15 @@ impl Spot {
         }
     }
 
+    fn is_on(&self, machine: &Machine) -> bool {
+        match (self, machine) {
+            (Spot::Machine(spot_machine), machine) => spot_machine == machine,
+            (Spot::Local(_), Machine::Local) => true,
+            (Spot::Remote(destination, _), Machine::Remote(other)) => destination == other,
+            (Spot::Local(_), Machine::Remote(_)) | (Spot::Remote(..), Machine::Local) => false,
+        }
+    }
+
     fn place(&self) -> Option<&Place> {
         match self {
             Spot::Machine(_) => None,
@@ -879,6 +888,28 @@ impl Row {
                 Spot::on(machine, Place::Worktree(place.clone()))
             }
             Row::View { machine, place, .. } => Spot::on(machine, Place::View(place.clone())),
+        }
+    }
+
+    fn is_spot(&self, spot: &Spot) -> bool {
+        match self {
+            Row::Machine { machine, .. } => {
+                matches!(spot, Spot::Machine(other) if other == machine)
+            }
+            Row::Project {
+                machine, project, ..
+            } => {
+                spot.is_on(machine)
+                    && matches!(spot.place(), Some(Place::Session(other)) if other == project.listed())
+            }
+            Row::Worktree { machine, place, .. } => {
+                spot.is_on(machine)
+                    && matches!(spot.place(), Some(Place::Worktree(other)) if other == place)
+            }
+            Row::View { machine, place, .. } => {
+                spot.is_on(machine)
+                    && matches!(spot.place(), Some(Place::View(other)) if other == place)
+            }
         }
     }
 
@@ -1803,7 +1834,6 @@ pub struct Sidebar {
     viewport: Viewport,
     revealed: Option<Spot>,
     top: usize,
-    laid: Layout,
     notice: Option<String>,
     copied: Option<(Copied, Instant)>,
     image_going: Option<Destination>,
@@ -1885,6 +1915,7 @@ enum Moving {
     Still,
     Down {
         at: Position,
+        line: Option<usize>,
         lifts: Option<Movable>,
     },
     Lifted(Lift),
@@ -1892,11 +1923,29 @@ enum Moving {
     Swept(Sweep, Layout),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+static EMPTY_ALOUD_BUTTONS: Spots<aloud::Button> = Spots::empty();
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum Viewport {
     #[default]
     Collapsed,
-    Expanded(Rect),
+    Expanded(Layout),
+}
+
+impl Viewport {
+    fn area(&self) -> Option<Rect> {
+        match self {
+            Viewport::Collapsed => None,
+            Viewport::Expanded(laid) => Some(laid.area),
+        }
+    }
+
+    fn laid(&self) -> Option<&Layout> {
+        match self {
+            Viewport::Collapsed => None,
+            Viewport::Expanded(laid) => Some(laid),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1908,6 +1957,36 @@ struct Layout {
     notes_y: u16,
     notes: Vec<String>,
     aloud_buttons: Spots<aloud::Button>,
+}
+
+#[derive(Clone, Copy)]
+struct NotesGeometry {
+    room: usize,
+    notes_from: usize,
+    notes_y: u16,
+}
+
+fn notes_geometry(area: Rect, notes_lines: usize) -> NotesGeometry {
+    let height = usize::from(area.height);
+    let room = height.saturating_sub(HEADER + notes_lines);
+    let notes_from = height.saturating_sub(notes_lines);
+    let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
+    let notes_y = area
+        .y
+        .checked_add(notes_line)
+        .expect("an area ends inside the screen");
+    NotesGeometry {
+        room,
+        notes_from,
+        notes_y,
+    }
+}
+
+struct NotesAt {
+    notes: Notes,
+    bottom: SidebarBottom,
+    buttons: Spots<aloud::Button>,
+    bottom_room: usize,
 }
 
 struct Rendered {
@@ -2191,7 +2270,6 @@ impl Sidebar {
             viewport: Viewport::default(),
             revealed: None,
             top: 0,
-            laid: Layout::default(),
             notice: None,
             copied: None,
             image_going: None,
@@ -2209,13 +2287,24 @@ impl Sidebar {
     }
 
     fn place_rows(&mut self, area: Rect) {
-        self.viewport = Viewport::Expanded(area);
-        self.relayout();
+        if let Viewport::Expanded(laid) = &self.viewport
+            && laid.area == area
+        {
+            assert_eq!(
+                laid.top, self.top,
+                "an unchanged viewport keeps its laid-out scroll offset"
+            );
+            return;
+        }
+        self.relayout_at(area);
     }
 
     pub fn collapse(&mut self) {
+        self.moving = Moving::Still;
+        if matches!(self.viewport, Viewport::Collapsed) {
+            return;
+        }
         self.viewport = Viewport::Collapsed;
-        self.relayout();
     }
 
     pub fn reagent(&mut self) {
@@ -2225,24 +2314,24 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn refold(&mut self, now: SystemTime) -> bool {
+    pub fn refold(&mut self, wall: SystemTime) -> bool {
         if self.folds.reload() {
-            self.rebuild(now);
+            self.rebuild(wall);
             return true;
         }
         false
     }
 
     #[must_use]
-    pub fn reread(&mut self, now: SystemTime) -> bool {
+    pub fn reread(&mut self, wall: SystemTime) -> bool {
         if self.news.reload() {
-            self.rebuild(now);
+            self.rebuild(wall);
             return true;
         }
         false
     }
 
-    pub fn heard(&mut self, host: Host, now: SystemTime) {
+    pub fn heard(&mut self, host: Host, wall: SystemTime) {
         self.shelve(&host);
         for shelf in &self.shelves {
             let Some(projects) = shelf.kept() else {
@@ -2262,9 +2351,8 @@ impl Sidebar {
         }
         self.host = Some(host);
         self.away = None;
-        self.rebuild(now);
         self.reran();
-        self.relayout();
+        self.rebuild(wall);
     }
 
     fn shelve(&mut self, host: &Host) {
@@ -2283,15 +2371,15 @@ impl Sidebar {
         }
     }
 
-    fn reshelve(&mut self, now: SystemTime) {
+    fn reshelve(&mut self, wall: SystemTime) {
         if let Some(host) = self.host.take() {
             self.shelve(&host);
             self.host = Some(host);
-            self.rebuild(now);
+            self.rebuild(wall);
         }
     }
 
-    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>, now: SystemTime) {
+    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>, wall: SystemTime) {
         let Some(at) = self
             .unheard
             .iter()
@@ -2303,16 +2391,16 @@ impl Sidebar {
             Some(wait @ Wait::Answers { .. }) => self.unheard[at].wait = wait,
             Some(wait @ Wait::Watch(_)) => {
                 self.unheard[at].wait = wait;
-                self.reshelve(now);
+                self.reshelve(wall);
             }
             None => {
                 self.unheard.remove(at);
-                self.reshelve(now);
+                self.reshelve(wall);
             }
         }
     }
 
-    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, now: SystemTime) {
+    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, wall: SystemTime) {
         self.notify(format!("not moved: {why}"));
         let Some(at) = self
             .unheard
@@ -2334,7 +2422,7 @@ impl Sidebar {
                 self.unheard.remove(at);
             }
         }
-        self.reshelve(now);
+        self.reshelve(wall);
     }
 
     pub fn unmoved(
@@ -2343,7 +2431,7 @@ impl Sidebar {
         ticket: u64,
         order: &Reorder,
         note: String,
-        now: SystemTime,
+        wall: SystemTime,
     ) {
         let of = order.wanted().of();
         let mut newer = self
@@ -2360,16 +2448,17 @@ impl Sidebar {
             "no two unheard orders share a ticket"
         );
         if self.unheard.len() < before {
-            self.reshelve(now);
+            self.reshelve(wall);
         }
     }
 
     #[must_use]
     pub fn ticked(&mut self, now: Moment, watched: bool) -> bool {
+        let lost_before = self.news.lost().map(str::to_owned);
         let mut changed = self.hold(now.steady);
         changed |= self.advance_timers(now.steady);
         if self.due.is_some_and(|due| due <= now.system) {
-            self.rebuild(now.system);
+            self.rebuild_rows(now.system);
             changed = true;
         }
         let here = self.here_key.filter(|_| watched);
@@ -2380,13 +2469,16 @@ impl Sidebar {
             now.system,
             now.steady,
         ) {
-            self.rebuild(now.system);
+            self.rebuild_rows(now.system);
             changed = true;
         }
         let live = self.live();
         self.news.listed(live.as_ref(), now.steady);
-        self.relayout();
-        changed
+        let lost_changed = self.news.lost() != lost_before.as_deref();
+        if changed || lost_changed {
+            self.relayout();
+        }
+        changed || lost_changed
     }
 
     fn advance_timers(&mut self, steady: Instant) -> bool {
@@ -2476,7 +2568,7 @@ impl Sidebar {
         true
     }
 
-    pub fn focus(&mut self, keys: Keys, now: SystemTime) {
+    pub fn focus(&mut self, keys: Keys, wall: SystemTime) {
         if let Mode::Afloat { .. } | Mode::AfloatNote(_) = self.mode {
             self.end_mode();
         }
@@ -2495,7 +2587,7 @@ impl Sidebar {
             self.end_mode();
             self.moving = Moving::Still;
         }
-        self.rebuild(now);
+        self.rebuild(wall);
     }
 
     pub fn holding(&self) -> Holding {
@@ -2539,9 +2631,16 @@ impl Sidebar {
     }
 
     pub fn close_menu(&mut self) {
+        if self.close_menu_in() {
+            self.relayout();
+        }
+    }
+
+    fn close_menu_in(&mut self) -> bool {
         let menu = self.take_open().map(|(menu, _)| menu);
+        let had = menu.is_some();
         self.keep_working(menu);
-        self.relayout();
+        had
     }
 
     pub fn drop_menu(&mut self, menu: u64) {
@@ -3000,7 +3099,10 @@ impl Sidebar {
     }
 
     pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
-        &self.laid.aloud_buttons
+        match &self.viewport {
+            Viewport::Collapsed => &EMPTY_ALOUD_BUTTONS,
+            Viewport::Expanded(laid) => &laid.aloud_buttons,
+        }
     }
 
     pub fn notify(&mut self, notice: String) {
@@ -3102,10 +3204,13 @@ impl Sidebar {
 
     #[cfg(test)]
     fn row_turning(&self) -> bool {
-        if self.laid.room == 0 {
+        let Some(laid) = self.viewport.laid() else {
+            return false;
+        };
+        if laid.room == 0 {
             return false;
         }
-        let shown = self.top..self.top + self.laid.room;
+        let shown = self.top..self.top + laid.room;
         let mut line = 0;
         for row in &self.rows {
             let first = line + row.gap();
@@ -3132,9 +3237,10 @@ impl Sidebar {
                 title: self.seat_name.clone(),
             };
         }
-        let width = usize::from(self.laid.area.width.saturating_sub(1));
-        let height = usize::from(self.laid.area.height);
-        let (mut notes, _, _) = self.notes_at(width, height, 0);
+        let area = self.viewport.area().unwrap_or_default();
+        let width = usize::from(area.width.saturating_sub(1));
+        let height = usize::from(area.height);
+        let NotesAt { mut notes, .. } = self.notes_at(width, height, 0);
         let room = height.saturating_sub(HEADER + notes.lines.len());
         notes.lines.truncate(height);
         let all = matches!(self.moving, Moving::Lifted(_) | Moving::Swept(..))
@@ -3169,15 +3275,19 @@ impl Sidebar {
         }))
     }
 
-    fn rebuild(&mut self, now: SystemTime) {
-        if self.rebuild_with(Typos::None, now) == Rebuilt::Unfound {
-            let rebuilt = self.rebuild_with(Typos::Forgiven, now);
+    fn rebuild(&mut self, wall: SystemTime) {
+        self.rebuild_rows(wall);
+        self.relayout();
+    }
+
+    fn rebuild_rows(&mut self, wall: SystemTime) {
+        if self.rebuild_with(Typos::None, wall) == Rebuilt::Unfound {
+            let rebuilt = self.rebuild_with(Typos::Forgiven, wall);
             assert!(
                 rebuilt == Rebuilt::Done,
                 "a search forgiving typos rebuilds even unfound"
             );
         }
-        self.relayout();
     }
 
     fn rebuild_with(&mut self, typos: Typos, now: SystemTime) -> Rebuilt {
@@ -3674,7 +3784,13 @@ impl Sidebar {
         Some(self.row_of(spot).expect("the highlight is on a row"))
     }
 
+    #[cfg(test)]
     fn step(&mut self, by: isize) {
+        self.step_in(by);
+        self.relayout();
+    }
+
+    fn step_in(&mut self, by: isize) {
         let stops: Vec<usize> = (0..self.rows.len()).filter(|at| self.stops(*at)).collect();
         let Some(last) = stops.len().checked_sub(1) else {
             return;
@@ -3687,10 +3803,15 @@ impl Sidebar {
             None => 0,
         };
         self.light(self.rows[stops[next]].spot());
+    }
+
+    #[cfg(test)]
+    fn end(&mut self, last: bool) {
+        self.end_in(last);
         self.relayout();
     }
 
-    fn end(&mut self, last: bool) {
+    fn end_in(&mut self, last: bool) {
         let mut stops = (0..self.rows.len()).filter(|at| self.stops(*at));
         let stop = if last {
             stops.next_back()
@@ -3699,7 +3820,6 @@ impl Sidebar {
         };
         if let Some(stop) = stop {
             self.light(self.rows[stop].spot());
-            self.relayout();
         }
     }
 
@@ -3786,14 +3906,14 @@ impl Sidebar {
             (Came::Typed, _) => ChordWait::Until(now.steady + PAUSE),
         };
         if menu::closes(key) && self.open().is_some_and(Menu::waits) {
-            self.close_menu();
+            self.close_menu_in();
             return Asked::Nothing;
         }
         if key.code == KeyCode::Char(menu::ALL_KEYS)
             && let Mode::Menu { menu, .. } = &self.mode
             && menu.lists()
         {
-            self.close_menu();
+            self.close_menu_in();
             self.pend(Pending::AllKeys(AllKeys::default()));
             return Asked::Nothing;
         }
@@ -3836,10 +3956,10 @@ impl Sidebar {
             return asked;
         }
         match key.code {
-            KeyCode::Down => self.step(1),
-            KeyCode::Up => self.step(-1),
-            KeyCode::Home => self.end(false),
-            KeyCode::End => self.end(true),
+            KeyCode::Down => self.step_in(1),
+            KeyCode::Up => self.step_in(-1),
+            KeyCode::Home => self.end_in(false),
+            KeyCode::End => self.end_in(true),
             KeyCode::Left => self.fold(true, now.system),
             KeyCode::Right => self.fold(false, now.system),
             KeyCode::Enter => return self.go(now.system),
@@ -3858,10 +3978,10 @@ impl Sidebar {
                 return self.open_menu_at(GIT, c);
             }
             KeyCode::Char(c) => match Top::of(c) {
-                Some(Top::Move(by)) => self.step(by),
-                Some(Top::Last) => self.end(true),
+                Some(Top::Move(by)) => self.step_in(by),
+                Some(Top::Last) => self.end_in(true),
                 Some(Top::First) if matches!(pending, Some(Pending::First(_))) => {
-                    self.end(false);
+                    self.end_in(false);
                 }
                 Some(Top::First) => self.pend(Pending::First(wait)),
                 Some(Top::Group(key)) => self.pend(Pending::Group { key, wait }),
@@ -4019,14 +4139,14 @@ impl Sidebar {
         self.relayout();
     }
 
-    fn selected_key(&mut self, key: &KeyEvent, now: SystemTime) -> Option<Asked> {
+    fn selected_key(&mut self, key: &KeyEvent, wall: SystemTime) -> Option<Asked> {
         match key.code {
-            KeyCode::Down => self.step(1),
-            KeyCode::Up => self.step(-1),
+            KeyCode::Down => self.step_in(1),
+            KeyCode::Up => self.step_in(-1),
             KeyCode::Esc => self.unselect(),
             KeyCode::Char(c) => match Top::of(c) {
-                Some(Top::Move(by)) => self.step(by),
-                Some(Top::Shift(by)) => return Some(self.shift(by, now)),
+                Some(Top::Move(by)) => self.step_in(by),
+                Some(Top::Shift(by)) => return Some(self.shift(by, wall)),
                 Some(Top::Command(Command::Reorder)) => self.widen(),
                 Some(Top::Command(Command::Quit)) => self.unselect(),
                 _ => {
@@ -4477,7 +4597,7 @@ impl Sidebar {
         self.target_at(self.on(), place).map(Rc::new)
     }
 
-    pub fn act_on_row(&mut self, target: &Target, action: Action, now: SystemTime) -> Asked {
+    pub fn act_on_row(&mut self, target: &Target, action: Action, wall: SystemTime) -> Asked {
         self.notice = None;
         self.end_mode();
         assert!(
@@ -4486,12 +4606,12 @@ impl Sidebar {
         );
         let command = Command::of(action);
         let asked = if command == Some(Command::Search) {
-            self.find(String::new(), now);
+            self.find(String::new(), wall);
             Asked::Nothing
         } else if self.highlights(target) {
             match command {
                 Some(Command::Unread) => {
-                    self.toggle_unread(now);
+                    self.toggle_unread(wall);
                     Asked::Nothing
                 }
                 Some(Command::Reorder) => {
@@ -4543,13 +4663,13 @@ impl Sidebar {
     }
 
     #[must_use]
-    pub fn paste(&mut self, text: &str, now: SystemTime) -> Asked {
-        let asked = self.paste_in(text, now);
+    pub fn paste(&mut self, text: &str, wall: SystemTime) -> Asked {
+        let asked = self.paste_in(text, wall);
         self.relayout();
         asked
     }
 
-    fn paste_in(&mut self, text: &str, now: SystemTime) -> Asked {
+    fn paste_in(&mut self, text: &str, wall: SystemTime) -> Asked {
         if let Mode::AfloatNote(_) = self.mode {
             return Asked::Nothing;
         }
@@ -4576,7 +4696,7 @@ impl Sidebar {
         let menu_afloat = matches!(self.mode, Mode::Afloat { .. });
         if let Some((on, place)) = checked_out {
             if menu_afloat {
-                self.close_menu();
+                self.close_menu_in();
             } else {
                 self.end_mode();
             }
@@ -4584,7 +4704,7 @@ impl Sidebar {
                 self.open().is_none(),
                 "a paste that goes leaves no menu open"
             );
-            return self.go_to(on, Place::Worktree(place), now);
+            return self.go_to(on, Place::Worktree(place), wall);
         }
         let Some(target) = target else {
             if self.lit_spot().is_none() {
@@ -4595,7 +4715,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let placed = if menu_afloat {
-            self.close_menu();
+            self.close_menu_in();
             Placed::Afloat
         } else {
             self.end_mode();
@@ -4680,12 +4800,14 @@ impl Sidebar {
         if self.open().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;
         }
-        let asked = match choice {
+        match choice {
             Choice::Key(key) => self.key(&key, now),
-            Choice::Skill(name) => self.pick(&name),
-        };
-        self.relayout();
-        asked
+            Choice::Skill(name) => {
+                let asked = self.pick(&name);
+                self.relayout();
+                asked
+            }
+        }
     }
 
     pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
@@ -5336,22 +5458,22 @@ impl Sidebar {
         self.rebuild(now);
     }
 
-    fn search_key(&mut self, key: &KeyEvent, mut term: String, now: SystemTime) -> Asked {
+    fn search_key(&mut self, key: &KeyEvent, mut term: String, wall: SystemTime) -> Asked {
         match key.code {
-            KeyCode::Down => self.step(1),
-            KeyCode::Up => self.step(-1),
-            KeyCode::Home => self.end(false),
-            KeyCode::End => self.end(true),
-            KeyCode::Enter => return self.go(now),
-            KeyCode::Esc => self.close_search(now),
-            KeyCode::Backspace if term.is_empty() => self.close_search(now),
+            KeyCode::Down => self.step_in(1),
+            KeyCode::Up => self.step_in(-1),
+            KeyCode::Home => self.end_in(false),
+            KeyCode::End => self.end_in(true),
+            KeyCode::Enter => return self.go(wall),
+            KeyCode::Esc => self.close_search(wall),
+            KeyCode::Backspace if term.is_empty() => self.close_search(wall),
             KeyCode::Backspace => {
                 term.pop();
-                self.find(term, now);
+                self.find(term, wall);
             }
             KeyCode::Char(c) => {
                 term.push(c);
-                self.find(term, now);
+                self.find(term, wall);
             }
             _ => {}
         }
@@ -5408,26 +5530,24 @@ impl Sidebar {
         Asked::Go { on, place }
     }
 
-    pub fn mouse(&mut self, mouse: MouseEvent, now: SystemTime) -> Asked {
-        let Viewport::Expanded(area) = self.viewport else {
+    pub fn mouse(&mut self, mouse: MouseEvent, wall: SystemTime) -> Asked {
+        let Some(area) = self.viewport.area() else {
             return Asked::Nothing;
         };
-        let asked = self.mouse_in(mouse, area, now);
+        let asked = self.mouse_in(mouse, area, wall);
         self.relayout();
         asked
     }
 
     #[cfg(test)]
-    fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect, now: SystemTime) -> Asked {
-        if self.viewport != Viewport::Expanded(area) {
-            self.place_rows(area);
-        }
-        let asked = self.mouse_in(mouse, area, now);
+    fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
+        self.place_rows(area);
+        let asked = self.mouse_in(mouse, area, wall);
         self.relayout();
         asked
     }
 
-    fn mouse_in(&mut self, mouse: MouseEvent, area: Rect, now: SystemTime) -> Asked {
+    fn mouse_in(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
         if matches!(
             mouse.kind,
             MouseEventKind::Down(_) | MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
@@ -5444,19 +5564,18 @@ impl Sidebar {
                 Asked::Nothing
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                self.close_menu();
-                self.unselect();
-                let row = self
-                    .line_of(mouse.row, area)
-                    .and_then(|line| self.row_at(line));
+                let line = self.line_of(mouse.row, area);
+                let row = line.and_then(|line| self.row_at(line));
                 let lifts = row.and_then(|at| self.lifting(at));
+                self.close_menu_in();
+                self.unselect();
                 let at = Position::new(mouse.column, mouse.row);
-                self.moving = Moving::Down { at, lifts };
+                self.moving = Moving::Down { at, line, lifts };
                 Asked::Nothing
             }
             MouseEventKind::Down(_) => Asked::Take,
             MouseEventKind::Drag(MouseButton::Left) => self.drag(mouse, area),
-            MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area, now),
+            MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area, wall),
             MouseEventKind::Moved => {
                 self.let_go();
                 Asked::Nothing
@@ -5479,7 +5598,7 @@ impl Sidebar {
                 sweep.reach(pointer, inside(area));
                 return Asked::Nothing;
             }
-            Moving::Down { at, lifts } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
+            Moving::Down { at, lifts, .. } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
             Moving::Swept(..) | Moving::Still => {
                 return Asked::Nothing;
             }
@@ -5501,10 +5620,12 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    fn release(&mut self, mouse: MouseEvent, area: Rect, now: SystemTime) -> Asked {
+    fn release(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
         let over = (area.left()..area.right()).contains(&mouse.column);
         match std::mem::take(&mut self.moving) {
-            Moving::Down { at, .. } if over && mouse.row == at.y => self.click(at, area, now),
+            Moving::Down { at, line, .. } if over && mouse.row == at.y => {
+                self.click(at, line, area, wall)
+            }
             Moving::Lifted(Lift {
                 lifted: movable, ..
             }) => {
@@ -5512,7 +5633,7 @@ impl Sidebar {
                 self.light(movable.spot());
                 let spans = self.spans(&movable);
                 match self.landing(&movable, line, over) {
-                    Some((landed, _)) if landed != spans => self.keep(&landed, now),
+                    Some((landed, _)) if landed != spans => self.keep(&landed, wall),
                     _ => {
                         self.settle(None, false);
                         Asked::Nothing
@@ -5521,11 +5642,16 @@ impl Sidebar {
             }
             Moving::Sweeping(mut sweep) => {
                 sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
-                let page = self.rendered(area, now).page;
+                let page = self.rendered(area, wall).page;
                 let Some(excerpt) = Excerpt::of(sweep.text(&page, inside(area))) else {
                     return Asked::Nothing;
                 };
-                self.moving = Moving::Swept(sweep, self.laid.clone());
+                let laid = self
+                    .viewport
+                    .laid()
+                    .expect("a sweeping sidebar has an expanded layout")
+                    .clone();
+                self.moving = Moving::Swept(sweep, laid);
                 Asked::CopyText(excerpt)
             }
             kept @ Moving::Swept(..) => {
@@ -5536,8 +5662,8 @@ impl Sidebar {
         }
     }
 
-    fn click(&mut self, at: Position, area: Rect, now: SystemTime) -> Asked {
-        let Some(index) = self.line_of(at.y, area).and_then(|line| self.row_at(line)) else {
+    fn click(&mut self, at: Position, line: Option<usize>, area: Rect, wall: SystemTime) -> Asked {
+        let Some(index) = line.and_then(|line| self.row_at(line)) else {
             return Asked::Take;
         };
         let row = &self.rows[index];
@@ -5551,27 +5677,26 @@ impl Sidebar {
         let Some((on, place)) = spot.clone().placed() else {
             if !typed {
                 self.light(spot);
-                self.toggle(now);
+                self.toggle(wall);
             }
             return Asked::Take;
         };
         let on_triangle = triangle.is_some_and(|triangle| at.x.saturating_sub(area.x) <= triangle);
         if on_triangle && !typed {
             self.light(spot);
-            self.toggle(now);
+            self.toggle(wall);
             return Asked::Take;
         }
         if stops {
             self.light(spot);
         }
-        self.go_to(on, place, now)
+        self.go_to(on, place, wall)
     }
 
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
+        let room = self.viewport.laid()?.room;
         let line = usize::from(y.checked_sub(area.y)?);
-        let shown = line
-            .checked_sub(HEADER)
-            .filter(|line| *line < self.laid.room)?;
+        let shown = line.checked_sub(HEADER).filter(|line| *line < room)?;
         Some(self.top + shown)
     }
 
@@ -5618,9 +5743,10 @@ impl Sidebar {
         if !lift.over {
             return 0;
         }
+        let room = self.viewport.laid().map_or(0, |laid| laid.room);
         let line = usize::from(lift.line);
         let up = line <= HEADER && self.top > 0;
-        let down = line + 1 >= HEADER + self.laid.room && self.top + self.laid.room < self.lines();
+        let down = line + 1 >= HEADER + room && self.top + room < self.lines();
         isize::from(down) - isize::from(up)
     }
 
@@ -5695,70 +5821,107 @@ impl Sidebar {
         }
     }
 
-    fn layout_with(&self, area: Rect, notes: Notes, buttons: Spots<aloud::Button>) -> Layout {
-        let height = usize::from(area.height);
-        let room = height.saturating_sub(HEADER + notes.lines.len());
-        let notes_from = height.saturating_sub(notes.lines.len());
-        let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
-        let notes_y = area
-            .y
-            .checked_add(notes_line)
-            .expect("an area ends inside the screen");
-        let order = match &self.lifted_landing() {
-            Some((spans, _)) => self.landed(&spans.rows()),
-            None => (0..self.rows.len()).collect(),
-        };
-        let rows = order
-            .into_iter()
-            .map(|at| {
-                let row = &self.rows[at];
-                (row.spot(), row.height())
-            })
-            .collect();
-        let aloud_buttons = buttons.down(notes_from).placed(inside(area));
+    fn layout_with(
+        &self,
+        area: Rect,
+        geometry: NotesGeometry,
+        landing: Option<&(Spans, Range<usize>)>,
+        notes: Notes,
+        buttons: Spots<aloud::Button>,
+    ) -> Layout {
+        assert!(
+            self.rows.len() <= ROWS_MAX,
+            "sidebar rows stay within their upper bound"
+        );
+        let landed = landing.map(|(spans, _)| self.landed(&spans.rows()));
+        let count = landed.as_ref().map_or(self.rows.len(), Vec::len);
+        let mut rows = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = landed.as_ref().map_or(index, |order| order[index]);
+            let row = &self.rows[at];
+            rows.push((row.spot(), row.height()));
+        }
+        let aloud_buttons = buttons.down(geometry.notes_from).placed(inside(area));
         Layout {
             area,
-            room,
+            room: geometry.room,
             top: self.top,
             rows,
-            notes_y,
+            notes_y: geometry.notes_y,
             notes: notes.said,
             aloud_buttons,
         }
     }
 
     fn relayout(&mut self) {
-        let Viewport::Expanded(area) = self.viewport else {
-            self.unsweep();
-            self.laid = Layout::default();
+        let Some(area) = self.viewport.area() else {
+            assert!(
+                matches!(self.moving, Moving::Still),
+                "a collapsed sidebar holds no drag or sweep"
+            );
             return;
         };
+        self.relayout_at(area);
+    }
+
+    fn relayout_at(&mut self, area: Rect) {
+        assert!(
+            self.rows.len() <= ROWS_MAX,
+            "sidebar rows stay within their upper bound"
+        );
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
-        let (notes, _, buttons) = self.notes_at(width, height, 0);
-        let room = height.saturating_sub(HEADER + notes.lines.len());
-        let lifted = self.lifted_landing().is_some();
+        let NotesAt {
+            notes,
+            buttons,
+            bottom_room,
+            ..
+        } = self.notes_at(width, height, 0);
+        if self.has_keys()
+            && let Mode::Pending(Pending::AllKeys(all)) = &mut self.mode
+        {
+            all.set_room(bottom_room);
+        }
+        let geometry = notes_geometry(area, notes.lines.len());
+        let top_before = self.top;
+        let mut landing = self.lifted_landing();
+        let lifted = landing.is_some();
         match self.highlight() {
             Highlight::Lit(at) => {
                 if let Some(at) = at
                     && !lifted
                 {
-                    self.reveal(at, room);
+                    self.reveal(at, geometry.room);
                 }
                 self.revealed = None;
             }
             Highlight::Resting(at) if self.revealed != self.here_row => {
-                self.reveal(at, room);
+                self.reveal(at, geometry.room);
                 self.revealed.clone_from(&self.here_row);
             }
             Highlight::Resting(_) | Highlight::Off => {}
         }
         self.top = self.top.min(self.lines().saturating_sub(1));
-        let laid = self.layout_with(area, notes, buttons);
+        if self.top != top_before && lifted {
+            landing = self.lifted_landing();
+        }
+        let laid = self.layout_with(area, geometry, landing.as_ref(), notes, buttons);
         if matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
             self.moving = Moving::Still;
         }
-        self.laid = laid;
+        self.viewport = Viewport::Expanded(laid);
+        let Viewport::Expanded(laid) = &self.viewport else {
+            unreachable!("relayout_at installs an expanded layout");
+        };
+        assert_eq!(laid.area, area, "relayout keeps the requested area");
+        assert_eq!(
+            laid.top, self.top,
+            "relayout records the clamped scroll offset"
+        );
+        assert!(
+            !matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
+            "relayout clears any stale sweep"
+        );
     }
 
     pub fn draw(&self, buffer: &mut Buffer, framed: Rect, wall: SystemTime) -> (Drawn, Cadence) {
@@ -5783,17 +5946,36 @@ impl Sidebar {
             "sidebar rows stay within their upper bound"
         );
         assert_eq!(
-            self.viewport,
-            Viewport::Expanded(area),
+            self.viewport.area(),
+            Some(area),
             "the sidebar is placed for the area it draws into"
         );
+        let laid = self
+            .viewport
+            .laid()
+            .expect("an expanded sidebar has a layout");
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(wall);
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(height);
         lines.extend(self.top(width));
-        let (notes, spotted, buttons) = self.notes_at(width, height, frame);
-        let room = height.saturating_sub(HEADER + notes.lines.len());
+        let NotesAt {
+            notes,
+            bottom: spotted,
+            buttons,
+            bottom_room,
+        } = self.notes_at(width, height, frame);
+        if self.has_keys()
+            && let Mode::Pending(Pending::AllKeys(all)) = &self.mode
+        {
+            assert_eq!(
+                all.room(),
+                bottom_room.saturating_sub(2),
+                "all-keys scroll room matches the laid-out bottom area"
+            );
+        }
+        let geometry = notes_geometry(area, notes.lines.len());
+        let room = geometry.room;
         let highlight = self.highlight();
         let landing = self.lifted_landing();
         let lifted = landing.is_some();
@@ -5827,17 +6009,32 @@ impl Sidebar {
             (None, Highlight::Resting(at)) => Some((at..at + 1, self.home_row(at), RESTING)),
             (None, Highlight::Off) => None,
         };
-        let order = match &landing {
-            Some((spans, _)) => self.landed(&spans.rows()),
-            None => (0..self.rows.len()).collect::<Vec<_>>(),
-        };
+        let landed = landing
+            .as_ref()
+            .map(|(spans, _)| self.landed(&spans.rows()));
+        let count = landed.as_ref().map_or(self.rows.len(), Vec::len);
+        assert_eq!(
+            laid.rows.len(),
+            count,
+            "the sidebar's laid-out row count matches its state before drawing"
+        );
         let mut drawn: Vec<Line<'static>> = Vec::new();
         let mut numbers = Vec::new();
         let mut cuts = Vec::new();
-        let mut rows = Vec::with_capacity(order.len());
-        let mut marks = Vec::with_capacity(order.len());
-        for at in order {
+        let mut marks = Vec::with_capacity(count);
+        for index in 0..count {
+            let at = landed.as_ref().map_or(index, |order| order[index]);
             let row = &self.rows[at];
+            let (laid_spot, laid_height) = &laid.rows[index];
+            assert!(
+                row.is_spot(laid_spot),
+                "each rendered row matches its laid-out spot"
+            );
+            assert_eq!(
+                *laid_height,
+                row.height(),
+                "each rendered row matches its laid-out height"
+            );
             let lights = |(rows, home, _): &&(Range<usize>, Option<usize>, Color)| {
                 rows.contains(&at) || *home == Some(at)
             };
@@ -5862,7 +6059,6 @@ impl Sidebar {
                 line: first + cut.line,
                 ..cut
             }));
-            rows.push((row.spot(), row.height()));
             for mut line in row_drawn {
                 if let Some(background) = background {
                     line = line.patch_style(Style::new().bg(background));
@@ -5875,33 +6071,39 @@ impl Sidebar {
             self.top.min(drawn.len().saturating_sub(1)),
             "the scroll offset is clamped before drawing"
         );
-        let notes_from = height.saturating_sub(notes.lines.len());
-        let notes_line = u16::try_from(notes_from).expect("the notes start inside the area");
-        let notes_y = area
-            .y
-            .checked_add(notes_line)
-            .expect("an area ends inside the screen");
         let inside = inside(area);
-        let laid = Layout {
-            area,
-            room,
-            top: self.top,
-            rows,
-            notes_y,
-            notes: notes.said,
-            aloud_buttons: buttons.down(notes_from).placed(inside),
-        };
         assert_eq!(
-            self.laid, laid,
-            "the sidebar's layout matches its state before drawing"
+            laid.room, room,
+            "the sidebar's laid-out room matches its state before drawing"
+        );
+        assert_eq!(
+            laid.top, self.top,
+            "the sidebar's laid-out scroll offset matches its state before drawing"
+        );
+        assert_eq!(
+            laid.notes_y, geometry.notes_y,
+            "the sidebar's laid-out notes row matches its state before drawing"
+        );
+        assert_eq!(
+            laid.notes, notes.said,
+            "the sidebar's laid-out notes match its state before drawing"
+        );
+        assert_eq!(
+            laid.aloud_buttons,
+            buttons.down(geometry.notes_from).placed(inside),
+            "the sidebar's laid-out aloud buttons match its state before drawing"
         );
         assert!(
-            !matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)),
+            !matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
             "a stale sweep is cleared before drawing"
         );
         lines.extend(drawn.into_iter().skip(self.top).take(room));
-        lines.resize(notes_from, Line::default());
-        let goes_on = notes.goes_on.iter().map(|line| notes_from + line).collect();
+        lines.resize(geometry.notes_from, Line::default());
+        let goes_on = notes
+            .goes_on
+            .iter()
+            .map(|line| geometry.notes_from + line)
+            .collect();
         let spinners = notes.spinners;
         lines.extend(notes.lines);
         let mut spots = Spots::default();
@@ -5920,7 +6122,10 @@ impl Sidebar {
                     cadence.age(since, wall);
                 }
             }
-            if spinners.iter().any(|line| notes_from + line < height) {
+            if spinners
+                .iter()
+                .any(|line| geometry.notes_from + line < height)
+            {
                 cadence.spin();
             }
         }
@@ -5946,7 +6151,7 @@ impl Sidebar {
         };
         let drawn = Drawn::Sidebar {
             numbers: spots.placed(inside),
-            bottom: spotted.placed(notes_from, inside),
+            bottom: spotted.placed(geometry.notes_from, inside),
         };
         Rendered {
             page,
@@ -5970,19 +6175,13 @@ impl Sidebar {
     }
 
     fn draw_collapsed_rows(&self, buffer: &mut Buffer, area: Rect) {
-        assert_eq!(
-            self.viewport,
-            Viewport::Collapsed,
+        assert!(
+            matches!(self.viewport, Viewport::Collapsed),
             "a collapsed sidebar is collapsed before drawing"
         );
-        assert_eq!(
-            self.laid,
-            Layout::default(),
-            "a collapsed sidebar holds no expanded layout"
-        );
         assert!(
-            !matches!(self.moving, Moving::Swept(..)),
-            "a collapsed sidebar holds no sweep"
+            matches!(self.moving, Moving::Still),
+            "a collapsed sidebar holds no drag or sweep"
         );
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
@@ -6086,12 +6285,7 @@ impl Sidebar {
         line
     }
 
-    fn notes_at(
-        &self,
-        width: usize,
-        height: usize,
-        frame: usize,
-    ) -> (Notes, SidebarBottom, Spots<aloud::Button>) {
+    fn notes_at(&self, width: usize, height: usize, frame: usize) -> NotesAt {
         let mut notes = Notes::default();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -6197,7 +6391,12 @@ impl Sidebar {
             Bottom::Nothing => (Vec::new(), SidebarBottom::Nothing),
         };
         notes.lines.extend(lines);
-        (notes, spotted, buttons)
+        NotesAt {
+            notes,
+            bottom: spotted,
+            buttons,
+            bottom_room: room,
+        }
     }
 
     fn searching(
@@ -16741,5 +16940,143 @@ mod tests {
             "focus rebuild uses the event's wall time rather than stale or epoch time"
         );
         assert_eq!(sidebar.due, None);
+    }
+
+    #[test]
+    fn clicking_an_open_menu_closes_it_without_activating_or_lifting_hidden_rows() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 32, 16);
+        let rows_area = framed_rows(framed);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+        step_onto_its_first_view(&mut sidebar);
+
+        assert_eq!(sidebar.key(&char('m'), now), Asked::Nothing);
+        assert!(sidebar.open().is_some());
+        let menu_top = sidebar.viewport.laid().unwrap().notes_y;
+        assert!(
+            usize::from(menu_top - rows_area.y) < HEADER + sidebar.lines(),
+            "the open menu covers rows underneath it"
+        );
+
+        let left = MouseButton::Left;
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 5, menu_top), wall),
+            Asked::Nothing
+        );
+        assert!(sidebar.open().is_none());
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Drag(left), 5, menu_top + 2), wall),
+            Asked::Nothing
+        );
+        assert!(
+            !matches!(sidebar.moving, Moving::Lifted(_)),
+            "dragging from a row that was covered by the open menu does not lift a hidden row"
+        );
+        let _ = sidebar.mouse(mouse(MouseEventKind::Up(left), 5, menu_top + 2), wall);
+
+        assert_eq!(sidebar.key(&char('m'), now), Asked::Nothing);
+        assert!(sidebar.open().is_some());
+        let menu_top = sidebar.viewport.laid().unwrap().notes_y;
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 5, menu_top), wall),
+            Asked::Nothing
+        );
+        assert!(sidebar.open().is_none());
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Up(left), 5, menu_top), wall),
+            Asked::Take,
+            "clicking on the open menu closes it without activating the hidden row underneath"
+        );
+    }
+
+    #[test]
+    fn collapse_clears_active_mouse_drag_and_allows_draw_collapsed() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let framed = Rect::new(0, 0, 32, 16);
+        let rows_area = framed_rows(framed);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+
+        let project_row = sidebar
+            .rows
+            .iter()
+            .position(|row| matches!(row, Row::Project { .. }))
+            .unwrap();
+        let project_line: usize = sidebar.rows[..project_row]
+            .iter()
+            .map(Row::height)
+            .sum::<usize>()
+            + sidebar.rows[project_row].gap();
+        let y = rows_area.y + u16::try_from(HEADER + project_line).unwrap();
+        let left = MouseButton::Left;
+
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, y), wall),
+            Asked::Nothing
+        );
+        assert!(matches!(sidebar.moving, Moving::Down { .. }));
+        sidebar.collapse();
+        assert!(matches!(sidebar.moving, Moving::Still));
+
+        sidebar.place(framed);
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, y), wall),
+            Asked::Nothing
+        );
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, y + 2), wall),
+            Asked::Take
+        );
+        assert!(matches!(sidebar.moving, Moving::Lifted(_)));
+
+        sidebar.collapse();
+        assert!(matches!(sidebar.viewport, Viewport::Collapsed));
+        assert!(matches!(sidebar.moving, Moving::Still));
+
+        let narrow = Rect::new(0, 0, COLLAPSED, 16);
+        let mut buffer = Buffer::empty(narrow);
+        sidebar.draw_collapsed(&mut buffer, narrow);
+    }
+
+    #[test]
+    fn all_keys_scrolls_from_relayout_without_a_prior_draw() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 33, 22);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        for _ in 0..200 {
+            assert_eq!(sidebar.key(&char('j'), now), Asked::Nothing);
+        }
+        assert_eq!(sidebar.key(&char('k'), now), Asked::Nothing);
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, wall);
+        let rows_area = framed_rows(framed);
+        let second_to_last: String = (rows_area.x..rows_area.right() - 1)
+            .map(|x| buffer[(x, rows_area.bottom() - 2)].symbol())
+            .collect();
+        assert_eq!(second_to_last.trim_end(), " Alt u        Read aloud, pause");
+    }
+
+    #[test]
+    fn idle_tick_leaves_layout_clean_and_returns_false() {
+        let mut sidebar = two_sessions();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 32, 16);
+        sidebar.focus(Keys::Sidebar, now.system);
+        sidebar.place(framed);
+
+        assert!(!sidebar.ticked(now + Duration::from_millis(50), false));
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, now.system);
     }
 }

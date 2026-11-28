@@ -1056,7 +1056,7 @@ impl App {
             .file()
             .map(|file| agents::watch(file, events.clone()))
             .transpose();
-        let now = SystemTime::now();
+        let wall = SystemTime::now();
         let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
         if let Some(why) = unkept {
             sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
@@ -1136,7 +1136,7 @@ impl App {
         } else {
             Side::Sidebar
         });
-        sidebar.focus(focus.keys(), now);
+        sidebar.focus(focus.keys(), wall);
         sidebar.place(areas.0);
         let reported = Holder::of(&focus, sidebar.holding()).reported();
         let focused = true;
@@ -1202,8 +1202,8 @@ impl App {
         };
         app.watch();
         if let Some(root) = root {
-            app.go_home(&Machine::Local, root, now);
-            app.give(Focus::on(Side::Session), now);
+            app.go_home(&Machine::Local, root, wall);
+            app.give(Focus::on(Side::Session), wall);
         }
         app
     }
@@ -2699,9 +2699,9 @@ impl App {
     }
 
     fn resize(&mut self, mouse: MouseEvent) -> bool {
-        let (sidebar, right) = self.areas;
+        let sidebar = self.areas.0;
         if let MouseEventKind::Drag(_) = mouse.kind {
-            let terminal = sidebar.width + right.width;
+            let terminal = self.frame.width;
             self.width
                 .drag(mouse.column.saturating_sub(sidebar.x), terminal);
             self.held = Held::Edge { dragged: true };
@@ -4062,12 +4062,28 @@ impl App {
 
     fn sync_areas(&mut self) {
         let collapsed = self.focus.side == Side::Collapsed;
+        if collapsed {
+            assert!(self.right.is_some(), "a collapsed sidebar has a right side");
+        }
         let own = if collapsed {
             sidebar::COLLAPSED
         } else {
             self.width.columns()
         };
         let (sidebar, right) = areas(self.frame, own);
+        assert_eq!(
+            sidebar.width + right.width,
+            self.frame.width,
+            "sidebar and right fill the frame width"
+        );
+        assert_eq!(
+            sidebar.height, self.frame.height,
+            "sidebar fills the frame height"
+        );
+        assert_eq!(
+            right.height, self.frame.height,
+            "right fills the frame height"
+        );
         self.areas = (sidebar, right);
         if collapsed {
             self.sidebar.collapse();
@@ -4098,9 +4114,15 @@ impl App {
             }
         }
         self.sync_areas();
+        assert_eq!(self.frame, frame, "resizing updates the frame");
+        assert_eq!(
+            self.areas.0.width + self.areas.1.width,
+            frame.width,
+            "resized areas match the frame width"
+        );
     }
 
-    fn give(&mut self, focus: Focus, now: SystemTime) {
+    fn give(&mut self, focus: Focus, wall: SystemTime) {
         let focus = match focus.side {
             Side::Session | Side::Collapsed if self.right.is_none() => Focus {
                 side: Side::Sidebar,
@@ -4115,7 +4137,7 @@ impl App {
         if let Some(right) = self.viewed_mut() {
             right.forget_step();
         }
-        self.sidebar.focus(focus.keys(), now);
+        self.sidebar.focus(focus.keys(), wall);
         assert!(
             self.sidebar.floating().is_none(),
             "a focus change closes what floats"
@@ -4126,13 +4148,13 @@ impl App {
         self.tell();
     }
 
-    fn leave(&mut self, now: SystemTime) {
+    fn leave(&mut self, wall: SystemTime) {
         let leaves = match self.holder() {
             Holder::Sidebar(_) => true,
             Holder::Terminal | Holder::Box(_) => false,
         };
         if leaves {
-            self.give(Focus::on(self.focus.side.session()), now);
+            self.give(Focus::on(self.focus.side.session()), wall);
         }
     }
 
@@ -4191,8 +4213,8 @@ impl App {
             }
             Answer::WindowPixels(window_pixels) => {
                 self.window_pixels = Some(window_pixels);
-                let cols = self.areas.0.width + self.areas.1.width;
-                let rows = self.areas.1.height;
+                let cols = self.frame.width;
+                let rows = self.frame.height;
                 let cell = embedded::cell_pixels(self.exact_cell, Some(window_pixels), cols, rows);
                 self.cell = cell;
                 if let Some(right) = self.viewed_mut() {
@@ -4278,11 +4300,11 @@ impl App {
         if !graphics.is_empty() {
             terminal.backend_mut().write_all(&graphics)?;
         }
-        let mut painted = None;
-        terminal.draw(|frame| {
-            painted = Some(self.paint_at(frame, now));
-        })?;
-        let painted = painted.expect("terminal.draw invokes its closure before returning Ok");
+        let (painted, cursor_position) = {
+            let mut frame = terminal.get_frame();
+            self.paint_at(&mut frame, now)
+        };
+        terminal.apply_buffer_with_cursor(cursor_position)?;
         self.settling
             .drawn(self.sidebar.aloud_buttons(), now.steady);
         self.paint_graphics(terminal.backend_mut())?;
@@ -4373,7 +4395,8 @@ impl App {
 
     pub fn paint(&mut self, frame: &mut Frame<'_>) {
         let now = Moment::now();
-        let painted = self.paint_at(frame, now);
+        self.resize_frame(frame.area());
+        let (painted, _) = self.paint_at(frame, now);
         self.settling
             .drawn(self.sidebar.aloud_buttons(), now.steady);
         self.pacing = Pacing::Drawn {
@@ -4382,7 +4405,7 @@ impl App {
         };
     }
 
-    fn paint_at(&mut self, frame: &mut Frame<'_>, now: Moment) -> Painted {
+    fn paint_at(&mut self, frame: &mut Frame<'_>, now: Moment) -> (Painted, Option<Position>) {
         let mut cadence = Cadence::default();
         let collapsed = self.focus.side == Side::Collapsed;
         let frame_area = frame.area();
@@ -4482,17 +4505,19 @@ impl App {
             drawn.light(buffer, pointer);
             self.sidebar.aloud_buttons().light(buffer, pointer);
         }
-        if matches!(self.holder(), Holder::Terminal)
-            && let Some(cursor) = cursor
-        {
+        let cursor_position = matches!(self.holder(), Holder::Terminal)
+            .then_some(cursor)
+            .flatten();
+        if let Some(cursor) = cursor_position {
             frame.set_cursor_position(cursor);
         }
         self.drawn = drawn;
-        Painted {
+        let painted = Painted {
             at: now,
             cadence,
             sidebar_view: self.sidebar.view(collapsed),
-        }
+        };
+        (painted, cursor_position)
     }
 }
 
@@ -5428,5 +5453,33 @@ mod tests {
         )
         .unwrap();
         terminal.draw(|frame| app.paint(frame)).unwrap();
+    }
+
+    #[test]
+    fn paint_and_draw_due_adapt_when_terminal_area_changes_without_resize_event() {
+        let (mut terminal, written) = test_terminal(100, 12);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let first = Moment::now();
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            first,
+        )
+        .unwrap();
+        terminal.draw(|frame| app.paint(frame)).unwrap();
+        assert_eq!(app.frame, Rect::new(0, 0, 100, 12));
+        assert_eq!(
+            app.areas,
+            areas(Rect::new(0, 0, 100, 12), app.width.columns())
+        );
+
+        let resized = Rect::new(0, 0, 92, 14);
+        terminal.resize(resized).unwrap();
+        let later = Moment::now() + sidebar::SPIN;
+        app.tick(later);
+        assert!(drew(&mut app, &mut terminal, &written, later));
+        assert_eq!(app.frame, resized);
+        assert_eq!(app.areas, areas(resized, app.width.columns()));
     }
 }
