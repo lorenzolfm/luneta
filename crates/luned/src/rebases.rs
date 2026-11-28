@@ -101,6 +101,13 @@ enum Onto {
 struct NamedBranch(String);
 
 pub(crate) fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
+    rebase_with_ref(dir, expected).map(|(rebased, _)| rebased)
+}
+
+pub(crate) fn rebase_with_ref(
+    dir: &Directory,
+    expected: Option<&Said>,
+) -> Result<(Rebased, String), Unrebased> {
     let until = Instant::now() + RUNNING_MAX;
     let Ready {
         top,
@@ -125,7 +132,7 @@ pub(crate) fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased
             })
         }
     };
-    Ok(Rebased { branch, onto, came })
+    Ok((Rebased { branch, onto, came }, reference))
 }
 
 fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {
@@ -469,6 +476,14 @@ impl Unrebased {
         match self {
             Unrebased::Refused(why) => Status::failed_precondition(why),
             Unrebased::InDoubt(why) => Status::aborted(why),
+        }
+    }
+}
+
+impl fmt::Display for Unrebased {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Unrebased::Refused(why) | Unrebased::InDoubt(why) => f.write_str(why),
         }
     }
 }

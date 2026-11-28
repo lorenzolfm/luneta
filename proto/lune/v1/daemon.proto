@@ -38,6 +38,9 @@ service Daemon {
   rpc Answer(AnswerRequest) returns (google.protobuf.Empty);
   rpc ListResume(ListResumeRequest) returns (ListResumeResponse);
   rpc ReloadResume(ReloadResumeRequest) returns (ReloadResumeResponse);
+  rpc StartFlow(StartFlowRequest) returns (FlowStateResponse);
+  rpc ControlFlow(ControlFlowRequest) returns (FlowStateResponse);
+  rpc ListFlows(ListFlowsRequest) returns (ListFlowsResponse);
 }
 
 message On {
@@ -781,6 +784,7 @@ message Worktree {
   repeated Terminal terminals = 8;
   google.protobuf.Timestamp used_at = 9;
   optional Arrangement arranged = 10;
+  optional FlowSummary flow = 11;
 }
 
 message Terminal {
@@ -1409,4 +1413,80 @@ enum RuleTrustReason {
   RULE_TRUST_REASON_FLAG_VALUE = 5;
   RULE_TRUST_REASON_FLAGS_DIFFER = 6;
   RULE_TRUST_REASON_DIR_NOT_ALLOWED = 7;
+}
+
+enum FlowMode {
+  FLOW_MODE_UNSPECIFIED = 0;
+  FLOW_MODE_INTERACTIVE = 1;
+  FLOW_MODE_UNATTENDED = 2;
+}
+
+enum FlowControl {
+  FLOW_CONTROL_UNSPECIFIED = 0;
+  FLOW_CONTROL_ADVANCE = 1;
+  FLOW_CONTROL_AUTO_REST = 2;
+  FLOW_CONTROL_PAUSE = 3;
+  FLOW_CONTROL_RESUME = 4;
+  FLOW_CONTROL_RETRY_STEP = 5;
+  FLOW_CONTROL_SKIP_STEP = 6;
+  FLOW_CONTROL_TAKE_OVER = 7;
+  FLOW_CONTROL_ABORT = 8;
+}
+
+enum FlowBadgeKind {
+  FLOW_BADGE_KIND_UNSPECIFIED = 0;
+  FLOW_BADGE_KIND_RUNNING = 1;
+  FLOW_BADGE_KIND_WAITING_INTERACTIVE = 2;
+  FLOW_BADGE_KIND_PAUSED = 3;
+  FLOW_BADGE_KIND_MERGED = 4;
+  FLOW_BADGE_KIND_READY_TO_MERGE = 5;
+}
+
+message FlowSummary {
+  fixed64 worktree = 1;
+  string flow_name = 2;
+  FlowMode mode = 3;
+  Harness harness = 4;
+  uint32 step_index = 5;
+  uint32 step_total = 6;
+  string stage_label = 7;
+  string badge = 8;
+  FlowBadgeKind badge_kind = 9;
+  optional string pause_reason = 10;
+  optional string detail = 11;
+  optional fixed64 active_view = 12;
+  optional string resume_session = 13;
+  repeated FlowControl controls = 14;
+}
+
+message StartFlowRequest {
+  On on = 1;
+  fixed64 worktree = 2;
+  optional string flow_name = 3;
+  FlowMode mode = 4;
+  Harness harness = 5;
+  oneof entry {
+    string implement_prompt = 6;
+    google.protobuf.Empty pull_request = 7;
+  }
+}
+
+message ControlFlowRequest {
+  On on = 1;
+  fixed64 worktree = 2;
+  FlowControl control = 3;
+}
+
+message FlowStateResponse {
+  optional FlowSummary flow = 1;
+}
+
+message ListFlowsRequest {
+  On on = 1;
+}
+
+message ListFlowsResponse {
+  repeated FlowSummary flows = 1;
+  repeated string defined_flows = 2;
+  repeated string config_warnings = 3;
 }

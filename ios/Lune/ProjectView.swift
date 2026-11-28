@@ -37,6 +37,28 @@ struct ProjectView: View {
                                     machine: seat.machine, cwd: worktree.folder,
                                     title: worktree.name)
                             },
+                            startFlow: { interactive in
+                                Task {
+                                    do {
+                                        try await luned.startFlow(
+                                            on: seat.machine, worktree: worktree.id,
+                                            interactive: interactive)
+                                    } catch {
+                                        failed = reason(error)
+                                    }
+                                }
+                            },
+                            controlFlow: { control in
+                                Task {
+                                    do {
+                                        try await luned.controlFlow(
+                                            on: seat.machine, worktree: worktree.id,
+                                            control: control)
+                                    } catch {
+                                        failed = reason(error)
+                                    }
+                                }
+                            },
                             closes: !closings.contains(worktree.id),
                             close: { closing = worktree })
                     }
@@ -103,20 +125,57 @@ struct ProjectView: View {
 private struct WorktreeHeader: View {
     let worktree: Worktree
     let ask: () -> Void
+    let startFlow: (Bool) -> Void
+    let controlFlow: (FlowControl) -> Void
     let closes: Bool
     let close: () -> Void
 
     var body: some View {
         HStack {
-            VStack(alignment: .leading) {
-                Text(worktree.name)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(worktree.name)
+                    if let flow = worktree.flow {
+                        FlowBadge(flow: flow)
+                    }
+                }
                 let caption = [worktree.branch, worktree.seen.words].compactMap { $0 }
                 if !caption.isEmpty {
                     Text(caption.joined(separator: " · ")).font(.caption2).textCase(nil)
                 }
+                if let flow = worktree.flow, flow.badgeKind == .paused, let detail = flow.detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                        .textCase(nil)
+                        .lineLimit(2)
+                }
             }
             Spacer()
             Menu {
+                if let flow = worktree.flow, !flow.controls.isEmpty {
+                    Section("Flow") {
+                        ForEach(flow.controls, id: \.self) { control in
+                            Button(
+                                control.title,
+                                systemImage: control.systemImage,
+                                role: control.isDestructive ? .destructive : nil
+                            ) {
+                                controlFlow(control)
+                            }
+                        }
+                    }
+                }
+                if worktree.flow == nil || worktree.flow?.canStartNew == true {
+                    Section("Flow") {
+                        Button("Start PR flow (auto)", systemImage: "bolt") {
+                            startFlow(false)
+                        }
+                        Button("Start PR flow (interactive)", systemImage: "play.circle") {
+                            startFlow(true)
+                        }
+                    }
+                }
                 Button("Ask here", systemImage: "bubble.left", action: ask)
                 Button("Close worktree", systemImage: "xmark", role: .destructive, action: close)
                     .disabled(!closes)
@@ -124,6 +183,30 @@ private struct WorktreeHeader: View {
                 Image(systemName: "ellipsis.circle")
                     .accessibilityLabel("Worktree actions")
             }
+        }
+    }
+}
+
+private struct FlowBadge: View {
+    let flow: Flow
+
+    var body: some View {
+        Text(flow.badge)
+            .font(.caption2.weight(.semibold))
+            .textCase(nil)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .foregroundStyle(tint)
+            .background(tint.opacity(0.16), in: Capsule())
+    }
+
+    private var tint: Color {
+        switch flow.badgeKind {
+        case .running: .blue
+        case .waitingInteractive: .orange
+        case .paused: .red
+        case .merged: .purple
+        case .readyToMerge: .green
         }
     }
 }

@@ -10,8 +10,8 @@ pub mod waits;
 
 pub use crate::core::{Asking, Backoff, Conversation, Core, Observer, TACKLE, tailnet_name};
 pub use crate::model::{
-    Agent, Far, Found, Held, Holds, Model, Placed, Project, Reached, Seen, Status, TerminalKey,
-    Unopened, View, Why, Worktree,
+    Agent, Far, Flow, FlowBadgeKind, FlowControl, Found, Held, Holds, Model, Placed, Project,
+    Reached, Seen, Status, TerminalKey, Unopened, View, Why, Worktree,
 };
 pub use crate::terminal::{
     Appearance, Cursor, CursorShape, Framed, Grid, KeyName, Rgb, Row, Run, SAID_HELD, SIDE_MAX,

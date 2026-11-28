@@ -11,7 +11,8 @@ use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards};
 use lune_domain::projects::{Argv, Arranged, Listed, Opens, WORKTREES_MAX, quoted};
 use lune_domain::projects::{
-    Ask, Browser, BrowserTarget, BrowserUrl, Change, Closing, Dir, Id, Line, Placed,
+    Ask, Browser, BrowserTarget, BrowserUrl, Change, Closing, Dir, Id, Line, NAME_CHARS_MAX, Name,
+    Placed,
 };
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{
@@ -148,6 +149,17 @@ pub enum Command {
     WorktreeFolder {
         worktree: WorktreeId,
         answer: oneshot::Sender<Result<Dir, Unrooted>>,
+    },
+    AttachFlows(SyncSender<crate::flows::Command>),
+    OpenNamedTerminal {
+        worktree: WorktreeId,
+        name: String,
+        opens: Opens,
+        answer: oneshot::Sender<Result<ViewId, String>>,
+    },
+    FocusView {
+        view: ViewId,
+        answer: oneshot::Sender<Result<(), String>>,
     },
 }
 
@@ -431,6 +443,7 @@ pub fn start(
         resume_config,
         resume_store,
         resume_synth: Synthesizer::default(),
+        flows: None,
     };
     let thread = thread::Builder::new().name("layouts".to_owned());
     thread.spawn(move || run(layouts, &commands, sweep))?;
@@ -458,6 +471,7 @@ struct Layouts {
     resume_config: ConfigState,
     resume_store: ResumeStore,
     resume_synth: Synthesizer,
+    flows: Option<SyncSender<crate::flows::Command>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -805,6 +819,20 @@ impl Layouts {
             Command::WorktreeFolder { worktree, answer } => {
                 let _ = answer.send(self.worktree_folder(worktree));
             }
+            Command::AttachFlows(flows) => {
+                self.flows = Some(flows);
+            }
+            Command::OpenNamedTerminal {
+                worktree,
+                name,
+                opens,
+                answer,
+            } => {
+                let _ = answer.send(self.open_named_terminal(worktree, &name, &opens));
+            }
+            Command::FocusView { view, answer } => {
+                let _ = answer.send(self.socket_focus_pane(view));
+            }
             Command::Rooted { root, listed } => {
                 let rooted = Change::Rooted {
                     root: root.clone(),
@@ -969,7 +997,7 @@ impl Layouts {
                             Is::Running {
                                 front: Some(front), ..
                             } => front.argv.first().cloned(),
-                            Is::Running { front: None, .. } | Is::Ended => None,
+                            Is::Running { front: None, .. } | Is::Ended(_) => None,
                         });
                         (terminal.id().view(), tty, command)
                     }
@@ -1701,6 +1729,63 @@ impl Layouts {
         let projects = self.kept().map_err(Unrooted::Unkept)?;
         let (project, found) = projects.find(worktree).ok_or(Unrooted::Unknown)?;
         project.folder(found.id()).ok_or(Unrooted::Unknown)
+    }
+
+    fn open_named_terminal(
+        &mut self,
+        worktree: WorktreeId,
+        name: &str,
+        opens: &Opens,
+    ) -> Result<ViewId, String> {
+        let terminal = self.store.fresh_terminal().map_err(Failed::said)?;
+        let projects = self.kept()?;
+        let (project, found) = projects
+            .find(worktree)
+            .ok_or_else(|| format!("no worktree has the id {worktree}"))?;
+        let shown = self
+            .clients
+            .values()
+            .filter(|it| it.showing_worktree(worktree));
+        let size = fit(shown, found.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        let focus = found.layout().last_focus();
+        let preferred = if focus.is_some() {
+            Beside::Focused
+        } else {
+            Beside::Largest
+        };
+        let view = terminal.view();
+        let (placed, inner) = placement(found.layout(), focus, preferred, view, size)
+            .or_else(|_| placement(found.layout(), focus, Beside::Largest, view, size))?;
+        let folder = project
+            .folder(worktree)
+            .ok_or_else(|| format!("worktree {worktree} has no folder"))?;
+        let cwd = Directory::from(&folder);
+        let made = Terminal::new(terminal, folder, opens.runs());
+        self.changed(Change::Open {
+            worktree,
+            view: View::Terminal(made),
+            placed,
+            size,
+        })?;
+        if let Some(parsed_name) = stage_view_name(name) {
+            let _ = self.changed(Change::RenameTerminal {
+                terminal: view,
+                to: Some(parsed_name),
+            });
+        }
+        self.spawned(terminal, &cwd, opens, inner)?;
+        for client in self.clients.values_mut() {
+            if let ClientPlace::Showing {
+                worktree: shown,
+                focus,
+                ..
+            } = &mut client.place
+                && *shown == worktree
+            {
+                *focus = Some(view);
+            }
+        }
+        Ok(view)
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -2939,6 +3024,33 @@ impl Layouts {
             "no two terminals share a key of lune-mux"
         );
         let before = std::mem::replace(&mut self.listed, terminals);
+        if let Some(flows) = &self.flows {
+            for (&terminal, known) in &self.known {
+                if let Some(now_term) = self.listed.get(&known.key)
+                    && let Is::Ended(exit) = now_term.is
+                    && before
+                        .get(&known.key)
+                        .is_none_or(|was| !matches!(was.is, Is::Ended(_)))
+                {
+                    let _ = flows.try_send(crate::flows::Command::TerminalExited {
+                        view: terminal.view(),
+                        exit,
+                    });
+                }
+            }
+            for &terminal in &ended {
+                let already_ended = before_keys
+                    .get(&terminal)
+                    .and_then(|key| before.get(key))
+                    .is_some_and(|was| matches!(was.is, Is::Ended(_)));
+                if !already_ended {
+                    let _ = flows.try_send(crate::flows::Command::TerminalExited {
+                        view: terminal.view(),
+                        exit: lune_domain::flows::TerminalExit::Unknown,
+                    });
+                }
+            }
+        }
         for terminal in ended {
             if let Err(failed) = self.closed(terminal.view()) {
                 let stays = format!("terminal {terminal} ended, and stays in its layout");
@@ -3008,7 +3120,7 @@ impl Layouts {
                     resumes: Some(resumes),
                     ..
                 } => Some(resumes.chosen().clone()),
-                Is::Running { resumes: None, .. } | Is::Ended => None,
+                Is::Running { resumes: None, .. } | Is::Ended(_) => None,
             };
             let chosen_synth = resume_synth.get(*terminal).cloned();
             let has_live_resume = chosen_osc.is_some() || chosen_synth.is_some();
@@ -3119,7 +3231,7 @@ impl Layouts {
                 let stored = self.resume_store.get(terminal.id().view());
                 let osc_resumes = listed.and_then(|listed| match &listed.is {
                     Is::Running { resumes, .. } => resumes.as_deref(),
-                    Is::Ended => None,
+                    Is::Ended(_) => None,
                 });
                 let mut records = Vec::new();
                 if let Some(resumes) = osc_resumes {
@@ -3191,7 +3303,7 @@ impl Layouts {
             }
             let osc_resumes = match &listed.is {
                 Is::Running { resumes, .. } => resumes.as_deref(),
-                Is::Ended => None,
+                Is::Ended(_) => None,
             };
             if osc_resumes.is_none() && terminal_id.is_none() {
                 continue;
@@ -3849,7 +3961,7 @@ fn ran(is: &Is) -> bool {
         Is::Running { doing, .. } => {
             matches!(doing, Some(Doing::Ended { .. } | Doing::Stopped { .. }))
         }
-        Is::Ended => true,
+        Is::Ended(_) => true,
     }
 }
 
@@ -3861,8 +3973,18 @@ fn runs_in_front(is: &Is) -> bool {
             matches!(doing, Some(Doing::Going { .. }))
                 || front.as_ref().is_some_and(|it| it.pid != *root)
         }
-        Is::Ended => false,
+        Is::Ended(_) => false,
     }
+}
+
+fn stage_view_name(raw: &str) -> Option<Name> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(NAME_CHARS_MAX)
+        .collect();
+    Name::parse(cleaned.trim()).ok()
 }
 
 fn is_folder(folder: &Dir) -> Result<bool, String> {
@@ -4211,7 +4333,12 @@ mod tests {
         assert_eq!(of(&kanban), command("lune kanban"));
         assert_eq!(of(&running(None, None)), before);
         assert_eq!(of(&running(None, Some(going(None)))), before);
-        assert_eq!(of(&listed(Is::Ended)), before);
+        assert_eq!(
+            of(&listed(Is::Ended(lune_domain::flows::TerminalExit::Code(
+                0
+            )))),
+            before
+        );
         let long = "é".repeat(LINE_BYTES_MAX);
         let too_long = running(Some((20, &[long.as_str()])), None);
         let cut = "é".repeat(LINE_BYTES_MAX / 2 - 1);
@@ -4256,7 +4383,7 @@ mod tests {
         let started = running(Some((10, &["fish"])), None);
         let going = running(Some((10, &["fish"])), Some(going(Some("ls"))));
         let vim = running(Some((20, &["vim"])), None);
-        let ended = listed(Is::Ended);
+        let ended = listed(Is::Ended(lune_domain::flows::TerminalExit::Code(0)));
         let ran_ls = running(Some((10, &["fish"])), Some(ended_ls()));
         for is in [&prompts, &started, &going, &vim, &ended, &ran_ls] {
             assert!(!keeps(None, &shell, &is.is), "{is:?}");
@@ -4338,7 +4465,7 @@ mod tests {
         let vim = running(Some((20, &["vim"])), None);
         let going = running(Some((10, &["fish"])), Some(going(Some("vim"))));
         let ran_ls = running(Some((10, &["fish"])), Some(ended_ls()));
-        let ended = listed(Is::Ended);
+        let ended = listed(Is::Ended(lune_domain::flows::TerminalExit::Code(0)));
         let at = |is: Option<&server::Terminal>, now| pasted(is.map(|it| &it.is), due, by, now);
         assert_eq!(
             at(Some(&prompts), early),
@@ -4785,7 +4912,7 @@ mod tests {
             "vim b.rs",
             "/w/lune/main/src",
             Some(Size::of(80, 24).unwrap()),
-            Is::Ended,
+            Is::Ended(lune_domain::flows::TerminalExit::Code(0)),
             ProgramStatuses::default(),
         );
         assert!(matches!(

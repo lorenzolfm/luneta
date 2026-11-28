@@ -121,6 +121,17 @@ final class Luned {
             on: machine, worktree: worktree.id, seen: worktree.views.map(\.id))
     }
 
+    func startFlow(
+        on machine: String?, worktree: UInt64, interactive: Bool, prompt: String? = nil
+    ) async throws {
+        try await reached().startFlow(
+            on: machine, worktree: worktree, interactive: interactive, prompt: prompt)
+    }
+
+    func controlFlow(on machine: String?, worktree: UInt64, control: FlowControl) async throws {
+        try await reached().controlFlow(on: machine, worktree: worktree, control: control)
+    }
+
     func waiting(at terminal: TerminalKey) async throws -> Waiting {
         try await reached().waiting(terminal: terminal)
     }

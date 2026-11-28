@@ -37,7 +37,7 @@ pub struct Found {
 
 const VIEWED: &str = concat!(
     "state,isDraft,url,baseRefName,headRefName,headRefOid,author,headRepository,",
-    "headRepositoryOwner,statusCheckRollup",
+    "headRepositoryOwner,statusCheckRollup,mergeable,mergeStateStatus",
 );
 
 #[derive(Deserialize)]
@@ -54,6 +54,10 @@ struct Viewed {
     head_repository_owner: Option<Owner>,
     #[serde(default)]
     status_check_rollup: Option<serde_json::Value>,
+    #[serde(default)]
+    mergeable: Option<String>,
+    #[serde(default)]
+    merge_state_status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +81,8 @@ pub struct Pulled {
     pub head: String,
     pub author: Option<String>,
     pub head_repository: Option<RepositoryName>,
+    pub mergeable: lune_domain::flows::Mergeable,
+    pub merge_state: lune_domain::flows::MergeStateStatus,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,6 +146,8 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
         }
         _ => None,
     };
+    let mergeable = parse_mergeable(viewed.mergeable.as_deref());
+    let merge_state = parse_merge_state(viewed.merge_state_status.as_deref());
     Ok(Pulled {
         pull_request: PullRequest {
             page,
@@ -155,7 +163,32 @@ fn parse(said: &[u8]) -> Result<Pulled, String> {
             .map(|author| author.login)
             .filter(|login| !login.is_empty()),
         head_repository,
+        mergeable,
+        merge_state,
     })
+}
+
+fn parse_mergeable(raw: Option<&str>) -> lune_domain::flows::Mergeable {
+    use lune_domain::flows::Mergeable;
+    match raw {
+        Some("MERGEABLE") => Mergeable::Mergeable,
+        Some("CONFLICTING") => Mergeable::Conflicting,
+        _ => Mergeable::Unknown,
+    }
+}
+
+fn parse_merge_state(raw: Option<&str>) -> lune_domain::flows::MergeStateStatus {
+    use lune_domain::flows::MergeStateStatus;
+    match raw {
+        Some("BEHIND") => MergeStateStatus::Behind,
+        Some("BLOCKED") => MergeStateStatus::Blocked,
+        Some("CLEAN") => MergeStateStatus::Clean,
+        Some("DIRTY") => MergeStateStatus::Dirty,
+        Some("DRAFT") => MergeStateStatus::Draft,
+        Some("HAS_HOOKS") => MergeStateStatus::HasHooks,
+        Some("UNSTABLE") => MergeStateStatus::Unstable,
+        _ => MergeStateStatus::Unknown,
+    }
 }
 
 const REPOSITORY: &str = "parent,url,defaultBranchRef";
@@ -786,6 +819,8 @@ mod tests {
             head: "abc".to_owned(),
             author: None,
             head_repository: None,
+            mergeable: lune_domain::flows::Mergeable::Unknown,
+            merge_state: lune_domain::flows::MergeStateStatus::Unknown,
         }
     }
 
@@ -1059,5 +1094,35 @@ mod tests {
         for said in unread {
             assert!(read(&said).is_err(), "{said:?}");
         }
+    }
+
+    #[test]
+    fn pull_request_parses_mergeable_and_merge_state_status() {
+        use lune_domain::flows::{MergeStateStatus, Mergeable};
+
+        let sample = |mergeable: &str, merge_state: &str| {
+            format!(
+                r#"{{"isDraft":false,"state":"OPEN","baseRefName":"main","headRefName":"feat",
+                "headRefOid":"deadbeef","url":"https://github.com/owner/repo/pull/9",
+                "mergeable":"{mergeable}","mergeStateStatus":"{merge_state}"}}"#
+            )
+        };
+        let parsed = parse(sample("MERGEABLE", "CLEAN").as_bytes()).unwrap();
+        assert_eq!(parsed.mergeable, Mergeable::Mergeable);
+        assert_eq!(parsed.merge_state, MergeStateStatus::Clean);
+
+        let parsed = parse(sample("CONFLICTING", "DIRTY").as_bytes()).unwrap();
+        assert_eq!(parsed.mergeable, Mergeable::Conflicting);
+        assert_eq!(parsed.merge_state, MergeStateStatus::Dirty);
+
+        let parsed = parse(sample("UNKNOWN", "BEHIND").as_bytes()).unwrap();
+        assert_eq!(parsed.mergeable, Mergeable::Unknown);
+        assert_eq!(parsed.merge_state, MergeStateStatus::Behind);
+
+        let parsed = parse(sample("MERGEABLE", "HAS_HOOKS").as_bytes()).unwrap();
+        assert_eq!(parsed.merge_state, MergeStateStatus::HasHooks);
+
+        let parsed = parse(sample("MERGEABLE", "BLOCKED").as_bytes()).unwrap();
+        assert_eq!(parsed.merge_state, MergeStateStatus::Blocked);
     }
 }

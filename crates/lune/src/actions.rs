@@ -45,12 +45,15 @@ pub const QUIT: char = 'q';
 
 pub const GIT: char = 'g';
 
-pub const MENU_GROUPS: [(char, &str); 5] = [
+pub const FLOW: char = 'f';
+
+pub const MENU_GROUPS: [(char, &str); 6] = [
     (SKILLS, "Skills"),
     ('n', "New"),
     ('d', "Close"),
     ('b', "Brief"),
     (GIT, "Git"),
+    (FLOW, "Flow"),
 ];
 
 pub const ROW_GROUPS: [(char, &str); 2] = [(YANK, "Yank"), (OPEN, "Open")];
@@ -134,6 +137,18 @@ actions! {
     ForgetMachine,
     DeleteMerged,
     Rebase,
+    FlowStartPrAuto,
+    FlowStartPrInteractive,
+    FlowStartPromptAuto,
+    FlowStartPromptInteractive,
+    FlowAdvance,
+    FlowAutoRest,
+    FlowPause,
+    FlowResume,
+    FlowRetryStep,
+    FlowSkipStep,
+    FlowTakeOver,
+    FlowAbort,
     BriefEvery,
     BriefThis,
     BriefHighlighted,
@@ -147,6 +162,7 @@ actions! {
     PastedWorktree,
     PastedReview,
     PastedTackle,
+    PastedShip,
     Swap,
     ViewLeft,
     ViewDown,
@@ -191,10 +207,16 @@ pub enum Pasted {
     Worktree,
     Review,
     Tackle,
+    Ship,
 }
 
 impl Pasted {
-    const ALL: [Pasted; 3] = [Pasted::Worktree, Pasted::Review, Pasted::Tackle];
+    const ALL: [Pasted; 4] = [
+        Pasted::Worktree,
+        Pasted::Review,
+        Pasted::Tackle,
+        Pasted::Ship,
+    ];
 
     #[must_use]
     pub const fn key(self) -> char {
@@ -202,6 +224,7 @@ impl Pasted {
             Pasted::Worktree => 'w',
             Pasted::Review => 'r',
             Pasted::Tackle => 't',
+            Pasted::Ship => 'f',
         }
     }
 
@@ -211,6 +234,7 @@ impl Pasted {
             Pasted::Worktree => Action::PastedWorktree,
             Pasted::Review => Action::PastedReview,
             Pasted::Tackle => Action::PastedTackle,
+            Pasted::Ship => Action::PastedShip,
         }
     }
 }
@@ -398,6 +422,78 @@ impl Action {
                 menu(&[GIT, 'r']),
                 CHECKED_OUT,
             ),
+            Action::FlowStartPrAuto => spec(
+                "start PR flow (auto)",
+                &["ship", "unattended", "pipeline"],
+                menu(&[FLOW, 'a']),
+                CHECKED_OUT,
+            ),
+            Action::FlowStartPrInteractive => spec(
+                "start PR flow (interactive)",
+                &["ship", "manual", "pipeline"],
+                menu(&[FLOW, 'i']),
+                CHECKED_OUT,
+            ),
+            Action::FlowStartPromptAuto => spec(
+                "start prompt flow (auto)…",
+                &["implement", "ship", "unattended"],
+                menu(&[FLOW, 'p']),
+                CHECKED_OUT,
+            ),
+            Action::FlowStartPromptInteractive => spec(
+                "start prompt flow (interactive)…",
+                &["implement", "manual", "pipeline"],
+                menu(&[FLOW, 'w']),
+                CHECKED_OUT,
+            ),
+            Action::FlowAdvance => spec(
+                "advance flow",
+                &["next", "stage", "continue"],
+                menu(&[FLOW, 'n']),
+                CHECKED_OUT,
+            ),
+            Action::FlowAutoRest => spec(
+                "auto the rest",
+                &["unattended", "finish", "ship"],
+                menu(&[FLOW, 'u']),
+                CHECKED_OUT,
+            ),
+            Action::FlowPause => spec(
+                "pause flow",
+                &["halt", "stop", "hold"],
+                menu(&[FLOW, 'z']),
+                CHECKED_OUT,
+            ),
+            Action::FlowResume => spec(
+                "resume flow",
+                &["continue", "unpause"],
+                menu(&[FLOW, 'r']),
+                CHECKED_OUT,
+            ),
+            Action::FlowRetryStep => spec(
+                "retry step",
+                &["rerun", "again"],
+                menu(&[FLOW, 't']),
+                CHECKED_OUT,
+            ),
+            Action::FlowSkipStep => spec(
+                "skip step",
+                &["bypass", "next"],
+                menu(&[FLOW, 's']),
+                CHECKED_OUT,
+            ),
+            Action::FlowTakeOver => spec(
+                "take over",
+                &["interactive", "session", "control"],
+                menu(&[FLOW, 'o']),
+                CHECKED_OUT,
+            ),
+            Action::FlowAbort => spec(
+                "abort flow",
+                &["cancel", "terminate"],
+                menu(&[FLOW, 'x']),
+                CHECKED_OUT,
+            ),
             Action::BriefEvery => spec(
                 "Brief every session",
                 &["summary", "all"],
@@ -459,6 +555,10 @@ impl Action {
             Action::PastedTackle => {
                 let tackle = Key::Pasted(Pasted::Tackle.key());
                 spec("tackle", &["issue", "work"], tackle, EVERY)
+            }
+            Action::PastedShip => {
+                let ship = Key::Pasted(Pasted::Ship.key());
+                spec("ship", &["flow", "automate", "pipeline"], ship, EVERY)
             }
             Action::Swap => anywhere("Sidebar or views", &["focus", "switch"], SWAP),
             Action::ViewLeft => {

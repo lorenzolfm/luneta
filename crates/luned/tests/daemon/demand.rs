@@ -859,6 +859,27 @@ impl Daemon for StandIn {
         Err(Status::unimplemented("a stand-in makes no worktree"))
     }
 
+    async fn start_flow(
+        &self,
+        _: Request<api::StartFlowRequest>,
+    ) -> Result<Response<api::FlowStateResponse>, Status> {
+        Err(Status::unimplemented("a stand-in runs no flows"))
+    }
+
+    async fn control_flow(
+        &self,
+        _: Request<api::ControlFlowRequest>,
+    ) -> Result<Response<api::FlowStateResponse>, Status> {
+        Err(Status::unimplemented("a stand-in runs no flows"))
+    }
+
+    async fn list_flows(
+        &self,
+        _: Request<api::ListFlowsRequest>,
+    ) -> Result<Response<api::ListFlowsResponse>, Status> {
+        Err(Status::unimplemented("a stand-in lists no flows"))
+    }
+
     type PrunesStream = tokio_stream::Empty<Result<PrunesResponse, Status>>;
 
     async fn prunes(

@@ -36,6 +36,8 @@ use crate::watch::{self, Troubles};
 
 const LIMIT: Duration = Duration::from_mins(1);
 
+const PUSH_LIMIT: Duration = Duration::from_mins(3);
+
 const TREE_DIRS_MAX: usize = 4096;
 
 const UNTRACKED_PATHS_INSPECTED_MAX: usize = 1024;
@@ -903,6 +905,172 @@ pub(crate) fn says_within<S: AsRef<OsStr>>(
         .answer()
         .map_err(|why| format!("git {asked} in {dir}: {why}"))?;
     Ok(String::from_utf8_lossy(&said).trim_end().to_owned())
+}
+
+pub fn is_clean(dir: &str) -> Result<bool, String> {
+    let asked = [
+        "--porcelain",
+        "--untracked-files=normal",
+        "--ignore-submodules",
+    ];
+    let said = says(dir, "status", &asked, &[] as &[&str])?;
+    Ok(said.is_empty())
+}
+
+pub fn head_oid(dir: &str) -> Result<String, String> {
+    let oid = says(dir, "rev-parse", &["--verify"], &["HEAD"])?;
+    if oid.is_empty() {
+        return Err(format!("git rev-parse HEAD in {dir} returned empty output"));
+    }
+    Ok(oid)
+}
+
+pub fn is_ancestor(dir: &str, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    let mut git = Git::at(dir, "merge-base");
+    git.arg("--is-ancestor");
+    let ran = git
+        .named([ancestor, descendant])
+        .run(LIMIT)
+        .map_err(|error| {
+            format!("git merge-base --is-ancestor in {dir} could not be run: {error}")
+        })?;
+    match ran {
+        Ran::Ended { status, .. } if status.code() == Some(0) => Ok(true),
+        Ran::Ended { status, .. } if status.code() == Some(1) => Ok(false),
+        other => match other.answer() {
+            Ok(_) => Ok(true),
+            Err(why) => Err(format!("git merge-base --is-ancestor in {dir}: {why}")),
+        },
+    }
+}
+
+pub fn rebase_in_progress(dir: &str) -> Result<bool, String> {
+    let said = says(
+        dir,
+        "rev-parse",
+        &["--git-path", "rebase-merge", "--git-path", "rebase-apply"],
+        &[] as &[&str],
+    )?;
+    let paths: Vec<&str> = said.lines().collect();
+    if paths.len() != 2 {
+        return Err(format!(
+            "git rev-parse --git-path in {dir} returned {} paths of 2",
+            paths.len()
+        ));
+    }
+    for rel in paths {
+        let full = Path::new(dir).join(rel);
+        if full
+            .try_exists()
+            .map_err(|error| format!("{}: {error}", full.display()))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn upstream_oid(dir: &str) -> Result<Option<String>, String> {
+    let mut git = Git::at(dir, "rev-parse");
+    git.args(["--verify", "--quiet"]);
+    let ran = git
+        .named(["@{u}"])
+        .run(LIMIT)
+        .map_err(|error| format!("git rev-parse @{{u}} in {dir} could not be run: {error}"))?;
+    match ran {
+        Ran::Ended { status, stdout, .. } if status.success() => Ok(one_line(stdout)),
+        Ran::Ended { .. } => Ok(None),
+        Ran::Stuck => Err(format!("git rev-parse @{{u}} in {dir} timed out")),
+    }
+}
+
+fn push_remote(dir: &str, branch: &str) -> Result<String, String> {
+    for key in [
+        format!("branch.{branch}.pushRemote"),
+        "remote.pushDefault".to_owned(),
+        format!("branch.{branch}.remote"),
+    ] {
+        let value = says(dir, "config", &["--default", "", "--get"], &[key])?;
+        if !value.is_empty() {
+            return Ok(value);
+        }
+    }
+    let listed = says(dir, "remote", &[], &[] as &[&str])?;
+    if let Some(first) = listed.lines().map(str::trim).find(|line| !line.is_empty()) {
+        return Ok(first.to_owned());
+    }
+    Ok("origin".to_owned())
+}
+
+pub fn push_if_ahead(dir: &str) -> Result<String, String> {
+    if !is_clean(dir)? {
+        return Err(
+            "working tree is not clean; commit or discard changes before pushing".to_owned(),
+        );
+    }
+    let Some(branch) = branch(dir)? else {
+        return Err(format!("{dir} is not on a branch"));
+    };
+    let head = head_oid(dir)?;
+    if upstream_oid(dir)?.is_some() {
+        let ahead_raw = says(dir, "rev-list", &["--count"], &["@{u}..HEAD"])?;
+        let ahead: u64 = ahead_raw
+            .parse()
+            .map_err(|_| format!("git rev-list --count said {ahead_raw:?}"))?;
+        if ahead == 0 {
+            return Ok(head);
+        }
+        let git = Git::at(dir, "push");
+        let ran = git
+            .named(std::iter::empty::<&str>())
+            .run_alone(PUSH_LIMIT)
+            .map_err(|error| format!("git push in {dir} could not be run: {error}"))?;
+        ran.answer()
+            .map_err(|why| format!("git push in {dir}: {why}"))?;
+    } else {
+        let remote = push_remote(dir, &branch)?;
+        let refspec = format!("refs/heads/{branch}");
+        let mut git = Git::at(dir, "push");
+        git.arg("-u");
+        let ran = git
+            .named([remote.as_str(), refspec.as_str()])
+            .run_alone(PUSH_LIMIT)
+            .map_err(|error| format!("git push -u in {dir} could not be run: {error}"))?;
+        ran.answer()
+            .map_err(|why| format!("git push -u in {dir}: {why}"))?;
+    }
+    head_oid(dir)
+}
+
+pub fn push_force_with_lease(dir: &str) -> Result<String, String> {
+    if !is_clean(dir)? {
+        return Err(
+            "working tree is not clean; commit or discard changes before pushing".to_owned(),
+        );
+    }
+    let Some(branch) = branch(dir)? else {
+        return Err(format!("{dir} is not on a branch"));
+    };
+    let remote = push_remote(dir, &branch)?;
+    let refspec = format!("refs/heads/{branch}");
+    let mut git = Git::at(dir, "push");
+    match upstream_oid(dir)? {
+        Some(remote_oid) => {
+            git.leased(&branch, &remote_oid);
+        }
+        None => {
+            git.args(["--force-with-lease", "-u"]);
+        }
+    }
+    let ran = git
+        .named([remote.as_str(), refspec.as_str()])
+        .run_alone(PUSH_LIMIT)
+        .map_err(|error| {
+            format!("git push --force-with-lease in {dir} could not be run: {error}")
+        })?;
+    ran.answer()
+        .map_err(|why| format!("git push --force-with-lease in {dir}: {why}"))?;
+    head_oid(dir)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -3716,8 +3884,9 @@ mod tests {
         DirEvents, Directory, Dirs, EVENT_PATHS_MAX, FoldersOnly, Git, Ground, LIMIT,
         NonEmptyPathBuf, ParsedEvent, Placed, RECURSIVE_ADD_RETRIES, REPOSITORY_VARS, Symbolic,
         TrackedDirs, Tree, TreeWatch, Troubles, WatchEngine, Watches, Watching, add_one, ask,
-        assert_watches_consistent, branch, changed, config_count, handle_event, locked, place,
-        pointed, reconcile, reconcile_with, scratch, stamp, watched, watched_with,
+        assert_watches_consistent, branch, changed, config_count, handle_event, head_oid,
+        is_ancestor, is_clean, locked, place, pointed, push_force_with_lease, push_if_ahead,
+        rebase_in_progress, reconcile, reconcile_with, scratch, stamp, watched, watched_with,
     };
 
     fn git(dir: &Path, args: &[&str]) -> bool {
@@ -5321,5 +5490,70 @@ mod tests {
             updated.paths.get(&kept_dir),
             Some(&RecursiveMode::NonRecursive)
         );
+    }
+
+    #[test]
+    fn flow_git_helpers_check_cleanliness_ancestry_and_safe_pushes() {
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(scratch_dir.path()).unwrap();
+        let bare = root.join("origin.git");
+        let work = root.join("work");
+        fs::create_dir(&bare).unwrap();
+        scratch(&bare, &["init", "--bare", "-q", "-b", "main"]).unwrap();
+        scratch(
+            &root,
+            &[
+                "clone",
+                "-q",
+                bare.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let work_str = work.to_str().unwrap();
+
+        fs::write(work.join("README"), "v1\n").unwrap();
+        assert!(!is_clean(work_str).unwrap());
+        scratch(&work, &["add", "README"]).unwrap();
+        scratch(&work, &["commit", "-q", "-m", "initial"]).unwrap();
+        scratch(&work, &["push", "-q", "-u", "origin", "main"]).unwrap();
+        assert!(is_clean(work_str).unwrap());
+        assert!(!rebase_in_progress(work_str).unwrap());
+        let base_oid = head_oid(work_str).unwrap();
+
+        scratch(&work, &["switch", "-q", "-c", "feat"]).unwrap();
+        fs::write(work.join("feat.txt"), "hello\n").unwrap();
+        scratch(&work, &["add", "feat.txt"]).unwrap();
+        scratch(&work, &["commit", "-q", "-m", "feat"]).unwrap();
+        let feat_oid = head_oid(work_str).unwrap();
+        assert!(is_ancestor(work_str, &base_oid, &feat_oid).unwrap());
+        assert!(!is_ancestor(work_str, &feat_oid, &base_oid).unwrap());
+
+        let pushed = push_if_ahead(work_str).unwrap();
+        assert_eq!(pushed, feat_oid);
+        let pushed_again = push_if_ahead(work_str).unwrap();
+        assert_eq!(pushed_again, feat_oid);
+
+        fs::write(work.join("feat.txt"), "amended\n").unwrap();
+        scratch(&work, &["add", "feat.txt"]).unwrap();
+        scratch(&work, &["commit", "-q", "--amend", "-m", "feat amended"]).unwrap();
+        let amended_oid = head_oid(work_str).unwrap();
+        assert_ne!(amended_oid, feat_oid);
+        let leased = push_force_with_lease(work_str).unwrap();
+        assert_eq!(leased, amended_oid);
+        let remote_feat = String::from_utf8(
+            scratch(
+                &root,
+                &[
+                    "--git-dir",
+                    bare.to_str().unwrap(),
+                    "rev-parse",
+                    "refs/heads/feat",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remote_feat.trim(), amended_oid);
     }
 }

@@ -4,9 +4,89 @@ use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
 use lune_protocol::v1::{self as api, terminal};
 
+use crate::flows::{FlowBadgeKind, FlowControl, FlowMode};
 use crate::mux::TerminalKey;
 use crate::projects::{Arranged, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId};
 use crate::projects::{CLONE_WORKTREES_MAX, VIEWS_MAX, WORKTREES_MAX, WorktreeId};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlowSummary {
+    pub flow_name: String,
+    pub mode: FlowMode,
+    pub step_index: u32,
+    pub step_total: u32,
+    pub stage_label: String,
+    pub badge: String,
+    pub badge_kind: FlowBadgeKind,
+    pub pause_reason: Option<String>,
+    pub detail: Option<String>,
+    pub active_view: Option<ViewId>,
+    pub resume_session: Option<String>,
+    pub controls: Vec<FlowControl>,
+}
+
+impl FlowSummary {
+    #[must_use]
+    pub fn of_api(said: &api::FlowSummary) -> FlowSummary {
+        let mode = match api::FlowMode::try_from(said.mode) {
+            Ok(api::FlowMode::Interactive) => FlowMode::Interactive,
+            Ok(api::FlowMode::Unattended | api::FlowMode::Unspecified) | Err(_) => {
+                FlowMode::Unattended
+            }
+        };
+        let badge_kind = match api::FlowBadgeKind::try_from(said.badge_kind) {
+            Ok(api::FlowBadgeKind::WaitingInteractive) => FlowBadgeKind::WaitingInteractive,
+            Ok(api::FlowBadgeKind::Paused) => FlowBadgeKind::Paused,
+            Ok(api::FlowBadgeKind::Merged) => FlowBadgeKind::Merged,
+            Ok(api::FlowBadgeKind::ReadyToMerge) => FlowBadgeKind::ReadyToMerge,
+            Ok(api::FlowBadgeKind::Running | api::FlowBadgeKind::Unspecified) | Err(_) => {
+                FlowBadgeKind::Running
+            }
+        };
+        let controls = said
+            .controls
+            .iter()
+            .filter_map(|raw| match api::FlowControl::try_from(*raw) {
+                Ok(api::FlowControl::Advance) => Some(FlowControl::Advance),
+                Ok(api::FlowControl::AutoRest) => Some(FlowControl::AutoRest),
+                Ok(api::FlowControl::Pause) => Some(FlowControl::Pause),
+                Ok(api::FlowControl::Resume) => Some(FlowControl::Resume),
+                Ok(api::FlowControl::RetryStep) => Some(FlowControl::RetryStep),
+                Ok(api::FlowControl::SkipStep) => Some(FlowControl::SkipStep),
+                Ok(api::FlowControl::TakeOver) => Some(FlowControl::TakeOver),
+                Ok(api::FlowControl::Abort) => Some(FlowControl::Abort),
+                Ok(api::FlowControl::Unspecified) | Err(_) => None,
+            })
+            .collect();
+        FlowSummary {
+            flow_name: said.flow_name.clone(),
+            mode,
+            step_index: said.step_index,
+            step_total: said.step_total,
+            stage_label: said.stage_label.clone(),
+            badge: said.badge.clone(),
+            badge_kind,
+            pause_reason: said.pause_reason.clone(),
+            detail: said.detail.clone(),
+            active_view: said.active_view.and_then(ViewId::of),
+            resume_session: said.resume_session.clone(),
+            controls,
+        }
+    }
+
+    #[must_use]
+    pub fn has_control(&self, control: FlowControl) -> bool {
+        self.controls.contains(&control)
+    }
+
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.badge_kind,
+            FlowBadgeKind::Merged | FlowBadgeKind::ReadyToMerge
+        )
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Worktree {
@@ -18,6 +98,7 @@ pub struct Worktree {
     pub used: Option<Used>,
     pub seen: Seen,
     pub arranged: Option<Arranged>,
+    pub flow: Option<Box<FlowSummary>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,6 +394,10 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
     let seen = seen.ok_or_else(|| format!("worktree {named} says no stage lune knows"))?;
     let arranged = worktree.arranged.map(Arranged::said).transpose();
     let arranged = arranged.map_err(|why| format!("worktree {named}'s arrangement: {why}"))?;
+    let flow = worktree
+        .flow
+        .as_ref()
+        .map(|flow| Box::new(FlowSummary::of_api(flow)));
     let name = named.clone();
     Ok(Worktree {
         id,
@@ -323,6 +408,7 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
         used,
         seen,
         arranged,
+        flow,
     })
 }
 

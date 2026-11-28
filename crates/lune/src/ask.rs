@@ -534,6 +534,7 @@ mod tests {
             ),
             ran: Ran::Unhooked,
             arranged: None,
+            flow: None,
         };
         Target::View(machine, row)
     }

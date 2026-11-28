@@ -25,7 +25,7 @@ use crate::api::change_projects_request::{
 };
 use crate::api::daemon_client::DaemonClient;
 use crate::api::{self, On};
-use crate::model::{Model, TerminalKey};
+use crate::model::{FlowControl, Model, TerminalKey};
 use crate::terminal::{Appearance, TerminalView};
 use crate::unanswered::{Refusals, Unanswered};
 use crate::verbs::{
@@ -611,6 +611,63 @@ impl Core {
             self::on(on),
             Change::CloseWorktree(CloseWorktree { worktree, seen }),
         )
+        .await
+    }
+
+    pub async fn start_flow(
+        &self,
+        on: Option<String>,
+        worktree: u64,
+        interactive: bool,
+        prompt: Option<String>,
+    ) -> Result<(), Unanswered> {
+        let rpc = self.rpc.clone();
+        let mode = if interactive {
+            api::FlowMode::Interactive
+        } else {
+            api::FlowMode::Unattended
+        };
+        let entry = match prompt {
+            Some(words) => api::start_flow_request::Entry::ImplementPrompt(words),
+            None => api::start_flow_request::Entry::PullRequest(()),
+        };
+        let request = api::StartFlowRequest {
+            on: self::on(on),
+            worktree,
+            flow_name: None,
+            mode: mode.into(),
+            harness: api::Harness::ClaudeCode.into(),
+            entry: Some(entry),
+        };
+        self.on_runtime(async move {
+            rpc.unary(Refusals::Changes, |mut daemon| async move {
+                daemon.start_flow(request).await
+            })
+            .await
+            .map(drop)
+        })
+        .await
+    }
+
+    pub async fn control_flow(
+        &self,
+        on: Option<String>,
+        worktree: u64,
+        control: FlowControl,
+    ) -> Result<(), Unanswered> {
+        let rpc = self.rpc.clone();
+        let request = api::ControlFlowRequest {
+            on: self::on(on),
+            worktree,
+            control: control.to_api().into(),
+        };
+        self.on_runtime(async move {
+            rpc.unary(Refusals::Changes, |mut daemon| async move {
+                daemon.control_flow(request).await
+            })
+            .await
+            .map(drop)
+        })
         .await
     }
 

@@ -84,7 +84,7 @@ impl Shown {
                     .and_then(|front| Said::new(front.argv.join(" "))),
                 doing: doing.clone(),
             },
-            Is::Ended => Program::Ended,
+            Is::Ended(_) => Program::Ended,
         };
         Shown::Listed {
             key,
@@ -245,6 +245,8 @@ pub enum Command {
         after: LocalVersion,
         decision: oneshot::Sender<WatchDecision<LocalSnapshot>>,
     },
+    Flows(BTreeMap<WorktreeId, api::FlowSummary>),
+    AttachFlows(SyncSender<crate::flows::Command>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -693,6 +695,10 @@ struct Known {
     versions: Versions,
     waiters: Waiters,
     sayings: Sayings,
+    flows: BTreeMap<WorktreeId, api::FlowSummary>,
+    flows_sink: Option<SyncSender<crate::flows::Command>>,
+    told_worktrees: Option<BTreeMap<WorktreeId, String>>,
+    told_sessions: BTreeMap<ViewId, String>,
 }
 
 impl Known {
@@ -733,6 +739,10 @@ impl Known {
             versions: Versions::new(),
             waiters: Waiters::new(),
             sayings: Sayings::default(),
+            flows: BTreeMap::new(),
+            flows_sink: None,
+            told_worktrees: None,
+            told_sessions: BTreeMap::new(),
         };
         assert_eq!(*known.local, known.built_local(SystemTime::now()));
         known
@@ -917,6 +927,15 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             }
             Command::WatchLocal { after, decision } => {
                 known.watch_local(after, decision);
+                continue;
+            }
+            Command::Flows(now) if now == known.flows => continue,
+            Command::Flows(now) => known.flows = now,
+            Command::AttachFlows(sink) => {
+                known.flows_sink = Some(sink);
+                known.told_worktrees = None;
+                known.told_sessions.clear();
+                known.notify_flows();
                 continue;
             }
         }
@@ -1236,6 +1255,7 @@ impl Known {
                 terminals: self.built_terminals(worktree),
                 used_at: worktree.used().map(|used| used.time().into()),
                 arranged: worktree.layout().arranged().map(|it| it.to_api().into()),
+                flow: self.flows.get(&worktree.id()).cloned(),
             }
         };
         let holds = |project: &Project| match project.holds() {
@@ -1407,6 +1427,7 @@ impl Known {
 
     fn update_local(&mut self) {
         self.forget_dirs();
+        self.notify_flows();
         let now = SystemTime::now();
         self.sayings.prune(now);
         let local = self.built_local(now);
@@ -1414,6 +1435,65 @@ impl Known {
             return;
         }
         self.publish_local(local);
+    }
+
+    fn worktree_dirs(&self) -> Option<BTreeMap<WorktreeId, String>> {
+        let projects = self.projects.as_ref().ok()?;
+        let mut dirs = BTreeMap::new();
+        for project in projects.all() {
+            match project.holds() {
+                Holds::Folder(own) => {
+                    dirs.insert(own.id(), project.dir().as_str().to_owned());
+                }
+                Holds::Clone(rows) => {
+                    for (subfolder, worktree) in rows {
+                        let folder = project.dir().at(subfolder);
+                        dirs.insert(worktree.id(), folder.as_str().to_owned());
+                    }
+                }
+            }
+        }
+        Some(dirs)
+    }
+
+    fn view_sessions(&self) -> BTreeMap<ViewId, String> {
+        let mut by_key = HashMap::new();
+        for (&view, located) in &self.terminals {
+            if let Located::Shown(Shown::Listed { key, .. } | Shown::Unlisted(key)) = located {
+                by_key.insert(*key, view);
+            }
+        }
+        let mut sessions = BTreeMap::new();
+        for agent in self.all_agents() {
+            if let (Some(key), Some(session)) = (agent.terminal, agent.session_id.as_ref())
+                && let Some(&view) = by_key.get(&key)
+            {
+                sessions.insert(view, session.as_str().to_owned());
+            }
+        }
+        sessions
+    }
+
+    fn notify_flows(&mut self) {
+        let Some(sink) = &self.flows_sink else {
+            return;
+        };
+        if let Some(dirs) = self.worktree_dirs()
+            && self.told_worktrees.as_ref() != Some(&dirs)
+            && sink
+                .try_send(crate::flows::Command::WorktreesKnown(dirs.clone()))
+                .is_ok()
+        {
+            self.told_worktrees = Some(dirs);
+        }
+        let sessions = self.view_sessions();
+        if sessions != self.told_sessions
+            && sink
+                .try_send(crate::flows::Command::AgentSessions(sessions.clone()))
+                .is_ok()
+        {
+            self.told_sessions = sessions;
+        }
     }
 
     fn refresh_sayings(&mut self) {
@@ -1614,6 +1694,9 @@ fn argv_matches_harness(argv: &[String], harness: Harness) -> bool {
         let Some(runner) = basename_lower(first) else {
             return false;
         };
+        if runner == "lune" && step_matches_harness(tail, harness) {
+            return true;
+        }
         if !RUNNERS.contains(&runner.as_str()) {
             return false;
         }
@@ -1625,6 +1708,29 @@ fn argv_matches_harness(argv: &[String], harness: Harness) -> bool {
         };
         rest = &tail[next..];
     }
+}
+
+fn step_matches_harness(tail: &[String], harness: Harness) -> bool {
+    let Some((subcommand, args)) = tail.split_first() else {
+        return false;
+    };
+    if subcommand != "_step" {
+        return false;
+    }
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if let Some(value) = arg.strip_prefix("--harness=") {
+            return arg_matches_harness(value, harness);
+        }
+        if arg == "--harness" {
+            return args
+                .get(index + 1)
+                .is_some_and(|value| arg_matches_harness(value, harness));
+        }
+        index += 1;
+    }
+    false
 }
 
 fn basename_lower(arg: &str) -> Option<String> {
@@ -2440,7 +2546,7 @@ mod tests {
                 cwd,
                 title: String::new(),
                 tty: None,
-                is: Is::Ended,
+                is: Is::Ended(lune_domain::flows::TerminalExit::Code(0)),
                 statuses: ProgramStatuses::default(),
             };
             (
@@ -2614,7 +2720,11 @@ mod tests {
 
         let ended = Shown::listed(
             term_key,
-            &frame("✳ Fixing the tests", "/w/lune/main/src", Is::Ended),
+            &frame(
+                "✳ Fixing the tests",
+                "/w/lune/main/src",
+                Is::Ended(lune_domain::flows::TerminalExit::Code(0)),
+            ),
         );
         core.send(Command::Terminals(BTreeMap::from([(
             view,
@@ -2916,5 +3026,43 @@ mod tests {
         let seq_after = known.versions.all().seq();
         known.refresh_sayings_at(expired_at + Duration::from_secs(5));
         assert_eq!(known.versions.all().seq(), seq_after);
+    }
+
+    #[test]
+    fn argv_matches_harness_recognizes_lune_step_runner() {
+        let argv = |words: &[&str]| words.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(argv_matches_harness(
+            &argv(&[
+                "lune",
+                "_step",
+                "--harness",
+                "claude",
+                "--stage",
+                "tigerstyle"
+            ]),
+            Harness::ClaudeCode
+        ));
+        assert!(argv_matches_harness(
+            &argv(&[
+                "/usr/local/bin/lune",
+                "_step",
+                "--harness=agy",
+                "--stage",
+                "land"
+            ]),
+            Harness::Antigravity
+        ));
+        assert!(argv_matches_harness(
+            &argv(&["lune", "_step", "--stage", "t", "--harness", "pi"]),
+            Harness::Pi
+        ));
+        assert!(!argv_matches_harness(
+            &argv(&["lune", "_step", "--harness", "claude"]),
+            Harness::Pi
+        ));
+        assert!(!argv_matches_harness(
+            &argv(&["lune", "agents", "--harness", "claude"]),
+            Harness::ClaudeCode
+        ));
     }
 }

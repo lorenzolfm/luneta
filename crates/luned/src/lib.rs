@@ -14,6 +14,7 @@ mod devices;
 mod directory;
 pub mod eza;
 mod fetches;
+pub mod flows;
 pub mod folder;
 mod git;
 mod github;

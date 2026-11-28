@@ -107,3 +107,51 @@ extension Landed {
         }
     }
 }
+
+extension Flow {
+    var needsAttention: Bool {
+        switch badgeKind {
+        case .paused, .waitingInteractive: true
+        case .running, .merged, .readyToMerge: false
+        }
+    }
+
+    var canStartNew: Bool {
+        switch badgeKind {
+        case .merged, .readyToMerge: true
+        case .running, .waitingInteractive, .paused: false
+        }
+    }
+}
+
+extension FlowControl {
+    var title: String {
+        switch self {
+        case .advance: "Advance"
+        case .autoRest: "Auto the rest"
+        case .pause: "Pause"
+        case .resume: "Resume"
+        case .retryStep: "Retry step"
+        case .skipStep: "Skip step"
+        case .takeOver: "Take over"
+        case .abort: "Abort flow"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .advance: "forward.frame"
+        case .autoRest: "bolt"
+        case .pause: "pause"
+        case .resume: "play"
+        case .retryStep: "arrow.clockwise"
+        case .skipStep: "forward.end"
+        case .takeOver: "person.fill"
+        case .abort: "xmark.octagon"
+        }
+    }
+
+    var isDestructive: Bool {
+        self == .abort
+    }
+}

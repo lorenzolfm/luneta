@@ -73,6 +73,14 @@ impl Told {
             ),
         }
     }
+
+    pub fn flow(title: String, body: String) -> Told {
+        Told {
+            title,
+            body,
+            came: Came::Unfiled,
+        }
+    }
 }
 
 pub struct Desktop {
