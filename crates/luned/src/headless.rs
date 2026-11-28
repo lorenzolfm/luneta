@@ -14,12 +14,24 @@ pub const TOOLLESS: &str = "You have no tools here: read no file and run nothing
 
 const BARE_FOLDER: &str = "bare";
 
-pub const CODEX_READS_ONLY: [&str; 5] = [
+pub const CODEX_BARE: [&str; 17] = [
     "--sandbox",
     "read-only",
     "--skip-git-repo-check",
     "--color",
     "never",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--disable",
+    "shell_tool",
+    "--disable",
+    "hooks",
+    "--disable",
+    "plugins",
+    "--disable",
+    "apps",
+    "--config",
+    "web_search=\"disabled\"",
 ];
 
 pub const CODEX_TOLD_ON_STDIN: &str = "-";
@@ -173,7 +185,7 @@ pub fn codex_once() -> Command {
     let mut codex = Command::new(Harness::Codex.program());
     codex
         .args(["exec", "--ephemeral"])
-        .args(CODEX_READS_ONLY)
+        .args(CODEX_BARE)
         .arg(CODEX_TOLD_ON_STDIN);
     codex
 }
@@ -402,8 +414,22 @@ mod tests {
                 "--skip-git-repo-check",
                 "--color",
                 "never",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--disable",
+                "shell_tool",
+                "--disable",
+                "hooks",
+                "--disable",
+                "plugins",
+                "--disable",
+                "apps",
+                "--config",
+                "web_search=\"disabled\"",
                 "-",
-            ]
+            ],
+            "Codex has no flag that takes its tools away, so it is told nothing of the user's \
+             config, and what runs commands, searches the web or calls out is turned off"
         );
         let heard = Command::new("cat").stdin(stdin).output().unwrap();
         assert_eq!(

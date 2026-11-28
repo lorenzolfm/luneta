@@ -1379,9 +1379,7 @@ impl Asked {
 
     fn codex_review(&self, resumed: Option<&SessionId>, bare: &Path) -> Command {
         let mut codex = Command::new(Harness::Codex.program());
-        codex
-            .args(["exec", "--json"])
-            .args(headless::CODEX_READS_ONLY);
+        codex.args(["exec", "--json"]).args(headless::CODEX_BARE);
         if let Some(session) = resumed {
             codex.args([Harness::Codex.resumes(), session.as_str()]);
         }
@@ -1671,16 +1669,17 @@ fn read_pi(tools: &mut PiTools, outcome: &mut Outcome, record: &Value) -> Vec<Re
     }
 }
 
+const CODEX_SAYS: [&str; 4] = ["agent_message", "reasoning", "todo_list", "error"];
+
 fn read_codex(outcome: &mut Outcome, record: &Value) -> Vec<Read> {
     let item = &record["item"];
     match (record["type"].as_str(), item["type"].as_str()) {
         (Some("thread.started"), _) => session(&record["thread_id"], Harness::Codex),
-        (Some("item.started"), Some(tool)) if tool != "agent_message" && tool != "reasoning" => {
-            let ran = Step::Ran {
-                id: item["id"].as_str().unwrap_or_default().to_owned(),
-                command: item["command"].as_str().unwrap_or(tool).to_owned(),
-            };
-            vec![Read::Step(ran)]
+        (Some("item.started" | "item.updated" | "item.completed"), Some(tool))
+            if !CODEX_SAYS.contains(&tool) =>
+        {
+            let unheld = format!("codex ran {tool} where it has no tools");
+            vec![Read::Unsafe(unheld)]
         }
         (Some("item.completed"), Some("agent_message")) => {
             let text = item["text"].as_str().unwrap_or_default().trim();
@@ -2848,16 +2847,8 @@ mod tests {
         assert_eq!(command.get_program(), "codex");
         assert_eq!(command.get_current_dir(), Some(expected_bare.as_path()));
         assert_eq!(stdin, format!("{REVIEW_SYSTEM}\n\nthe diff\n\nExplain."));
-        let reads_only = [
-            "exec",
-            "--json",
-            "--sandbox",
-            "read-only",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-        ];
-        assert_eq!(args(&command), [&reads_only[..], &["-"]].concat());
+        let toolless = [&["exec", "--json"][..], &headless::CODEX_BARE[..]].concat();
+        assert_eq!(args(&command), [&toolless[..], &["-"]].concat());
         let followed = Asked::review_follow_up(
             Some(PathBuf::from("/w/lune")),
             session("7c22"),
@@ -2869,7 +2860,7 @@ mod tests {
         assert_eq!(stdin, format!("{REVIEW_SYSTEM}\n\nwhy?"));
         assert_eq!(
             args(&command),
-            [&reads_only[..], &["resume", "7c22", "-"]].concat(),
+            [&toolless[..], &["resume", "7c22", "-"]].concat(),
             "the words of a resumed turn still come on stdin"
         );
         let unknown = AskRequest {
@@ -3096,7 +3087,7 @@ console.log(JSON.stringify({ entries, results }));
     }
 
     #[test]
-    fn what_codex_writes_says_what_the_agent_said_and_ran() {
+    fn what_codex_writes_says_what_the_agent_said_and_a_tool_it_runs_ends_the_turn() {
         let mut reader = Reader::codex();
         assert!(reader.read("not json").is_err());
         let mut read = |record: Value| reader.read(&record.to_string()).unwrap();
@@ -3109,32 +3100,32 @@ console.log(JSON.stringify({ entries, results }));
             })]
         );
         assert_eq!(read(json!({"type": "turn.started"})), []);
-        let command = "/bin/bash -lc 'ls -a .'";
-        let ran = |event: &str, status: &str| {
-            json!({"type": event, "item": {"id": "item_0", "type": "command_execution",
-                   "command": command, "aggregated_output": "", "exit_code": null, "status": status}})
+        let item = |event: &str, kind: &str| json!({"type": event, "item": {"id": "item_0", "type": kind}});
+        let unheld = |tool: &str| {
+            [Read::Unsafe(format!(
+                "codex ran {tool} where it has no tools"
+            ))]
         };
-        assert_eq!(
-            read(ran("item.started", "in_progress")),
-            [Read::Step(Step::Ran {
-                id: "item_0".to_owned(),
-                command: command.to_owned(),
-            })]
-        );
-        assert_eq!(read(ran("item.completed", "completed")), []);
-        let searched =
-            json!({"type": "item.started", "item": {"id": "item_1", "type": "web_search"}});
-        assert_eq!(
-            read(searched),
-            [Read::Step(Step::Ran {
-                id: "item_1".to_owned(),
-                command: "web_search".to_owned(),
-            })],
-            "a tool with no command line is named by its kind"
-        );
-        let thought =
-            json!({"type": "item.started", "item": {"id": "item_2", "type": "reasoning"}});
-        assert_eq!(read(thought), []);
+        for (event, tool) in [
+            ("item.started", "command_execution"),
+            ("item.started", "web_search"),
+            ("item.started", "mcp_tool_call"),
+            ("item.started", "collab_tool_call"),
+            ("item.completed", "file_change"),
+            ("item.started", "a tool Codex gains later"),
+        ] {
+            assert_eq!(read(item(event, tool)), unheld(tool), "{event}");
+        }
+        for said in ["reasoning", "todo_list"] {
+            for event in ["item.started", "item.updated", "item.completed"] {
+                assert_eq!(
+                    read(item(event, said)),
+                    [],
+                    "{event} of {said} runs nothing"
+                );
+            }
+        }
+        assert_eq!(read(json!({"type": "item.started", "item": {}})), []);
         let says = |text: &str| json!({"type": "item.completed", "item": {"id": "item_3", "type": "agent_message", "text": text}});
         let said = |text: &str| Read::Step(Step::Said(text.to_owned()));
         assert_eq!(
