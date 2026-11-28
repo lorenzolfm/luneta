@@ -50,6 +50,7 @@ fn served_change(change: Option<&Change>) -> Result<(), Status> {
         Some(Change::Bring(_)) => unserved_change("Bring"),
         Some(Change::OpenBrowser(_)) => unserved_change("OpenBrowser"),
         Some(Change::CloseBrowser(_)) => unserved_change("CloseBrowser"),
+        Some(Change::ReviveView(_)) => unserved_change("ReviveView"),
     }
 }
 
@@ -368,6 +369,10 @@ mod tests {
             (
                 "CloseBrowser",
                 Some(Change::CloseBrowser(change::CloseBrowser::default())),
+            ),
+            (
+                "ReviveView",
+                Some(Change::ReviveView(change::ReviveView::default())),
             ),
             ("with no change", None),
         ];

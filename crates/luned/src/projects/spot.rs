@@ -58,15 +58,63 @@ pub fn bare_in(folder: &Path) -> bool {
     folder.join(BARE).is_dir()
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unlisted {
+    Invalid(String),
+    Transient(String),
+}
+
+impl Unlisted {
+    #[must_use]
+    pub fn into_string(self) -> String {
+        match self {
+            Unlisted::Invalid(why) | Unlisted::Transient(why) => why,
+        }
+    }
+}
+
 pub fn subfolders(root: &Dir, look: Duration) -> Result<Listed, String> {
-    listed(root, Instant::now() + look, look)
+    subfolders_checked(root, look).map_err(Unlisted::into_string)
+}
+
+pub fn subfolders_checked(root: &Dir, look: Duration) -> Result<Listed, Unlisted> {
+    listed_checked(root, Instant::now() + look, look)
 }
 
 fn listed(root: &Dir, until: Instant, look: Duration) -> Result<Listed, String> {
+    listed_checked(root, until, look).map_err(Unlisted::into_string)
+}
+
+fn listed_checked(root: &Dir, until: Instant, look: Duration) -> Result<Listed, Unlisted> {
     let mut git = Git::of(&Directory::from(root).child(BARE), "worktree");
     git.args(["list", "--porcelain", "-z"]);
-    let said = ran(git, "worktree list", until, look)?;
-    porcelain(root, &said)
+    let limit = left(until, look).map_err(Unlisted::Transient)?;
+    let outcome = git
+        .run(limit)
+        .map_err(|error| Unlisted::Transient(format!("git worktree list did not run: {error}")))?;
+    match outcome {
+        Ran::Ended { status, stdout, .. } if status.success() => {
+            porcelain(root, &stdout).map_err(Unlisted::Invalid)
+        }
+        Ran::Ended { status, .. } => {
+            let signaled = status.code().is_none();
+            let why = outcome
+                .answer()
+                .expect_err("non-successful git run returns an error");
+            let why = format!("git worktree list: {why}");
+            if signaled {
+                Err(Unlisted::Transient(why))
+            } else {
+                Err(Unlisted::Invalid(why))
+            }
+        }
+        Ran::Stuck => {
+            let why = outcome
+                .answer()
+                .expect_err("stuck git run returns an error");
+            Err(Unlisted::Transient(format!("git worktree list: {why}")))
+        }
+    }
 }
 
 fn left(until: Instant, look: Duration) -> Result<Duration, String> {
@@ -93,12 +141,6 @@ fn toplevel(folder: &Dir, until: Instant, look: Duration) -> Result<Option<Dir>,
     }
     let top = lines.next().ok_or("git named no top")?;
     Dir::parse(top).map(Some)
-}
-
-fn ran(git: Git, asked: &str, until: Instant, look: Duration) -> Result<Vec<u8>, String> {
-    let ran = git.run(left(until, look)?);
-    let ran = ran.map_err(|error| format!("git {asked} did not run: {error}"))?;
-    ran.answer().map_err(|why| format!("git {asked}: {why}"))
 }
 
 pub fn clone_of(common: &Directory, look: Duration) -> Result<CloneRoot, String> {

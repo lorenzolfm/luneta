@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::path::Path;
@@ -9,9 +9,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::layout::{self, Direction, Order, Sides, Towards};
-use lune_domain::projects::{Argv, Arranged, Listed, Opens, WORKTREES_MAX, quoted};
+use lune_domain::projects::{Argv, Arranged, BARE, Listed, Opens, WORKTREES_MAX, quoted};
 use lune_domain::projects::{
-    Ask, Browser, BrowserTarget, BrowserUrl, Change, CloseTarget, Closing, Dir, Id, Line, Placed,
+    Ask, Browser, BrowserTarget, BrowserUrl, Change, CloseTarget, Closing, Dir, Id, Line, Name,
+    Placed, ReviveWorktree, Subfolder,
 };
 use lune_domain::projects::{Holds, ProjectName, Worktree};
 use lune_domain::projects::{
@@ -38,7 +39,9 @@ use crate::mux::{Failure, Runs as Opened};
 use crate::program::{self, Ran as Looked};
 use crate::projects::{self, Changed, Failed, Store};
 use crate::resume::config::{self as resume_config, ConfigState};
-use crate::resume::store::{RecordSource, ResumeAttempt, ResumeStore, StoredResume};
+use crate::resume::store::{
+    OwnedResumeRecord, RecordSource, ResumeAttempt, ResumeStore, StoredResume,
+};
 use crate::resume::synthesize::{LiveTerminal, Synthesizer};
 use crate::resume::{self, trust};
 use crate::shells::Shell;
@@ -58,6 +61,10 @@ pub const CLIENTS_MAX: usize = 64;
 pub const ANSWERS_MAX: usize = 64;
 
 const COMMANDS_MAX: usize = 64;
+
+const CLOSED_VIEWS_MAX: usize = 64;
+
+const REVIVE_FOLDER_CACHE_MAX: usize = 3 * CLOSED_VIEWS_MAX;
 
 const TAG: &str = "lune terminal ";
 
@@ -85,6 +92,7 @@ const SHELLS: [&str; 9] = [
 ];
 
 const _: () = assert!(ANSWERS_MAX > 1);
+const _: () = assert!(CLOSED_VIEWS_MAX > 0);
 const _: () = assert!(RESTORE_ATTEMPTS_MAX > 0);
 const _: () = assert!(RESTORES_PER_PASS > 0);
 const _: () = assert!(RESTORES_PER_PASS <= VIEWS_MAX);
@@ -402,12 +410,21 @@ pub fn start(
             }
         }
     }
-    let (resume_store, resume_store_warning) = ResumeStore::open(store.projects().is_some());
+    let (mut resume_store, resume_store_warning) = ResumeStore::open(store.projects().is_some());
     if let Some(why) = resume_store_warning {
         log::say(&format!("resume records: {why}"));
     }
     let mut homes = Homes::start(FOLDER_LOOK)?;
     if let Some(projects) = store.projects() {
+        if resume_store.unkept().is_none() {
+            let live: BTreeSet<ViewId> = projects
+                .terminals()
+                .map(|(_, terminal)| terminal.id().view())
+                .collect();
+            if let Err(why) = resume_store.retain_views(&live) {
+                log::say(&format!("resume records: {why}"));
+            }
+        }
         homes.seed(projects);
     }
     let layouts = Layouts {
@@ -431,6 +448,7 @@ pub fn start(
         resume_config,
         resume_store,
         resume_synth: Synthesizer::default(),
+        closed_views: VecDeque::with_capacity(CLOSED_VIEWS_MAX),
     };
     let thread = thread::Builder::new().name("layouts".to_owned());
     thread.spawn(move || run(layouts, &commands, sweep))?;
@@ -458,6 +476,152 @@ struct Layouts {
     resume_config: ConfigState,
     resume_store: ResumeStore,
     resume_synth: Synthesizer,
+    closed_views: VecDeque<ClosedView>,
+}
+
+#[derive(Clone, Debug)]
+struct ClosedView {
+    place: ClosedPlace,
+    kind: ClosedKind,
+}
+
+#[derive(Clone, Debug)]
+enum ClosedPlace {
+    Folder {
+        project: ProjectId,
+        worktree: WorktreeId,
+        arranged: Arranged,
+    },
+    Clone {
+        project: ProjectId,
+        worktree: WorktreeId,
+        subfolder: Subfolder,
+        worktree_name: Option<Name>,
+        arranged: Arranged,
+    },
+}
+
+impl ClosedPlace {
+    fn project(&self) -> ProjectId {
+        match self {
+            ClosedPlace::Folder { project, .. } | ClosedPlace::Clone { project, .. } => *project,
+        }
+    }
+
+    fn worktree(&self) -> WorktreeId {
+        match self {
+            ClosedPlace::Folder { worktree, .. } | ClosedPlace::Clone { worktree, .. } => *worktree,
+        }
+    }
+
+    fn arranged(&self) -> Arranged {
+        match self {
+            ClosedPlace::Folder { arranged, .. } | ClosedPlace::Clone { arranged, .. } => *arranged,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingResume {
+    source: RecordSource,
+    record: OwnedResumeRecord,
+}
+
+#[derive(Clone, Debug)]
+struct ClosedTerminal {
+    folder: Dir,
+    runs: Runs,
+    name: Option<Name>,
+    resume: Option<PendingResume>,
+}
+
+#[derive(Clone, Debug)]
+enum ClosedKind {
+    Terminal(Box<ClosedTerminal>),
+    Browser { url: Option<BrowserUrl> },
+    Review,
+    Welcome,
+}
+
+enum PreparedTarget {
+    ExistingEmpty {
+        worktree: WorktreeId,
+        size: Size,
+        arranged: Arranged,
+    },
+    ExistingLaid {
+        worktree: WorktreeId,
+        size: Size,
+        focus: Option<ViewId>,
+    },
+    ReopenClone {
+        project: ProjectId,
+        listed: Listed,
+        subfolder: Subfolder,
+        name: Option<Name>,
+        arranged: Arranged,
+    },
+}
+
+struct PreparedTerminal {
+    spawn_folder: Dir,
+    changed_folder: bool,
+    runs: Runs,
+    name: Option<Name>,
+    resume: Option<PendingResume>,
+}
+
+enum PreparedKind {
+    Terminal(Box<PreparedTerminal>),
+    Browser { url: Option<BrowserUrl> },
+    Review,
+    Welcome,
+}
+
+struct PreparedRevive {
+    target: PreparedTarget,
+    kind: PreparedKind,
+}
+
+enum TargetResolution {
+    Ready(PreparedRevive),
+    Gone,
+}
+
+enum RevivedWorktree {
+    Reopened(WorktreeId),
+    Existing(WorktreeId),
+}
+
+impl RevivedWorktree {
+    fn id(&self) -> WorktreeId {
+        match self {
+            RevivedWorktree::Reopened(worktree) | RevivedWorktree::Existing(worktree) => *worktree,
+        }
+    }
+
+    fn made(&self) -> Made {
+        match self {
+            RevivedWorktree::Reopened(worktree) => Made::Worktree(*worktree),
+            RevivedWorktree::Existing(worktree) => Made::Found(*worktree),
+        }
+    }
+}
+
+struct RevivedView {
+    worktree: RevivedWorktree,
+    view: ViewId,
+}
+
+enum ReviveFailure {
+    Requeue(Failed),
+    KeptInLayout(String),
+}
+
+struct TerminalSnapshot {
+    folder: Dir,
+    runs: Runs,
+    keeps_restored: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -704,6 +868,7 @@ impl Layouts {
                     }
                     Ask::CloseView(target) => self.close_view(target).map(alone),
                     Ask::OpenBrowser { target, url } => self.open_browser(target, url),
+                    Ask::ReviveView => self.revive_view(),
                 };
                 let kept = self.store.revision();
                 let _ = answer.send(changed.map(|(made, opened)| Changed { made, opened, kept }));
@@ -1298,8 +1463,16 @@ impl Layouts {
         &mut self,
         change: Change,
     ) -> Result<(Option<Made>, Option<projects::Opened>), Failed> {
+        let forgot = match &change {
+            Change::ForgetProject { project } => Some(*project),
+            _ => None,
+        };
         let Some(opens) = change.opens() else {
-            return self.store.change(change).map(|made| (made, None));
+            let made = self.store.change(change)?;
+            if let Some(project) = forgot {
+                self.forget_closed_project(project);
+            }
+            return Ok((made, None));
         };
         let found_agent = match &change {
             Change::Pull { agent, .. } => agent.clone(),
@@ -1532,6 +1705,7 @@ impl Layouts {
                 "worktree {worktree} goes with it"
             );
         }
+        self.forget_closed_project(project);
         self.forget_closed(&terminals);
         Ok(None)
     }
@@ -1573,6 +1747,14 @@ impl Layouts {
             terminals.len() + browsers.len() <= most,
             "a layout holds at most {most} views"
         );
+        if !terminals.is_empty() {
+            self.read_runs();
+        }
+        let closed_snapshots = {
+            let projects = self.kept().map_err(Failed::NotKept)?;
+            let (project, shown) = projects.find(worktree).ok_or_else(unknown)?;
+            self.snapshot_worktree_views(project, shown)
+        };
         let mux_closed = self.close_terminals(&terminals)?;
         let kept = self.store.closed(Closing::Worktree(worktree));
         let what = format!("worktree {worktree}'s terminals");
@@ -1583,6 +1765,9 @@ impl Layouts {
         };
         if let Some(why) = kept? {
             self.unwritten(&why);
+        }
+        for snapshot in closed_snapshots {
+            self.push_closed(snapshot);
         }
         for client in self.clients.values_mut() {
             if let ClientPlace::Showing {
@@ -2514,24 +2699,48 @@ impl Layouts {
                 "neither {kept} nor its worktree's {theirs} is a folder"
             ));
         };
+        let stored = self.resume_store.get(terminal.view()).cloned();
+        self.spawn_restored(
+            terminal,
+            &folder,
+            changed_folder,
+            &runs,
+            inner,
+            stored.as_ref(),
+        )
+    }
+
+    fn spawn_restored(
+        &mut self,
+        terminal: TerminalViewId,
+        folder: &Dir,
+        changed_folder: bool,
+        runs: &Runs,
+        inner: Size,
+        stored: Option<&StoredResume>,
+    ) -> Result<(), String> {
+        assert!(
+            !self.known.contains_key(&terminal),
+            "restored terminal {terminal} is not already known"
+        );
         let tagged = tag(terminal.view());
 
-        if let Some(stored) = self.resume_store.get(terminal.view()).cloned() {
+        if let Some(stored) = stored {
             return self.remade_saved(
                 terminal,
-                &folder,
+                folder,
                 changed_folder,
-                &runs,
+                runs,
                 inner,
                 tagged,
-                &stored,
+                stored,
             );
         }
 
-        let cwd = Directory::from(&folder);
+        let cwd = Directory::from(folder);
         let args: Vec<String>;
         let mut reset_to_shell = false;
-        let (opened, restore) = match &runs {
+        let (opened, restore) = match runs {
             Runs::Shell => (Opened::Shell(&self.shell), None),
             Runs::Command(line) | Runs::Unrun(line) => {
                 let restore = if line.as_str().contains('\n') {
@@ -2615,7 +2824,7 @@ impl Layouts {
         if reset_to_shell {
             let plain = Ran {
                 terminal,
-                folder,
+                folder: folder.clone(),
                 runs: Runs::Shell,
             };
             if let Err(why) = self.changed(Change::Ran(vec![plain])) {
@@ -2626,8 +2835,8 @@ impl Layouts {
         } else if let Runs::Command(line) = runs {
             let unrun = Ran {
                 terminal,
-                folder,
-                runs: Runs::Unrun(line),
+                folder: folder.clone(),
+                runs: Runs::Unrun(line.clone()),
             };
             if let Err(why) = self.changed(Change::Ran(vec![unrun])) {
                 self.troubles.say(format!(
@@ -2842,7 +3051,11 @@ impl Layouts {
         let View::Terminal(terminal) = held else {
             return self.closed(view);
         };
-        let key = match self.known.get(&terminal.id()) {
+        let terminal_id = terminal.id();
+        if self.known.contains_key(&terminal_id) {
+            self.read_runs();
+        }
+        let key = match self.known.get(&terminal_id) {
             Some(known) => Some(known.key),
             None => self.mux.tagged(&tag(view)).map_err(|failure| {
                 let unlooked = format!("terminal {view} is not looked for");
@@ -2861,18 +3074,31 @@ impl Layouts {
     }
 
     fn closed(&mut self, view: ViewId) -> Result<(), Failed> {
+        self.closed_with(view, None)
+    }
+
+    fn closed_with(
+        &mut self,
+        view: ViewId,
+        last_listed: Option<&server::Terminal>,
+    ) -> Result<(), Failed> {
         let projects = self.kept().map_err(Failed::NotKept)?;
         let unheld = || Failed::Refused(format!("no layout holds the view {view}"));
-        let (held_in, _) = projects.holding_view(view).ok_or_else(unheld)?;
+        let (held_in, held_view) = projects.holding_view(view).ok_or_else(unheld)?;
+        let (project, _) = projects
+            .find(held_in.id())
+            .expect("a worktree holding a view belongs to a project");
         let tree = held_in
             .layout()
             .tree()
             .expect("a layout that holds a view is laid");
         let heir = tree.heir(view);
-        let terminal = projects.holding_terminal(view).map(|(_, it)| it.id());
+        let terminal = held_view.terminal().map(Terminal::id);
+        let snapshot = self.snapshot_closed(project, held_in, held_view, last_listed);
         if let Some(why) = self.store.followed(Change::Close { view })? {
             self.unwritten(&why);
         }
+        self.push_closed(snapshot);
         if let Some(terminal) = terminal {
             self.known.remove(&terminal);
             self.resume_synth.remove(terminal);
@@ -2911,6 +3137,538 @@ impl Layouts {
         });
         assert!(!focused, "no client focuses view {view}, which closed");
         Ok(())
+    }
+
+    fn push_closed(&mut self, closed: ClosedView) {
+        assert!(
+            self.closed_views.len() <= CLOSED_VIEWS_MAX,
+            "closed view history stays within CLOSED_VIEWS_MAX before push"
+        );
+        if self.closed_views.len() == CLOSED_VIEWS_MAX {
+            self.closed_views.pop_front();
+        }
+        self.closed_views.push_back(closed);
+        assert!(
+            !self.closed_views.is_empty(),
+            "pushing a closed view leaves history non-empty"
+        );
+        assert!(
+            self.closed_views.len() <= CLOSED_VIEWS_MAX,
+            "closed view history stays within CLOSED_VIEWS_MAX"
+        );
+    }
+
+    fn forget_closed_project(&mut self, project: ProjectId) {
+        assert!(
+            self.closed_views.len() <= CLOSED_VIEWS_MAX,
+            "closed view history stays within CLOSED_VIEWS_MAX before forget"
+        );
+        self.closed_views
+            .retain(|entry| entry.place.project() != project);
+        assert!(
+            self.closed_views
+                .iter()
+                .all(|entry| entry.place.project() != project),
+            "forgotten project {project} keeps no closed views"
+        );
+    }
+
+    fn snapshot_worktree_views(&self, project: &Project, shown: &Worktree) -> Vec<ClosedView> {
+        assert!(
+            project.worktrees().any(|it| it.id() == shown.id()),
+            "worktree {} belongs to project {}",
+            shown.id(),
+            project.id()
+        );
+        let focus = shown.layout().last_focus();
+        let mut views: Vec<&View> = shown.layout().views().collect();
+        assert!(
+            views.len() <= LAYOUT_VIEWS_MAX,
+            "a worktree holds at most {LAYOUT_VIEWS_MAX} views"
+        );
+        if let Some(focused) = focus {
+            let focused_index = views
+                .iter()
+                .position(|it| layout::Leaf::id(*it) == focused)
+                .expect("last_focus is a view in the layout");
+            let focused_view = views.remove(focused_index);
+            views.push(focused_view);
+        }
+        let snapshots: Vec<ClosedView> = views
+            .iter()
+            .map(|view| self.snapshot_closed(project, shown, view, None))
+            .collect();
+        assert_eq!(
+            snapshots.len(),
+            views.len(),
+            "every view in the worktree is snapshotted"
+        );
+        snapshots
+    }
+
+    fn snapshot_closed(
+        &self,
+        project: &Project,
+        worktree: &Worktree,
+        held: &View,
+        last_listed: Option<&server::Terminal>,
+    ) -> ClosedView {
+        let view_id = layout::Leaf::id(held);
+        assert!(
+            worktree.layout().holds(view_id),
+            "snapshotted view {view_id} belongs to worktree {}",
+            worktree.id()
+        );
+        let arranged = worktree
+            .layout()
+            .arranged()
+            .expect("a layout holding a view is arranged");
+        let place = match project.holds() {
+            Holds::Folder(_) => ClosedPlace::Folder {
+                project: project.id(),
+                worktree: worktree.id(),
+                arranged,
+            },
+            Holds::Clone(_) => {
+                let subfolder = project
+                    .subfolder(worktree.id())
+                    .expect("a clone worktree has a subfolder")
+                    .clone();
+                ClosedPlace::Clone {
+                    project: project.id(),
+                    worktree: worktree.id(),
+                    subfolder,
+                    worktree_name: worktree.renamed().cloned(),
+                    arranged,
+                }
+            }
+        };
+        let kind = match held {
+            View::Terminal(terminal) => {
+                let known = self.known.get(&terminal.id());
+                let listed = last_listed.or_else(|| known.and_then(|it| self.listed.get(&it.key)));
+                let restored = known
+                    .and_then(|it| it.remade.as_ref())
+                    .and_then(|it| it.restored.as_ref());
+                let TerminalSnapshot { folder, runs, .. } =
+                    terminal_runs_snapshot(terminal, restored, listed, &self.shell);
+                let still_resuming = matches!(restored, Some(Restored::Resuming { .. }));
+                let at_shell = listed.is_some() && runs == Runs::Shell && !still_resuming;
+                let resume = choose_closed_resume(
+                    listed,
+                    at_shell,
+                    self.resume_synth.get(terminal.id()),
+                    self.resume_store.get(terminal.id().view()),
+                );
+                ClosedKind::Terminal(Box::new(ClosedTerminal {
+                    folder,
+                    runs,
+                    name: terminal.name().cloned(),
+                    resume,
+                }))
+            }
+            View::Browser(browser) => ClosedKind::Browser {
+                url: browser.url().cloned(),
+            },
+            View::Review(_) => ClosedKind::Review,
+            View::Welcome(_) => ClosedKind::Welcome,
+        };
+        ClosedView { place, kind }
+    }
+
+    fn revive_view(&mut self) -> Result<(Option<Made>, Option<projects::Opened>), Failed> {
+        let _ = self.kept().map_err(Failed::NotKept)?;
+        assert!(
+            self.closed_views.len() <= CLOSED_VIEWS_MAX,
+            "closed view history stays within CLOSED_VIEWS_MAX before revive"
+        );
+        let mut folder_cache = BTreeMap::new();
+        let mut clone_cache = BTreeMap::new();
+        for _ in 0..CLOSED_VIEWS_MAX {
+            let Some(entry) = self.closed_views.pop_back() else {
+                return Err(Failed::Refused("nothing closed to revive".to_owned()));
+            };
+            let prepared =
+                match self.resolve_revive_target(&entry, &mut folder_cache, &mut clone_cache) {
+                    Ok(TargetResolution::Ready(prepared)) => prepared,
+                    Ok(TargetResolution::Gone) => continue,
+                    Err(failed) => {
+                        self.push_closed(entry);
+                        return Err(failed);
+                    }
+                };
+            match self.revive_entry(prepared) {
+                Ok(RevivedView { worktree, view }) => {
+                    let worktree_id = worktree.id();
+                    for client in self.clients.values_mut() {
+                        if let ClientPlace::Showing {
+                            worktree: shown,
+                            focus,
+                            ..
+                        } = &mut client.place
+                            && *shown == worktree_id
+                        {
+                            *focus = Some(view);
+                        }
+                    }
+                    self.went(worktree_id);
+                    return Ok((Some(worktree.made()), Some(projects::Opened::View(view))));
+                }
+                Err(ReviveFailure::Requeue(failed)) => {
+                    self.push_closed(entry);
+                    return Err(failed);
+                }
+                Err(ReviveFailure::KeptInLayout(why)) => {
+                    return Err(Failed::Unopened(why));
+                }
+            }
+        }
+        assert!(
+            self.closed_views.is_empty(),
+            "reviving checked every closed view"
+        );
+        Err(Failed::Refused("nothing closed to revive".to_owned()))
+    }
+
+    fn resolve_revive_target(
+        &self,
+        entry: &ClosedView,
+        folder_cache: &mut BTreeMap<Dir, bool>,
+        clone_cache: &mut BTreeMap<ProjectId, Option<Listed>>,
+    ) -> Result<TargetResolution, Failed> {
+        let projects = self.kept().map_err(Failed::NotKept)?;
+        let place = &entry.place;
+        let (worktree_folder, target) =
+            if let Some((project, shown)) = projects.find(place.worktree()) {
+                let folder = project
+                    .folder(place.worktree())
+                    .expect("a held worktree has a folder");
+                (
+                    folder,
+                    self.prepared_existing(place.worktree(), shown, place.arranged()),
+                )
+            } else {
+                let Some(project) = projects.project_of(place.project()) else {
+                    return Ok(TargetResolution::Gone);
+                };
+                match (project.holds(), place) {
+                    (Holds::Folder(own), ClosedPlace::Folder { arranged, .. }) => (
+                        project.dir().clone(),
+                        self.prepared_existing(own.id(), own, *arranged),
+                    ),
+                    (
+                        Holds::Clone(_),
+                        ClosedPlace::Clone {
+                            subfolder,
+                            worktree_name,
+                            arranged,
+                            ..
+                        },
+                    ) => {
+                        if let Some(existing) = project.worktree_at(subfolder) {
+                            let (_, shown) = projects
+                                .find(existing)
+                                .expect("a clone worktree at subfolder is held");
+                            let folder = project
+                                .folder(existing)
+                                .expect("a held worktree has a folder");
+                            (folder, self.prepared_existing(existing, shown, *arranged))
+                        } else {
+                            let Ok(folder) = project.dir().try_at(subfolder) else {
+                                return Ok(TargetResolution::Gone);
+                            };
+                            if !is_folder_cached(&folder, folder_cache).map_err(Failed::Refused)? {
+                                return Ok(TargetResolution::Gone);
+                            }
+                            let Some(listed) = clone_listed_cached(
+                                project.id(),
+                                project.dir(),
+                                folder_cache,
+                                clone_cache,
+                            )
+                            .map_err(Failed::Refused)?
+                            else {
+                                return Ok(TargetResolution::Gone);
+                            };
+                            if !listed.subfolders().contains(subfolder) {
+                                return Ok(TargetResolution::Gone);
+                            }
+                            (
+                                folder,
+                                PreparedTarget::ReopenClone {
+                                    project: project.id(),
+                                    listed,
+                                    subfolder: subfolder.clone(),
+                                    name: worktree_name.clone(),
+                                    arranged: *arranged,
+                                },
+                            )
+                        }
+                    }
+                    (Holds::Folder(_), ClosedPlace::Clone { .. })
+                    | (Holds::Clone(_), ClosedPlace::Folder { .. }) => {
+                        return Ok(TargetResolution::Gone);
+                    }
+                }
+            };
+
+        let kind = match &entry.kind {
+            ClosedKind::Terminal(closed_terminal) => {
+                let ClosedTerminal {
+                    folder,
+                    runs,
+                    name,
+                    resume,
+                } = closed_terminal.as_ref();
+                let (spawn_folder, changed_folder) = if is_folder_cached(folder, folder_cache)
+                    .map_err(Failed::Refused)?
+                {
+                    (folder.clone(), false)
+                } else if folder != &worktree_folder
+                    && is_folder_cached(&worktree_folder, folder_cache).map_err(Failed::Refused)?
+                {
+                    (worktree_folder, true)
+                } else {
+                    return Ok(TargetResolution::Gone);
+                };
+                PreparedKind::Terminal(Box::new(PreparedTerminal {
+                    spawn_folder,
+                    changed_folder,
+                    runs: runs.clone(),
+                    name: name.clone(),
+                    resume: resume.clone(),
+                }))
+            }
+            ClosedKind::Browser { url } => PreparedKind::Browser { url: url.clone() },
+            ClosedKind::Review => PreparedKind::Review,
+            ClosedKind::Welcome => PreparedKind::Welcome,
+        };
+
+        Ok(TargetResolution::Ready(PreparedRevive { target, kind }))
+    }
+
+    fn prepared_existing(
+        &self,
+        worktree: WorktreeId,
+        shown: &Worktree,
+        arranged: Arranged,
+    ) -> PreparedTarget {
+        assert_eq!(
+            shown.id(),
+            worktree,
+            "prepared existing target matches its worktree"
+        );
+        let shown_clients = self
+            .clients
+            .values()
+            .filter(|it| it.showing_worktree(worktree));
+        let size =
+            fit(shown_clients, shown.layout(), &self.known).map_or(UNSHOWN_SIZE, |fit| fit.size);
+        if shown.layout().is_empty() {
+            PreparedTarget::ExistingEmpty {
+                worktree,
+                size,
+                arranged,
+            }
+        } else {
+            PreparedTarget::ExistingLaid {
+                worktree,
+                size,
+                focus: shown.layout().last_focus(),
+            }
+        }
+    }
+
+    fn revive_entry(&mut self, prepared: PreparedRevive) -> Result<RevivedView, ReviveFailure> {
+        let mut terminal_spawn: Option<(TerminalViewId, Dir, bool, Runs, Option<PendingResume>)> =
+            None;
+        let view = match prepared.kind {
+            PreparedKind::Terminal(prepared_terminal) => {
+                let PreparedTerminal {
+                    spawn_folder,
+                    changed_folder,
+                    runs,
+                    name,
+                    resume,
+                } = *prepared_terminal;
+                let terminal = self
+                    .store
+                    .fresh_terminal()
+                    .map_err(ReviveFailure::Requeue)?;
+                let made = Terminal::new(terminal, spawn_folder.clone(), runs.clone()).named(name);
+                terminal_spawn = Some((terminal, spawn_folder, changed_folder, runs, resume));
+                View::Terminal(made)
+            }
+            PreparedKind::Browser { url } => {
+                let id = self.store.fresh().map_err(ReviveFailure::Requeue)?;
+                View::Browser(Browser::new(id, url))
+            }
+            PreparedKind::Review => {
+                View::Review(self.store.fresh().map_err(ReviveFailure::Requeue)?)
+            }
+            PreparedKind::Welcome => {
+                View::Welcome(self.store.fresh().map_err(ReviveFailure::Requeue)?)
+            }
+        };
+        let view_id = layout::Leaf::id(&view);
+
+        let (revived_worktree, worktree, inner) = match prepared.target {
+            PreparedTarget::ExistingEmpty {
+                worktree,
+                size,
+                arranged,
+            } => {
+                self.store
+                    .change(Change::Open {
+                        worktree,
+                        view,
+                        placed: Placed::Alone(arranged),
+                        size,
+                    })
+                    .map_err(ReviveFailure::Requeue)?;
+                (
+                    RevivedWorktree::Existing(worktree),
+                    worktree,
+                    layout::lone(size),
+                )
+            }
+            PreparedTarget::ExistingLaid {
+                worktree,
+                size,
+                focus,
+            } => {
+                let projects = self
+                    .kept()
+                    .map_err(Failed::NotKept)
+                    .map_err(ReviveFailure::Requeue)?;
+                let (_, shown) = projects.find(worktree).ok_or_else(|| {
+                    ReviveFailure::Requeue(Failed::Refused(format!(
+                        "no worktree has the id {worktree}"
+                    )))
+                })?;
+                let (placed, inner) = if focus.is_some() {
+                    placement(shown.layout(), focus, Beside::Focused, view_id, size).or_else(|_| {
+                        placement(shown.layout(), focus, Beside::Largest, view_id, size)
+                    })
+                } else {
+                    placement(shown.layout(), None, Beside::Largest, view_id, size)
+                }
+                .map_err(Failed::Refused)
+                .map_err(ReviveFailure::Requeue)?;
+                self.store
+                    .change(Change::Open {
+                        worktree,
+                        view,
+                        placed,
+                        size,
+                    })
+                    .map_err(ReviveFailure::Requeue)?;
+                (RevivedWorktree::Existing(worktree), worktree, inner)
+            }
+            PreparedTarget::ReopenClone {
+                project,
+                listed,
+                subfolder,
+                name,
+                arranged,
+            } => {
+                let worktree = self
+                    .store
+                    .revive_worktree(ReviveWorktree {
+                        project,
+                        listed,
+                        subfolder,
+                        name,
+                        arranged,
+                        view,
+                    })
+                    .map_err(ReviveFailure::Requeue)?;
+                (
+                    RevivedWorktree::Reopened(worktree),
+                    worktree,
+                    layout::lone(UNSHOWN_SIZE),
+                )
+            }
+        };
+
+        if let Some((terminal, spawn_folder, changed_folder, runs, resume)) = terminal_spawn {
+            let stored_resume = match resume {
+                Some(saved) => match self.resume_store.upsert(
+                    terminal.view(),
+                    saved.source,
+                    saved.record.clone(),
+                ) {
+                    Ok(()) => Some(StoredResume {
+                        source: saved.source,
+                        record: saved.record,
+                        attempt: ResumeAttempt::Pending,
+                    }),
+                    Err(why) => {
+                        self.troubles
+                            .say(format!("terminal {terminal}'s resume record: {why}"));
+                        None
+                    }
+                },
+                None => None,
+            };
+            if let Err(why) = self.spawn_restored(
+                terminal,
+                &spawn_folder,
+                changed_folder,
+                &runs,
+                inner,
+                stored_resume.as_ref(),
+            ) {
+                let unopened = self.followed(Change::Unopen { terminal });
+                let failure_message = format!("no terminal opens in worktree {worktree}: {why}");
+                match unopened {
+                    Ok(()) => {
+                        self.homes.forget(terminal);
+                        if stored_resume.is_some()
+                            && let Err(remove_why) = self.resume_store.remove(terminal.view())
+                        {
+                            self.troubles
+                                .say(format!("terminal {terminal}'s resume record: {remove_why}"));
+                        }
+                        let projects = self
+                            .store
+                            .projects()
+                            .expect("projects just unopened are kept");
+                        assert!(
+                            projects.holding_view(view_id).is_none(),
+                            "unopened terminal {terminal} left its layout"
+                        );
+                        return Err(ReviveFailure::Requeue(Failed::Refused(failure_message)));
+                    }
+                    Err(rollback_why) => {
+                        self.troubles
+                            .say(format!("terminal {terminal} stays lost: {rollback_why}"));
+                        return Err(ReviveFailure::KeptInLayout(failure_message));
+                    }
+                }
+            }
+        }
+
+        let projects = self
+            .store
+            .projects()
+            .expect("projects just changed are kept");
+        let held_in = projects.holding_view(view_id).map(|(it, _)| it.id());
+        assert_eq!(
+            held_in,
+            Some(worktree),
+            "revived view {view_id} opened in its worktree"
+        );
+        let last_focus = self.layout(worktree).map(Layout::last_focus);
+        assert_eq!(
+            last_focus,
+            Ok(Some(view_id)),
+            "revived view {view_id} opens focused"
+        );
+        Ok(RevivedView {
+            worktree: revived_worktree,
+            view: view_id,
+        })
     }
 
     fn heard_listed(&mut self, listed: TerminalsListed) {
@@ -3004,7 +3762,8 @@ impl Layouts {
         );
         let before = std::mem::replace(&mut self.listed, terminals);
         for terminal in ended {
-            if let Err(failed) = self.closed(terminal.view()) {
+            let last = before_keys.get(&terminal).and_then(|key| before.get(key));
+            if let Err(failed) = self.closed_with(terminal.view(), last) {
                 let stays = format!("terminal {terminal} ended, and stays in its layout");
                 self.troubles.say(format!("{stays}: {}", failed.said()));
             }
@@ -3090,9 +3849,19 @@ impl Layouts {
                 Some(Restored::Resuming { .. })
             );
             let store_result = if let Some(record) = chosen_osc {
-                resume_store.upsert(terminal.view(), RecordSource::Osc7577, record)
+                match OwnedResumeRecord::try_for_current_user(record) {
+                    Some(owned) => {
+                        resume_store.upsert(terminal.view(), RecordSource::Osc7577, owned)
+                    }
+                    None => Err("resume record uid does not match current user".to_owned()),
+                }
             } else if let Some(record) = chosen_synth {
-                resume_store.upsert(terminal.view(), RecordSource::Synthesized, record)
+                match OwnedResumeRecord::try_for_current_user(record) {
+                    Some(owned) => {
+                        resume_store.upsert(terminal.view(), RecordSource::Synthesized, owned)
+                    }
+                    None => Err("resume record uid does not match current user".to_owned()),
+                }
             } else if !still_resuming {
                 resume_store.remove(terminal.view())
             } else {
@@ -3103,19 +3872,16 @@ impl Layouts {
                     "terminal {terminal}'s resume record is not kept: {why}"
                 ));
             }
-            let folder = listed
-                .cwd
-                .as_ref()
-                .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
-                .unwrap_or_else(|| held.folder().clone());
-            let mut runs = runs_of(listed, held.runs(), shell);
             let restored = known
                 .remade
                 .as_ref()
                 .and_then(|remade| remade.restored.as_ref());
-            if keeps(restored, held.runs(), &listed.is) {
-                runs = held.runs().clone();
-            } else if let Some(remade) = &mut known.remade {
+            let TerminalSnapshot {
+                folder,
+                runs,
+                keeps_restored,
+            } = terminal_runs_snapshot(held, restored, Some(listed), shell);
+            if !keeps_restored && let Some(remade) = &mut known.remade {
                 remade.restored = None;
             }
             if folder != *held.folder() {
@@ -3220,7 +3986,7 @@ impl Layouts {
                 } else if let Some(stored) = stored {
                     records.push(evaluate_resume_record(
                         stored.source,
-                        &stored.record,
+                        stored.record.as_record(),
                         true,
                         Some(stored),
                         &self.resume_config,
@@ -3741,9 +4507,9 @@ fn evaluate_resume_record(
     let persistence = match stored {
         Some(saved)
             if saved.source == source
-                && saved.record.pid() == record.pid()
-                && saved.record.proc_start() == record.proc_start()
-                && saved.record.argv() == record.argv() =>
+                && saved.record.as_record().pid() == record.pid()
+                && saved.record.as_record().proc_start() == record.proc_start()
+                && saved.record.as_record().argv() == record.argv() =>
         {
             match saved.attempt {
                 ResumeAttempt::Pending => api::ResumePersistence::Saved,
@@ -3762,13 +4528,8 @@ fn decide_saved_resume(
     shell: &Shell,
     folder: &Dir,
 ) -> SavedChoice {
-    let our_uid = rustix::process::getuid().as_raw();
-    assert_eq!(
-        stored.record.uid(),
-        our_uid,
-        "stored resume records belong to current user"
-    );
-    let program = stored.record.argv().program().to_owned();
+    let record = stored.record.as_record();
+    let program = record.argv().program().to_owned();
     if config_state.is_incomplete() {
         return SavedChoice::Skip {
             reason: "settings_incomplete",
@@ -3789,7 +4550,7 @@ fn decide_saved_resume(
             program,
         };
     }
-    let (spawn_dir, eval_record) = match stored.record.cwd() {
+    let (spawn_dir, eval_record) = match record.cwd() {
         Some(ResumeCwdSource::Explicit(dir)) => {
             let Ok(parsed) = Dir::parse(dir.as_str()) else {
                 return SavedChoice::Skip {
@@ -3803,19 +4564,19 @@ fn decide_saved_resume(
                     program,
                 };
             }
-            (parsed, stored.record.clone())
+            (parsed, record.clone())
         }
         Some(ResumeCwdSource::Inferred(dir)) => {
             if let Some(parsed) = Dir::parse(dir.as_str())
                 .ok()
                 .filter(|d| is_folder(d) == Ok(true))
             {
-                (parsed, stored.record.clone())
+                (parsed, record.clone())
             } else {
-                (folder.clone(), stored.record.clone().with_cwd(None))
+                (folder.clone(), record.clone().with_cwd(None))
             }
         }
-        None => (folder.clone(), stored.record.clone()),
+        None => (folder.clone(), record.clone()),
     };
     let verdict = trust::evaluate(
         &eval_record,
@@ -3846,7 +4607,7 @@ fn decide_saved_resume(
             };
         }
     };
-    let mode = if stored.record.placement().is_root() {
+    let mode = if record.placement().is_root() {
         SavedResumeMode::Root
     } else if let Some(kind) = shell.resume_kind() {
         SavedResumeMode::InShell(kind)
@@ -3861,7 +4622,7 @@ fn decide_saved_resume(
         assert!(allow_root);
     }
     SavedChoice::Resume {
-        argv: stored.record.argv().clone(),
+        argv: record.argv().clone(),
         cwd: spawn_dir,
         mode,
         rule,
@@ -3929,6 +4690,136 @@ fn runs_in_front(is: &Is) -> bool {
     }
 }
 
+fn choose_closed_resume(
+    listed: Option<&server::Terminal>,
+    at_shell: bool,
+    synthesized: Option<&ResumeRecord>,
+    stored: Option<&StoredResume>,
+) -> Option<PendingResume> {
+    let osc_resume = listed.and_then(|it| match &it.is {
+        Is::Running {
+            resumes: Some(resumes),
+            ..
+        } => OwnedResumeRecord::try_for_current_user(resumes.chosen().clone()).map(|record| {
+            PendingResume {
+                source: RecordSource::Osc7577,
+                record,
+            }
+        }),
+        Is::Running { .. } | Is::Ended => None,
+    });
+    if osc_resume.is_some() {
+        osc_resume
+    } else if at_shell {
+        None
+    } else if let Some(record) =
+        synthesized.and_then(|record| OwnedResumeRecord::try_for_current_user(record.clone()))
+    {
+        Some(PendingResume {
+            source: RecordSource::Synthesized,
+            record,
+        })
+    } else {
+        stored.map(|saved| PendingResume {
+            source: saved.source,
+            record: saved.record.clone(),
+        })
+    }
+}
+
+fn terminal_runs_snapshot(
+    terminal: &Terminal,
+    restored: Option<&Restored>,
+    listed: Option<&server::Terminal>,
+    shell: &Shell,
+) -> TerminalSnapshot {
+    let folder = listed
+        .and_then(|it| it.cwd.as_ref())
+        .and_then(|cwd| Dir::parse(cwd.as_str()).ok())
+        .unwrap_or_else(|| terminal.folder().clone());
+    let Some(listed) = listed else {
+        return TerminalSnapshot {
+            folder,
+            runs: terminal.runs().clone(),
+            keeps_restored: restored.is_some(),
+        };
+    };
+    let keeps_restored = keeps(restored, terminal.runs(), &listed.is);
+    let runs = if keeps_restored {
+        terminal.runs().clone()
+    } else {
+        runs_of(listed, terminal.runs(), shell)
+    };
+    TerminalSnapshot {
+        folder,
+        runs,
+        keeps_restored,
+    }
+}
+
+fn clone_listed_cached(
+    project: ProjectId,
+    root: &Dir,
+    folder_cache: &mut BTreeMap<Dir, bool>,
+    clone_cache: &mut BTreeMap<ProjectId, Option<Listed>>,
+) -> Result<Option<Listed>, String> {
+    assert!(
+        clone_cache.len() <= CLOSED_VIEWS_MAX,
+        "revive clone cache stays bounded by closed view entries"
+    );
+    if let Some(cached) = clone_cache.get(&project) {
+        return Ok(cached.clone());
+    }
+    let bare_subfolder = Subfolder::parse(BARE).expect(".bare is a valid subfolder");
+    let Ok(bare_dir) = root.try_at(&bare_subfolder) else {
+        clone_cache.insert(project, None);
+        return Ok(None);
+    };
+    if !is_folder_cached(&bare_dir, folder_cache)? {
+        clone_cache.insert(project, None);
+        return Ok(None);
+    }
+    let listed = match projects::subfolders_checked(root, projects::SPOT_LOOK) {
+        Ok(listed) => listed,
+        Err(projects::Unlisted::Invalid(why)) => {
+            log::say(&format!(
+                "revive skips clone project {project} at {}: {why}",
+                root.as_str()
+            ));
+            clone_cache.insert(project, None);
+            assert!(
+                clone_cache.len() <= CLOSED_VIEWS_MAX,
+                "revive clone cache stays bounded by closed view entries"
+            );
+            return Ok(None);
+        }
+        Err(projects::Unlisted::Transient(why)) => return Err(why),
+    };
+    clone_cache.insert(project, Some(listed.clone()));
+    assert!(
+        clone_cache.len() <= CLOSED_VIEWS_MAX,
+        "revive clone cache stays bounded by closed view entries"
+    );
+    Ok(Some(listed))
+}
+
+fn is_folder_cached(folder: &Dir, cache: &mut BTreeMap<Dir, bool>) -> Result<bool, String> {
+    assert!(
+        cache.len() <= REVIVE_FOLDER_CACHE_MAX,
+        "revive folder cache stays bounded by closed view entries"
+    );
+    if let Some(&present) = cache.get(folder) {
+        return Ok(present);
+    }
+    let present = is_folder(folder)?;
+    cache.insert(folder.clone(), present);
+    assert!(
+        cache.len() <= REVIVE_FOLDER_CACHE_MAX,
+        "revive folder cache stays bounded by closed view entries"
+    );
+    Ok(present)
+}
+
 fn is_folder(folder: &Dir) -> Result<bool, String> {
     let mut test = process::Command::new("/bin/sh");
     test.args(["-c", r#"test -d "$1""#, "sh", folder.as_str()]);
@@ -3961,7 +4852,7 @@ fn placement(
     size: Size,
 ) -> Result<(Placed, Size), String> {
     let Some(tree) = layout.tree() else {
-        return Ok((Placed::Alone, layout::lone(size)));
+        return Ok((Placed::Alone(Arranged::Tabs), layout::lone(size)));
     };
     assert!(
         !tree.holds(new),
@@ -4856,5 +5747,75 @@ mod tests {
             tell(&mut told, &mut troubles, &ended),
             Some(Core::Terminals(_))
         ));
+    }
+
+    #[test]
+    fn choose_closed_resume_rejects_mismatched_uid_and_resets_attempt_to_pending() {
+        use lune_protocol::program_resume::{
+            ProcStart, ProcessName, ProcessPid, ProcessPlacement, ReportedAt, TerminalResumes,
+        };
+
+        let make_record = |uid: u32| {
+            ResumeRecord::new(
+                ProcessPid::new(42).unwrap(),
+                ProcStart::parse("12345".to_owned()).unwrap(),
+                uid,
+                ProcessName::parse("claude".to_owned()).unwrap(),
+                None,
+                None,
+                ProcessPlacement::ShellHosted,
+                ResumeArgv::parse(vec![
+                    "claude".to_owned(),
+                    "--resume".to_owned(),
+                    "abc".to_owned(),
+                ])
+                .unwrap(),
+                None,
+                ReportedAt::from_parts(100, 0).unwrap(),
+            )
+        };
+
+        let our_uid = rustix::process::getuid().as_raw();
+        let other_uid = our_uid.wrapping_add(1);
+        let other_record = make_record(other_uid);
+        let own_record = OwnedResumeRecord::try_for_current_user(make_record(our_uid)).unwrap();
+
+        let osc_other = server::Terminal {
+            tag: Vec::new(),
+            size: None,
+            cwd: None,
+            title: String::new(),
+            tty: None,
+            is: Is::Running {
+                root: AgentPid::new(10).unwrap(),
+                front: None,
+                doing: None,
+                resumes: Some(Box::new(
+                    TerminalResumes::new(other_record.clone(), Vec::new()).unwrap(),
+                )),
+            },
+            statuses: ProgramStatuses::default(),
+        };
+        assert_eq!(
+            choose_closed_resume(Some(&osc_other), false, None, None),
+            None
+        );
+        assert_eq!(
+            choose_closed_resume(None, false, Some(&other_record), None),
+            None
+        );
+
+        let tried_own = StoredResume {
+            source: RecordSource::Synthesized,
+            record: own_record.clone(),
+            attempt: ResumeAttempt::Tried,
+        };
+        assert_eq!(
+            choose_closed_resume(Some(&osc_other), false, None, Some(&tried_own)),
+            Some(PendingResume {
+                source: RecordSource::Synthesized,
+                record: own_record,
+            })
+        );
     }
 }

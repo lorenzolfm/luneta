@@ -73,6 +73,12 @@ pub use keeps::KEPT;
 pub use layouts::RESTORE_PAUSE;
 pub use lune_protocol::release;
 pub use pi::extension as pi_extension;
+#[cfg(target_os = "macos")]
+pub use process::{
+    ActiveState as MacosActiveState, ProcessState as MacosProcessState,
+    ProcessStateError as MacosProcessStateError, StartTime as MacosStartTime,
+    state as macos_process_state,
+};
 pub use process::{
     Exit as ProcessExit, READY_BYTES_MAX, ReadyLine, ReadyPrefix, read_ready_line, var,
 };
@@ -85,4 +91,4 @@ pub use shows::{
     AskNumber, Beside, Direction, Echoed, FocusAsked, Found, Growth, Heard, Laid, LayoutAsked,
     Rect, Show, Shows, View, Where, show,
 };
-pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE};
+pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE, Troubles};

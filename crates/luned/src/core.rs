@@ -168,6 +168,8 @@ pub enum Listing {
 pub const FOLLOW_DIRS_MAX: usize = WORKTREES_MAX + VIEWS_MAX;
 
 const _: () = assert!(FOLLOW_DIRS_MAX > 0);
+const _: () = assert!(FOLLOW_DIRS_MAX <= lune_protocol::github::PULL_REQUESTS_MAX);
+const _: () = assert!(FOLLOW_DIRS_MAX <= lune_protocol::git::GIT_STATUSES_MAX);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowDirs(BTreeSet<Dir>);
@@ -223,7 +225,7 @@ pub enum Command {
         why: Option<git::Why>,
         answer: oneshot::Sender<GitStatusStored>,
     },
-    PullRequests(BTreeMap<String, Found>),
+    PullRequests(BTreeMap<Dir, Found>),
     Topics(HashMap<TopicKey, Said>),
     Hosts(Named),
     Projects {
@@ -246,7 +248,7 @@ pub enum Command {
     ProjectFolders(oneshot::Sender<BTreeSet<Dir>>),
     Clones(oneshot::Sender<BTreeMap<Dir, BTreeSet<WorktreeId>>>),
     Plain(oneshot::Sender<BTreeSet<Dir>>),
-    Branches(oneshot::Sender<BTreeMap<String, String>>),
+    Branches(oneshot::Sender<BTreeMap<Dir, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
@@ -704,7 +706,7 @@ struct Known {
     agent_statuses: Statuses,
     terminals: BTreeMap<ViewId, Located>,
     statuses: BTreeMap<Dir, GitStatus>,
-    pull_requests: BTreeMap<String, Found>,
+    pull_requests: BTreeMap<Dir, Found>,
     topics: [HashMap<SessionId, Said>; TranscriptHarness::ALL.len()],
     remotes: KnownRemotes,
     projects: Result<Projects, String>,
@@ -997,8 +999,7 @@ impl Known {
     fn forget_dirs(&mut self) {
         let dirs = self.dirs();
         self.statuses.retain(|dir, _| dirs.contains(dir));
-        self.pull_requests
-            .retain(|dir, _| Dir::parse(dir).is_ok_and(|dir| dirs.contains(&dir)));
+        self.pull_requests.retain(|dir, _| dirs.contains(dir));
     }
 
     fn branch(&self, dir: &Dir) -> Option<&str> {
@@ -1017,13 +1018,13 @@ impl Known {
     }
 
     fn pull_request(&self, dir: &Dir) -> Option<&PullRequest> {
-        let found = self.pull_requests.get(dir.as_str())?;
+        let found = self.pull_requests.get(dir)?;
         let on_its_branch = self.branch(dir) == Some(found.branch.as_str());
         on_its_branch.then_some(&found.pull_request)
     }
 
-    fn branches(&self) -> BTreeMap<String, String> {
-        let branch = |dir: &Dir| Some((dir.as_str().to_owned(), self.branch(dir)?.to_owned()));
+    fn branches(&self) -> BTreeMap<Dir, String> {
+        let branch = |dir: &Dir| Some((dir.clone(), self.branch(dir)?.to_owned()));
         self.statuses.keys().filter_map(branch).collect()
     }
 
@@ -1231,17 +1232,17 @@ impl Known {
         let pull_requests = self
             .pull_requests
             .keys()
-            .filter_map(|dir| {
-                let parsed = Dir::parse(dir).ok()?;
-                Some(self.pull_request(&parsed)?.to_api(dir))
-            })
+            .filter_map(|dir| Some(self.pull_request(dir)?.to_api(dir.as_str())))
+            .collect::<Vec<_>>();
+        assert!(pull_requests.len() <= lune_protocol::github::PULL_REQUESTS_MAX);
+        let git_statuses: Vec<_> = self
+            .statuses
+            .iter()
+            .map(|(dir, status)| status.to_api(dir.as_str()))
             .collect();
+        assert!(git_statuses.len() <= lune_protocol::git::GIT_STATUSES_MAX);
         Local {
-            git_statuses: self
-                .statuses
-                .iter()
-                .map(|(dir, status)| status.to_api(dir.as_str()))
-                .collect(),
+            git_statuses,
             agents,
             unread,
             pull_requests,

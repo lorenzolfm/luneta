@@ -43,7 +43,7 @@ pub fn made(host: &Host, change: Change) -> Result<Option<Made>, Status> {
     answered_on(host, None, change).map(|answered| answered.made)
 }
 
-fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {
+pub fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -595,7 +595,7 @@ fn an_old_file_forgets_the_worktrees_it_kept_with_no_view_and_is_written_again()
 
 #[test]
 fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made_with_it() {
-    let owned = crate::own::Owned::new();
+    let mut owned = crate::own::Owned::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let (up, clone) = (scratch.join("up"), scratch.join("lune"));
@@ -607,7 +607,7 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
     fs::create_dir(&plain).unwrap();
     let lune = project(&owned.host, &clone, None);
     let main = worktree(&owned.host, lune, &clone.join("main"));
-    let stalled = owned.stall_mux();
+    let stalled = owned.mux.stall();
     let branched = branched_on(&owned.host, None, lune, "two").unwrap_err();
     assert_eq!(branched.code(), Code::Aborted, "{branched:?}");
     let said = branched.message();
@@ -661,7 +661,7 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
 
 #[test]
 fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_changes_says_both() {
-    let owned = crate::own::Owned::new();
+    let mut owned = crate::own::Owned::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let clone = scratch.join("lune");
@@ -670,7 +670,7 @@ fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_change
     let lune = project(&owned.host, &clone, None);
     worktree(&owned.host, lune, &clone.join("main"));
     let file = kept(&owned.host);
-    let stalled = owned.stall_mux();
+    let stalled = owned.mux.stall();
     let refused = thread::scope(|scope| {
         let adding = scope.spawn(|| {
             let folder = text(&clone.join("two"));
@@ -703,7 +703,7 @@ fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_change
 
 #[test]
 fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not() {
-    let owned = crate::own::Owned::new();
+    let mut owned = crate::own::Owned::new();
     let host = &owned.host;
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
@@ -757,7 +757,7 @@ fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not
         opened,
     );
 
-    let stalled = owned.stall_mux();
+    let stalled = owned.mux.stall();
     let unrun = answered_on(host, None, pull(Some(&["sleep", "602"]))).unwrap();
     drop(stalled);
     assert_eq!(
@@ -1286,9 +1286,9 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
     ]);
     let pulls = serde_json::json!([
         {"number": 524, "title": "Say view, not pane", "isDraft": true, "headRefName": "issue-511",
-         "author": {"login": "lorenzolfm"}},
+         "author": {"login": "lorenzolfm"}, "mergeable": "CONFLICTING"},
         {"number": 526, "title": "Match each place once", "isDraft": false,
-         "headRefName": "issue-523", "author": null},
+         "headRefName": "issue-523", "author": null, "mergeable": "MERGEABLE"},
     ]);
     far.gh.work(&issues, &pulls);
 
@@ -1310,12 +1310,18 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
             more: false
         }))
     );
-    let pull = |number, title: &str, draft, branch: &str, author: Option<&str>| ListedPull {
+    let pull = |number,
+                title: &str,
+                draft,
+                branch: &str,
+                author: Option<&str>,
+                mergeability: luned::api::Mergeability| ListedPull {
         number,
         title: title.to_owned(),
         draft,
         branch: branch.to_owned(),
         author: author.map(str::to_owned),
+        mergeability: mergeability.into(),
     };
     assert_eq!(
         listed.pulls,
@@ -1325,9 +1331,17 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
                 "Say view, not pane",
                 true,
                 "issue-511",
-                Some("lorenzolfm")
+                Some("lorenzolfm"),
+                luned::api::Mergeability::Conflicting
             ),
-            pull(526, "Match each place once", false, "issue-523", None),
+            pull(
+                526,
+                "Match each place once",
+                false,
+                "issue-523",
+                None,
+                luned::api::Mergeability::Mergeable
+            ),
         ]
     );
     assert!(!listed.more_pulls, "gh listed all that are open");
@@ -1339,7 +1353,7 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
         [
             format!("{at} issue list --state open --limit 51 --json number,title,labels"),
             format!(
-                "{at} pr list --state open --limit 51 --json number,title,isDraft,headRefName,author"
+                "{at} pr list --state open --limit 51 --json number,title,isDraft,headRefName,author,mergeable"
             ),
         ],
         "gh lists the open ones and one past the most, in the clone's root, on far"

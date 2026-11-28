@@ -628,7 +628,7 @@ impl Shape {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placed {
-    Alone,
+    Alone(Arranged),
     Beside { at: ViewId, towards: Towards },
 }
 
@@ -891,12 +891,21 @@ impl Layout {
     }
 
     pub(super) fn first(view: View) -> Layout {
-        let shape = Shape::unfocused(Arranged::Tabs);
+        Layout::first_as(view, Arranged::Tabs)
+    }
+
+    pub(super) fn first_as(view: View, arranged: Arranged) -> Layout {
+        let shape = Shape::unfocused(arranged);
         let first = Layout(Some(Laid {
             tree: Tree::one(view),
             shape,
         }));
         assert_eq!(first.len(), 1, "a first layout holds its one view");
+        assert_eq!(
+            first.arranged(),
+            Some(arranged),
+            "a first layout keeps its arrangement"
+        );
         first
     }
 
@@ -905,14 +914,14 @@ impl Layout {
         let count = self.len();
         let size = self.room_in(size);
         match (&mut self.0, placed) {
-            (None, Placed::Alone) => {
-                let shape = Shape::unfocused(Arranged::Tabs);
+            (None, Placed::Alone(arranged)) => {
+                let shape = Shape::unfocused(arranged);
                 self.0 = Some(Laid {
                     tree: Tree::one(view),
                     shape,
                 });
             }
-            (Some(_), Placed::Alone) => return Err("the layout holds views already".to_owned()),
+            (Some(_), Placed::Alone(_)) => return Err("the layout holds views already".to_owned()),
             (None, Placed::Beside { at, .. }) => {
                 return Err(format!("the layout is empty, and so holds no view {at}"));
             }

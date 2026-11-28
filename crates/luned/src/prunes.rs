@@ -8,6 +8,7 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(test)]
 use lune_protocol::github::State;
 
 use crate::api::{self, On, PruneRequest, PruneResponse, PrunesRequest, PrunesResponse};
@@ -596,7 +597,7 @@ pub(crate) fn plan(
     let mut merged: Vec<(OnBranch<'_>, Pulled)> = Vec::new();
     for (on, answer) in askable.into_iter().zip(answers) {
         match answer {
-            Ok(Some(pulled)) if pulled.pull_request.state == State::Merged => {
+            Ok(Some(pulled)) if pulled.pull_request.is_merged() => {
                 merged.push((on, pulled));
             }
             Ok(_) => {}
@@ -1340,7 +1341,6 @@ mod tests {
             pull_request: PullRequest {
                 page,
                 state: State::Merged,
-                checks: None,
                 stale: false,
             },
             base_name: "main".to_owned(),

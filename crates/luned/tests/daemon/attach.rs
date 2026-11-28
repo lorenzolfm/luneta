@@ -408,10 +408,9 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
             .any(|it| it.name.as_deref() == Some("logs"))
             .then_some(())
     });
-    assert!(
-        !window.shows("its new name"),
-        "the palette closes once the name is given"
-    );
+    eventually("the palette closes once the name is given", || {
+        (!window.shows("its new name")).then_some(())
+    });
 }
 
 #[test]
@@ -1115,6 +1114,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"Replaces 
 
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
+    window.seated("work/main");
     window.send(REVIEW);
     eventually("review loads the diff", || {
         (window.shows("src/lib.rs") && window.shows("new_call")).then_some(())

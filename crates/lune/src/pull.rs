@@ -8,6 +8,7 @@ use luned::log;
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::menu::MenuId;
 use crate::reach::{self, Luned};
 use crate::sidebar::TerminalPlace;
 
@@ -37,7 +38,7 @@ pub struct Asking {
     pub others: Others,
 }
 
-pub fn prepare(menu: u64, asking: Asking, events: &Sender<Event>) {
+pub fn prepare(menu: MenuId, asking: Asking, events: &Sender<Event>) {
     let due = Due::new(events, move |found| Event::Pulled { menu, found });
     let Asking {
         on,
