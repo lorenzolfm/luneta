@@ -1586,7 +1586,10 @@ mod tests {
         let envelope: Envelope = serde_json::from_value(raw).unwrap();
         assert_eq!(envelope.state.cwd().unwrap().as_str(), "/w");
         assert_eq!(state_of(&envelope.state), Some(ActiveStatus::Working));
-        let telemetry = envelope.state.telemetry(now).expect("valid siblings remain");
+        let telemetry = envelope
+            .state
+            .telemetry(now)
+            .expect("valid siblings remain");
         assert_eq!(telemetry.model(), None);
         assert_eq!(telemetry.context().unwrap().used_permille.get(), 425);
         assert_eq!(telemetry.context().unwrap().window_tokens, None);

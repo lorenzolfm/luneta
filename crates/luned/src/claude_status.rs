@@ -928,7 +928,9 @@ fn decide_status_line_action(
 ) -> io::Result<StatusLineAction> {
     match settings.and_then(|map| map.get("statusLine")) {
         Some(Value::Bool(false)) => Ok(StatusLineAction::LeaveUntouched),
-        Some(Value::Bool(true) | Value::Null) | None => Ok(StatusLineAction::Wire(ChainSource::None)),
+        Some(Value::Bool(true) | Value::Null) | None => {
+            Ok(StatusLineAction::Wire(ChainSource::None))
+        }
         Some(Value::Object(status_line)) => {
             match status_line.get("enabled") {
                 None | Some(Value::Bool(true)) => {}
