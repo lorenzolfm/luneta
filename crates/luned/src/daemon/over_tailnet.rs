@@ -477,6 +477,7 @@ mod tests {
             let socket = folder.path().join("tailnet.sock");
             let (core, questions) = mpsc::sync_channel(1);
             let (layouts, laid) = mpsc::sync_channel(1);
+            let git_refresher = crate::git::Refresher::disconnected();
             let host = Host {
                 started: SystemTime::now(),
                 claude_folder: None,
@@ -486,6 +487,7 @@ mod tests {
                 bridges: Arc::default(),
                 layouts,
                 listings: Arc::default(),
+                git_refresher,
                 ask_sessions: Arc::new(crate::asks::SessionModes::in_memory()),
             };
             let incoming = UnixListenerStream::new(UnixListener::bind(&socket).unwrap());

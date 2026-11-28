@@ -584,7 +584,7 @@ fn an_old_file_forgets_the_worktrees_it_kept_with_no_view_and_is_written_again()
 
 #[test]
 fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made_with_it() {
-    let owned = crate::own::Owned::new();
+    let mut owned = crate::own::Owned::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let (up, clone) = (scratch.join("up"), scratch.join("lune"));
@@ -596,7 +596,7 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
     fs::create_dir(&plain).unwrap();
     let lune = project(&owned.host, &clone, None);
     let main = worktree(&owned.host, lune, &clone.join("main"));
-    let stalled = owned.stall_mux();
+    let stalled = owned.mux.stall();
     let branched = branched_on(&owned.host, None, lune, "two").unwrap_err();
     assert_eq!(branched.code(), Code::Aborted, "{branched:?}");
     let said = branched.message();
@@ -650,7 +650,7 @@ fn a_worktree_whose_first_terminal_does_not_start_is_not_made_nor_a_project_made
 
 #[test]
 fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_changes_says_both() {
-    let owned = crate::own::Owned::new();
+    let mut owned = crate::own::Owned::new();
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
     let clone = scratch.join("lune");
@@ -659,7 +659,7 @@ fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_change
     let lune = project(&owned.host, &clone, None);
     worktree(&owned.host, lune, &clone.join("main"));
     let file = kept(&owned.host);
-    let stalled = owned.stall_mux();
+    let stalled = owned.mux.stall();
     let refused = thread::scope(|scope| {
         let adding = scope.spawn(|| {
             let folder = text(&clone.join("two"));
@@ -692,7 +692,7 @@ fn a_worktree_whose_first_terminal_does_not_start_while_its_projects_file_change
 
 #[test]
 fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not() {
-    let owned = crate::own::Owned::new();
+    let mut owned = crate::own::Owned::new();
     let host = &owned.host;
     let scratch = tempfile::tempdir().unwrap();
     let scratch = fs::canonicalize(scratch.path()).unwrap();
@@ -746,7 +746,7 @@ fn a_pull_that_finds_its_worktree_runs_its_command_there_or_says_why_it_does_not
         opened,
     );
 
-    let stalled = owned.stall_mux();
+    let stalled = owned.mux.stall();
     let unrun = answered_on(host, None, pull(Some(&["sleep", "602"]))).unwrap();
     drop(stalled);
     assert_eq!(

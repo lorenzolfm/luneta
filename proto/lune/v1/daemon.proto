@@ -715,6 +715,11 @@ message RebaseResponse {
     Clean clean = 4;
     Stopped stopped = 5;
   }
+  oneof status_refresh {
+    LocalVersion refreshed_at = 6;
+    google.protobuf.Empty untracked = 7;
+    google.protobuf.Empty stale = 8;
+  }
 
   message Clean {
     uint32 ahead = 1;
