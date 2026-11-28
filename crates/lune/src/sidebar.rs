@@ -4101,6 +4101,7 @@ impl SidebarState {
                     agents::Harness::ClaudeCode => 0u8,
                     agents::Harness::Antigravity => 1u8,
                     agents::Harness::Pi => 2u8,
+                    agents::Harness::Codex => 3u8,
                 };
                 (!matches_preferred, rank, std::cmp::Reverse(*pid))
             });
