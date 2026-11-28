@@ -17,6 +17,7 @@ use lune_protocol::github::PullRequest;
 use lune_protocol::program_status::{ChildProgramStatus, ProgramPhase, ProgramStatus, bound_fair};
 use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
+use lune_protocol::telemetry::AgentTelemetry;
 use lune_protocol::watch::{HostVersion, LocalVersion};
 use prost::Message as _;
 use tokio::sync::oneshot;
@@ -25,6 +26,7 @@ use crate::Directory;
 use crate::agent::{Agent, SeenAgent, Unread};
 use crate::api;
 use crate::claude::{self, Scan};
+use crate::claude_status::ClaudeTelemetry;
 use crate::git;
 use crate::github::Found;
 use crate::mux::own::server::{self, Is};
@@ -231,6 +233,7 @@ pub enum Command {
     PiAgents(Vec<ReportedAgent>),
     AgyAgents(Vec<ReportedAgent>),
     CodexThreads(codex::Held),
+    ClaudeTelemetry(Vec<ClaudeTelemetry>),
     MuxTerminals(BTreeMap<TerminalKey, MuxTerminal>),
     Terminals(BTreeMap<ViewId, Located>),
     GitStatus {
@@ -715,6 +718,7 @@ struct Known {
     pi: Vec<ReportedAgent>,
     agy: Vec<ReportedAgent>,
     codex: codex::Held,
+    claude_telemetry: Vec<ClaudeTelemetry>,
     contested: HashMap<AgentId, Contest>,
     mux_terminals: BTreeMap<TerminalKey, MuxTerminal>,
     osc_agents: Vec<SeenAgent>,
@@ -761,6 +765,7 @@ impl Known {
             pi: Vec::new(),
             agy: Vec::new(),
             codex: codex::Held::new(),
+            claude_telemetry: Vec::new(),
             contested: HashMap::new(),
             mux_terminals: BTreeMap::new(),
             osc_agents: Vec::new(),
@@ -830,6 +835,16 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 assert!(now.len() <= crate::statuses::SOURCE_AGENTS_MAX);
                 known.codex = now;
                 known.reconcile_osc_statuses();
+            }
+            Command::ClaudeTelemetry(now) if now == known.claude_telemetry => continue,
+            Command::ClaudeTelemetry(now) => {
+                let pids: HashSet<AgentPid> = now.iter().map(|entry| entry.agent.pid()).collect();
+                assert_eq!(
+                    pids.len(),
+                    now.len(),
+                    "a claude telemetry entry's pid comes twice"
+                );
+                known.claude_telemetry = now;
             }
             Command::MuxTerminals(now) if now == known.mux_terminals => continue,
             Command::MuxTerminals(now) => {
@@ -1213,6 +1228,7 @@ impl Known {
                 name: thread.and_then(|thread| thread.name.clone()),
                 entrypoint,
                 terminal: Some(key),
+                telemetry: None,
             });
             osc_reports.push(osc_report(id, terminal));
         }
@@ -1240,16 +1256,42 @@ impl Known {
             .collect()
     }
 
+    fn claude_telemetry_for(
+        &self,
+        id: &AgentId,
+        harness: Harness,
+        session_id: Option<&Said>,
+    ) -> Option<AgentTelemetry> {
+        if harness != Harness::ClaudeCode {
+            return None;
+        }
+        self.claude_telemetry
+            .iter()
+            .find(|entry| entry.agent == *id)
+            .or_else(|| {
+                let session_id = session_id?;
+                self.claude_telemetry
+                    .iter()
+                    .find(|entry| entry.session_id.as_ref() == Some(session_id))
+            })
+            .map(|entry| entry.telemetry.clone())
+    }
+
     fn agents(&self) -> Vec<api::Agent> {
         let mut agents: Vec<api::Agent> = self
-            .all_agents()
-            .into_iter()
-            .map(|agent| {
+            .readers()
+            .map(ReportedAgent::seen)
+            .chain(&self.osc_agents)
+            .map(|seen| {
+                let agent = self.agent_statuses.apply(seen);
                 let topic = TranscriptHarness::of(agent.harness).and_then(|harness| {
                     let id = agent.session_id.as_ref()?.as_str();
                     self.topics[harness.index()].get(id).cloned()
                 });
-                agent.to_api(topic)
+                let telemetry = seen.telemetry.clone().or_else(|| {
+                    self.claude_telemetry_for(&seen.id, seen.harness, seen.session_id.as_ref())
+                });
+                agent.to_api(topic, telemetry)
             })
             .collect();
         bound_fair(

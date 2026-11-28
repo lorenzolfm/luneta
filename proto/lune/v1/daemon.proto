@@ -561,6 +561,31 @@ message Agent {
   }
   optional StatusRung status_rung = 23;
   repeated Subagent subagents = 24;
+  optional AgentTelemetry telemetry = 25;
+}
+
+message AgentTelemetry {
+  optional string model = 1;
+  optional string effort = 2;
+  optional ContextWindow context = 3;
+  optional AgentUsage usage = 4;
+}
+
+message ContextWindow {
+  uint32 used_permille = 1;
+  optional uint64 window_tokens = 2;
+  optional uint64 used_tokens = 3;
+}
+
+message AgentUsage {
+  repeated UsageWindow windows = 1;
+  optional uint64 session_cost_micro_usd = 2;
+}
+
+message UsageWindow {
+  string label = 1;
+  uint32 used_permille = 2;
+  optional google.protobuf.Timestamp resets_at = 3;
 }
 
 enum Harness {

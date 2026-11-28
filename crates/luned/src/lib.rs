@@ -7,6 +7,7 @@ pub mod changes;
 pub mod checks;
 pub mod choices;
 mod claude;
+mod claude_status;
 mod client;
 mod codex;
 mod core;

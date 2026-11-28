@@ -939,6 +939,23 @@ fn sanitize_remote_host(
         clean.sort_by(|(a, _), (b, _)| a.cmp(b));
         host.git_statuses = clean.into_iter().map(|(_, status)| status).collect();
     }
+    let mut normalized_telemetry = 0usize;
+    for agent in &mut host.agents {
+        let Some(raw) = agent.telemetry.take() else {
+            continue;
+        };
+        let clean = lune_protocol::telemetry::AgentTelemetry::of_api(&raw)
+            .map(|telemetry| telemetry.to_api());
+        if clean.as_ref() != Some(&raw) {
+            normalized_telemetry += 1;
+        }
+        agent.telemetry = clean;
+    }
+    if normalized_telemetry > 0 {
+        anomalies.say(format!(
+            "{destination}: normalized telemetry on {normalized_telemetry} remote agent(s)"
+        ));
+    }
     anomalies.done();
 }
 
@@ -1721,6 +1738,69 @@ mod tests {
         sanitize_remote_host(&destination, &mut host, &mut anomalies);
         assert_eq!(host.pull_requests, vec![first]);
         assert_eq!(host.git_statuses, vec![valid_status]);
+    }
+
+    #[test]
+    fn remote_host_sanitization_normalizes_and_bounds_agent_telemetry() {
+        use lune_protocol::telemetry::{TELEMETRY_TEXT_BYTES_MAX, USAGE_WINDOWS_MAX};
+
+        let destination: Destination = "nixos".parse().unwrap();
+        let noisy = api::Agent {
+            pid: 1,
+            telemetry: Some(api::AgentTelemetry {
+                model: Some(format!("\x1b[31m{}\u{200b}", "a".repeat(200))),
+                effort: Some("   ".to_owned()),
+                context: Some(api::ContextWindow {
+                    used_permille: 1500,
+                    window_tokens: Some(0),
+                    used_tokens: None,
+                }),
+                usage: Some(api::AgentUsage {
+                    windows: (0..=USAGE_WINDOWS_MAX + 2)
+                        .map(|idx| api::UsageWindow {
+                            label: format!("w{idx}"),
+                            used_permille: 250,
+                            resets_at: None,
+                        })
+                        .collect(),
+                    session_cost_micro_usd: Some(120_000),
+                }),
+            }),
+            ..api::Agent::default()
+        };
+        let invalid_only = api::Agent {
+            pid: 2,
+            telemetry: Some(api::AgentTelemetry {
+                model: Some("  \n\t ".to_owned()),
+                effort: None,
+                context: Some(api::ContextWindow {
+                    used_permille: 9999,
+                    window_tokens: None,
+                    used_tokens: None,
+                }),
+                usage: None,
+            }),
+            ..api::Agent::default()
+        };
+        let mut host = api::remote::Host {
+            agents: vec![noisy, invalid_only],
+            ..api::remote::Host::default()
+        };
+        let mut anomalies = Troubles::default();
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
+
+        let cleaned = host.agents[0].telemetry.as_ref().unwrap();
+        assert_eq!(
+            cleaned.model.as_deref().unwrap().len(),
+            TELEMETRY_TEXT_BYTES_MAX
+        );
+        assert_eq!(cleaned.effort, None);
+        assert_eq!(cleaned.context, None);
+        assert_eq!(
+            cleaned.usage.as_ref().unwrap().windows.len(),
+            USAGE_WINDOWS_MAX
+        );
+        assert_eq!(host.agents[1].telemetry, None);
     }
 
     #[test]

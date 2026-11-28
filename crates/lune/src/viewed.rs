@@ -93,6 +93,22 @@ pub fn layout_size(columns: NonZeroU16, rows: NonZeroU16) -> Size {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FocusedView {
+    Terminal {
+        id: ViewId,
+        key: Option<TerminalKey>,
+    },
+    Browser {
+        id: ViewId,
+        title: Option<String>,
+    },
+    Welcome,
+    Review {
+        title: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tab {
     pub worktree: WorktreeId,
     pub name: String,
@@ -1651,6 +1667,29 @@ impl Viewed {
 
     pub fn review_needs_load(&self) -> bool {
         self.layout.review_needs_load()
+    }
+
+    #[must_use]
+    pub fn focused_view(&self) -> Option<FocusedView> {
+        let view = self.layout.laid()?.focused()?;
+        Some(match &view.found {
+            Found::Key(key) => FocusedView::Terminal {
+                id: view.id,
+                key: Some(*key),
+            },
+            Found::Lost | Found::Looking => FocusedView::Terminal {
+                id: view.id,
+                key: None,
+            },
+            Found::Browser { .. } => FocusedView::Browser {
+                id: view.id,
+                title: self.browsers.title(view.id).map(str::to_owned),
+            },
+            Found::Welcome => FocusedView::Welcome,
+            Found::Review => FocusedView::Review {
+                title: self.layout.view_title(view, Some(&self.browsers)),
+            },
+        })
     }
 
     fn lose_stream(&mut self, now: Instant) {

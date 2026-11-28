@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lune_domain::agent::Harness;
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
+use lune_protocol::telemetry::AgentTelemetry;
 use serde::Deserialize as _;
 
 use crate::Directory;
@@ -26,6 +27,7 @@ pub struct SeenAgent {
     pub name: Option<Name>,
     pub entrypoint: Option<Said>,
     pub terminal: Option<TerminalKey>,
+    pub telemetry: Option<AgentTelemetry>,
 }
 
 fn is_at_prompt(harness: Harness, entrypoint: Option<&Said>) -> bool {
@@ -70,6 +72,7 @@ impl Sighting {
             name,
             entrypoint,
             terminal,
+            telemetry: None,
         }
     }
 }
@@ -244,7 +247,7 @@ impl Agent {
     }
 
     #[must_use]
-    pub fn to_api(&self, topic: Option<Said>) -> api::Agent {
+    pub fn to_api(&self, topic: Option<Said>, telemetry: Option<AgentTelemetry>) -> api::Agent {
         let (status, waiting_for, reported_status) =
             match self.status.status().map(ActiveStatus::to_api) {
                 Some((legacy, waiting_for, reported)) => {
@@ -276,6 +279,7 @@ impl Agent {
             reported_status,
             status_rung,
             subagents,
+            telemetry: telemetry.map(|telemetry| telemetry.to_api()),
         }
     }
 }

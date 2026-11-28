@@ -10,6 +10,7 @@ pub mod release;
 pub mod said;
 pub mod shell;
 pub mod socket;
+pub mod telemetry;
 pub mod turn;
 pub mod unread;
 pub mod watch;
@@ -158,6 +159,13 @@ impl v1::Agent {
     pub fn live_topic(&self) -> Option<&str> {
         let topic = self.topic.as_deref()?.trim();
         (!topic.is_empty()).then_some(topic)
+    }
+
+    #[must_use]
+    pub fn parsed_telemetry(&self) -> Option<telemetry::AgentTelemetry> {
+        self.telemetry
+            .as_ref()
+            .and_then(telemetry::AgentTelemetry::of_api)
     }
 }
 
