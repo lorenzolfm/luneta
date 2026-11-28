@@ -67,7 +67,7 @@ use crate::menu::{
 };
 use crate::moonlight;
 use crate::news::{Dwell, News};
-use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
+use crate::picker::{Aim, Here, Holds, Housed, Listing, Runs, Seated, Shelved, Worktree};
 use crate::printed::Printed;
 use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
@@ -963,66 +963,87 @@ struct Checkout {
     pull_request: Option<Numbered>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Named<C> {
-    Unbranched(String),
-    Branch(C),
-    Apart { name: String, checkout: C },
-}
+pub use named::{Branched, Named};
 
-pub trait Branched {
-    fn branch(&self) -> &str;
-}
+mod named {
+    use lune_protocol::said::Said;
 
-impl Branched for Checkout {
-    fn branch(&self) -> &str {
-        self.branch.as_str()
+    use super::Checkout;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Named<C>(Kind<C>);
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Kind<C> {
+        Unbranched(Said),
+        Branch(C),
+        Apart { name: Said, checkout: C },
     }
-}
 
-impl Branched for String {
-    fn branch(&self) -> &str {
-        self
+    pub trait Branched {
+        fn branch(&self) -> &str;
     }
-}
 
-impl<C: Branched> Named<C> {
-    #[must_use]
-    pub fn of(name: String, checkout: Option<C>) -> Named<C> {
-        match checkout {
-            None => Named::Unbranched(name),
-            Some(checkout) if checkout.branch() == name => Named::Branch(checkout),
-            Some(checkout) => Named::Apart { name, checkout },
+    impl Branched for Checkout {
+        fn branch(&self) -> &str {
+            self.branch.as_str()
         }
     }
 
-    #[must_use]
-    pub fn name(&self) -> &str {
-        match self {
-            Named::Unbranched(name) | Named::Apart { name, .. } => name,
-            Named::Branch(checkout) => checkout.branch(),
+    impl Branched for Said {
+        fn branch(&self) -> &str {
+            self.as_str()
         }
     }
 
-    #[must_use]
-    pub fn apart(&self) -> Option<&C> {
-        match self {
-            Named::Apart { checkout, .. } => Some(checkout),
-            Named::Unbranched(_) | Named::Branch(_) => None,
+    impl<C: Branched> Named<C> {
+        #[must_use]
+        pub fn of(name: Said, checkout: Option<C>) -> Named<C> {
+            Named(match checkout {
+                None => Kind::Unbranched(name),
+                Some(checkout) if checkout.branch() == name.as_str() => Kind::Branch(checkout),
+                Some(checkout) => Kind::Apart { name, checkout },
+            })
         }
-    }
 
-    fn checkout(&self) -> Option<&C> {
-        match self {
-            Named::Unbranched(_) => None,
-            Named::Branch(checkout) | Named::Apart { checkout, .. } => Some(checkout),
+        #[must_use]
+        pub fn name(&self) -> &str {
+            match &self.0 {
+                Kind::Unbranched(name) | Kind::Apart { name, .. } => name.as_str(),
+                Kind::Branch(checkout) => checkout.branch(),
+            }
         }
-    }
 
-    fn height(&self) -> usize {
-        match self {
-            Named::Unbranched(_) | Named::Branch(_) => 1,
-            Named::Apart { .. } => 2,
+        #[must_use]
+        pub fn apart(&self) -> Option<&C> {
+            match &self.0 {
+                Kind::Apart { checkout, .. } => Some(checkout),
+                Kind::Unbranched(_) | Kind::Branch(_) => None,
+            }
+        }
+
+        #[must_use]
+        pub(super) fn same_branch(&self) -> Option<&C> {
+            match &self.0 {
+                Kind::Branch(checkout) => Some(checkout),
+                Kind::Unbranched(_) | Kind::Apart { .. } => None,
+            }
+        }
+
+        #[must_use]
+        pub(super) fn checkout(&self) -> Option<&C> {
+            match &self.0 {
+                Kind::Unbranched(_) => None,
+                Kind::Branch(checkout) | Kind::Apart { checkout, .. } => Some(checkout),
+            }
+        }
+
+        #[must_use]
+        pub(super) fn height(&self) -> usize {
+            match &self.0 {
+                Kind::Unbranched(_) | Kind::Branch(_) => 1,
+                Kind::Apart { .. } => 2,
+            }
         }
     }
 }
@@ -1232,17 +1253,25 @@ impl Away {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum KnownHolds {
+    Folder(KnownWorktree),
+    Clone {
+        worktrees: Vec<KnownWorktree>,
+        unopened: rows::Unopened,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Known {
     project: ProjectRow,
     dir: Dir,
-    worktrees: Vec<KnownWorktree>,
-    unopened: Unopened,
+    holds: KnownHolds,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KnownWorktree {
     place: WorktreePlace,
-    name: String,
+    name: Said,
     folder: Dir,
     seen: projects::Seen,
     used: Option<Used>,
@@ -1438,7 +1467,7 @@ impl Known {
             kept: ledger::Session::Project(said.id),
         };
         let project = ProjectRow::of(listed);
-        let worktrees = said.worktrees().iter().map(|worktree| KnownWorktree {
+        let known_worktree = |worktree: &rows::Worktree| KnownWorktree {
             place: WorktreePlace {
                 project: project.clone(),
                 worktree: worktree.id,
@@ -1450,24 +1479,44 @@ impl Known {
             views: worktree.views.iter().map(KnownView::of).collect(),
             arranged: worktree.arranged,
             flow: worktree.flow.clone(),
-        });
-        let worktrees = worktrees.collect();
-        let unopened = match &said.holds {
-            rows::Holds::Folder(_) => Unopened::Folder,
+        };
+        let holds = match &said.holds {
+            rows::Holds::Folder(own) => KnownHolds::Folder(known_worktree(own)),
             rows::Holds::Clone {
-                unopened: rows::Unopened::Listed(folders),
-                ..
-            } => Unopened::Listed(folders.clone()),
-            rows::Holds::Clone {
-                unopened: rows::Unopened::Unlisted(why),
-                ..
-            } => Unopened::Unlisted(why.clone()),
+                worktrees,
+                unopened,
+            } => KnownHolds::Clone {
+                worktrees: worktrees.iter().map(known_worktree).collect(),
+                unopened: unopened.clone(),
+            },
         };
         Known {
             project,
             dir: said.dir.clone(),
-            worktrees,
-            unopened,
+            holds,
+        }
+    }
+
+    fn worktrees(&self) -> &[KnownWorktree] {
+        match &self.holds {
+            KnownHolds::Folder(own) => std::slice::from_ref(own),
+            KnownHolds::Clone { worktrees, .. } => worktrees,
+        }
+    }
+
+    fn worktrees_mut(&mut self) -> &mut [KnownWorktree] {
+        match &mut self.holds {
+            KnownHolds::Folder(own) => std::slice::from_mut(own),
+            KnownHolds::Clone { worktrees, .. } => worktrees,
+        }
+    }
+
+    fn refuses_new_worktree(&self) -> Option<String> {
+        match &self.holds {
+            KnownHolds::Folder(_) => Some(projects::folder_has_one_worktree(
+                self.project.listed().name(),
+            )),
+            KnownHolds::Clone { .. } => None,
         }
     }
 
@@ -1476,22 +1525,22 @@ impl Known {
     }
 
     fn order(&self) -> Vec<WorktreeId> {
-        self.worktrees
+        self.worktrees()
             .iter()
             .map(|worktree| worktree.place.worktree)
             .collect()
     }
 
     fn view_ids(&self) -> impl Iterator<Item = ViewId> {
-        self.worktrees.iter().flat_map(KnownWorktree::view_ids)
+        self.worktrees().iter().flat_map(KnownWorktree::view_ids)
     }
 
     fn terminals(&self) -> impl Iterator<Item = &FoundTerminal> {
-        self.worktrees.iter().flat_map(KnownWorktree::terminals)
+        self.worktrees().iter().flat_map(KnownWorktree::terminals)
     }
 
     fn placed_terminals(&self) -> impl Iterator<Item = (&WorktreePlace, &FoundTerminal)> {
-        let each = self.worktrees.iter();
+        let each = self.worktrees().iter();
         each.flat_map(|worktree| {
             worktree
                 .terminals()
@@ -1500,7 +1549,7 @@ impl Known {
     }
 
     fn placed_views(&self) -> impl Iterator<Item = (&WorktreePlace, KnownShown<'_>)> {
-        let each = self.worktrees.iter();
+        let each = self.worktrees().iter();
         each.flat_map(|worktree| worktree.shown().map(move |view| (&worktree.place, view)))
     }
 
@@ -1509,7 +1558,7 @@ impl Known {
     }
 
     fn has_browser(&self, id: ViewId) -> bool {
-        self.worktrees.iter().any(|worktree| {
+        self.worktrees().iter().any(|worktree| {
             worktree
                 .views
                 .iter()
@@ -1543,7 +1592,7 @@ fn arranged_holding(
     let shelf = shelves.iter().find(|shelf| shelf.machine == *on)?;
     let known = shelf.projects().iter().find(|it| it.listed() == listed)?;
     let holding = known
-        .worktrees
+        .worktrees()
         .iter()
         .find(|it| it.view_ids().any(|id| id == view))?;
     let seated =
@@ -1653,7 +1702,7 @@ impl Shelf {
                 let known = known.find(|known| known.project.id() == *project);
                 let known = known.expect("the project reordered is shelved");
                 let at = |worktree: &KnownWorktree| position(worktrees, worktree.place.worktree);
-                known.worktrees.sort_by_key(at);
+                known.worktrees_mut().sort_by_key(at);
             }
         }
     }
@@ -3184,7 +3233,7 @@ impl SidebarState {
             let mut live = Vec::new();
             for known in projects {
                 live.push(Fold::Project(machine, known.project.id()));
-                let worktrees = known.worktrees.iter();
+                let worktrees = known.worktrees().iter();
                 live.extend(worktrees.map(|it| Fold::Worktree(machine, it.place.worktree)));
             }
             self.folds.listed(machine, &live);
@@ -3809,7 +3858,7 @@ impl SidebarState {
     fn here_worktree(&self) -> Option<WorktreePlace> {
         let seat = self.seat.as_ref()?;
         let known = self.known_of(seat.project)?;
-        let mut worktrees = known.worktrees.iter();
+        let mut worktrees = known.worktrees().iter();
         let seated = seat.worktree()?;
         let worktree = worktrees.find(|worktree| worktree.place.worktree == seated)?;
         Some(worktree.place.clone())
@@ -3895,29 +3944,36 @@ impl SidebarState {
     fn shelved(&self, machine: &Machine, seen: Result<&Seen<'_>, &Away>) -> Shelved {
         let heard = seen.ok();
         let statuses = git_statuses(heard.map_or(&[], |seen| seen.git_statuses));
+        let picker_worktree = |worktree: &KnownWorktree| {
+            let branch = statuses
+                .get(worktree.folder.as_str())
+                .and_then(|status| Some(checkout(status, None)?.branch));
+            let terminals = worktree.terminals().map(|view| view.key);
+            Worktree {
+                id: worktree.place.worktree,
+                named: Named::of(worktree.name.clone(), branch),
+                folder: worktree.folder.clone(),
+                used: worktree.used,
+                terminals: terminals.collect(),
+            }
+        };
         let mut projects = Vec::new();
         for known in shelf(&self.shelves, machine) {
-            let mut worktrees = Vec::with_capacity(known.worktrees.len());
-            for worktree in &known.worktrees {
-                let branch = statuses
-                    .get(worktree.folder.as_str())
-                    .and_then(|status| Some(String::from(checkout(status, None)?.branch)));
-                let terminals = worktree.terminals().map(|view| view.key);
-                worktrees.push(Worktree {
-                    place: worktree.place.clone(),
-                    named: Named::of(worktree.name.clone(), branch),
-                    folder: worktree.folder.clone(),
-                    used: worktree.used,
-                    terminals: terminals.collect(),
-                });
-            }
+            let holds = match &known.holds {
+                KnownHolds::Folder(own) => Holds::Folder(picker_worktree(own)),
+                KnownHolds::Clone {
+                    worktrees,
+                    unopened,
+                } => Holds::Clone {
+                    worktrees: worktrees.iter().map(picker_worktree).collect(),
+                    unopened: unopened.clone(),
+                },
+            };
             let (project, dir) = (known.project.clone(), known.dir.clone());
-            let unopened = known.unopened.clone();
             projects.push(Housed {
                 project,
                 dir,
-                worktrees,
-                unopened,
+                holds,
             });
         }
         let away = seen.err().map(|away| away.said().0);
@@ -4230,7 +4286,7 @@ impl SidebarState {
             | Mode::Afloat { .. }
             | Mode::AfloatNote(_) => None,
         };
-        let finder = term.map(|term| Finder::new(term, typos));
+        let finder = term.and_then(|term| Finder::of(term, typos));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut view_titles: HashMap<Machine, HashMap<WorktreeId, BTreeMap<ViewId, String>>> =
             HashMap::new();
@@ -4296,8 +4352,8 @@ impl SidebarState {
                 let folded = self.folds.contains(Fold::Project(&machine, project));
                 let colour = colour_of(project);
                 let agent = |view: &FoundTerminal| agents.get(&view.key).copied();
-                let mut worktrees = Vec::with_capacity(known.worktrees.len());
-                for worktree in &known.worktrees {
+                let mut worktrees = Vec::with_capacity(known.worktrees().len());
+                for worktree in known.worktrees() {
                     let mut by_view: Vec<Shows<'_>> = Vec::with_capacity(worktree.views.len());
                     for view in worktree.shown() {
                         counts.views += 1;
@@ -5576,7 +5632,7 @@ impl SidebarState {
             .iter()
             .find(|it| it.project.id() == place.project.id())?;
         known
-            .worktrees
+            .worktrees()
             .iter()
             .find(|wt| wt.place == *place)
             .and_then(|wt| wt.flow.clone())
@@ -5590,7 +5646,7 @@ impl SidebarState {
     ) -> Option<Directory> {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.listed() == listed)?;
-        let worktree = known.worktrees.iter().find(|worktree| {
+        let worktree = known.worktrees().iter().find(|worktree| {
             worktree
                 .views
                 .iter()
@@ -5613,10 +5669,13 @@ impl SidebarState {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.project.id() == place.project.id())?;
         let worktree = known
-            .worktrees
+            .worktrees()
             .iter()
             .find(|worktree| worktree.place == place)?;
-        let (name, folder) = (worktree.name.clone(), Directory::from(&worktree.folder));
+        let (name, folder) = (
+            worktree.name.as_str().to_owned(),
+            Directory::from(&worktree.folder),
+        );
         let (branch, repository) = git_in(self.seen(machine).as_ref(), &folder);
         let row = WorktreeRow {
             place,
@@ -5863,7 +5922,7 @@ impl SidebarState {
                 let checked_out = pull_request_link(&pulls, worktree.folder.as_str());
                 checked_out.is_some_and(|it| it.is(link))
             };
-            let worktrees = seen.projects.iter().flat_map(|known| &known.worktrees);
+            let worktrees = seen.projects.iter().flat_map(Known::worktrees);
             let mut found = worktrees.filter(checks_out);
             let Some(worktree) = found.next() else {
                 continue;
@@ -6132,7 +6191,7 @@ impl SidebarState {
             Wants::Cloned(project) => {
                 let mut known = shelf(&self.shelves, &on).iter();
                 let known = known.find(|it| it.project.id() == project);
-                let refused = known.and_then(|it| it.unopened.refuses_new_worktree(&it.project));
+                let refused = known.and_then(Known::refuses_new_worktree);
                 if let Some(refused) = refused {
                     self.drop_menu_saying(number, format!("menu: {refused}"));
                 }
@@ -6379,12 +6438,18 @@ impl SidebarState {
             .find(|known| known.project.id() == project);
         let known = known.ok_or_else(unlisted)?;
         let worktrees = known
-            .worktrees
+            .worktrees()
             .iter()
             .map(|worktree| worktree.place.worktree)
             .collect();
-        let seen = known.worktrees.iter().flat_map(KnownWorktree::terminal_ids);
-        let seen_browsers = known.worktrees.iter().flat_map(KnownWorktree::browser_ids);
+        let seen = known
+            .worktrees()
+            .iter()
+            .flat_map(KnownWorktree::terminal_ids);
+        let seen_browsers = known
+            .worktrees()
+            .iter()
+            .flat_map(KnownWorktree::browser_ids);
         let session = listed.name().session().clone();
         Ok(Act::Project {
             session,
@@ -6396,9 +6461,7 @@ impl SidebarState {
     }
 
     fn worktree_closes(&self, on: &Machine, worktree: WorktreeId) -> Result<Act, String> {
-        let worktrees = shelf(&self.shelves, on)
-            .iter()
-            .flat_map(|known| &known.worktrees);
+        let worktrees = shelf(&self.shelves, on).iter().flat_map(Known::worktrees);
         let mut held = worktrees.filter(|it| it.place.worktree == worktree);
         let Some(found) = held.next() else {
             return Err(format!("worktree {worktree} is no longer listed"));
@@ -8026,21 +8089,31 @@ pub fn short_cwd(path: &str) -> String {
     }
 }
 
-pub type Fit = (bool, Score);
-
-pub struct Finder<'a> {
-    fuzzy: Fuzzy,
-    anywhere: Fuzzy,
-    term: &'a str,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Fit {
+    exact: bool,
+    score: Score,
 }
 
-impl<'a> Finder<'a> {
-    pub fn new(term: &'a str, typos: Typos) -> Self {
-        Finder {
-            fuzzy: Fuzzy::new(term, typos),
-            anywhere: Fuzzy::anywhere(term, typos),
-            term,
-        }
+pub struct Finder {
+    fuzzy: Fuzzy,
+    anywhere: Fuzzy,
+    lower: String,
+}
+
+impl Finder {
+    #[must_use]
+    pub fn of(typed: &str, typos: Typos) -> Option<Self> {
+        (!typed.is_empty()).then(|| Finder {
+            fuzzy: Fuzzy::new(typed, typos),
+            anywhere: Fuzzy::anywhere(typed, typos),
+            lower: typed.to_lowercase(),
+        })
+    }
+
+    #[must_use]
+    pub fn term(&self) -> &str {
+        &self.lower
     }
 
     fn session(&self, name: &str) -> Option<(Fit, Vec<usize>)> {
@@ -8087,8 +8160,18 @@ impl<'a> Finder<'a> {
         )
     }
 
+    #[must_use]
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
-        let exact = shown == self.term;
+        self.find_own(shown, None, also)
+    }
+
+    #[must_use]
+    pub fn find_own(
+        &self,
+        shown: &str,
+        own: Option<&str>,
+        also: &[Option<&str>],
+    ) -> Option<(Fit, Vec<usize>)> {
         let best = |fuzzy: &Fuzzy| {
             also.iter()
                 .flatten()
@@ -8097,16 +8180,24 @@ impl<'a> Finder<'a> {
         };
         let other = best(&self.fuzzy);
         let Some((score, hits)) = self.fuzzy.hits(shown) else {
-            return Some(((exact, other?), Vec::new()));
+            return Some((
+                Fit {
+                    exact: false,
+                    score: other?,
+                },
+                Vec::new(),
+            ));
         };
+        let exact = shown.to_lowercase() == self.lower
+            || own.is_some_and(|own| own.to_lowercase() == self.lower);
         let fits = |score: Score, other: Option<Score>| other.is_none_or(|other| score >= other);
         let lit = fits(score, other)
             || self
                 .anywhere
                 .score(shown)
                 .is_some_and(|anywhere| fits(anywhere, best(&self.anywhere)));
-        let fit = (exact, other.map_or(score, |other| score.max(other)));
-        Some((fit, if lit { hits } else { Vec::new() }))
+        let score = other.map_or(score, |other| score.max(other));
+        Some((Fit { exact, score }, if lit { hits } else { Vec::new() }))
     }
 }
 
@@ -8555,10 +8646,9 @@ fn row_lines(
             let gone = if *missing { MISSING } else { "" };
             let name = named.name();
             let line_room = width.saturating_sub(WORKTREE + gone.width() + reserve + 1);
-            let beside = match named {
-                Named::Branch(checkout) => Some(Beside::fitting(checkout, name, line_room)),
-                Named::Unbranched(_) | Named::Apart { .. } => None,
-            };
+            let beside = named
+                .same_branch()
+                .map(|checkout| Beside::fitting(checkout, name, line_room));
             let held = beside.as_ref().map_or(0, Beside::width);
             let status = beside.as_ref().map_or("", |beside| beside.status.as_str());
             let room = line_room.saturating_sub(beside.as_ref().map_or(0, Beside::taken));
@@ -8605,12 +8695,7 @@ fn row_lines(
                 spans.push(badge_span);
             }
             let mut lines = vec![Line::from(spans)];
-            if let Named::Apart { name, checkout } = named {
-                assert_ne!(
-                    name,
-                    checkout.branch.as_str(),
-                    "a name apart is not its branch"
-                );
+            if let Some(checkout) = named.apart() {
                 let at = lines.len();
                 let (drawn, numbered, branch_room) = checkout_line(*here, checkout, at, width);
                 lines.push(drawn);

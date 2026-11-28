@@ -139,7 +139,7 @@ impl Projected {
         let (project, _) = self.holding(on, worktree)?;
         let tab = |it: &Worktree| Tab {
             worktree: it.id,
-            name: it.name.clone(),
+            name: it.name.as_str().to_owned(),
         };
         let tabs: Vec<Tab> = project.worktrees().iter().map(tab).collect();
         assert!(
