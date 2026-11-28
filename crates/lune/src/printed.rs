@@ -9,7 +9,7 @@ pub use luned::printed::{Kept, Printed};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
-use crate::menu::Ended;
+use crate::menu::{Ended, MenuId};
 use crate::reach::{self, Luned};
 
 pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
@@ -75,7 +75,7 @@ pub fn prompt(printed: &Printed, asks: &str, ended: &Ended) -> String {
 }
 
 pub fn read(
-    menu: u64,
+    menu: MenuId,
     on: Machine,
     terminal: Result<TerminalKey, String>,
     ended: Ended,

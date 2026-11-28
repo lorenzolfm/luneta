@@ -66,7 +66,7 @@ use crate::images::{self, Went};
 use crate::input;
 use crate::issue::{self, Issue};
 use crate::machines::{self, Added, Machine};
-use crate::menu::{self, Choice, Origin, Rename};
+use crate::menu::{self, Choice, MenuId, Origin, Rename};
 use crate::models::Fetched;
 use crate::named;
 use crate::news::{self, News};
@@ -96,7 +96,7 @@ pub enum Made {
         made: Result<Landing, String>,
     },
     Pulled {
-        menu: u64,
+        menu: MenuId,
         made: Result<Pulled, String>,
     },
 }
@@ -206,32 +206,32 @@ pub enum Event {
     ImageSlow(Destination),
     Named(Made),
     Skills {
-        menu: u64,
+        menu: MenuId,
         agent: agents::Harness,
         skills: Result<Vec<Skill>, String>,
     },
     Pulled {
-        menu: u64,
+        menu: MenuId,
         found: Result<Found, String>,
     },
     Prunes {
-        menu: u64,
+        menu: MenuId,
         plan: Result<prunes::Plan, String>,
     },
     Pruned {
-        menu: u64,
+        menu: MenuId,
         pruned: Result<prunes::Pruned, String>,
     },
     Printed {
-        menu: u64,
+        menu: MenuId,
         printed: Result<Printed, String>,
     },
     Checks {
-        menu: u64,
+        menu: MenuId,
         checks: Result<checks::Failing, String>,
     },
     Rebased {
-        menu: u64,
+        menu: MenuId,
         rebased: Result<Rebased, Unrebased>,
     },
     Briefed {
@@ -333,6 +333,15 @@ fn resized(chord: Chord) -> Option<Growth> {
         return Some(Growth::Grow);
     }
     (chord == SHRINK).then_some(Growth::Shrink)
+}
+
+fn is_chord(chord: Chord) -> bool {
+    chord == MENU
+        || List::opened_by(chord).is_some()
+        || chord == SWAP
+        || chord == COLLAPSE
+        || stepped(chord).is_some()
+        || resized(chord).is_some()
 }
 
 #[derive(Debug)]
@@ -2123,12 +2132,18 @@ impl App {
         let mut dirty = false;
         let mut kept_notice = false;
         match self.sidebar.floating() {
-            Some(Floating::Menu(menu)) if menu.waits() => {
+            Some(Floating::Waiting(_)) => {
+                if key.kind == KeyEventKind::Repeat {
+                    return false;
+                }
                 if menu::closes(key) {
                     self.sidebar.close_menu();
                     return true;
                 }
                 if matches!(key.code, KeyCode::Modifier(_)) {
+                    return false;
+                }
+                if self.focus.side == Side::Sidebar && !menu::bare(key) && !is_chord(chord) {
                     return false;
                 }
                 let left = self.sidebar.leave_floating_waiting();
@@ -2157,7 +2172,13 @@ impl App {
             }
             None => {}
         }
-        if self.chord(chord) {
+        let ran_chord = self.chord(chord);
+        assert_eq!(
+            ran_chord,
+            is_chord(chord),
+            "is_chord agrees with App::chord"
+        );
+        if ran_chord {
             return true;
         }
         match self.holder() {
@@ -2558,7 +2579,7 @@ impl App {
             None => {}
         }
         match self.sidebar.floating() {
-            Some(Floating::Menu(menu)) if menu.waits() => {
+            Some(Floating::Waiting(_)) => {
                 let scrolls = matches!(
                     mouse.kind,
                     MouseEventKind::ScrollUp
@@ -3921,7 +3942,7 @@ impl App {
         });
     }
 
-    fn refuse_naming(&mut self, menu: Option<u64>, said: impl FnOnce(&str) -> String) -> bool {
+    fn refuse_naming(&mut self, menu: Option<MenuId>, said: impl FnOnce(&str) -> String) -> bool {
         if self.naming == Naming::Idle {
             return false;
         }
@@ -3974,7 +3995,7 @@ impl App {
         }
     }
 
-    fn pulled_made(&mut self, menu: u64, made: Result<Pulled, String>) {
+    fn pulled_made(&mut self, menu: MenuId, made: Result<Pulled, String>) {
         let opener = self
             .sidebar
             .made_for(menu)
@@ -4413,6 +4434,11 @@ impl App {
             }
             None => match self.sidebar.floating() {
                 Some(Floating::Menu(menu)) => {
+                    let (drawn, menu_cadence) = menu.draw(buffer, right, now.system);
+                    cadence.merge(menu_cadence);
+                    drawn
+                }
+                Some(Floating::Waiting(menu)) => {
                     let (drawn, menu_cadence) = menu.draw(buffer, right, now.system);
                     cadence.merge(menu_cadence);
                     drawn
@@ -5716,6 +5742,20 @@ mod tests {
         written.borrow_mut().clear();
 
         let now = next();
+        let repeat_enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat);
+        app.handle_at(Event::Input(Input::Key(repeat_enter)), &mut terminal, now)
+            .unwrap();
+        assert!(
+            app.sidebar.floating_waits(),
+            "a repeated key leaves a floating waiting menu open"
+        );
+        assert!(
+            !drew(&mut app, &mut terminal, &written, now),
+            "a repeated key does not dirty the frame"
+        );
+
+        let now = next();
         press_key(
             &mut app,
             &mut terminal,
@@ -5759,16 +5799,50 @@ mod tests {
             Pull::Agent,
             Origin::Views,
         );
+        app.sidebar.notify("keep me".to_owned());
         assert!(
             app.take_dictation_target().is_none(),
             "dictation does not start while the sidebar has focus"
         );
         assert!(app.sidebar.floating_waits());
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            dictation::KEY.0,
+            dictation::KEY.1,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "pressing dictation key while sidebar has focus leaves waiting floating menu open"
+        );
+        let now = next();
+        press_key(
+            &mut app,
+            &mut terminal,
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+            now,
+        );
+        assert!(
+            app.sidebar.floating_waits(),
+            "pressing an unbound modified key on sidebar leaves waiting floating menu open"
+        );
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
+        let _ = app.sidebar.draw(&mut buffer, Rect::new(0, 0, 40, 24), now);
+        let sidebar_text: String = (0..24)
+            .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect();
+        assert!(
+            sidebar_text.contains("keep me"),
+            "ignored modified keys on sidebar preserve an existing notice: {sidebar_text}"
+        );
 
         let now = next();
         app.handle_at(
             Event::Pruned {
-                menu: 999,
+                menu: MenuId::of(999),
                 pruned: Err("boom".to_owned()),
             },
             &mut terminal,
@@ -5795,6 +5869,19 @@ mod tests {
             sidebar_text.contains("boom"),
             "promoted floating notice survives the pass-through sidebar key: {sidebar_text}"
         );
+
+        start_test_pull(
+            &mut app,
+            "https://github.com/lorenzolfm/lune/pull/24",
+            Pull::Worktree,
+            Origin::Views,
+        );
+        assert!(app.sidebar.floating_waits());
+        let now = next();
+        press_key(&mut app, &mut terminal, SWAP.0, SWAP.1, now);
+        assert!(app.sidebar.floating().is_none());
+        assert!(app.sidebar.turning());
+        assert_eq!(app.focus.side, Side::Session);
 
         app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None);
         app.give(Focus::on(Side::Session));

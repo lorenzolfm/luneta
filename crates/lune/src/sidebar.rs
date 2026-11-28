@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
-use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
@@ -60,8 +60,9 @@ use crate::ledger::{self, Key};
 use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
-    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Folder, Hint, Label, Menu, Origin,
-    ProjectTarget, Pull, Ran, Rename, Target, Top, ViewRow, Wants, WorktreeRow,
+    self, AllKeys, Briefed, Choice, Cwd, Did, Done, Folder, Hint, InteractiveMenu, Label, Menu,
+    MenuId, Origin, ProjectTarget, Pull, Ran, Rename, Target, Top, ViewRow, WaitingMenu, Wants,
+    WorktreeRow,
 };
 use crate::moonlight;
 use crate::news::News;
@@ -1487,18 +1488,18 @@ pub enum Asked {
         project: ProjectRow,
     },
     Prunes {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         dir: Directory,
     },
     Prune {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         dir: Directory,
         agreed: BTreeSet<prunes::Deleting>,
     },
     Rebase {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         dir: Directory,
         branch: Said,
@@ -1565,14 +1566,14 @@ pub enum Asked {
         rename: Rename,
     },
     Make {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         cwd: Directory,
         name: String,
         agent: Option<Argv>,
     },
     Pull {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         work: Work,
         wanted: Wanted,
@@ -1580,20 +1581,20 @@ pub enum Asked {
         others: Others,
     },
     Find {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         dir: Directory,
         agent: agents::Harness,
     },
     Printed {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         session: Listed,
         view: ViewKey,
         ended: menu::Ended,
     },
     Checks {
-        menu: u64,
+        menu: MenuId,
         on: Machine,
         page: checks::PullPage,
     },
@@ -1611,7 +1612,7 @@ pub enum Asked {
 }
 
 impl Asked {
-    fn menu(&self) -> Option<u64> {
+    fn menu(&self) -> Option<MenuId> {
         match self {
             Asked::Prunes { menu, .. }
             | Asked::Prune { menu, .. }
@@ -1738,7 +1739,8 @@ enum Mode {
 }
 
 pub enum Floating<'a> {
-    Menu(&'a Menu),
+    Menu(&'a InteractiveMenu),
+    Waiting(&'a WaitingMenu),
     Note(&'a str),
 }
 
@@ -1836,10 +1838,10 @@ pub struct Sidebar {
     image_going: Option<Destination>,
     aloud: Option<aloud::Shown>,
     aloud_buttons: Spots<aloud::Button>,
-    working: BTreeMap<u64, Menu>,
+    working: BTreeMap<MenuId, WaitingMenu>,
     filing: BTreeMap<u64, String>,
     filed: Option<String>,
-    menus: u64,
+    menus: Option<MenuId>,
     wall: SystemTime,
     due: Option<SystemTime>,
 }
@@ -1901,7 +1903,7 @@ impl Pause {
         match self {
             Pause::Nothing => false,
             Pause::Until(shows) => steady < shows,
-            Pause::Quiet => menu.quiet(),
+            Pause::Quiet => matches!(menu, Menu::Waiting(waiting) if waiting.quiet()),
         }
     }
 
@@ -1909,7 +1911,7 @@ impl Pause {
         match self {
             Pause::Nothing => false,
             Pause::Until(_) => true,
-            Pause::Quiet => menu.quiet(),
+            Pause::Quiet => matches!(menu, Menu::Waiting(waiting) if waiting.quiet()),
         }
     }
 }
@@ -2221,7 +2223,7 @@ impl Sidebar {
             working: BTreeMap::new(),
             filing: BTreeMap::new(),
             filed: None,
-            menus: 0,
+            menus: None,
             wall,
             due: None,
         }
@@ -2514,7 +2516,14 @@ impl Sidebar {
 
     pub fn floating(&self) -> Option<Floating<'_>> {
         match &self.mode {
-            Mode::Afloat { menu, .. } => Some(Floating::Menu(menu)),
+            Mode::Afloat {
+                menu: Menu::Interactive(menu),
+                ..
+            } => Some(Floating::Menu(menu)),
+            Mode::Afloat {
+                menu: Menu::Waiting(menu),
+                ..
+            } => Some(Floating::Waiting(menu)),
             Mode::AfloatNote(note) => Some(Floating::Note(note)),
             Mode::Idle
             | Mode::Pending(_)
@@ -2526,19 +2535,31 @@ impl Sidebar {
 
     #[must_use]
     pub fn floating_waits(&self) -> bool {
-        matches!(&self.mode, Mode::Afloat { menu, .. } if menu.waits())
+        matches!(
+            &self.mode,
+            Mode::Afloat {
+                menu: Menu::Waiting(_),
+                ..
+            }
+        )
     }
 
     #[must_use]
     pub fn leave_floating_waiting(&mut self) -> LeftFloating {
         let (number, kept_notice) = match &self.mode {
-            Mode::Afloat { menu, said } if menu.waits() => (menu.number(), said.is_some()),
+            Mode::Afloat {
+                menu: Menu::Waiting(menu),
+                said,
+            } => (menu.number(), said.is_some()),
             Mode::Idle
             | Mode::Pending(_)
             | Mode::Search(_)
             | Mode::Reorder(_)
             | Mode::Menu { .. }
-            | Mode::Afloat { .. }
+            | Mode::Afloat {
+                menu: Menu::Interactive(_),
+                ..
+            }
             | Mode::AfloatNote(_) => return LeftFloating::Stayed,
         };
         assert!(
@@ -2563,6 +2584,12 @@ impl Sidebar {
         LeftFloating::Left { kept_notice }
     }
 
+    fn next_menu(&mut self) -> MenuId {
+        let next = self.menus.map_or_else(MenuId::first, MenuId::next);
+        self.menus = Some(next);
+        next
+    }
+
     pub fn float_note(&mut self, note: String) {
         self.end_mode();
         self.let_go();
@@ -2580,10 +2607,9 @@ impl Sidebar {
         self.keep_working(menu);
     }
 
-    pub fn drop_menu(&mut self, menu: u64) {
-        assert!(menu > 0, "menu numbers start at one");
+    pub fn drop_menu(&mut self, menu: MenuId) {
         assert!(
-            menu <= self.menus,
+            self.menus.is_some_and(|last| menu <= last),
             "dropped menu {menu} was issued by this sidebar"
         );
         if self.open().is_some_and(|open| open.number() == menu) {
@@ -2602,7 +2628,7 @@ impl Sidebar {
         );
     }
 
-    fn drop_menu_saying(&mut self, menu: u64, notice: String) {
+    fn drop_menu_saying(&mut self, menu: MenuId, notice: String) {
         let open = self.open().is_some_and(|open| open.number() == menu);
         let taken = if open {
             let (_, placed) = self.take_open().expect("the menu is open");
@@ -2712,7 +2738,7 @@ impl Sidebar {
 
     #[cfg(test)]
     fn working_on(&self) -> bool {
-        self.working.values().any(|menu| menu.doing().is_some())
+        !self.working.is_empty()
     }
 
     fn went_said(place: &Place) -> String {
@@ -2728,26 +2754,35 @@ impl Sidebar {
     }
 
     fn keep_working(&mut self, menu: Option<Menu>) {
-        if let Some(menu) = menu.filter(Menu::waits) {
+        if let Some(Menu::Waiting(menu)) = menu {
             self.working.insert(menu.number(), menu);
         }
     }
 
-    fn take_waited(&mut self, menu: u64, keep: impl Fn(&Menu) -> bool) -> Option<(Menu, Taken)> {
+    fn take_waited(
+        &mut self,
+        menu: MenuId,
+        keep: impl Fn(&WaitingMenu) -> bool,
+    ) -> Option<(WaitingMenu, Taken)> {
         let (waited, taken, ()) = self.take_seen(menu, |it| keep(it).then_some(()))?;
         Some((waited, taken))
     }
 
     fn take_seen<T>(
         &mut self,
-        menu: u64,
-        see: impl Fn(&Menu) -> Option<T>,
-    ) -> Option<(Menu, Taken, T)> {
-        let open = self.open().filter(|it| it.number() == menu);
-        if let Some(seen) = open.and_then(&see) {
-            return self
-                .take_open()
-                .map(|(it, placed)| (it, Taken::Open(placed), seen));
+        menu: MenuId,
+        see: impl Fn(&WaitingMenu) -> Option<T>,
+    ) -> Option<(WaitingMenu, Taken, T)> {
+        let open = matches!(
+            self.open(),
+            Some(Menu::Waiting(waiting)) if waiting.number() == menu && see(waiting).is_some()
+        );
+        if open {
+            let Some((Menu::Waiting(it), placed)) = self.take_open() else {
+                unreachable!("the open waiting menu matched");
+            };
+            let seen = see(&it).expect("the open waiting menu matched");
+            return Some((it, Taken::Open(placed), seen));
         }
         let seen = self.working.get(&menu).and_then(see)?;
         self.working.remove(&menu).map(|it| (it, Taken::Kept, seen))
@@ -3136,7 +3171,7 @@ impl Sidebar {
 
     #[cfg(test)]
     pub fn turning(&self) -> bool {
-        let menus = self.open().is_some_and(Menu::turning);
+        let menus = matches!(self.open(), Some(Menu::Waiting(menu)) if menu.turning());
         self.row_turning() || menus || self.working_on() || !self.filing.is_empty()
     }
 
@@ -3805,7 +3840,7 @@ impl Sidebar {
         self.key_from(key, now, Came::Typed, Notice::Keep)
     }
 
-    fn tuck_waiting_sidebar_menu(&mut self, number: u64) {
+    fn tuck_waiting_sidebar_menu(&mut self, number: MenuId) {
         assert!(
             !self.working.contains_key(&number),
             "a waiting menu is not already tucked in working"
@@ -3828,21 +3863,27 @@ impl Sidebar {
             }
             return Asked::Nothing;
         }
-        if let Mode::Menu { menu, .. } = &self.mode
-            && menu.waits()
+        if let Mode::Menu {
+            menu: Menu::Waiting(menu),
+            ..
+        } = &self.mode
         {
+            if key.kind == KeyEventKind::Repeat {
+                return Asked::Nothing;
+            }
+            let number = menu.number();
             if menu::closes(key) {
                 if notice == Notice::Clear {
                     self.notice = None;
                 }
                 self.copied = None;
                 self.filed = None;
-                self.tuck_waiting_sidebar_menu(menu.number());
+                self.tuck_waiting_sidebar_menu(number);
                 return Asked::Nothing;
             }
             let leaves = menu::bare(key) && !matches!(key.code, KeyCode::Modifier(_));
             if leaves {
-                self.tuck_waiting_sidebar_menu(menu.number());
+                self.tuck_waiting_sidebar_menu(number);
             } else {
                 return Asked::Nothing;
             }
@@ -3866,12 +3907,17 @@ impl Sidebar {
             (Came::Read, _) | (_, Some(Pending::Legend)) => ChordWait::Shown,
             (Came::Typed, _) => ChordWait::Until(now.steady + PAUSE),
         };
-        if menu::closes(key) && self.open().is_some_and(Menu::waits) {
-            self.close_menu();
+        if matches!(self.open(), Some(Menu::Waiting(_))) {
+            if key.kind != KeyEventKind::Repeat && menu::closes(key) {
+                self.close_menu();
+            }
             return Asked::Nothing;
         }
         if key.code == KeyCode::Char(menu::ALL_KEYS)
-            && let Mode::Menu { menu, .. } = &self.mode
+            && let Mode::Menu {
+                menu: Menu::Interactive(menu),
+                ..
+            } = &self.mode
             && menu.lists()
         {
             self.close_menu();
@@ -3879,10 +3925,16 @@ impl Sidebar {
             return Asked::Nothing;
         }
         if let Some((menu, placed)) = self.take_open() {
+            let Menu::Interactive(menu) = menu else {
+                unreachable!("an open waiting menu returned above");
+            };
             let asked = self.menu_did(placed, menu.key(key));
             if paused
-                && let Mode::Menu { menu, pause } = &mut self.mode
-                && menu.quiet()
+                && let Mode::Menu {
+                    menu: Menu::Waiting(waiting),
+                    pause,
+                } = &mut self.mode
+                && waiting.quiet()
             {
                 *pause = Pause::Quiet;
             }
@@ -4357,9 +4409,9 @@ impl Sidebar {
         let Some(target) = self.target() else {
             return Asked::Nothing;
         };
-        self.menus += 1;
+        let number = self.next_menu();
         let agent = self.agent_for(&target);
-        let Some(did) = Menu::open(self.menus, target, key, agent) else {
+        let Some(did) = Menu::open(number, target, key, agent) else {
             return Asked::Nothing;
         };
         self.menu_did(Placed::Sidebar(Pause::Nothing), did)
@@ -4369,10 +4421,10 @@ impl Sidebar {
         let Some(target) = self.target() else {
             return Asked::Nothing;
         };
-        self.menus += 1;
+        let number = self.next_menu();
         let agent = self.agent_for(&target);
-        let opened = Menu::open(self.menus, target, Some(group), agent);
-        let Some(Did::Stays(menu, Wants::Nothing)) = opened else {
+        let opened = Menu::open(number, target, Some(group), agent);
+        let Some(Did::Stays(Menu::Interactive(menu), Wants::Nothing)) = opened else {
             return Asked::Nothing;
         };
         let did = menu.key(&KeyEvent::from(KeyCode::Char(key)));
@@ -4487,11 +4539,14 @@ impl Sidebar {
     }
 
     fn reran(&mut self) {
-        let Some(Target::View(machine, row)) = self.open().map(Menu::target) else {
+        let Some(Menu::Interactive(menu)) = self.open() else {
+            return;
+        };
+        let Target::View(machine, row) = menu.target() else {
             return;
         };
         let ran = self.ran_in(machine, row.place.listed(), row.place.view());
-        if let Some(menu) = self.open_mut() {
+        if let Some(Menu::Interactive(menu)) = self.open_mut() {
             menu.reran(ran);
         }
     }
@@ -4505,14 +4560,17 @@ impl Sidebar {
                 return self.float_note(why.to_owned());
             }
         };
-        self.menus += 1;
+        let number = self.next_menu();
         let Some(target) = self.target_at(self.on(), place) else {
             return self.float_note(NO_HERE_VIEW.to_owned());
         };
         let agent = self.agent_for(&target);
         self.end_mode();
         self.let_go();
-        self.put(Menu::new(self.menus, target, agent), Placed::Afloat);
+        self.put(
+            Menu::Interactive(InteractiveMenu::new(number, target, agent)),
+            Placed::Afloat,
+        );
     }
 
     pub fn aimed_row(&self) -> Aim {
@@ -4588,9 +4646,9 @@ impl Sidebar {
         if Command::of(action) == Some(Command::Quit) {
             return Asked::Quit;
         }
-        self.menus += 1;
+        let number = self.next_menu();
         let agent = self.agent_for(target);
-        let did = Menu::acting(self.menus, target, action, agent);
+        let did = Menu::acting(number, target, action, agent);
         if origin == Origin::Views {
             self.let_go();
         }
@@ -4613,7 +4671,9 @@ impl Sidebar {
         if let Mode::AfloatNote(_) = self.mode {
             return Asked::Nothing;
         }
-        if self.open_mut().is_some_and(|menu| menu.paste(text)) {
+        if let Some(Menu::Interactive(menu)) = self.open_mut()
+            && menu.paste(text)
+        {
             return Asked::Nothing;
         }
         let target = match self.open() {
@@ -4661,9 +4721,14 @@ impl Sidebar {
             self.end_mode();
             Placed::Sidebar(Pause::Nothing)
         };
-        self.menus += 1;
+        let number = self.next_menu();
         self.put(
-            Menu::pull(self.menus, target, work, self.agent.harness()),
+            Menu::Interactive(InteractiveMenu::pull(
+                number,
+                target,
+                work,
+                self.agent.harness(),
+            )),
             placed,
         );
         Asked::Nothing
@@ -4714,26 +4779,33 @@ impl Sidebar {
             return Asked::Nothing;
         }
         self.end_mode();
-        self.menus += 1;
-        let did = Menu::start_pull(self.menus, target, work, self.agent.harness(), pull);
+        let number = self.next_menu();
+        let (waiting, wants) =
+            WaitingMenu::start_pull(number, target, work, self.agent.harness(), pull);
         if origin == Origin::Views {
             self.let_go();
         }
-        self.menu_did(Placed::of(origin), did)
+        self.menu_did(
+            Placed::of(origin),
+            Did::Stays(Menu::Waiting(waiting), wants),
+        )
     }
 
     fn notice_on_its_way(&mut self, work: &Work) -> bool {
-        let making = self
-            .open()
+        let open = match self.open() {
+            Some(Menu::Waiting(menu)) => Some(menu),
+            Some(Menu::Interactive(_)) | None => None,
+        };
+        let making = open
             .into_iter()
             .chain(self.working.values())
-            .filter_map(Menu::making);
+            .filter_map(WaitingMenu::making);
         let on_its_way = making.into_iter().any(|making| making == work);
         self.notice = on_its_way.then(|| format!("{} is on its way", work.tab()));
         on_its_way
     }
 
-    pub fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
+    pub fn chose(&mut self, menu: MenuId, choice: Choice, now: Moment) -> Asked {
         if self.open().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;
         }
@@ -4760,14 +4832,18 @@ impl Sidebar {
     fn pick(&mut self, name: &Name) -> Asked {
         self.notice = None;
         self.unpend();
-        let Some((menu, placed)) = self.take_open() else {
+        if !matches!(self.open(), Some(Menu::Interactive(_))) {
             return Asked::Nothing;
+        }
+        let Some((Menu::Interactive(menu), placed)) = self.take_open() else {
+            unreachable!("the open interactive menu matched");
         };
         self.menu_did(placed, menu.pick(name))
     }
 
-    pub fn scroll_menu(&mut self, menu: u64, by: isize) {
-        if let Some(open) = self.open_mut().filter(|open| open.number() == menu) {
+    pub fn scroll_menu(&mut self, menu: MenuId, by: isize) {
+        if let Some(Menu::Interactive(open)) = self.open_mut().filter(|open| open.number() == menu)
+        {
             open.scroll(by);
         }
     }
@@ -4815,6 +4891,18 @@ impl Sidebar {
                         on,
                         project,
                         branch,
+                    },
+                    Done::Open {
+                        on,
+                        session,
+                        view,
+                        opens,
+                    } => Asked::Open {
+                        asking: taken.held(),
+                        on,
+                        project: session.project(),
+                        beside: view,
+                        opens,
                     },
                     Done::Welcome { on, session, view } => Asked::Welcome {
                         asking: taken.held(),
@@ -4878,38 +4966,36 @@ impl Sidebar {
             }
         };
         let (number, on) = (menu.number(), menu.target().machine().clone());
-        if let Wants::Open {
-            session,
-            view,
-            opens,
-        } = wants
-        {
-            let asking = taken.held();
-            return Asked::Open {
-                asking,
-                on,
-                project: session.project(),
-                beside: view,
-                opens,
-            };
-        }
-        match taken {
-            Taken::Open(placed) => self.put(menu, placed),
-            Taken::Kept => {
+        match (taken, menu) {
+            (Taken::Open(placed), menu) => {
+                self.put(menu, placed);
+                self.menu_wants(number, on, wants)
+            }
+            (Taken::Kept, Menu::Waiting(menu)) => {
                 self.working.insert(number, menu);
+                let asked = self.menu_wants(number, on, wants);
+                assert_eq!(
+                    asked.menu(),
+                    Some(number),
+                    "a tucked waiting menu stays waiting only for work it asks"
+                );
+                asked
+            }
+            (Taken::Kept, Menu::Interactive(menu)) => {
+                assert_eq!(
+                    wants,
+                    Wants::Nothing,
+                    "a tucked menu returning to an interactive stage asks no further work"
+                );
+                if let Some(said) = menu.left() {
+                    self.say(said);
+                }
+                Asked::Nothing
             }
         }
-        let asked = self.menu_wants(number, on, wants);
-        if taken == Taken::Kept
-            && asked.menu() != Some(number)
-            && let Some(said) = self.working.remove(&number).as_ref().and_then(Menu::left)
-        {
-            self.say(said);
-        }
-        asked
     }
 
-    fn menu_wants(&mut self, number: u64, on: Machine, wants: Wants) -> Asked {
+    fn menu_wants(&mut self, number: MenuId, on: Machine, wants: Wants) -> Asked {
         match wants {
             Wants::Nothing => Asked::Nothing,
             Wants::Cloned(project) => {
@@ -4939,9 +5025,6 @@ impl Sidebar {
                     dir,
                     agent,
                 }
-            }
-            Wants::Open { .. } => {
-                unreachable!("an open is asked of the host before the menu is kept")
             }
             Wants::Pull(work, wanted) => match self.worked(&on) {
                 Ok(worked) => {
@@ -5005,14 +5088,17 @@ impl Sidebar {
     }
 
     fn planned(&mut self, plan: Result<Plan, String>) -> Asked {
-        let Some((menu, placed)) = self.take_open() else {
+        if !matches!(self.open(), Some(Menu::Interactive(_))) {
             return Asked::Nothing;
+        }
+        let Some((Menu::Interactive(menu), placed)) = self.take_open() else {
+            unreachable!("the open interactive menu matched");
         };
         self.menu_did(placed, menu.planned(plan))
     }
 
-    pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
-        let Some((waiting, taken)) = self.take_waited(menu, Menu::sweeping) else {
+    pub fn prunes(&mut self, menu: MenuId, plan: Result<prunes::Plan, String>) -> Asked {
+        let Some((waiting, taken)) = self.take_waited(menu, WaitingMenu::sweeping) else {
             return Asked::Nothing;
         };
         if let Ok(plan) = &plan {
@@ -5021,8 +5107,8 @@ impl Sidebar {
         self.menu_did_after(taken, waiting.swept(plan))
     }
 
-    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
-        let waiting = self.take_waited(menu, Menu::pruning);
+    pub fn pruned(&mut self, menu: MenuId, pruned: Result<prunes::Pruned, String>) -> Asked {
+        let waiting = self.take_waited(menu, WaitingMenu::pruning);
         let taken = waiting.as_ref().map_or(Taken::Kept, |(_, taken)| *taken);
         match pruned {
             Ok(prunes::Pruned::Changed(plan)) => {
@@ -5050,8 +5136,8 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
-        let Some((waiting, taken)) = self.take_waited(menu, Menu::pulling) else {
+    pub fn pulled(&mut self, menu: MenuId, found: Result<Found, String>) -> Asked {
+        let Some((waiting, taken)) = self.take_waited(menu, WaitingMenu::pulling) else {
             return Asked::Nothing;
         };
         if let Some(off_branch) = waiting.off_branch(&found) {
@@ -5060,22 +5146,27 @@ impl Sidebar {
         self.menu_did_after(taken, waiting.pulled(found))
     }
 
-    pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
-        let Some((waiting, taken)) = self.take_waited(menu, Menu::reading) else {
+    pub fn printed(&mut self, menu: MenuId, printed: Result<Printed, String>) -> Asked {
+        let Some((waiting, taken)) = self.take_waited(menu, WaitingMenu::reading) else {
             return Asked::Nothing;
         };
-        self.menu_did_after(taken, waiting.printed(printed))
+        let current = waiting
+            .reading_view()
+            .map_or(Ran::Unhooked, |(machine, session, view)| {
+                self.ran_in(machine, session, view)
+            });
+        self.menu_did_after(taken, waiting.printed(printed, &current))
     }
 
-    pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
-        let Some((waiting, taken)) = self.take_waited(menu, Menu::fetching) else {
+    pub fn checks(&mut self, menu: MenuId, checks: Result<checks::Failing, String>) -> Asked {
+        let Some((waiting, taken)) = self.take_waited(menu, WaitingMenu::fetching) else {
             return Asked::Nothing;
         };
         self.menu_did_after(taken, waiting.checked(checks))
     }
 
-    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
-        let Some((waiting, taken)) = self.take_waited(menu, Menu::rebasing) else {
+    pub fn rebased(&mut self, menu: MenuId, rebased: Result<Rebased, Unrebased>) -> Asked {
+        let Some((waiting, taken)) = self.take_waited(menu, WaitingMenu::rebasing) else {
             return Asked::Nothing;
         };
         self.menu_did_after(taken, waiting.rebased(rebased))
@@ -5324,8 +5415,8 @@ impl Sidebar {
         self.tickets
     }
 
-    pub fn made_for(&mut self, menu: u64) -> Option<Held> {
-        let made = |it: &Menu| it.opens_pulled().then_some(());
+    pub fn made_for(&mut self, menu: MenuId) -> Option<Held> {
+        let made = |it: &WaitingMenu| it.opens_pulled().then_some(());
         self.take_seen(menu, made)
             .map(|(_, taken, ())| taken.held())
     }
@@ -5333,11 +5424,11 @@ impl Sidebar {
     #[must_use]
     pub fn found(
         &mut self,
-        menu: u64,
+        menu: MenuId,
         agent: agents::Harness,
         skills: Result<Vec<Skill>, String>,
     ) -> bool {
-        if let Some(open) = self.open_mut().filter(|it| it.number() == menu) {
+        if let Some(Menu::Interactive(open)) = self.open_mut().filter(|it| it.number() == menu) {
             open.found(agent, skills);
             return true;
         }
@@ -6082,9 +6173,7 @@ impl Sidebar {
             notes.say(&going, width, Style::new().fg(NAME));
         }
         for working in self.working.values() {
-            if let Some(doing) = working.doing() {
-                notes.wait(&doing, width, Style::new().fg(NAME), frame);
-            }
+            notes.wait(&working.doing(), width, Style::new().fg(NAME), frame);
         }
         let mut buttons = Spots::default();
         if let Some(aloud) = &self.aloud {
@@ -7843,10 +7932,17 @@ mod tests {
             .collect()
     }
 
-    fn floating_menu(sidebar: &Sidebar) -> Option<&Menu> {
+    fn floating_menu(sidebar: &Sidebar) -> Option<&InteractiveMenu> {
         match sidebar.floating() {
             Some(Floating::Menu(menu)) => Some(menu),
-            Some(Floating::Note(_)) | None => None,
+            Some(Floating::Waiting(_) | Floating::Note(_)) | None => None,
+        }
+    }
+
+    fn open_waiting(sidebar: &Sidebar) -> Option<&WaitingMenu> {
+        match sidebar.open() {
+            Some(Menu::Waiting(menu)) => Some(menu),
+            Some(Menu::Interactive(_)) | None => None,
         }
     }
 
@@ -11260,7 +11356,7 @@ mod tests {
     }
 
     fn on_menu(code: KeyCode) -> Hit {
-        Hit::Menu(1, Choice::Key(KeyEvent::from(code)))
+        Hit::Menu(MenuId::of(1), Choice::Key(KeyEvent::from(code)))
     }
 
     #[test]
@@ -11377,7 +11473,7 @@ mod tests {
         let clicked = sidebar.keys_clicked(Keyed::Legend, &char('d'), moment(160_000));
         assert_eq!(clicked, Asked::Nothing);
         assert_eq!(clicks(&mut sidebar, 18), group);
-        let chosen = sidebar.chose(1, Choice::Key(char('d')), moment(160_000));
+        let chosen = sidebar.chose(MenuId::of(1), Choice::Key(char('d')), moment(160_000));
         assert_eq!(chosen, Asked::Nothing);
         let lines = screen(&mut sidebar, true, 32, 20);
         assert!(
@@ -11662,7 +11758,7 @@ mod tests {
             let asked = sidebar.paste("https://github.com/lorenzolfm/lune/pull/5");
             assert_eq!(asked, Asked::Nothing);
             assert!(sidebar.open().is_some());
-            sidebar.drop_menu(sidebar.menus);
+            sidebar.drop_menu(sidebar.menus.expect("a menu was opened"));
             assert!(sidebar.open().is_none());
             assert!(!shows_at(&mut sidebar, now, shows), "{shows}");
         }
@@ -11692,7 +11788,7 @@ mod tests {
         let dir = directory("/w/lune/main");
         let agent = agents::Harness::ClaudeCode;
         let find = Asked::Find {
-            menu: 1,
+            menu: MenuId::of(1),
             on: Machine::Local,
             dir,
             agent,
@@ -11705,7 +11801,7 @@ mod tests {
             runs: crate::skills::Runs::ForAnyone,
         };
         let _ = sidebar.found(
-            1,
+            MenuId::of(1),
             agent,
             Ok(vec![skill("code-review"), skill("tigerstyle")]),
         );
@@ -11714,8 +11810,11 @@ mod tests {
             .iter()
             .map(|(text, hit)| (text.as_str(), hit.clone()))
             .collect();
-        let on = |skill| Some(Hit::Menu(1, Choice::Skill(name(skill))));
-        let tab = Some(Hit::Menu(1, Choice::Key(KeyEvent::from(KeyCode::Tab))));
+        let on = |skill| Some(Hit::Menu(MenuId::of(1), Choice::Skill(name(skill))));
+        let tab = Some(Hit::Menu(
+            MenuId::of(1),
+            Choice::Key(KeyEvent::from(KeyCode::Tab)),
+        ));
         assert_eq!(
             skills,
             [
@@ -11727,7 +11826,7 @@ mod tests {
         );
         let tigerstyle = || Choice::Skill(name("tigerstyle"));
         assert_eq!(
-            sidebar.chose(2, tigerstyle(), moment(160_000)),
+            sidebar.chose(MenuId::of(2), tigerstyle(), moment(160_000)),
             Asked::Nothing
         );
         let command = ["claude", "/tigerstyle"].map(str::to_owned).to_vec();
@@ -11740,7 +11839,10 @@ mod tests {
             beside,
             opens,
         };
-        assert_eq!(sidebar.chose(1, tigerstyle(), moment(160_000)), open);
+        assert_eq!(
+            sidebar.chose(MenuId::of(1), tigerstyle(), moment(160_000)),
+            open
+        );
     }
 
     #[test]
@@ -11962,7 +12064,7 @@ mod tests {
         for elsewhere in elsewhere.map(|it| format!("https://github.com/{it}")) {
             assert_eq!(sidebar.paste(&elsewhere), Asked::Nothing, "{elsewhere}");
             assert!(sidebar.open().is_some(), "{elsewhere}");
-            sidebar.drop_menu(sidebar.menus);
+            sidebar.drop_menu(sidebar.menus.expect("a menu was opened"));
         }
     }
 
@@ -12021,7 +12123,7 @@ mod tests {
         let on = Machine::Local;
         let others = Vec::new();
         let pull = Asked::Pull {
-            menu: 1,
+            menu: MenuId::of(1),
             on,
             work,
             wanted,
@@ -12041,7 +12143,7 @@ mod tests {
             work,
         };
         let asked = Asked::Make {
-            menu: 1,
+            menu: MenuId::of(1),
             on: Machine::Local,
             cwd: directory("/w/n/feat"),
             name: "#5".to_owned(),
@@ -12049,7 +12151,7 @@ mod tests {
         };
         assert_eq!(
             sidebar.pulled(
-                1,
+                MenuId::of(1),
                 Ok(Found {
                     on: Machine::Local,
                     ready
@@ -12057,9 +12159,9 @@ mod tests {
             ),
             asked
         );
-        assert_eq!(sidebar.made_for(1), Some(Held::Open));
+        assert_eq!(sidebar.made_for(MenuId::of(1)), Some(Held::Open));
         assert!(sidebar.open().is_none());
-        assert_eq!(sidebar.made_for(1), None);
+        assert_eq!(sidebar.made_for(MenuId::of(1)), None);
         sidebar.focus(Keys::Terminal);
         assert!(sidebar.working.is_empty());
     }
@@ -12068,7 +12170,7 @@ mod tests {
     fn what_a_key_of_a_pasted_link_started_goes_on_once_the_keys_leave_the_menu() {
         let page = "https://github.com/lorenzolfm/lune/pull/5";
         let link = || Link::parse(page).unwrap();
-        let number = 1;
+        let number = MenuId::of(1);
         let pulling = || {
             let mut sidebar = own_two_sessions();
             sidebar.focus(Keys::Sidebar);
@@ -12076,7 +12178,7 @@ mod tests {
             let Asked::Pull { .. } = sidebar.key(&char('r'), moment(160_000)) else {
                 panic!("no job for the key");
             };
-            assert!(sidebar.open().is_some_and(Menu::pulling));
+            assert!(open_waiting(&sidebar).is_some_and(WaitingMenu::pulling));
             sidebar
         };
         let ready = || {
@@ -12160,7 +12262,7 @@ mod tests {
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
-        let number = sidebar.open().map_or(0, Menu::number);
+        let number = sidebar.open().expect("the menu").number();
         assert_eq!(
             sidebar.key(&KeyEvent::from(KeyCode::Esc), moment(161_000)),
             Asked::Nothing
@@ -12185,7 +12287,7 @@ mod tests {
         let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
             panic!("no job for the key");
         };
-        let number = sidebar.open().map_or(0, Menu::number);
+        let number = sidebar.open().expect("the menu").number();
         assert_eq!(sidebar.paste(page), Asked::Nothing);
         assert_eq!(sidebar.open().map(Menu::number), Some(number));
         sidebar.focus(Keys::Terminal);
@@ -12209,7 +12311,7 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.paste(page), Asked::Nothing);
         assert_eq!(sidebar.paste(page), Asked::Nothing);
-        assert_eq!(sidebar.open().map(Menu::number), Some(2));
+        assert_eq!(sidebar.open().map(Menu::number), Some(MenuId::of(2)));
         assert_eq!(sidebar.notice, None);
         assert!(sidebar.working.is_empty());
     }
@@ -12251,14 +12353,14 @@ mod tests {
             sidebar.paste("https://github.com/lorenzolfm/lune/issues/6"),
             Asked::Nothing
         );
-        assert_eq!(sidebar.open().map(Menu::number), Some(2));
-        assert!(sidebar.working.contains_key(&1));
+        assert_eq!(sidebar.open().map(Menu::number), Some(MenuId::of(2)));
+        assert!(sidebar.working.contains_key(&MenuId::of(1)));
 
         let mut sidebar = waiting();
         sit(&mut sidebar, &own_view_of("older", 1, 1));
         float_a_menu(&mut sidebar);
-        assert_eq!(sidebar.open().map(Menu::number), Some(2));
-        assert!(sidebar.working.contains_key(&1));
+        assert_eq!(sidebar.open().map(Menu::number), Some(MenuId::of(2)));
+        assert!(sidebar.working.contains_key(&MenuId::of(1)));
     }
 
     #[test]
@@ -12279,7 +12381,7 @@ mod tests {
             panic!("no job for the key");
         };
         assert_eq!(
-            sidebar.pulled(1, Err("gh failed".to_owned())),
+            sidebar.pulled(MenuId::of(1), Err("gh failed".to_owned())),
             Asked::Nothing
         );
         assert_eq!(
@@ -12287,7 +12389,7 @@ mod tests {
             Some("menu: lorenzolfm/lune#5: gh failed")
         );
         assert!(sidebar.working.is_empty());
-        assert_eq!(sidebar.open().map(Menu::number), Some(2));
+        assert_eq!(sidebar.open().map(Menu::number), Some(MenuId::of(2)));
         let work = Readied::Link(Link::parse(page).unwrap());
         let at = At::Unopened;
         let folder = directory("/w/lune/issue-6");
@@ -12299,14 +12401,17 @@ mod tests {
             work,
         };
         let asked = sidebar.pulled(
-            2,
+            MenuId::of(2),
             Ok(Found {
                 on: Machine::Local,
                 ready,
             }),
         );
-        assert!(matches!(asked, Asked::Make { menu: 2, .. }), "{asked:?}");
-        assert_eq!(sidebar.made_for(2), Some(Held::Open));
+        assert!(
+            matches!(asked, Asked::Make { menu, .. } if menu == MenuId::of(2)),
+            "{asked:?}"
+        );
+        assert_eq!(sidebar.made_for(MenuId::of(2)), Some(Held::Open));
         assert!(sidebar.open().is_none());
     }
 
@@ -12370,7 +12475,7 @@ mod tests {
             let mut sidebar = own_two_sessions();
             sidebar.focus(Keys::Sidebar);
             assert_eq!(sidebar.paste(page), Asked::Nothing);
-            let number = sidebar.open().map_or(0, Menu::number);
+            let number = sidebar.open().expect("the menu").number();
             let Asked::Pull { wanted, .. } = sidebar.key(&char(key), moment(160_000)) else {
                 panic!("no job for the key");
             };
@@ -12420,7 +12525,7 @@ mod tests {
                 float_a_menu(&mut sidebar);
             }
             assert_eq!(sidebar.paste(page), Asked::Nothing);
-            let number = sidebar.open().map_or(0, Menu::number);
+            let number = sidebar.open().expect("the menu").number();
             let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
                 panic!("no job for the key");
             };
@@ -12498,7 +12603,7 @@ mod tests {
         let (on, s) = (Machine::Local, listed("s", 10));
         let view = view_key(10, 1);
         let printed = Asked::Printed {
-            menu: 1,
+            menu: MenuId::of(1),
             on,
             session: s,
             view,
@@ -12506,7 +12611,7 @@ mod tests {
         };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         let nothing = || Ok(Printed::Nothing);
-        assert_eq!(sidebar.printed(2, nothing()), Asked::Nothing);
+        assert_eq!(sidebar.printed(MenuId::of(2), nothing()), Asked::Nothing);
         let prompt = "Fix this. In my shell, `cargo test` ended with exit status 101. It printed \
                       nothing.";
         let command = vec!["claude".to_owned(), "--".to_owned(), prompt.to_owned()];
@@ -12519,7 +12624,7 @@ mod tests {
             beside,
             opens,
         };
-        assert_eq!(sidebar.printed(1, nothing()), open);
+        assert_eq!(sidebar.printed(MenuId::of(1), nothing()), open);
         assert!(sidebar.open().is_none());
 
         type_in(&mut sidebar, "jcf");
@@ -12545,7 +12650,7 @@ mod tests {
         let (on, s) = (Machine::Local, listed("s", 10));
         let view = view_key(10, 2);
         let printed = Asked::Printed {
-            menu: 3,
+            menu: MenuId::of(3),
             on,
             session: s,
             view,
@@ -12553,7 +12658,7 @@ mod tests {
         };
         assert_eq!(sidebar.key(&char('f'), moment(160_000)), printed);
         sidebar.hear(shells(going("make", 200, Front::Working)));
-        assert_eq!(sidebar.printed(3, nothing()), Asked::Nothing);
+        assert_eq!(sidebar.printed(MenuId::of(3), nothing()), Asked::Nothing);
         assert!(sidebar.open().is_none());
         let why = "menu: view 2's shell went on as lune read what `make` printed; ask again";
         assert_eq!(sidebar.notice.as_deref(), Some(why));
@@ -12570,7 +12675,7 @@ mod tests {
         let project = own_listed("s", 1);
         let printed = matches!(&asked, Asked::Printed { session, .. } if *session == project);
         assert!(printed, "{asked:?}");
-        let number = sidebar.open().map_or(0, Menu::number);
+        let number = sidebar.open().expect("the menu").number();
         sidebar.focus(Keys::Terminal);
         assert_eq!(sidebar.working.len(), 1);
         let lines = screen(&mut sidebar, false, 40, 17);
@@ -12600,7 +12705,7 @@ mod tests {
             let mut sidebar = two_sessions();
             sidebar.focus(Keys::Sidebar);
             assert_eq!(sidebar.paste(page), Asked::Nothing);
-            let number = sidebar.open().map_or(0, Menu::number);
+            let number = sidebar.open().expect("the menu").number();
             let Asked::Pull { .. } = sidebar.key(&char('w'), moment(160_000)) else {
                 panic!("no job for the key");
             };
@@ -12638,7 +12743,7 @@ mod tests {
         let mut sidebar = two_sessions();
         sidebar.focus(Keys::Sidebar);
         assert_eq!(sidebar.paste(page), Asked::Nothing);
-        let number = sidebar.open().map_or(0, Menu::number);
+        let number = sidebar.open().expect("the menu").number();
         let Asked::Pull { .. } = sidebar.key(&char('t'), moment(160_000)) else {
             panic!("no job for the key");
         };
@@ -12724,7 +12829,9 @@ mod tests {
         sidebar.focus(Keys::Sidebar);
         float_a_menu(&mut sidebar);
         assert_eq!(standing(&mut sidebar), lent);
-        let target = floating_menu(&sidebar).map(Menu::target).cloned();
+        let target = floating_menu(&sidebar)
+            .map(InteractiveMenu::target)
+            .cloned();
         assert_eq!(
             target,
             Some(Target::View(
@@ -12963,7 +13070,7 @@ mod tests {
 
         let floated = |sidebar: &Sidebar| match sidebar.floating() {
             Some(Floating::Note(note)) => Some(note.to_owned()),
-            Some(Floating::Menu(_)) | None => None,
+            Some(Floating::Menu(_) | Floating::Waiting(_)) | None => None,
         };
 
         float_a_menu(&mut sidebar);
@@ -14674,7 +14781,7 @@ mod tests {
         );
         let dir = Directory::parse("/w/b".to_owned()).unwrap();
         let on = Machine::Remote(nixos());
-        let number = sidebar.menus + 1;
+        let number = sidebar.menus.map_or_else(MenuId::first, MenuId::next);
         let branch = Said::new("fix".to_owned()).unwrap();
         assert_eq!(
             sidebar.key(&char('r'), now),
@@ -14685,7 +14792,7 @@ mod tests {
                 branch
             }
         );
-        assert!(sidebar.open().expect("the menu").rebasing());
+        assert!(open_waiting(&sidebar).is_some_and(WaitingMenu::rebasing));
         let rebased = rebases::Rebased {
             branch: Said::new("fix".to_owned()).unwrap(),
             onto: Said::new("origin/main".to_owned()).unwrap(),
@@ -14760,7 +14867,10 @@ mod tests {
             kept: Vec::new(),
             unasked: Vec::new(),
         };
-        assert_eq!(sidebar.prunes(number + 1, Ok(plan.clone())), Asked::Nothing);
+        assert_eq!(
+            sidebar.prunes(number.next(), Ok(plan.clone())),
+            Asked::Nothing
+        );
         assert_eq!(sidebar.prunes(number, Ok(plan.clone())), Asked::Nothing);
         let deletes = Asked::Prune {
             menu: number,
@@ -14769,10 +14879,10 @@ mod tests {
             agreed: plan.deletes(),
         };
         assert_eq!(sidebar.key(&char('y'), now), deletes);
-        assert!(sidebar.open().expect("the menu").pruning());
+        assert!(open_waiting(&sidebar).is_some_and(WaitingMenu::pruning));
         let changed = Ok(prunes::Pruned::Changed(plan.clone()));
         assert_eq!(sidebar.pruned(number, changed.clone()), Asked::Nothing);
-        assert!(!sidebar.open().expect("the menu").pruning());
+        assert!(!open_waiting(&sidebar).is_some_and(WaitingMenu::pruning));
         assert_eq!(sidebar.key(&char('y'), now), deletes);
         sidebar.key(&KeyEvent::from(KeyCode::Esc), now);
         assert_eq!(sidebar.pruned(number, changed), Asked::Nothing);
@@ -14946,7 +15056,7 @@ mod tests {
             sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
             Asked::Nothing
         );
-        let number = sidebar.open().map_or(0, Menu::number);
+        let number = sidebar.open().expect("the menu").number();
         let on = Machine::Remote(nixos());
         let link = Link::parse("https://github.com/lorenzolfm/lune/pull/5").unwrap();
         let worked = links::Worked {
@@ -15037,7 +15147,7 @@ mod tests {
             sidebar.paste("https://github.com/lorenzolfm/lune/pull/5"),
             Asked::Nothing
         );
-        let number = sidebar.open().map_or(0, Menu::number);
+        let number = sidebar.open().expect("the menu").number();
         let asked = sidebar.key(&char('r'), moment(160_000));
         let Asked::Pull {
             on, wanted, others, ..
@@ -16465,12 +16575,22 @@ mod tests {
         let Asked::Pull { menu: tackle, .. } = sidebar.key(&char('t'), moment(160_000)) else {
             panic!("tackle did not start");
         };
-        assert!(sidebar.open().is_some_and(Menu::pulling));
+        assert!(open_waiting(&sidebar).is_some_and(WaitingMenu::pulling));
+
+        let repeat_j =
+            KeyEvent::new_with_kind(KeyCode::Char('j'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert_eq!(sidebar.key(&repeat_j, moment(160_025)), Asked::Nothing);
+        assert!(
+            open_waiting(&sidebar).is_some_and(WaitingMenu::pulling),
+            "a repeated key leaves a waiting sidebar menu open"
+        );
+        assert!(sidebar.working.is_empty());
+        assert_eq!(sidebar.lit_spot().cloned(), first);
 
         let shift = KeyEvent::from(KeyCode::Modifier(ModifierKeyCode::LeftShift));
         assert_eq!(sidebar.key(&shift, moment(160_050)), Asked::Nothing);
         assert!(
-            sidebar.open().is_some_and(Menu::pulling),
+            open_waiting(&sidebar).is_some_and(WaitingMenu::pulling),
             "a bare modifier leaves a waiting sidebar menu open"
         );
         assert!(sidebar.working.is_empty());
@@ -16478,7 +16598,7 @@ mod tests {
         let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
         assert_eq!(sidebar.key(&ctrl_x, moment(160_075)), Asked::Nothing);
         assert!(
-            sidebar.open().is_some_and(Menu::pulling),
+            open_waiting(&sidebar).is_some_and(WaitingMenu::pulling),
             "a modified non-closing key leaves a waiting sidebar menu open"
         );
         assert!(sidebar.working.is_empty());
@@ -16541,7 +16661,7 @@ mod tests {
             matches!(asked, Asked::Make { menu, .. } if menu == worktree),
             "{asked:?}"
         );
-        assert!(sidebar.open().is_some_and(Menu::opens_pulled));
+        assert!(open_waiting(&sidebar).is_some_and(WaitingMenu::opens_pulled));
 
         let entered = sidebar.key(&KeyEvent::from(KeyCode::Enter), moment(161_100));
         assert!(matches!(entered, Asked::Go { .. }), "{entered:?}");
@@ -16632,6 +16752,37 @@ mod tests {
             LeftFloating::Stayed,
             "a sidebar-docked waiting menu is not a floating menu"
         );
-        assert!(sidebar.open().is_some_and(Menu::pulling));
+        assert!(open_waiting(&sidebar).is_some_and(WaitingMenu::pulling));
+    }
+
+    #[test]
+    fn a_tucked_reading_menu_refuses_to_open_an_agent_once_the_shell_went_on() {
+        let mut sidebar = fresh();
+        let shells = |doing: Doing| {
+            host(
+                vec![own_session("s", 1, vec![in_shell(1, doing)])],
+                Vec::new(),
+            )
+        };
+        sidebar.hear(shells(ended("cargo test", Some(101), 3000)));
+        sidebar.focus(Keys::Sidebar);
+        type_in(&mut sidebar, "Gc");
+        let Asked::Printed { menu: number, .. } = sidebar.key(&char('f'), moment(160_000)) else {
+            panic!("reading did not start");
+        };
+        assert_eq!(sidebar.key(&char('k'), moment(160_100)), Asked::Nothing);
+        assert!(sidebar.open().is_none());
+        assert!(sidebar.working.contains_key(&number));
+
+        sidebar.hear(shells(going("cargo build", 200, Front::Working)));
+        assert_eq!(
+            sidebar.printed(number, Ok(Printed::Nothing)),
+            Asked::Nothing
+        );
+        assert!(sidebar.working.is_empty());
+        assert_eq!(
+            sidebar.notice.as_deref(),
+            Some("menu: view 1's shell went on as lune read what `cargo test` printed; ask again")
+        );
     }
 }
