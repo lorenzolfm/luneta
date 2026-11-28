@@ -1,5 +1,4 @@
 use std::fs;
-use std::process::Stdio;
 
 use lune_waits::eventually;
 use luned::api::keep_printed_response::Printed;
@@ -7,26 +6,20 @@ use luned::api::{self, KeepPrintedRequest, KeepPrintedResponse};
 use luned::mux::own::api as mux_api;
 use tonic::Code;
 
-use crate::host::{PATIENT, Running};
-use crate::own::{Owned, built_server};
+use crate::host::PATIENT;
+use crate::own::Owned;
 
 const PRINTS: &str = r"printf '$ make\r\nbuilt it\r\n$ '; sleep 600";
 
 struct Shell {
     owned: Owned,
-    _mux: Running,
 }
 
 impl Shell {
     fn new() -> Shell {
-        let owned = Owned::new();
-        let program = built_server();
-        let mut mux = owned.host.vars().command(program.to_str().unwrap());
-        mux.arg(owned.host.folder());
-        let mux = Running::spawn(mux.stdin(Stdio::null()));
-        let socket = owned.socket();
-        eventually("lune-mux listens", || socket.exists().then_some(()));
-        Shell { owned, _mux: mux }
+        let mut owned = Owned::new();
+        owned.spawn_mux(|_| {});
+        Shell { owned }
     }
 
     fn printing(&self) -> api::TerminalKey {

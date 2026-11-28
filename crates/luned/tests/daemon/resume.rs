@@ -17,22 +17,23 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::Streaming;
 
 use crate::agents::file_of_pid;
-use crate::host::{LUNE, PATIENT, folder_in};
-use crate::own::Owned;
+use crate::host::{Host, LUNE, PATIENT, folder_in};
+use crate::own::{Owned, OwnedMux};
 use crate::projects::asked;
 
 const CLAUDE_UUID: &str = "015d3962-6f9e-45c3-92bc-c7cef5068215";
 
 struct Shown<'a> {
-    owned: &'a Owned,
+    _host: &'a Host,
+    runtime: &'a tokio::runtime::Runtime,
     asks: mpsc::Sender<ShowRequest>,
     heard: Streaming<ShowResponse>,
     laid: Option<Laid>,
 }
 
 impl<'a> Shown<'a> {
-    fn new(owned: &'a Owned, worktree: u64) -> Self {
-        let folder = folder_in(owned.host.runtime.path()).unwrap();
+    fn new(host: &'a Host, runtime: &'a tokio::runtime::Runtime, worktree: u64) -> Self {
+        let folder = folder_in(host.runtime.path()).unwrap();
         let (asks, asked) = mpsc::channel(16);
         let hello = Hello {
             worktree,
@@ -49,7 +50,7 @@ impl<'a> Shown<'a> {
             asked: 0,
         })
         .unwrap();
-        let heard = owned.block_on(async move {
+        let heard = runtime.block_on(async move {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             daemon
                 .show(ReceiverStream::new(asked))
@@ -58,7 +59,8 @@ impl<'a> Shown<'a> {
                 .into_inner()
         });
         let mut shown = Shown {
-            owned,
+            _host: host,
+            runtime,
             asks,
             heard,
             laid: None,
@@ -93,7 +95,7 @@ impl<'a> Shown<'a> {
         let patience = Patience::begun();
         loop {
             let next = self
-                .owned
+                .runtime
                 .block_on(patience.awaited(what, self.heard.message()));
             let word = next.unwrap().expect("layout stream went on");
             if let Some(show_response::Event::Laid(laid)) = word.event {
@@ -290,14 +292,14 @@ fn enable_esm(bin: &Path) {
     fs::write(bin.join("package.json"), r#"{"type":"module"}"#).unwrap();
 }
 
-fn kill_and_restore(owned: &Owned, shown: &mut Shown<'_>) -> Laid {
+fn kill_and_restore(mux: &mut OwnedMux, shown: &mut Shown<'_>) -> Laid {
     let before: Vec<Option<TerminalKey>> = shown
         .until("current keys", |_| true)
         .views
         .iter()
         .map(view_key)
         .collect();
-    owned.kill_mux();
+    mux.kill();
     shown.until("restored with fresh keys", |laid| {
         let now: Vec<Option<TerminalKey>> = laid.views.iter().map(view_key).collect();
         now.iter().all(Option::is_some) && now != before
@@ -335,7 +337,7 @@ fn is_saved(record: &api::ResumeRecordInfo) -> bool {
 
 #[test]
 fn synthesized_claude_resumes_with_kept_flags_in_shell_and_returns_to_shell() {
-    let owned = Owned::new();
+    let mut owned = Owned::new();
     let work = owned.host.home.path().join("work");
     fs::create_dir_all(&work).unwrap();
     let work_canon = fs::canonicalize(&work).unwrap();
@@ -373,7 +375,7 @@ fn synthesized_claude_resumes_with_kept_flags_in_shell_and_returns_to_shell() {
     fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
 
     let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, wt);
     let key = shown.open_shell();
 
     run_in_shell(&owned, key, "claude --continue --model opus --verbose");
@@ -428,7 +430,7 @@ fn synthesized_claude_resumes_with_kept_flags_in_shell_and_returns_to_shell() {
     assert_eq!(dir_mode, 0o700);
     assert_eq!(store_mode, 0o600);
 
-    let laid_after = kill_and_restore(&owned, &mut shown);
+    let laid_after = kill_and_restore(&mut owned.mux, &mut shown);
     let restored_key = view_key(&laid_after.views[0]).unwrap();
 
     let got_args = eventually("claude resumes with kept flags", || {
@@ -473,7 +475,7 @@ fn synthesized_claude_resumes_with_kept_flags_in_shell_and_returns_to_shell() {
 
 #[test]
 fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
-    let owned = Owned::new();
+    let mut owned = Owned::new();
     let pi_dir = owned.host.home.path().join(".pi/agent");
     fs::create_dir_all(&pi_dir).unwrap();
     let ext_path = pi_dir.join("extensions/lune.ts");
@@ -526,7 +528,7 @@ fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
 
     let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, wt);
     let key = shown.open_shell();
 
     run_in_shell(&owned, key, "pi --continue --model sonnet");
@@ -553,7 +555,7 @@ fn pi_extension_emits_osc_7577_strips_token_resumes_and_clears_on_quit() {
         ["pi", "--session", "pi-sess-1", "--model", "sonnet"]
     );
 
-    let laid_after = kill_and_restore(&owned, &mut shown);
+    let laid_after = kill_and_restore(&mut owned.mux, &mut shown);
     let restored_key = view_key(&laid_after.views[0]).unwrap();
 
     let got = eventually("pi resumes with session and kept flags", || {
@@ -642,7 +644,7 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     fs::set_permissions(&fake_nvim, fs::Permissions::from_mode(0o755)).unwrap();
 
     let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, wt);
     let key = shown.open_shell();
 
     run_in_shell(
@@ -664,7 +666,7 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     owned.stop_daemon();
     owned.kill_mux();
     owned.start_daemon();
-    let mut shown2 = Shown::new(&owned, wt);
+    let mut shown2 = Shown::new(&owned.host, &owned.runtime, wt);
     let laid2 = shown2.until("terminal restored after reboot", |l| {
         l.views.len() == 1 && view_key(&l.views[0]).is_some()
     });
@@ -692,7 +694,7 @@ command = ["nvim", "-S", { under = "~/sessions" }]
             .then_some(())
     });
 
-    let _laid3 = kill_and_restore(&owned, &mut shown2);
+    let _laid3 = kill_and_restore(&mut owned.mux, &mut shown2);
     eventually("symlink escape is blocked on restore", || {
         logged(&owned)
             .contains("not resuming saved program nvim, starting a shell (reason=not_trusted)")
@@ -706,7 +708,7 @@ command = ["nvim", "-S", { under = "~/sessions" }]
 
 #[test]
 fn missing_explicit_cwd_skips_resume_and_tried_prevents_retry_after_failure() {
-    let owned = Owned::new();
+    let mut owned = Owned::new();
     let work = owned.host.home.path().join("work");
     let ephemeral = owned.host.home.path().join("ephemeral");
     let sessions_dir = owned.host.home.path().join("sessions");
@@ -761,7 +763,7 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     fs::set_permissions(&fake_nvim, fs::Permissions::from_mode(0o755)).unwrap();
 
     let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, wt);
     let key = shown.open_shell();
 
     run_in_shell(
@@ -785,7 +787,7 @@ command = ["nvim", "-S", { under = "~/sessions" }]
     });
 
     fs::remove_dir_all(&ephemeral).unwrap();
-    let laid2 = kill_and_restore(&owned, &mut shown);
+    let laid2 = kill_and_restore(&mut owned.mux, &mut shown);
     eventually("missing explicit cwd skipped", || {
         logged(&owned).contains("reason=dir_gone").then_some(())
     });
@@ -815,14 +817,14 @@ command = ["nvim", "-S", { under = "~/sessions" }]
             .map(|_| ())
     });
 
-    let _laid3 = kill_and_restore(&owned, &mut shown);
+    let _laid3 = kill_and_restore(&mut owned.mux, &mut shown);
     eventually("first resume ran once and failed", || {
         fs::read_to_string(&runs_file)
             .ok()
             .filter(|s| s.lines().count() == 1)
     });
 
-    let _laid4 = kill_and_restore(&owned, &mut shown);
+    let _laid4 = kill_and_restore(&mut owned.mux, &mut shown);
     eventually("second restore skips because already_tried", || {
         logged(&owned)
             .contains("reason=already_tried")
@@ -946,7 +948,7 @@ command = ["htop"]
 
 #[test]
 fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
-    let owned = Owned::new();
+    let mut owned = Owned::new();
     let pi_dir = owned.host.home.path().join(".pi/agent");
     fs::create_dir_all(&pi_dir).unwrap();
     let ext_path = pi_dir.join("extensions/lune.ts");
@@ -985,7 +987,7 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
     fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
 
     let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, wt);
     let key = shown.open_shell();
 
     run_in_shell(&owned, key, "claude --restricted");
@@ -1016,7 +1018,7 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
         },
     );
 
-    let laid_after_claude = kill_and_restore(&owned, &mut shown);
+    let laid_after_claude = kill_and_restore(&mut owned.mux, &mut shown);
     let key2 = view_key(&laid_after_claude.views[0]).unwrap();
     eventually(
         "restricted claude is typed at prompt rather than executed",
@@ -1071,7 +1073,7 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
     fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
 
     let wt_pi = open_worktree(&owned, &work_pi);
-    let mut shown_pi = Shown::new(&owned, wt_pi);
+    let mut shown_pi = Shown::new(&owned.host, &owned.runtime, wt_pi);
     let pi_key = shown_pi.open_shell();
     run_in_shell(&owned, pi_key, "pi -e ./ext.ts 'NEVER_REPLAY_PROMPT'");
 
@@ -1091,7 +1093,7 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
         ["pi", "--session", "pi-sess-2", "-e", "./ext.ts"]
     );
 
-    let _laid3 = kill_and_restore(&owned, &mut shown_pi);
+    let _laid3 = kill_and_restore(&mut owned.mux, &mut shown_pi);
     let got = eventually("pi resumes without replaying initial prompt", || {
         fs::read_to_string(&pi_resumed).ok()
     });
@@ -1100,7 +1102,7 @@ fn unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt() {
 
 #[test]
 fn custom_absolute_claude_override_without_flags_synthesizes_and_resumes() {
-    let owned = Owned::new();
+    let mut owned = Owned::new();
     let work = owned.host.home.path().join("work");
     fs::create_dir_all(&work).unwrap();
     let work_canon = fs::canonicalize(&work).unwrap();
@@ -1143,7 +1145,7 @@ fn custom_absolute_claude_override_without_flags_synthesizes_and_resumes() {
     ));
 
     let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let mut shown = Shown::new(&owned.host, &owned.runtime, wt);
     let key = shown.open_shell();
 
     run_in_shell(
@@ -1181,7 +1183,7 @@ fn custom_absolute_claude_override_without_flags_synthesizes_and_resumes() {
         [claude_abs.to_str().unwrap(), "--resume", CLAUDE_UUID]
     );
 
-    let _laid2 = kill_and_restore(&owned, &mut shown);
+    let _laid2 = kill_and_restore(&mut owned.mux, &mut shown);
     let got = eventually(
         "custom absolute claude resumes without leaked default flags",
         || fs::read(&resumed_args).ok(),
