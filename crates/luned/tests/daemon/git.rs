@@ -138,6 +138,10 @@ fn changed_every_way(dir: &Path, origin: &Path) {
     fs::write(dir.join("untracked"), "new\n").unwrap();
 }
 
+fn names(line: &str, tool: &str) -> bool {
+    line.split(' ').any(|word| word == tool)
+}
+
 #[test]
 fn git_says_how_each_project_s_folder_stands() {
     let host = Host::new();
@@ -243,7 +247,7 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     eventually("git counts the lines changed on issue-299", || {
         (changed(&work) == Some((3, 2))).then_some(())
     });
-    let git_said = || daemon.said().iter().find(|line| line.contains("git ")).cloned();
+    let git_said = || daemon.said().iter().find(|line| names(line, "git")).cloned();
     lune_waits::never("git says something", git_said);
     eventually("git counts none on main", || changed(&other).is_none().then_some(()));
 
@@ -959,7 +963,7 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
     );
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+        daemon.said().iter().find(|line| names(line, "gh")).cloned()
     });
 }
 
@@ -1002,7 +1006,7 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
         ["main", &in_parent("main"), "merged", "alone", &in_parent("alone")]
     );
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+        daemon.said().iter().find(|line| names(line, "gh")).cloned()
     });
 }
 
@@ -1034,7 +1038,7 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
         host.gh.asked().contains(&trunk_in_parent).then_some(())
     });
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+        daemon.said().iter().find(|line| names(line, "gh")).cloned()
     });
     assert_eq!(found(), None);
 }
@@ -1136,7 +1140,7 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     assert_eq!(host.gh.asked(), asked);
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh ") || line.contains("git ")).cloned()
+        daemon.said().iter().find(|line| names(line, "gh") || names(line, "git")).cloned()
     });
 }
 
@@ -1205,7 +1209,7 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
     });
 
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+        daemon.said().iter().find(|line| names(line, "gh")).cloned()
     });
 }
 
@@ -1279,7 +1283,7 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     );
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh ")).cloned()
+        daemon.said().iter().find(|line| names(line, "gh")).cloned()
     });
 }
 

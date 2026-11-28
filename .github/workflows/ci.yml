@@ -217,7 +217,7 @@ jobs:
           fi
           attic="$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#attic-client)/bin/attic"
           "$attic" login homelab https://attic.tail174781.ts.net "$ATTIC_TOKEN"
-          nix path-info --all | awk -v skip="${ATTIC_SKIP_PATH:-}" '!/\.drv$/ && (skip == "" || $0 != skip)' | "$attic" push homelab:main --stdin
+          nix path-info --all | grep -v '\.drv$' | "$attic" push homelab:main --stdin
 
   breaking:
     needs: code
@@ -349,51 +349,9 @@ jobs:
           | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Build and test the daemon
-        id: daemon
-        shell: bash
-        run: |
-          set -euo pipefail
-          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          if [[ -z $system ]]; then
-            echo "::error::nix eval returned an empty system name"
-            exit 1
-          fi
-          log="$RUNNER_TEMP/daemon.log"
-          out="$RUNNER_TEMP/luned-check"
-          rm -f "$out"
-          : > "$log"
-          nix build -L --out-link "$out" ".#checks.$system.luned" 2>&1 | tee "$log"
-          built="$(nix path-info "$out")"
-          if [[ $built != /nix/store/* || $built == *$'\n'* || $built == *$'\r'* ]]; then
-            echo "::error::luned out-link did not resolve to a nix store path: $built"
-            exit 1
-          fi
-          echo "ATTIC_SKIP_PATH=$built" >> "$GITHUB_ENV"
-
-      - name: Name the tests that passed only on a retry
-        if: ${{ !cancelled() && steps.daemon.outcome != 'skipped' }}
-        shell: bash
-        env:
-          DAEMON_OUTCOME: ${{ steps.daemon.outcome }}
-        run: |
-          set -euo pipefail
-          nix run .#flaky-report -- \
-            --outcome "$DAEMON_OUTCOME" \
-            --log "$RUNNER_TEMP/daemon.log" \
-            --junit "$RUNNER_TEMP/luned-check/share/luned/junit.xml" \
-            --out-link "$RUNNER_TEMP/luned-check"
+        run: nix build -L ".#checks.$(nix eval --impure --raw --expr builtins.currentSystem).luned"
 
       - *attic-push
-
-      - name: Drop flaky or unverified daemon check from the local store
-        if: ${{ !cancelled() && env.ATTIC_SKIP_PATH != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -f "$RUNNER_TEMP/luned-check"
-          if [[ -e $ATTIC_SKIP_PATH ]]; then
-            nix store delete "$ATTIC_SKIP_PATH"
-          fi
 
   release:
     needs: [code, clippy, tested, daemon]

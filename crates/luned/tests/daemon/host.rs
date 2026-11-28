@@ -100,7 +100,9 @@ pub fn install(from: &Path, to: &Path) {
 pub fn script(path: &Path, text: &str) {
     let draft = path.with_extension("draft");
     fs::write(&draft, format!("#!/bin/sh\n{text}")).unwrap();
-    install(&draft, path);
+    let staged = path.with_extension("staged");
+    install(&draft, &staged);
+    fs::rename(&staged, path).unwrap();
 }
 
 pub fn shared_script(path: &Path, text: &str) {

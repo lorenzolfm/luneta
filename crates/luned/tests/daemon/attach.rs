@@ -638,6 +638,12 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_lune_picks
     eventually("one's last pane closed, lune goes to the first open of those left", || {
         (gone_to() == [two]).then_some(())
     });
+    eventually("one, with no pane left, leaves lune's sidebar", || {
+        let rows: Vec<String> = window.screen().iter().map(|line| in_sidebar(line)).collect();
+        let work = rows.iter().position(|row| row.contains("● work"))?;
+        let other = rows.iter().position(|row| row.contains("● other"))?;
+        rows[work..other].iter().all(|row| !row.contains("▾ main")).then_some(())
+    });
     let row = sidebar_row(&window, "● other");
     click(&mut window, row);
     eventually("a click on other's row shows its home", || window.shows(UNHOSTED).then_some(()));
@@ -659,9 +665,9 @@ fn a_home_s_talk_goes_on_while_lune_shows_a_worktree_and_esc_stops_only_its_turn
     let claude = format!(
         r#"n=$(cat "{at}/turns" 2>/dev/null || echo 0)
 n=$((n + 1))
-echo "$n" > "{at}/turns"
 echo "$@" > "{at}/args-$n"
 echo "${{LUNE_TURN_BEFORE:-none}}" > "{at}/before-$n"
+echo "$n" > "{at}/turns"
 cat > /dev/null
 echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
 case "$n" in

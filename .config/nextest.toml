@@ -8,10 +8,9 @@ and not test(=sessions::pending_checks_are_asked_about_again_soon_and_stand_stal
 """
 
 [profile.ci]
-retries = 2
+retries = 0
 slow-timeout = { period = "60s", terminate-after = 3 }
 failure-output = "immediate-final"
-final-status-level = "flaky"
 
 [profile.ci.junit]
 path = "junit.xml"

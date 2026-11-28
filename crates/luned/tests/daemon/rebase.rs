@@ -21,7 +21,9 @@ use crate::worktree::{cloned_as_wt, git};
 
 const UNFINISHED: i32 = 4;
 
-const REBASE: &str = "\x1b[97;3ugr";
+const MENU: &str = "\x1b[97;3u";
+
+const MENU_CLOSES: &str = "<ESC> - Close";
 
 const SAYS_WHERE: &str = "printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
@@ -302,6 +304,20 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
     });
 }
 
+fn rebase_offered(window: &mut Window) {
+    eventually("lune offers the rebase of the view's branch", || {
+        window.send(MENU);
+        eventually("lune's menu opens", || window.shows(MENU_CLOSES).then_some(()));
+        if window.shows("g  Git") {
+            return Some(());
+        }
+        window.send("\x1b");
+        eventually("lune's menu closes", || (!window.shows(MENU_CLOSES)).then_some(()));
+        None
+    });
+    window.send("gr");
+}
+
 #[test]
 fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflicts() {
     if !makes_shells() {
@@ -322,16 +338,16 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
 
     let mut window = Window::open(host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
+    eventually("the view has the keys", || window.cursor().is_some().then_some(()));
     window.send(SAYS_WHERE);
-    eventually("the view's row says its branch", || window.shows(" fix").then_some(()));
-    window.send(REBASE);
+    rebase_offered(&mut window);
     let clean = "fix is rebased onto origin/main, one commit on top";
     eventually("a note says it is rebased", || window.shows(clean).then_some(()));
     assert!(!asked.exists(), "a clean rebase starts no agent");
 
     commit(&dir.path, "theirs", "mine\n");
     commit(&up, "theirs", "yours\n");
-    window.send(REBASE);
+    rebase_offered(&mut window);
     let agent = eventually("an agent starts on the conflicts", || fs::read_to_string(&asked).ok());
     assert!(agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "), "{agent}");
     assert!(agent.contains(", on conflicts in theirs. Resolve it: "), "{agent}");

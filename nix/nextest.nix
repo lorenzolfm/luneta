@@ -7,10 +7,19 @@ let
   realpath = lib.getExe' pkgs.coreutils "realpath";
   seq = lib.getExe' pkgs.coreutils "seq";
   sleep = lib.getExe' pkgs.coreutils "sleep";
+  mktemp = lib.getExe' pkgs.coreutils "mktemp";
+  rm = lib.getExe' pkgs.coreutils "rm";
+  inMemory = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+    if [ -d /dev/shm ] && [ -w /dev/shm ]; then
+      TMPDIR="$(${mktemp} -d /dev/shm/lune-nextest.XXXXXX)"
+      export TMPDIR
+      trap '${rm} -rf -- "$TMPDIR"' EXIT
+    fi
+  '';
 in
 pkgs.writeShellApplication {
   name = "lune-nextest";
-  meta.description = "cargo nextest run on lune's tests, failing if they leave a lune-mux from target/ running";
+  meta.description = "cargo nextest run on lune's tests with their temporary folders in memory on Linux, failing if they leave a lune-mux from target/ running";
   text = ''
     target="$(cargo metadata --locked --no-deps --format-version 1 | ${jq} -r .target_directory)"
     case "$target" in
@@ -37,6 +46,7 @@ pkgs.writeShellApplication {
     }
     before=" $(muxes " ")"
     tested=0
+    ${inMemory}
     cargo nextest run --locked ${testRun} "$@" || tested=$?
     left="$(muxes "$before")"
     for _ in $(${seq} 100); do
