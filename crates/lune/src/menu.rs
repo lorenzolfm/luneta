@@ -3177,7 +3177,6 @@ fn fitted(
 #[derive(Debug, Default)]
 pub struct AllKeys {
     first: usize,
-    room: usize,
 }
 
 struct KeysRow {
@@ -3237,17 +3236,9 @@ impl AllKeys {
         rows
     }
 
-    pub fn set_room(&mut self, room: usize) {
-        self.room = room.saturating_sub(2);
-    }
-
-    #[must_use]
-    pub fn room(&self) -> usize {
-        self.room
-    }
-
-    pub fn scroll(&mut self, by: isize) {
-        let last = AllKeys::rows(0).len().saturating_sub(self.room);
+    pub fn scroll(&mut self, by: isize, room: usize) {
+        let body = room.saturating_sub(2);
+        let last = AllKeys::rows(0).len().saturating_sub(body);
         self.first = self.first.min(last).saturating_add_signed(by).min(last);
     }
 

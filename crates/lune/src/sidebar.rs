@@ -50,7 +50,7 @@ use crate::checks;
 use crate::clock::Moment;
 use crate::close::{self, Act, Plan, Scope, Untold};
 use crate::copied::{Copied, Excerpt};
-use crate::folds::{Fold, Folds};
+use crate::folds::{Fold, FoldSet, Folds};
 use crate::fuzzy::{Fuzzy, Score, Typos};
 use crate::icons;
 use crate::issue::Repository;
@@ -62,7 +62,7 @@ use crate::menu::{
     ProjectTarget, Pull, Ran, Rename, Target, Top, ViewRow, Wants, WorktreeRow,
 };
 use crate::moonlight;
-use crate::news::News;
+use crate::news::{Dwell, News};
 use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
 use crate::printed::Printed;
 use crate::prune;
@@ -1808,7 +1808,48 @@ pub struct ExpandedView {
     notes: Vec<Line<'static>>,
 }
 
-pub struct Sidebar {
+mod sealed {
+    use super::SidebarState;
+
+    pub struct Sidebar {
+        state: SidebarState,
+    }
+
+    impl Sidebar {
+        pub(super) fn from_state(state: SidebarState) -> Self {
+            Sidebar { state }
+        }
+
+        pub(super) fn state(&self) -> &SidebarState {
+            &self.state
+        }
+
+        pub(super) fn edit<R>(&mut self, change: impl FnOnce(&mut SidebarState) -> R) -> R {
+            let result = change(&mut self.state);
+            self.state.relayout();
+            result
+        }
+
+        pub(super) fn edit_if(&mut self, change: impl FnOnce(&mut SidebarState) -> bool) -> bool {
+            let changed = change(&mut self.state);
+            if changed {
+                self.state.relayout();
+            }
+            changed
+        }
+
+        pub(super) fn edit_without_layout<R>(
+            &mut self,
+            change: impl FnOnce(&mut SidebarState) -> R,
+        ) -> R {
+            change(&mut self.state)
+        }
+    }
+}
+
+pub use sealed::Sidebar;
+
+struct SidebarState {
     host: Option<Host>,
     this: String,
     away: Option<String>,
@@ -1830,10 +1871,8 @@ pub struct Sidebar {
     here_row: Option<Spot>,
     lit: Option<Lit>,
     mode: Mode,
-    moving: Moving,
     viewport: Viewport,
     revealed: Option<Spot>,
-    top: usize,
     notice: Option<String>,
     copied: Option<(Copied, Instant)>,
     image_going: Option<Destination>,
@@ -1909,14 +1948,37 @@ impl Pause {
     }
 }
 
+#[derive(Debug)]
+enum Pressed {
+    Space,
+    Row(Spot),
+    Movable(Movable),
+}
+
+impl Pressed {
+    fn spot(&self) -> Option<Spot> {
+        match self {
+            Pressed::Space => None,
+            Pressed::Row(spot) => Some(spot.clone()),
+            Pressed::Movable(movable) => Some(movable.spot()),
+        }
+    }
+
+    fn movable(&self) -> Option<&Movable> {
+        match self {
+            Pressed::Space | Pressed::Row(_) => None,
+            Pressed::Movable(movable) => Some(movable),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 enum Moving {
     #[default]
     Still,
     Down {
         at: Position,
-        line: Option<usize>,
-        lifts: Option<Movable>,
+        on: Pressed,
     },
     Lifted(Lift),
     Sweeping(Sweep),
@@ -1925,25 +1987,45 @@ enum Moving {
 
 static EMPTY_ALOUD_BUTTONS: Spots<aloud::Button> = Spots::empty();
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug)]
 enum Viewport {
-    #[default]
-    Collapsed,
-    Expanded(Layout),
+    Collapsed { area: Rect, top: usize },
+    Expanded { laid: Layout, moving: Moving },
 }
 
 impl Viewport {
-    fn area(&self) -> Option<Rect> {
+    fn expanded_area(&self) -> Option<Rect> {
         match self {
-            Viewport::Collapsed => None,
-            Viewport::Expanded(laid) => Some(laid.area),
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { laid, .. } => Some(laid.area),
         }
     }
 
     fn laid(&self) -> Option<&Layout> {
         match self {
-            Viewport::Collapsed => None,
-            Viewport::Expanded(laid) => Some(laid),
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { laid, .. } => Some(laid),
+        }
+    }
+
+    fn top(&self) -> usize {
+        match self {
+            Viewport::Collapsed { top, .. } => *top,
+            Viewport::Expanded { laid, .. } => laid.top,
+        }
+    }
+
+    fn moving(&self) -> Option<&Moving> {
+        match self {
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { moving, .. } => Some(moving),
+        }
+    }
+
+    fn moving_mut(&mut self) -> Option<&mut Moving> {
+        match self {
+            Viewport::Collapsed { .. } => None,
+            Viewport::Expanded { moving, .. } => Some(moving),
         }
     }
 }
@@ -1986,7 +2068,6 @@ struct NotesAt {
     notes: Notes,
     bottom: SidebarBottom,
     buttons: Spots<aloud::Button>,
-    bottom_room: usize,
 }
 
 struct Rendered {
@@ -2243,8 +2324,339 @@ enum Highlight {
 }
 
 impl Sidebar {
-    pub fn new(folds: Folds, news: News, agent: Kept, this: String) -> Self {
-        Sidebar {
+    pub fn new(folds: Folds, news: News, agent: Kept, this: String, framed: Rect) -> Self {
+        Sidebar::from_state(SidebarState::new(folds, news, agent, this, framed))
+    }
+
+    pub fn place(&mut self, framed: Rect) {
+        self.edit_without_layout(|state| state.place_rows(framed_rows(framed)));
+    }
+
+    pub fn collapse(&mut self, framed: Rect) {
+        self.edit_without_layout(|state| state.collapse_rows(framed_rows(framed)));
+    }
+
+    pub fn reagent(&mut self) {
+        self.edit_without_layout(SidebarState::reagent);
+    }
+
+    #[must_use]
+    pub fn refold(&mut self, wall: SystemTime) -> bool {
+        self.edit_if(|state| state.refold(wall))
+    }
+
+    #[must_use]
+    pub fn reread(&mut self, wall: SystemTime) -> bool {
+        self.edit_if(|state| state.reread(wall))
+    }
+
+    pub fn heard(&mut self, host: Host, wall: SystemTime) {
+        self.edit(|state| state.heard(host, wall));
+    }
+
+    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>, wall: SystemTime) {
+        self.edit(|state| state.moved(ticket, kept, wall));
+    }
+
+    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, wall: SystemTime) {
+        self.edit(|state| state.unsent(ticket, order, why, wall));
+    }
+
+    pub fn unmoved(
+        &mut self,
+        on: &Machine,
+        ticket: u64,
+        order: &Reorder,
+        note: String,
+        wall: SystemTime,
+    ) {
+        self.edit(|state| state.unmoved(on, ticket, order, note, wall));
+    }
+
+    #[must_use]
+    pub fn ticked(&mut self, now: Moment, watched: bool) -> bool {
+        self.edit_if(|state| state.ticked(now, watched))
+    }
+
+    #[must_use]
+    pub fn lost(&mut self, why: String) -> bool {
+        self.edit_if(|state| state.lost(why))
+    }
+
+    pub fn focus(&mut self, keys: Keys, wall: SystemTime) {
+        self.edit(|state| state.focus(keys, wall));
+    }
+
+    pub fn holding(&self) -> Holding {
+        self.state().holding()
+    }
+
+    pub fn floating(&self) -> Option<Floating<'_>> {
+        self.state().floating()
+    }
+
+    pub fn float_note(&mut self, note: String) {
+        self.edit(|state| state.float_note(note));
+    }
+
+    pub fn close_note(&mut self) {
+        let _ = self.edit_if(SidebarState::close_note);
+    }
+
+    pub fn close_menu(&mut self) {
+        let _ = self.edit_if(SidebarState::close_menu);
+    }
+
+    pub fn drop_menu(&mut self, menu: u64) {
+        let _ = self.edit_if(|state| state.drop_menu(menu));
+    }
+
+    pub fn sit(&mut self, seat: Seat, now: SystemTime) {
+        let _ = self.edit_if(|state| state.sit(seat, now));
+    }
+
+    pub fn unseat(&mut self, now: SystemTime) {
+        let _ = self.edit_if(|state| state.unseat(now));
+    }
+
+    pub fn own_title(&self) -> Option<&str> {
+        self.state().own_title()
+    }
+
+    pub fn on(&self) -> &Machine {
+        self.state().on()
+    }
+
+    pub fn here_agent(&self) -> Option<HereAgent> {
+        self.state().here_agent()
+    }
+
+    pub fn on_header(&self) -> Option<Machine> {
+        self.state().on_header()
+    }
+
+    pub fn listing(&self) -> Listing {
+        self.state().listing()
+    }
+
+    pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
+        self.state().reaches()
+    }
+
+    pub fn whereabouts(&self) -> Option<Here> {
+        self.state().whereabouts()
+    }
+
+    pub fn far_agent(&self) -> Option<&Destination> {
+        self.state().far_agent()
+    }
+
+    pub fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
+        self.state().sayings()
+    }
+
+    #[must_use]
+    pub fn aloud(&mut self, shown: Option<aloud::Shown>) -> bool {
+        self.edit_if(|state| state.aloud(shown))
+    }
+
+    pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
+        self.state().aloud_buttons()
+    }
+
+    pub fn notify(&mut self, notice: String) {
+        self.edit(|state| state.notify(notice));
+    }
+
+    #[must_use]
+    pub fn clear_notice(&mut self) -> bool {
+        self.edit_if(SidebarState::clear_notice)
+    }
+
+    #[must_use]
+    pub fn unsay(&mut self, notice: &str) -> bool {
+        self.edit_if(|state| state.unsay(notice))
+    }
+
+    pub fn filing(&mut self, number: u64, repository: &str) {
+        self.edit(|state| state.filing(number, repository));
+    }
+
+    pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
+        self.edit(|state| state.filed(number, repository, filed));
+    }
+
+    #[must_use]
+    pub fn image_going(&mut self, to: Option<Destination>) -> bool {
+        self.edit_if(|state| state.image_going(to))
+    }
+
+    #[cfg(test)]
+    pub fn turning(&self) -> bool {
+        self.state().turning()
+    }
+
+    #[must_use]
+    pub fn view(&self) -> SidebarView {
+        self.state().view()
+    }
+
+    pub fn key(&mut self, key: &KeyEvent, now: Moment) -> Asked {
+        self.edit(|state| state.key_from(key, now, Came::Typed))
+    }
+
+    #[must_use]
+    pub fn due(&self, now: Moment) -> Option<Instant> {
+        self.state().due(now)
+    }
+
+    pub fn number_clicked(&mut self, link: Link) -> Asked {
+        self.edit(|state| state.number_clicked(link))
+    }
+
+    pub fn copied(&mut self, copied: Copied, steady: Instant) {
+        self.edit(|state| state.copied(copied, steady));
+    }
+
+    pub fn float_menu(&mut self) {
+        self.edit(SidebarState::float_menu);
+    }
+
+    pub fn aimed_row(&self) -> Aim {
+        self.state().aimed_row()
+    }
+
+    pub fn aimed_view(&self) -> Aim {
+        self.state().aimed_view()
+    }
+
+    pub fn aimed_worktree(&self) -> Aim {
+        self.state().aimed_worktree()
+    }
+
+    pub fn act_on_row(&mut self, target: &Target, action: Action, wall: SystemTime) -> Asked {
+        self.edit(|state| state.act_on_row(target, action, wall))
+    }
+
+    pub fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+        self.edit(|state| state.act_in_menu(target, action, origin))
+    }
+
+    pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
+        self.edit(|state| state.chained(done, origin))
+    }
+
+    #[must_use]
+    pub fn paste(&mut self, text: &str, wall: SystemTime) -> Asked {
+        self.edit(|state| state.paste(text, wall))
+    }
+
+    pub fn pull_in_menu(
+        &mut self,
+        target: Target,
+        work: Work,
+        pull: Pull,
+        origin: Origin,
+    ) -> Asked {
+        self.edit(|state| state.pull_in_menu(target, work, pull, origin))
+    }
+
+    pub fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
+        self.edit(|state| state.chose(menu, choice, now))
+    }
+
+    pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
+        self.edit(|state| state.keys_clicked(keyed, key, now))
+    }
+
+    pub fn scroll_menu(&mut self, menu: u64, by: isize) {
+        let _ = self.edit_if(|state| state.scroll_menu(menu, by));
+    }
+
+    pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
+        self.edit(|state| state.prunes(menu, plan))
+    }
+
+    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
+        self.edit(|state| state.pruned(menu, pruned))
+    }
+
+    pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
+        self.edit(|state| state.pulled(menu, found))
+    }
+
+    pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
+        self.edit(|state| state.printed(menu, printed))
+    }
+
+    pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
+        self.edit(|state| state.checks(menu, checks))
+    }
+
+    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
+        self.edit(|state| state.rebased(menu, rebased))
+    }
+
+    pub fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
+        self.state().plan(on, listed, scope)
+    }
+
+    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
+        self.edit(|state| state.unclosed(on, act, ticket, unchanged));
+    }
+
+    pub fn ticket(&mut self) -> u64 {
+        self.edit_without_layout(SidebarState::ticket)
+    }
+
+    pub fn made_for(&mut self, menu: u64) -> Option<Held> {
+        self.edit(|state| state.made_for(menu))
+    }
+
+    #[must_use]
+    pub fn found(
+        &mut self,
+        menu: u64,
+        agent: agents::Harness,
+        skills: Result<Vec<Skill>, String>,
+    ) -> bool {
+        self.edit_if(|state| state.found(menu, agent, skills))
+    }
+
+    pub fn mouse(&mut self, mouse: MouseEvent, wall: SystemTime) -> Asked {
+        self.edit(|state| state.mouse(mouse, wall))
+    }
+
+    pub fn pressed(&self) -> bool {
+        self.state().pressed()
+    }
+
+    pub fn unsweep(&mut self) {
+        self.edit_without_layout(SidebarState::unsweep);
+    }
+
+    pub fn let_go(&mut self) {
+        let _ = self.edit_if(SidebarState::let_go);
+    }
+
+    #[cfg(test)]
+    pub fn scrolling(&self) -> bool {
+        self.state().scrolling()
+    }
+
+    #[must_use]
+    pub fn scroll_due(&self, steady: Instant) -> Option<Instant> {
+        self.state().scroll_due(steady)
+    }
+
+    pub fn draw(&self, buffer: &mut Buffer, framed: Rect, wall: SystemTime) -> (Drawn, Cadence) {
+        self.state().draw(buffer, framed, wall)
+    }
+}
+
+impl SidebarState {
+    fn new(folds: Folds, news: News, agent: Kept, this: String, framed: Rect) -> Self {
+        let mut state = SidebarState {
             host: None,
             this,
             away: None,
@@ -2266,10 +2678,11 @@ impl Sidebar {
             here_row: None,
             lit: None,
             mode: Mode::default(),
-            moving: Moving::default(),
-            viewport: Viewport::default(),
+            viewport: Viewport::Collapsed {
+                area: Rect::default(),
+                top: 0,
+            },
             revealed: None,
-            top: 0,
             notice: None,
             copied: None,
             image_going: None,
@@ -2279,42 +2692,38 @@ impl Sidebar {
             filed: None,
             menus: 0,
             due: None,
-        }
-    }
-
-    pub fn place(&mut self, framed: Rect) {
-        self.place_rows(framed_rows(framed));
+        };
+        state.place_rows(framed_rows(framed));
+        state
     }
 
     fn place_rows(&mut self, area: Rect) {
-        if let Viewport::Expanded(laid) = &self.viewport
-            && laid.area == area
-        {
-            assert_eq!(
-                laid.top, self.top,
-                "an unchanged viewport keeps its laid-out scroll offset"
-            );
+        if matches!(&self.viewport, Viewport::Expanded { laid, .. } if laid.area == area) {
             return;
         }
         self.relayout_at(area);
     }
 
-    pub fn collapse(&mut self) {
-        self.moving = Moving::Still;
-        if matches!(self.viewport, Viewport::Collapsed) {
-            return;
-        }
-        self.viewport = Viewport::Collapsed;
+    fn collapse_rows(&mut self, area: Rect) {
+        let top = self.viewport.top();
+        self.viewport = Viewport::Collapsed { area, top };
     }
 
-    pub fn reagent(&mut self) {
+    #[cfg(test)]
+    fn set_top(&mut self, top: usize) {
+        match &mut self.viewport {
+            Viewport::Collapsed { top: saved, .. } => *saved = top,
+            Viewport::Expanded { laid, .. } => laid.top = top,
+        }
+    }
+
+    fn reagent(&mut self) {
         if let Err(why) = self.agent.reload() {
             log::say(&format!("agent: {why}"));
         }
     }
 
-    #[must_use]
-    pub fn refold(&mut self, wall: SystemTime) -> bool {
+    fn refold(&mut self, wall: SystemTime) -> bool {
         if self.folds.reload() {
             self.rebuild(wall);
             return true;
@@ -2322,8 +2731,7 @@ impl Sidebar {
         false
     }
 
-    #[must_use]
-    pub fn reread(&mut self, wall: SystemTime) -> bool {
+    fn reread(&mut self, wall: SystemTime) -> bool {
         if self.news.reload() {
             self.rebuild(wall);
             return true;
@@ -2331,7 +2739,7 @@ impl Sidebar {
         false
     }
 
-    pub fn heard(&mut self, host: Host, wall: SystemTime) {
+    fn heard(&mut self, host: Host, wall: SystemTime) {
         self.shelve(&host);
         for shelf in &self.shelves {
             let Some(projects) = shelf.kept() else {
@@ -2339,7 +2747,7 @@ impl Sidebar {
             };
             let machine = &shelf.machine;
             if projects.is_empty() && self.folds.contains(Fold::Machine(machine)) {
-                self.folds.set(Fold::Machine(machine), false);
+                let _ = self.folds.set(Fold::Machine(machine), false);
             }
             let mut live = Vec::new();
             for known in projects {
@@ -2379,7 +2787,7 @@ impl Sidebar {
         }
     }
 
-    pub fn moved(&mut self, ticket: u64, kept: Option<api::Version>, wall: SystemTime) {
+    fn moved(&mut self, ticket: u64, kept: Option<api::Version>, wall: SystemTime) {
         let Some(at) = self
             .unheard
             .iter()
@@ -2400,7 +2808,7 @@ impl Sidebar {
         }
     }
 
-    pub fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, wall: SystemTime) {
+    fn unsent(&mut self, ticket: u64, order: &Reorder, why: &str, wall: SystemTime) {
         self.notify(format!("not moved: {why}"));
         let Some(at) = self
             .unheard
@@ -2425,7 +2833,7 @@ impl Sidebar {
         self.reshelve(wall);
     }
 
-    pub fn unmoved(
+    fn unmoved(
         &mut self,
         on: &Machine,
         ticket: u64,
@@ -2452,33 +2860,29 @@ impl Sidebar {
         }
     }
 
-    #[must_use]
-    pub fn ticked(&mut self, now: Moment, watched: bool) -> bool {
-        let lost_before = self.news.lost().map(str::to_owned);
+    fn ticked(&mut self, now: Moment, watched: bool) -> bool {
         let mut changed = self.hold(now.steady);
         changed |= self.advance_timers(now.steady);
         if self.due.is_some_and(|due| due <= now.system) {
-            self.rebuild_rows(now.system);
+            self.rebuild(now.system);
             changed = true;
         }
         let here = self.here_key.filter(|_| watched);
         let finished = &self.finished;
-        if self.news.dwell(
+        let Dwell { rows, lost } = self.news.dwell(
             here,
             |key| finished.get(&key).copied(),
             now.system,
             now.steady,
-        ) {
-            self.rebuild_rows(now.system);
+        );
+        if rows {
+            self.rebuild(now.system);
             changed = true;
         }
+        changed |= lost;
         let live = self.live();
-        self.news.listed(live.as_ref(), now.steady);
-        let lost_changed = self.news.lost() != lost_before.as_deref();
-        if changed || lost_changed {
-            self.relayout();
-        }
-        changed || lost_changed
+        changed |= self.news.listed(live.as_ref(), now.steady);
+        changed
     }
 
     fn advance_timers(&mut self, steady: Instant) -> bool {
@@ -2557,25 +2961,22 @@ impl Sidebar {
         Some(live)
     }
 
-    #[must_use]
-    pub fn lost(&mut self, why: String) -> bool {
+    fn lost(&mut self, why: String) -> bool {
         if self.away.as_ref() == Some(&why) {
             return false;
         }
         log::say(&format!("luned: {why}"));
         self.away = Some(why);
-        self.relayout();
         true
     }
 
-    pub fn focus(&mut self, keys: Keys, wall: SystemTime) {
+    fn focus(&mut self, keys: Keys, wall: SystemTime) {
         if let Mode::Afloat { .. } | Mode::AfloatNote(_) = self.mode {
             self.end_mode();
         }
         let (had, holds) = (self.keys.held(), keys.held());
         self.keys = keys;
         if had == holds {
-            self.relayout();
             return;
         }
         self.unpend();
@@ -2585,12 +2986,14 @@ impl Sidebar {
             }
         } else {
             self.end_mode();
-            self.moving = Moving::Still;
+            if let Some(moving) = self.viewport.moving_mut() {
+                *moving = Moving::Still;
+            }
         }
         self.rebuild(wall);
     }
 
-    pub fn holding(&self) -> Holding {
+    fn holding(&self) -> Holding {
         match (&self.mode, self.pressed()) {
             (Mode::Afloat { .. } | Mode::AfloatNote(_), _) => Holding::Afloat,
             (_, true) => Holding::Press,
@@ -2604,7 +3007,7 @@ impl Sidebar {
         }
     }
 
-    pub fn floating(&self) -> Option<Floating<'_>> {
+    fn floating(&self) -> Option<Floating<'_>> {
         match &self.mode {
             Mode::Afloat { menu, .. } => Some(Floating::Menu(menu)),
             Mode::AfloatNote(note) => Some(Floating::Note(note)),
@@ -2616,38 +3019,33 @@ impl Sidebar {
         }
     }
 
-    pub fn float_note(&mut self, note: String) {
+    fn float_note(&mut self, note: String) {
         self.end_mode();
-        self.let_go();
+        let _ = self.let_go();
         self.mode = Mode::AfloatNote(note);
-        self.relayout();
     }
 
-    pub fn close_note(&mut self) {
+    fn close_note(&mut self) -> bool {
         if let Mode::AfloatNote(_) = self.mode {
             self.mode = Mode::Idle;
-            self.relayout();
+            return true;
         }
+        false
     }
 
-    pub fn close_menu(&mut self) {
-        if self.close_menu_in() {
-            self.relayout();
-        }
-    }
-
-    fn close_menu_in(&mut self) -> bool {
+    fn close_menu(&mut self) -> bool {
         let menu = self.take_open().map(|(menu, _)| menu);
         let had = menu.is_some();
         self.keep_working(menu);
         had
     }
 
-    pub fn drop_menu(&mut self, menu: u64) {
+    fn drop_menu(&mut self, menu: u64) -> bool {
         if self.open().is_some_and(|open| open.number() == menu) {
             self.take_open();
-            self.relayout();
+            return true;
         }
+        false
     }
 
     fn drop_menu_saying(&mut self, menu: u64, notice: String) {
@@ -2801,7 +3199,7 @@ impl Sidebar {
         self.working.remove(&menu).map(|it| (it, Taken::Kept, seen))
     }
 
-    pub fn sit(&mut self, seat: Seat, now: SystemTime) {
+    fn sit(&mut self, seat: Seat, now: SystemTime) -> bool {
         let was = self
             .seat
             .take()
@@ -2810,7 +3208,7 @@ impl Sidebar {
         let (project, worktree, terminal) = (seat.project, seat.worktree(), seat.terminal());
         self.seat = Some(seat);
         if unmoved {
-            return;
+            return false;
         }
         if was.is_none() {
             self.unfold_project(project);
@@ -2819,29 +3217,33 @@ impl Sidebar {
             && was.as_ref().and_then(Seat::worktree) != Some(worktree)
         {
             let on = self.on().clone();
-            self.folds.set(Fold::Worktree(&on, worktree), false);
+            let _ = self.folds.set(Fold::Worktree(&on, worktree), false);
         }
         let moved = was.as_ref().and_then(Seat::terminal) != terminal;
         if moved && let Some(terminal) = terminal {
             self.unfold_home(project, terminal);
         }
         self.rebuild(now);
+        true
     }
 
-    pub fn unseat(&mut self, now: SystemTime) {
-        if self.seat.take().is_some() {
+    fn unseat(&mut self, now: SystemTime) -> bool {
+        let had = self.seat.take().is_some();
+        if had {
             self.rebuild(now);
         }
         assert!(
             self.seat.is_none(),
             "lune sits nowhere when it shows no worktree"
         );
+        had
     }
 
     fn unfold_home(&mut self, project: ProjectId, terminal: TerminalKey) {
         if let Some(place) = self.view_place(project, terminal) {
             let on = self.on().clone();
-            self.folds
+            let _ = self
+                .folds
                 .set(Fold::Worktree(&on, place.worktree.worktree), false);
         }
     }
@@ -2857,7 +3259,7 @@ impl Sidebar {
             .map(|seat| seat.project)
     }
 
-    pub fn own_title(&self) -> Option<&str> {
+    fn own_title(&self) -> Option<&str> {
         self.seat_name.as_deref()
     }
 
@@ -2888,8 +3290,8 @@ impl Sidebar {
     fn unfold_project(&mut self, project: ProjectId) {
         if self.known_of(project).is_some() {
             let on = self.on().clone();
-            self.folds.set(Fold::Machine(&on), false);
-            self.folds.set(Fold::Project(&on, project), false);
+            let _ = self.folds.set(Fold::Machine(&on), false);
+            let _ = self.folds.set(Fold::Project(&on, project), false);
         }
     }
 
@@ -2897,7 +3299,7 @@ impl Sidebar {
         seated == Some(listed.project())
     }
 
-    pub fn on(&self) -> &Machine {
+    fn on(&self) -> &Machine {
         self.seat.as_ref().map_or(&Machine::Local, |seat| &seat.on)
     }
 
@@ -2907,7 +3309,7 @@ impl Sidebar {
         self.view_place(seat.project, terminal).ok_or(NO_HERE_VIEW)
     }
 
-    pub fn here_agent(&self) -> Option<HereAgent> {
+    fn here_agent(&self) -> Option<HereAgent> {
         let place = self.here_place().ok()?;
         let seen = self.seen(self.on())?;
         let seated = seen.seated();
@@ -2924,14 +3326,14 @@ impl Sidebar {
         })
     }
 
-    pub fn on_header(&self) -> Option<Machine> {
+    fn on_header(&self) -> Option<Machine> {
         match self.lit_spot()? {
             Spot::Machine(machine) => Some(machine.clone()),
             Spot::Local(_) | Spot::Remote(..) => None,
         }
     }
 
-    pub fn listing(&self) -> Listing {
+    fn listing(&self) -> Listing {
         let here = self.whereabouts();
         let (away, this) = (self.away.clone(), self.this.clone());
         let mut listing = Listing {
@@ -2999,7 +3401,7 @@ impl Sidebar {
         }
     }
 
-    pub fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
+    fn reaches(&self) -> Option<Vec<(Machine, Reach)>> {
         let host = self.host.as_ref()?;
         let here = self.whereabouts();
         let reach = |machine: &Machine, seen: Result<Seen<'_>, Away>| {
@@ -3025,7 +3427,7 @@ impl Sidebar {
         )
     }
 
-    pub fn whereabouts(&self) -> Option<Here> {
+    fn whereabouts(&self) -> Option<Here> {
         let project = self.seated_in()?;
         let on = self.on().clone();
         if let Ok(place) = self.here_place() {
@@ -3035,7 +3437,7 @@ impl Sidebar {
         Some(Here::Session { on, session })
     }
 
-    pub fn far_agent(&self) -> Option<&Destination> {
+    fn far_agent(&self) -> Option<&Destination> {
         let Machine::Remote(on) = self.on() else {
             return None;
         };
@@ -3080,7 +3482,7 @@ impl Sidebar {
         runs
     }
 
-    pub fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
+    fn sayings(&self) -> Option<Vec<(Machine, Option<Vec<Saying>>)>> {
         let each = machines(self.host.as_ref()?, &self.shelves).each();
         Some(
             each.map(|(on, seen)| (on, seen.ok().map(|seen| seen.sayings.to_vec())))
@@ -3088,54 +3490,43 @@ impl Sidebar {
         )
     }
 
-    #[must_use]
-    pub fn aloud(&mut self, shown: Option<aloud::Shown>) -> bool {
+    fn aloud(&mut self, shown: Option<aloud::Shown>) -> bool {
         if self.aloud == shown {
             return false;
         }
         self.aloud = shown;
-        self.relayout();
         true
     }
 
-    pub fn aloud_buttons(&self) -> &Spots<aloud::Button> {
+    fn aloud_buttons(&self) -> &Spots<aloud::Button> {
         match &self.viewport {
-            Viewport::Collapsed => &EMPTY_ALOUD_BUTTONS,
-            Viewport::Expanded(laid) => &laid.aloud_buttons,
+            Viewport::Collapsed { .. } => &EMPTY_ALOUD_BUTTONS,
+            Viewport::Expanded { laid, .. } => &laid.aloud_buttons,
         }
     }
 
-    pub fn notify(&mut self, notice: String) {
+    fn notify(&mut self, notice: String) {
         log::say(&notice);
         self.notice = Some(notice);
-        self.relayout();
     }
 
-    #[must_use]
-    pub fn clear_notice(&mut self) -> bool {
-        let cleared = self.notice.take().is_some();
-        if cleared {
-            self.relayout();
-        }
-        cleared
+    fn clear_notice(&mut self) -> bool {
+        self.notice.take().is_some()
     }
 
-    #[must_use]
-    pub fn unsay(&mut self, notice: &str) -> bool {
+    fn unsay(&mut self, notice: &str) -> bool {
         if self.notice.as_deref() == Some(notice) {
             self.notice = None;
-            self.relayout();
             return true;
         }
         false
     }
 
-    pub fn filing(&mut self, number: u64, repository: &str) {
+    fn filing(&mut self, number: u64, repository: &str) {
         self.filing.insert(number, repository.to_owned());
-        self.relayout();
     }
 
-    pub fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
+    fn filed(&mut self, number: u64, repository: &str, filed: &Result<Filed, Unfiled>) {
         self.filing.remove(&number);
         match filed {
             Ok(filed) => {
@@ -3144,7 +3535,6 @@ impl Sidebar {
                 self.filed = Some(format!(
                     "filed #{number} in {repository}: {title}; link copied"
                 ));
-                self.relayout();
             }
             Err(Unfiled::Refused(why)) => {
                 self.notify(format!(
@@ -3158,13 +3548,9 @@ impl Sidebar {
         }
     }
 
-    #[must_use]
-    pub fn image_going(&mut self, to: Option<Destination>) -> bool {
+    fn image_going(&mut self, to: Option<Destination>) -> bool {
         let changed = self.image_going != to;
         self.image_going = to;
-        if changed {
-            self.relayout();
-        }
         changed
     }
 
@@ -3197,7 +3583,7 @@ impl Sidebar {
     }
 
     #[cfg(test)]
-    pub fn turning(&self) -> bool {
+    fn turning(&self) -> bool {
         let menus = self.open().is_some_and(Menu::turning);
         self.row_turning() || menus || self.working_on() || !self.filing.is_empty()
     }
@@ -3210,7 +3596,7 @@ impl Sidebar {
         if laid.room == 0 {
             return false;
         }
-        let shown = self.top..self.top + laid.room;
+        let shown = laid.top..laid.top + laid.room;
         let mut line = 0;
         for row in &self.rows {
             let first = line + row.gap();
@@ -3222,13 +3608,12 @@ impl Sidebar {
         false
     }
 
-    #[must_use]
-    pub fn view(&self, collapsed: bool) -> SidebarView {
+    fn view(&self) -> SidebarView {
         assert!(
             self.rows.len() <= ROWS_MAX,
             "sidebar rows stay within their upper bound"
         );
-        if collapsed {
+        let Viewport::Expanded { laid, moving } = &self.viewport else {
             return SidebarView::Collapsed {
                 away: self.away.is_some(),
                 tinted: self.image_going.is_some() || self.copied.is_some(),
@@ -3236,17 +3621,20 @@ impl Sidebar {
                 paused: self.aloud.as_ref().is_some_and(aloud::Shown::paused),
                 title: self.seat_name.clone(),
             };
-        }
-        let area = self.viewport.area().unwrap_or_default();
-        let width = usize::from(area.width.saturating_sub(1));
-        let height = usize::from(area.height);
+        };
+        let width = usize::from(laid.area.width.saturating_sub(1));
+        let height = usize::from(laid.area.height);
         let NotesAt { mut notes, .. } = self.notes_at(width, height, 0);
-        let room = height.saturating_sub(HEADER + notes.lines.len());
+        assert_eq!(
+            laid.room,
+            height.saturating_sub(HEADER + notes.lines.len()),
+            "the sidebar's laid-out room matches its state before diffing"
+        );
         notes.lines.truncate(height);
-        let all = matches!(self.moving, Moving::Lifted(_) | Moving::Swept(..))
+        let all = matches!(moving, Moving::Lifted(_) | Moving::Swept(..))
             || matches!(self.mode, Mode::Reorder(_));
-        let top = self.top.min(self.lines().saturating_sub(1));
-        let shown = top..top + room;
+        let top = laid.top;
+        let shown = top..top + laid.room;
         let mut line = 0;
         let mut rows = Vec::new();
         for row in &self.rows {
@@ -3276,11 +3664,6 @@ impl Sidebar {
     }
 
     fn rebuild(&mut self, wall: SystemTime) {
-        self.rebuild_rows(wall);
-        self.relayout();
-    }
-
-    fn rebuild_rows(&mut self, wall: SystemTime) {
         if self.rebuild_with(Typos::None, wall) == Rebuilt::Unfound {
             let rebuilt = self.rebuild_with(Typos::Forgiven, wall);
             assert!(
@@ -3622,15 +4005,23 @@ impl Sidebar {
         self.here_row = here_spot.and_then(|spot| self.row_for(&spot));
         let gone = |spot: Spot| self.row_of(&spot).is_none();
         let reordered_gone = matches!(&self.mode, Mode::Reorder(movable) if gone(movable.spot()));
-        let lifted_gone = matches!(
-            &self.moving,
-            Moving::Lifted(Lift { lifted: movable, .. }) if gone(movable.spot())
-        );
         if reordered_gone {
             self.mode = Mode::Idle;
         }
-        if lifted_gone {
-            self.moving = Moving::Still;
+        let lifted_gone = matches!(
+            self.viewport.moving(),
+            Some(Moving::Lifted(Lift { lifted: movable, .. })) if gone(movable.spot())
+        );
+        let down_gone = matches!(
+            self.viewport.moving(),
+            Some(Moving::Down { on, .. }) if on.spot().is_some_and(gone)
+        );
+        if let Some(moving) = self.viewport.moving_mut() {
+            if lifted_gone {
+                *moving = Moving::Still;
+            } else if down_gone && let Moving::Down { on, .. } = moving {
+                *on = Pressed::Space;
+            }
         }
         if let Some(Lit::Closing { spot, landing, .. }) = &self.lit
             && self.row_of(spot).is_none()
@@ -3784,13 +4175,7 @@ impl Sidebar {
         Some(self.row_of(spot).expect("the highlight is on a row"))
     }
 
-    #[cfg(test)]
     fn step(&mut self, by: isize) {
-        self.step_in(by);
-        self.relayout();
-    }
-
-    fn step_in(&mut self, by: isize) {
         let stops: Vec<usize> = (0..self.rows.len()).filter(|at| self.stops(*at)).collect();
         let Some(last) = stops.len().checked_sub(1) else {
             return;
@@ -3805,13 +4190,7 @@ impl Sidebar {
         self.light(self.rows[stops[next]].spot());
     }
 
-    #[cfg(test)]
     fn end(&mut self, last: bool) {
-        self.end_in(last);
-        self.relayout();
-    }
-
-    fn end_in(&mut self, last: bool) {
         let mut stops = (0..self.rows.len()).filter(|at| self.stops(*at));
         let stop = if last {
             stops.next_back()
@@ -3863,8 +4242,9 @@ impl Sidebar {
             Folding::Project(project) => (Fold::Project(&machine, project), project_of(spot)),
             Folding::Worktree(worktree) => (Fold::Worktree(&machine, worktree), spot.worktree()),
         };
-        if !self.folds.set(fold, folded) {
-            return;
+        match self.folds.set(fold, folded) {
+            FoldSet::Unchanged | FoldSet::SharingLost => return,
+            FoldSet::Changed => {}
         }
         if folded {
             match row {
@@ -3875,16 +4255,10 @@ impl Sidebar {
         self.rebuild(now);
     }
 
-    pub fn key(&mut self, key: &KeyEvent, now: Moment) -> Asked {
-        let asked = self.key_from(key, now, Came::Typed);
-        self.relayout();
-        asked
-    }
-
     fn key_from(&mut self, key: &KeyEvent, now: Moment, came: Came) -> Asked {
         if self.pressed() {
             if key.code == KeyCode::Esc {
-                self.let_go();
+                let _ = self.let_go();
             }
             return Asked::Nothing;
         }
@@ -3906,14 +4280,14 @@ impl Sidebar {
             (Came::Typed, _) => ChordWait::Until(now.steady + PAUSE),
         };
         if menu::closes(key) && self.open().is_some_and(Menu::waits) {
-            self.close_menu_in();
+            let _ = self.close_menu();
             return Asked::Nothing;
         }
         if key.code == KeyCode::Char(menu::ALL_KEYS)
             && let Mode::Menu { menu, .. } = &self.mode
             && menu.lists()
         {
-            self.close_menu_in();
+            let _ = self.close_menu();
             self.pend(Pending::AllKeys(AllKeys::default()));
             return Asked::Nothing;
         }
@@ -3956,10 +4330,10 @@ impl Sidebar {
             return asked;
         }
         match key.code {
-            KeyCode::Down => self.step_in(1),
-            KeyCode::Up => self.step_in(-1),
-            KeyCode::Home => self.end_in(false),
-            KeyCode::End => self.end_in(true),
+            KeyCode::Down => self.step(1),
+            KeyCode::Up => self.step(-1),
+            KeyCode::Home => self.end(false),
+            KeyCode::End => self.end(true),
             KeyCode::Left => self.fold(true, now.system),
             KeyCode::Right => self.fold(false, now.system),
             KeyCode::Enter => return self.go(now.system),
@@ -3978,10 +4352,10 @@ impl Sidebar {
                 return self.open_menu_at(GIT, c);
             }
             KeyCode::Char(c) => match Top::of(c) {
-                Some(Top::Move(by)) => self.step_in(by),
-                Some(Top::Last) => self.end_in(true),
+                Some(Top::Move(by)) => self.step(by),
+                Some(Top::Last) => self.end(true),
                 Some(Top::First) if matches!(pending, Some(Pending::First(_))) => {
-                    self.end_in(false);
+                    self.end(false);
                 }
                 Some(Top::First) => self.pend(Pending::First(wait)),
                 Some(Top::Group(key)) => self.pend(Pending::Group { key, wait }),
@@ -4010,8 +4384,7 @@ impl Sidebar {
         Asked::Nothing
     }
 
-    #[must_use]
-    pub fn due(&self, now: Moment) -> Option<Instant> {
+    fn due(&self, now: Moment) -> Option<Instant> {
         let shows = match &self.mode {
             Mode::Pending(
                 Pending::First(ChordWait::Until(shows))
@@ -4055,7 +4428,7 @@ impl Sidebar {
             }
             _ => return None,
         };
-        all.scroll(by);
+        all.scroll(by, self.bottom_room());
         self.pend(Pending::AllKeys(all));
         Some(Asked::Nothing)
     }
@@ -4127,25 +4500,23 @@ impl Sidebar {
         }
     }
 
-    pub fn number_clicked(&mut self, link: Link) -> Asked {
+    fn number_clicked(&mut self, link: Link) -> Asked {
         self.notice = None;
         self.unpend();
-        self.relayout();
         Asked::Copy(link)
     }
 
-    pub fn copied(&mut self, copied: Copied, steady: Instant) {
+    fn copied(&mut self, copied: Copied, steady: Instant) {
         self.copied = Some((copied, steady));
-        self.relayout();
     }
 
     fn selected_key(&mut self, key: &KeyEvent, wall: SystemTime) -> Option<Asked> {
         match key.code {
-            KeyCode::Down => self.step_in(1),
-            KeyCode::Up => self.step_in(-1),
+            KeyCode::Down => self.step(1),
+            KeyCode::Up => self.step(-1),
             KeyCode::Esc => self.unselect(),
             KeyCode::Char(c) => match Top::of(c) {
-                Some(Top::Move(by)) => self.step_in(by),
+                Some(Top::Move(by)) => self.step(by),
                 Some(Top::Shift(by)) => return Some(self.shift(by, wall)),
                 Some(Top::Command(Command::Reorder)) => self.widen(),
                 Some(Top::Command(Command::Quit)) => self.unselect(),
@@ -4364,7 +4735,13 @@ impl Sidebar {
             .collect()
     }
 
-    fn landing(&self, movable: &Movable, line: u16, over: bool) -> Option<(Spans, Range<usize>)> {
+    fn landing(
+        &self,
+        movable: &Movable,
+        line: u16,
+        over: bool,
+        top: usize,
+    ) -> Option<(Spans, Range<usize>)> {
         let at = self.row_of(&movable.spot())?;
         let spans = self.spans(movable);
         let rows = spans.rows();
@@ -4375,7 +4752,7 @@ impl Sidebar {
         }
         let lines = |span: Range<usize>| self.rows[span].iter().map(Row::height).sum::<usize>();
         let above = HEADER + lines(lifted.start..at) + self.rows[at].gap();
-        let top = (self.top + usize::from(line)) as isize - above as isize;
+        let top = (top + usize::from(line)) as isize - above as isize;
         let mut line = lines(0..rows[0].start);
         let mut gaps = Vec::with_capacity(rows.len());
         for (index, span) in rows.iter().enumerate() {
@@ -4537,7 +4914,7 @@ impl Sidebar {
         }
     }
 
-    pub fn float_menu(&mut self) {
+    fn float_menu(&mut self) {
         self.notice = None;
         let place = match self.here_place() {
             Ok(place) => Place::View(place),
@@ -4552,12 +4929,11 @@ impl Sidebar {
         };
         let agent = self.agent_for(&target);
         self.end_mode();
-        self.let_go();
+        let _ = self.let_go();
         self.put(Menu::new(self.menus, target, agent), Placed::Afloat);
-        self.relayout();
     }
 
-    pub fn aimed_row(&self) -> Aim {
+    fn aimed_row(&self) -> Aim {
         match self.target() {
             Some(row) => Aim::At {
                 target: Rc::new(row),
@@ -4567,7 +4943,7 @@ impl Sidebar {
         }
     }
 
-    pub fn aimed_view(&self) -> Aim {
+    fn aimed_view(&self) -> Aim {
         let view = self
             .here_place()
             .ok()
@@ -4580,7 +4956,7 @@ impl Sidebar {
         }
     }
 
-    pub fn aimed_worktree(&self) -> Aim {
+    fn aimed_worktree(&self) -> Aim {
         match self
             .here_worktree()
             .and_then(|place| self.here_target(Place::Worktree(place)))
@@ -4597,7 +4973,7 @@ impl Sidebar {
         self.target_at(self.on(), place).map(Rc::new)
     }
 
-    pub fn act_on_row(&mut self, target: &Target, action: Action, wall: SystemTime) -> Asked {
+    fn act_on_row(&mut self, target: &Target, action: Action, wall: SystemTime) -> Asked {
         self.notice = None;
         self.end_mode();
         assert!(
@@ -4605,7 +4981,7 @@ impl Sidebar {
             "the sidebar has the keys its own keys act with"
         );
         let command = Command::of(action);
-        let asked = if command == Some(Command::Search) {
+        if command == Some(Command::Search) {
             self.find(String::new(), wall);
             Asked::Nothing
         } else if self.highlights(target) {
@@ -4626,27 +5002,23 @@ impl Sidebar {
         } else {
             self.notify(PALETTE_ROW_GONE.to_owned());
             Asked::Nothing
-        };
-        self.relayout();
-        asked
+        }
     }
 
-    pub fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
+    fn act_in_menu(&mut self, target: &Target, action: Action, origin: Origin) -> Asked {
         self.notice = None;
         self.end_mode();
-        let asked = if Command::of(action) == Some(Command::Quit) {
+        if Command::of(action) == Some(Command::Quit) {
             Asked::Quit
         } else {
             self.menus += 1;
             let agent = self.agent_for(target);
             let did = Menu::acting(self.menus, target, action, agent);
             if origin == Origin::Views {
-                self.let_go();
+                let _ = self.let_go();
             }
             self.menu_did(Placed::of(origin), did)
-        };
-        self.relayout();
-        asked
+        }
     }
 
     fn highlights(&self, target: &Target) -> bool {
@@ -4655,21 +5027,12 @@ impl Sidebar {
             .is_some_and(|highlighted| at(&highlighted) == at(target))
     }
 
-    pub fn chained(&mut self, done: Done, origin: Origin) -> Asked {
+    fn chained(&mut self, done: Done, origin: Origin) -> Asked {
         self.notice = None;
-        let asked = self.menu_did(Placed::of(origin), Did::Closed(done));
-        self.relayout();
-        asked
+        self.menu_did(Placed::of(origin), Did::Closed(done))
     }
 
-    #[must_use]
-    pub fn paste(&mut self, text: &str, wall: SystemTime) -> Asked {
-        let asked = self.paste_in(text, wall);
-        self.relayout();
-        asked
-    }
-
-    fn paste_in(&mut self, text: &str, wall: SystemTime) -> Asked {
+    fn paste(&mut self, text: &str, wall: SystemTime) -> Asked {
         if let Mode::AfloatNote(_) = self.mode {
             return Asked::Nothing;
         }
@@ -4696,7 +5059,7 @@ impl Sidebar {
         let menu_afloat = matches!(self.mode, Mode::Afloat { .. });
         if let Some((on, place)) = checked_out {
             if menu_afloat {
-                self.close_menu_in();
+                let _ = self.close_menu();
             } else {
                 self.end_mode();
             }
@@ -4715,7 +5078,7 @@ impl Sidebar {
             return Asked::Nothing;
         };
         let placed = if menu_afloat {
-            self.close_menu_in();
+            let _ = self.close_menu();
             Placed::Afloat
         } else {
             self.end_mode();
@@ -4763,7 +5126,7 @@ impl Sidebar {
         None
     }
 
-    pub fn pull_in_menu(
+    fn pull_in_menu(
         &mut self,
         target: Target,
         work: Work,
@@ -4771,18 +5134,15 @@ impl Sidebar {
         origin: Origin,
     ) -> Asked {
         if self.notice_on_its_way(&work) {
-            self.relayout();
             return Asked::Nothing;
         }
         self.end_mode();
         self.menus += 1;
         let did = Menu::start_pull(self.menus, target, work, self.agent.harness(), pull);
         if origin == Origin::Views {
-            self.let_go();
+            let _ = self.let_go();
         }
-        let asked = self.menu_did(Placed::of(origin), did);
-        self.relayout();
-        asked
+        self.menu_did(Placed::of(origin), did)
     }
 
     fn notice_on_its_way(&mut self, work: &Work) -> bool {
@@ -4796,21 +5156,17 @@ impl Sidebar {
         on_its_way
     }
 
-    pub fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
+    fn chose(&mut self, menu: u64, choice: Choice, now: Moment) -> Asked {
         if self.open().is_none_or(|open| open.number() != menu) {
             return Asked::Nothing;
         }
         match choice {
-            Choice::Key(key) => self.key(&key, now),
-            Choice::Skill(name) => {
-                let asked = self.pick(&name);
-                self.relayout();
-                asked
-            }
+            Choice::Key(key) => self.key_from(&key, now, Came::Typed),
+            Choice::Skill(name) => self.pick(&name),
         }
     }
 
-    pub fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
+    fn keys_clicked(&mut self, keyed: Keyed, key: &KeyEvent, now: Moment) -> Asked {
         let there = match self.bottom() {
             Bottom::Legend | Bottom::Group(_) | Bottom::Keys(..) | Bottom::AllKeys(_) => {
                 Some(Keyed::Legend)
@@ -4821,9 +5177,7 @@ impl Sidebar {
         if !self.has_keys() || there != Some(keyed) {
             return Asked::Nothing;
         }
-        let asked = self.key_from(key, now, Came::Read);
-        self.relayout();
-        asked
+        self.key_from(key, now, Came::Read)
     }
 
     fn pick(&mut self, name: &Name) -> Asked {
@@ -4835,11 +5189,12 @@ impl Sidebar {
         self.menu_did(placed, menu.pick(name))
     }
 
-    pub fn scroll_menu(&mut self, menu: u64, by: isize) {
+    fn scroll_menu(&mut self, menu: u64, by: isize) -> bool {
         if let Some(open) = self.open_mut().filter(|open| open.number() == menu) {
             open.scroll(by);
-            self.relayout();
+            return true;
         }
+        false
     }
 
     fn has_keys(&self) -> bool {
@@ -5081,22 +5436,20 @@ impl Sidebar {
         self.menu_did(placed, menu.planned(plan))
     }
 
-    pub fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
+    fn prunes(&mut self, menu: u64, plan: Result<prunes::Plan, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::sweeping) else {
             return Asked::Nothing;
         };
         if let Ok(plan) = &plan {
             log_unasked(plan);
         }
-        let asked = self.menu_did_after(taken, waiting.swept(plan));
-        self.relayout();
-        asked
+        self.menu_did_after(taken, waiting.swept(plan))
     }
 
-    pub fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
+    fn pruned(&mut self, menu: u64, pruned: Result<prunes::Pruned, String>) -> Asked {
         let waiting = self.take_waited(menu, Menu::pruning);
         let taken = waiting.as_ref().map_or(Taken::Kept, |(_, taken)| *taken);
-        let asked = match pruned {
+        match pruned {
             Ok(prunes::Pruned::Changed(plan)) => {
                 log_unasked(&plan);
                 if let Some((waiting, taken @ Taken::Open(_))) = waiting {
@@ -5122,48 +5475,38 @@ impl Sidebar {
                 );
                 Asked::Nothing
             }
-        };
-        self.relayout();
-        asked
+        }
     }
 
-    pub fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
+    fn pulled(&mut self, menu: u64, found: Result<Found, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::pulling) else {
             return Asked::Nothing;
         };
         if let Some(off_branch) = waiting.off_branch(&found) {
             self.say_of(taken, off_branch);
         }
-        let asked = self.menu_did_after(taken, waiting.pulled(found));
-        self.relayout();
-        asked
+        self.menu_did_after(taken, waiting.pulled(found))
     }
 
-    pub fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
+    fn printed(&mut self, menu: u64, printed: Result<Printed, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::reading) else {
             return Asked::Nothing;
         };
-        let asked = self.menu_did_after(taken, waiting.printed(printed));
-        self.relayout();
-        asked
+        self.menu_did_after(taken, waiting.printed(printed))
     }
 
-    pub fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
+    fn checks(&mut self, menu: u64, checks: Result<checks::Failing, String>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::fetching) else {
             return Asked::Nothing;
         };
-        let asked = self.menu_did_after(taken, waiting.checked(checks));
-        self.relayout();
-        asked
+        self.menu_did_after(taken, waiting.checked(checks))
     }
 
-    pub fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
+    fn rebased(&mut self, menu: u64, rebased: Result<Rebased, Unrebased>) -> Asked {
         let Some((waiting, taken)) = self.take_waited(menu, Menu::rebasing) else {
             return Asked::Nothing;
         };
-        let asked = self.menu_did_after(taken, waiting.rebased(rebased));
-        self.relayout();
-        asked
+        self.menu_did_after(taken, waiting.rebased(rebased))
     }
 
     fn worked(&self, on: &Machine) -> Result<Vec<Worked>, String> {
@@ -5204,7 +5547,7 @@ impl Sidebar {
             .collect()
     }
 
-    pub fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
+    fn plan(&self, on: &Machine, listed: &Listed, scope: Scope) -> Result<Plan, String> {
         if let Some(why) = self.out_of_reach(on) {
             return Err(why);
         }
@@ -5384,7 +5727,7 @@ impl Sidebar {
         Asked::Close { on, act, ticket }
     }
 
-    pub fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
+    fn unclosed(&mut self, on: &Machine, act: &Act, ticket: u64, unchanged: Unchanged) {
         if let Some(Lit::Closing {
             spot,
             ticket: armed,
@@ -5404,24 +5747,18 @@ impl Sidebar {
         self.notify(format!("menu: {}", unchanged.said("not closed", &in_doubt)));
     }
 
-    pub fn ticket(&mut self) -> u64 {
+    fn ticket(&mut self) -> u64 {
         self.tickets += 1;
         self.tickets
     }
 
-    pub fn made_for(&mut self, menu: u64) -> Option<Held> {
+    fn made_for(&mut self, menu: u64) -> Option<Held> {
         let made = |it: &Menu| it.opens_pulled().then_some(());
-        let held = self
-            .take_seen(menu, made)
-            .map(|(_, taken, ())| taken.held());
-        if held.is_some() {
-            self.relayout();
-        }
-        held
+        self.take_seen(menu, made)
+            .map(|(_, taken, ())| taken.held())
     }
 
-    #[must_use]
-    pub fn found(
+    fn found(
         &mut self,
         menu: u64,
         agent: agents::Harness,
@@ -5429,7 +5766,6 @@ impl Sidebar {
     ) -> bool {
         if let Some(open) = self.open_mut().filter(|it| it.number() == menu) {
             open.found(agent, skills);
-            self.relayout();
             return true;
         }
         false
@@ -5460,10 +5796,10 @@ impl Sidebar {
 
     fn search_key(&mut self, key: &KeyEvent, mut term: String, wall: SystemTime) -> Asked {
         match key.code {
-            KeyCode::Down => self.step_in(1),
-            KeyCode::Up => self.step_in(-1),
-            KeyCode::Home => self.end_in(false),
-            KeyCode::End => self.end_in(true),
+            KeyCode::Down => self.step(1),
+            KeyCode::Up => self.step(-1),
+            KeyCode::Home => self.end(false),
+            KeyCode::End => self.end(true),
             KeyCode::Enter => return self.go(wall),
             KeyCode::Esc => self.close_search(wall),
             KeyCode::Backspace if term.is_empty() => self.close_search(wall),
@@ -5530,21 +5866,11 @@ impl Sidebar {
         Asked::Go { on, place }
     }
 
-    pub fn mouse(&mut self, mouse: MouseEvent, wall: SystemTime) -> Asked {
-        let Some(area) = self.viewport.area() else {
+    fn mouse(&mut self, mouse: MouseEvent, wall: SystemTime) -> Asked {
+        let Some(area) = self.viewport.expanded_area() else {
             return Asked::Nothing;
         };
-        let asked = self.mouse_in(mouse, area, wall);
-        self.relayout();
-        asked
-    }
-
-    #[cfg(test)]
-    fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
-        self.place_rows(area);
-        let asked = self.mouse_in(mouse, area, wall);
-        self.relayout();
-        asked
+        self.mouse_in(mouse, area, wall)
     }
 
     fn mouse_in(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
@@ -5556,83 +5882,111 @@ impl Sidebar {
         }
         match mouse.kind {
             MouseEventKind::ScrollDown => {
-                self.top = (self.top + 3).min(self.lines().saturating_sub(1));
+                let max = self.lines().saturating_sub(1);
+                if let Viewport::Expanded { laid, .. } = &mut self.viewport {
+                    laid.top = (laid.top + 3).min(max);
+                }
                 Asked::Nothing
             }
             MouseEventKind::ScrollUp => {
-                self.top = self.top.saturating_sub(3);
+                if let Viewport::Expanded { laid, .. } = &mut self.viewport {
+                    laid.top = laid.top.saturating_sub(3);
+                }
                 Asked::Nothing
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let line = self.line_of(mouse.row, area);
-                let row = line.and_then(|line| self.row_at(line));
-                let lifts = row.and_then(|at| self.lifting(at));
-                self.close_menu_in();
+                let on = match self
+                    .line_of(mouse.row, area)
+                    .and_then(|line| self.row_at(line))
+                {
+                    None => Pressed::Space,
+                    Some(at) => match self.lifting(at) {
+                        Some(movable) => Pressed::Movable(movable),
+                        None => Pressed::Row(self.rows[at].spot()),
+                    },
+                };
+                let _ = self.close_menu();
                 self.unselect();
                 let at = Position::new(mouse.column, mouse.row);
-                self.moving = Moving::Down { at, line, lifts };
+                self.set_moving(Moving::Down { at, on });
                 Asked::Nothing
             }
             MouseEventKind::Down(_) => Asked::Take,
             MouseEventKind::Drag(MouseButton::Left) => self.drag(mouse, area),
             MouseEventKind::Up(MouseButton::Left) => self.release(mouse, area, wall),
             MouseEventKind::Moved => {
-                self.let_go();
+                let _ = self.let_go();
                 Asked::Nothing
             }
             _ => Asked::Nothing,
         }
     }
 
+    fn set_moving(&mut self, next: Moving) {
+        let Viewport::Expanded { moving, .. } = &mut self.viewport else {
+            unreachable!("only an expanded sidebar holds pointer motion");
+        };
+        *moving = next;
+    }
+
     fn drag(&mut self, mouse: MouseEvent, area: Rect) -> Asked {
         let line = mouse.row.saturating_sub(area.y);
         let over = (area.left()..area.right()).contains(&mouse.column);
         let pointer = Position::new(mouse.column, mouse.row);
-        let (from, lifts) = match &mut self.moving {
-            Moving::Lifted(lift) => {
+        let (from, lifts) = match self.viewport.moving_mut() {
+            Some(Moving::Lifted(lift)) => {
                 lift.line = line;
                 lift.over = over;
                 return Asked::Nothing;
             }
-            Moving::Sweeping(sweep) => {
+            Some(Moving::Sweeping(sweep)) => {
                 sweep.reach(pointer, inside(area));
                 return Asked::Nothing;
             }
-            Moving::Down { at, lifts, .. } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
-            Moving::Swept(..) | Moving::Still => {
+            Some(Moving::Down { at, on }) => {
+                (*at, on.movable().cloned().filter(|_| mouse.row != at.y))
+            }
+            Some(Moving::Swept(..) | Moving::Still) | None => {
                 return Asked::Nothing;
             }
         };
         let typed = self.typed();
-        let lifts = lifts.filter(|lifts| !typed && self.row_of(&lifts.spot()).is_some());
+        let lifts = lifts.filter(|lifts| {
+            assert!(
+                self.row_of(&lifts.spot()).is_some(),
+                "a pressed movable stays listed"
+            );
+            !typed
+        });
         if let Some(lifted) = lifts {
-            self.moving = Moving::Lifted(Lift {
+            self.set_moving(Moving::Lifted(Lift {
                 lifted,
                 line,
                 over,
                 scrolled: None,
-            });
+            }));
             return Asked::Take;
         }
         if from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1 {
-            self.moving = Moving::Sweeping(Sweep::new(from, pointer, inside(area)));
+            self.set_moving(Moving::Sweeping(Sweep::new(from, pointer, inside(area))));
         }
         Asked::Nothing
     }
 
     fn release(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
         let over = (area.left()..area.right()).contains(&mouse.column);
-        match std::mem::take(&mut self.moving) {
-            Moving::Down { at, line, .. } if over && mouse.row == at.y => {
-                self.click(at, line, area, wall)
-            }
+        let Some(moving) = self.viewport.moving_mut() else {
+            return Asked::Nothing;
+        };
+        match std::mem::take(moving) {
+            Moving::Down { at, on } if over && mouse.row == at.y => self.click(at, on, area, wall),
             Moving::Lifted(Lift {
                 lifted: movable, ..
             }) => {
                 let line = mouse.row.saturating_sub(area.y);
                 self.light(movable.spot());
                 let spans = self.spans(&movable);
-                match self.landing(&movable, line, over) {
+                match self.landing(&movable, line, over, self.viewport.top()) {
                     Some((landed, _)) if landed != spans => self.keep(&landed, wall),
                     _ => {
                         self.settle(None, false);
@@ -5642,32 +5996,32 @@ impl Sidebar {
             }
             Moving::Sweeping(mut sweep) => {
                 sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
-                let page = self.rendered(area, wall).page;
+                let Viewport::Expanded { laid, .. } = &self.viewport else {
+                    unreachable!("a sweeping sidebar is expanded");
+                };
+                let page = self.rendered(laid, &Moving::Still, wall).page;
                 let Some(excerpt) = Excerpt::of(sweep.text(&page, inside(area))) else {
                     return Asked::Nothing;
                 };
-                let laid = self
-                    .viewport
-                    .laid()
-                    .expect("a sweeping sidebar has an expanded layout")
-                    .clone();
-                self.moving = Moving::Swept(sweep, laid);
+                let under = laid.clone();
+                self.set_moving(Moving::Swept(sweep, under));
                 Asked::CopyText(excerpt)
             }
             kept @ Moving::Swept(..) => {
-                self.moving = kept;
+                self.set_moving(kept);
                 Asked::Nothing
             }
             Moving::Down { .. } | Moving::Still => Asked::Nothing,
         }
     }
 
-    fn click(&mut self, at: Position, line: Option<usize>, area: Rect, wall: SystemTime) -> Asked {
-        let Some(index) = line.and_then(|line| self.row_at(line)) else {
+    fn click(&mut self, at: Position, on: Pressed, area: Rect, wall: SystemTime) -> Asked {
+        let Some(spot) = on.spot() else {
             return Asked::Take;
         };
+        let index = self.row_of(&spot).expect("a pressed row stays listed");
         let row = &self.rows[index];
-        let (spot, stops) = (row.spot(), self.stops(index));
+        let stops = self.stops(index);
         let triangle = match row {
             Row::Project { .. } => Some(2),
             Row::Worktree { .. } => Some(3),
@@ -5694,65 +6048,75 @@ impl Sidebar {
     }
 
     fn line_of(&self, y: u16, area: Rect) -> Option<usize> {
-        let room = self.viewport.laid()?.room;
+        let laid = self.viewport.laid()?;
         let line = usize::from(y.checked_sub(area.y)?);
-        let shown = line.checked_sub(HEADER).filter(|line| *line < room)?;
-        Some(self.top + shown)
+        let shown = line.checked_sub(HEADER).filter(|line| *line < laid.room)?;
+        Some(laid.top + shown)
     }
 
-    pub fn pressed(&self) -> bool {
+    fn pressed(&self) -> bool {
         matches!(
-            self.moving,
-            Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_)
+            self.viewport.moving(),
+            Some(Moving::Down { .. } | Moving::Lifted(_) | Moving::Sweeping(_))
         )
     }
 
-    pub fn unsweep(&mut self) {
-        if let Moving::Swept(..) = self.moving {
-            self.moving = Moving::Still;
+    fn unsweep(&mut self) {
+        if let Some(moving @ Moving::Swept(..)) = self.viewport.moving_mut() {
+            *moving = Moving::Still;
         }
     }
 
-    pub fn let_go(&mut self) {
-        if self.pressed() {
-            self.moving = Moving::Still;
-            self.relayout();
+    fn let_go(&mut self) -> bool {
+        if !self.pressed() {
+            return false;
         }
+        if let Some(moving) = self.viewport.moving_mut() {
+            *moving = Moving::Still;
+        }
+        true
     }
 
     #[cfg(test)]
-    pub fn scrolling(&self) -> bool {
+    fn scrolling(&self) -> bool {
         self.pull() != 0
     }
 
-    #[must_use]
-    pub fn scroll_due(&self, steady: Instant) -> Option<Instant> {
+    fn scroll_due(&self, steady: Instant) -> Option<Instant> {
         if self.pull() == 0 {
             return None;
         }
-        let Moving::Lifted(lift) = &self.moving else {
+        let Some(Moving::Lifted(lift)) = self.viewport.moving() else {
             return None;
         };
         Some(lift.scrolled.map_or(steady, |then| then + SCROLL))
     }
 
     fn pull(&self) -> isize {
-        let Moving::Lifted(lift) = &self.moving else {
+        let Viewport::Expanded {
+            laid,
+            moving: Moving::Lifted(lift),
+        } = &self.viewport
+        else {
             return 0;
         };
         if !lift.over {
             return 0;
         }
-        let room = self.viewport.laid().map_or(0, |laid| laid.room);
+        let room = laid.room;
         let line = usize::from(lift.line);
-        let up = line <= HEADER && self.top > 0;
-        let down = line + 1 >= HEADER + room && self.top + room < self.lines();
+        let up = line <= HEADER && laid.top > 0;
+        let down = line + 1 >= HEADER + room && laid.top + room < self.lines();
         isize::from(down) - isize::from(up)
     }
 
     fn hold(&mut self, at: Instant) -> bool {
         let by = self.pull();
-        let Moving::Lifted(lift) = &mut self.moving else {
+        let Viewport::Expanded {
+            laid,
+            moving: Moving::Lifted(lift),
+        } = &mut self.viewport
+        else {
             return false;
         };
         if by == 0 {
@@ -5766,9 +6130,9 @@ impl Sidebar {
             return false;
         }
         lift.scrolled = Some(at);
-        let was = self.top;
-        self.top = self.top.saturating_add_signed(by);
-        self.top != was
+        let was = laid.top;
+        laid.top = laid.top.saturating_add_signed(by);
+        laid.top != was
     }
 
     fn lines(&self) -> usize {
@@ -5798,32 +6162,20 @@ impl Sidebar {
         row.map_or(Highlight::Off, Highlight::Resting)
     }
 
-    fn lifted_landing(&self) -> Option<(Spans, Range<usize>)> {
-        match &self.moving {
-            Moving::Lifted(Lift {
+    fn lifted_landing_at(&self, top: usize) -> Option<(Spans, Range<usize>)> {
+        match self.viewport.moving() {
+            Some(Moving::Lifted(Lift {
                 lifted, line, over, ..
-            }) => self.landing(lifted, *line, *over),
-            Moving::Still | Moving::Down { .. } | Moving::Sweeping(_) | Moving::Swept(..) => None,
-        }
-    }
-
-    fn reveal(&mut self, at: usize, room: usize) {
-        let start: usize = self.rows[..at].iter().map(Row::height).sum();
-        let end = start + self.rows[at].height();
-        if start < self.top {
-            self.top = start;
-        } else if end > self.top + room {
-            self.top = end.saturating_sub(room);
-        }
-        if end - start <= room {
-            assert!(self.top <= start);
-            assert!(end <= self.top + room);
+            })) => self.landing(lifted, *line, *over, top),
+            Some(Moving::Still | Moving::Down { .. } | Moving::Sweeping(_) | Moving::Swept(..))
+            | None => None,
         }
     }
 
     fn layout_with(
         &self,
         area: Rect,
+        top: usize,
         geometry: NotesGeometry,
         landing: Option<&(Spans, Range<usize>)>,
         notes: Notes,
@@ -5845,7 +6197,7 @@ impl Sidebar {
         Layout {
             area,
             room: geometry.room,
-            top: self.top,
+            top,
             rows,
             notes_y: geometry.notes_y,
             notes: notes.said,
@@ -5854,14 +6206,9 @@ impl Sidebar {
     }
 
     fn relayout(&mut self) {
-        let Some(area) = self.viewport.area() else {
-            assert!(
-                matches!(self.moving, Moving::Still),
-                "a collapsed sidebar holds no drag or sweep"
-            );
-            return;
-        };
-        self.relayout_at(area);
+        if let Some(area) = self.viewport.expanded_area() {
+            self.relayout_at(area);
+        }
     }
 
     fn relayout_at(&mut self, area: Rect) {
@@ -5871,89 +6218,91 @@ impl Sidebar {
         );
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
-        let NotesAt {
-            notes,
-            buttons,
-            bottom_room,
-            ..
-        } = self.notes_at(width, height, 0);
-        if self.has_keys()
-            && let Mode::Pending(Pending::AllKeys(all)) = &mut self.mode
-        {
-            all.set_room(bottom_room);
-        }
+        let NotesAt { notes, buttons, .. } = self.notes_at(width, height, 0);
         let geometry = notes_geometry(area, notes.lines.len());
-        let top_before = self.top;
-        let mut landing = self.lifted_landing();
+        let mut top = self.viewport.top();
+        let top_before = top;
+        let mut landing = self.lifted_landing_at(top);
         let lifted = landing.is_some();
         match self.highlight() {
             Highlight::Lit(at) => {
                 if let Some(at) = at
                     && !lifted
                 {
-                    self.reveal(at, geometry.room);
+                    reveal(&self.rows, &mut top, at, geometry.room);
                 }
                 self.revealed = None;
             }
             Highlight::Resting(at) if self.revealed != self.here_row => {
-                self.reveal(at, geometry.room);
+                reveal(&self.rows, &mut top, at, geometry.room);
                 self.revealed.clone_from(&self.here_row);
             }
             Highlight::Resting(_) | Highlight::Off => {}
         }
-        self.top = self.top.min(self.lines().saturating_sub(1));
-        if self.top != top_before && lifted {
-            landing = self.lifted_landing();
+        top = top.min(self.lines().saturating_sub(1));
+        if top != top_before && lifted {
+            landing = self.lifted_landing_at(top);
         }
-        let laid = self.layout_with(area, geometry, landing.as_ref(), notes, buttons);
-        if matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
-            self.moving = Moving::Still;
-        }
-        self.viewport = Viewport::Expanded(laid);
-        let Viewport::Expanded(laid) = &self.viewport else {
-            unreachable!("relayout_at installs an expanded layout");
+        let laid = self.layout_with(area, top, geometry, landing.as_ref(), notes, buttons);
+        let mut moving = match &mut self.viewport {
+            Viewport::Collapsed { .. } => Moving::Still,
+            Viewport::Expanded { moving, .. } => std::mem::take(moving),
         };
+        if matches!(&moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
+            moving = Moving::Still;
+        }
         assert_eq!(laid.area, area, "relayout keeps the requested area");
-        assert_eq!(
-            laid.top, self.top,
-            "relayout records the clamped scroll offset"
-        );
         assert!(
-            !matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
+            !matches!(&moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)),
             "relayout clears any stale sweep"
         );
+        self.viewport = Viewport::Expanded { laid, moving };
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, framed: Rect, wall: SystemTime) -> (Drawn, Cadence) {
-        let drawn = self.draw_rows_painted(buffer, framed_rows(framed), wall);
+    fn draw(&self, buffer: &mut Buffer, framed: Rect, wall: SystemTime) -> (Drawn, Cadence) {
+        let area = framed_rows(framed);
+        let drawn = match &self.viewport {
+            Viewport::Collapsed {
+                area: collapsed, ..
+            } => {
+                assert_eq!(
+                    *collapsed, area,
+                    "the sidebar is collapsed for the area it draws into"
+                );
+                self.draw_collapsed_rows(buffer, area);
+                (Drawn::Nothing, Cadence::default())
+            }
+            Viewport::Expanded { laid, moving } => {
+                assert_eq!(
+                    laid.area, area,
+                    "the sidebar is placed for the area it draws into"
+                );
+                self.draw_rows_painted(buffer, laid, moving, wall)
+            }
+        };
         self.frame(buffer, framed);
         drawn
     }
 
-    pub fn draw_collapsed(&self, buffer: &mut Buffer, framed: Rect) {
-        self.draw_collapsed_rows(buffer, framed_rows(framed));
-        self.frame(buffer, framed);
-    }
-
     #[cfg(test)]
     fn draw_rows(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Drawn {
-        self.draw_rows_painted(buffer, area, wall).0
+        let Viewport::Expanded { laid, moving } = &self.viewport else {
+            unreachable!("an expanded sidebar is placed before draw_rows");
+        };
+        assert_eq!(
+            laid.area, area,
+            "the sidebar is placed for the area it draws into"
+        );
+        self.draw_rows_painted(buffer, laid, moving, wall).0
     }
 
-    fn rendered(&self, area: Rect, wall: SystemTime) -> Rendered {
+    fn rendered(&self, laid: &Layout, moving: &Moving, wall: SystemTime) -> Rendered {
         assert!(
             self.rows.len() <= ROWS_MAX,
             "sidebar rows stay within their upper bound"
         );
-        assert_eq!(
-            self.viewport.area(),
-            Some(area),
-            "the sidebar is placed for the area it draws into"
-        );
-        let laid = self
-            .viewport
-            .laid()
-            .expect("an expanded sidebar has a layout");
+        let area = laid.area;
+        let top = laid.top;
         let width = usize::from(area.width.saturating_sub(1));
         let height = usize::from(area.height);
         let frame = frame(wall);
@@ -5963,21 +6312,16 @@ impl Sidebar {
             notes,
             bottom: spotted,
             buttons,
-            bottom_room,
         } = self.notes_at(width, height, frame);
-        if self.has_keys()
-            && let Mode::Pending(Pending::AllKeys(all)) = &self.mode
-        {
-            assert_eq!(
-                all.room(),
-                bottom_room.saturating_sub(2),
-                "all-keys scroll room matches the laid-out bottom area"
-            );
-        }
         let geometry = notes_geometry(area, notes.lines.len());
         let room = geometry.room;
         let highlight = self.highlight();
-        let landing = self.lifted_landing();
+        let landing = match moving {
+            Moving::Lifted(Lift {
+                lifted, line, over, ..
+            }) => self.landing(lifted, *line, *over, top),
+            Moving::Still | Moving::Down { .. } | Moving::Sweeping(_) | Moving::Swept(..) => None,
+        };
         let lifted = landing.is_some();
         if self.host.is_none() {
             let waiting = if self.away.is_some() {
@@ -6067,18 +6411,14 @@ impl Sidebar {
             }
         }
         assert_eq!(
-            self.top,
-            self.top.min(drawn.len().saturating_sub(1)),
+            top,
+            top.min(drawn.len().saturating_sub(1)),
             "the scroll offset is clamped before drawing"
         );
         let inside = inside(area);
         assert_eq!(
             laid.room, room,
             "the sidebar's laid-out room matches its state before drawing"
-        );
-        assert_eq!(
-            laid.top, self.top,
-            "the sidebar's laid-out scroll offset matches its state before drawing"
         );
         assert_eq!(
             laid.notes_y, geometry.notes_y,
@@ -6094,10 +6434,10 @@ impl Sidebar {
             "the sidebar's laid-out aloud buttons match its state before drawing"
         );
         assert!(
-            !matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
+            !matches!(moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, laid)),
             "a stale sweep is cleared before drawing"
         );
-        lines.extend(drawn.into_iter().skip(self.top).take(room));
+        lines.extend(drawn.into_iter().skip(top).take(room));
         lines.resize(geometry.notes_from, Line::default());
         let goes_on = notes
             .goes_on
@@ -6108,7 +6448,7 @@ impl Sidebar {
         lines.extend(notes.lines);
         let mut spots = Spots::default();
         let mut cut_spots = Spots::default();
-        let shown = self.top..self.top + room;
+        let shown = top..top + room;
         let mut cadence = Cadence::default();
         if width > 0 {
             for (line, spinning, since) in marks {
@@ -6136,12 +6476,12 @@ impl Sidebar {
         } in numbers
         {
             if shown.contains(&line) {
-                spots.add(HEADER + line - self.top, columns, link.clone());
+                spots.add(HEADER + line - top, columns, link.clone());
             }
         }
         for CutAt { line, column, took } in cuts {
             if shown.contains(&line) {
-                cut_spots.add(HEADER + line - self.top, column..column + 1, took);
+                cut_spots.add(HEADER + line - top, column..column + 1, took);
             }
         }
         let page = Page {
@@ -6163,12 +6503,14 @@ impl Sidebar {
     fn draw_rows_painted(
         &self,
         buffer: &mut Buffer,
-        area: Rect,
+        laid: &Layout,
+        moving: &Moving,
         wall: SystemTime,
     ) -> (Drawn, Cadence) {
-        let rendered = self.rendered(area, wall);
+        let area = laid.area;
+        let rendered = self.rendered(laid, moving, wall);
         put(buffer, area, &rendered.page.lines, self.framing());
-        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = &self.moving {
+        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = moving {
             sweep.draw(buffer, inside(area));
         }
         (rendered.drawn, rendered.cadence)
@@ -6176,12 +6518,8 @@ impl Sidebar {
 
     fn draw_collapsed_rows(&self, buffer: &mut Buffer, area: Rect) {
         assert!(
-            matches!(self.viewport, Viewport::Collapsed),
-            "a collapsed sidebar is collapsed before drawing"
-        );
-        assert!(
-            matches!(self.moving, Moving::Still),
-            "a collapsed sidebar holds no drag or sweep"
+            matches!(self.viewport, Viewport::Collapsed { area: collapsed, .. } if collapsed == area),
+            "a collapsed sidebar is collapsed for the area it draws into"
         );
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
@@ -6285,7 +6623,7 @@ impl Sidebar {
         line
     }
 
-    fn notes_at(&self, width: usize, height: usize, frame: usize) -> NotesAt {
+    fn notes_above(&self, width: usize, frame: usize) -> (Notes, Spots<aloud::Button>) {
         let mut notes = Notes::default();
         let error = Style::new().fg(ERROR);
         if let Some(away) = &self.away {
@@ -6351,6 +6689,21 @@ impl Sidebar {
             buttons = spots.down(notes.lines.len());
             notes.lines.push(line);
         }
+        (notes, buttons)
+    }
+
+    fn bottom_room(&self) -> usize {
+        let Some(area) = self.viewport.expanded_area() else {
+            return 0;
+        };
+        let width = usize::from(area.width.saturating_sub(1));
+        let height = usize::from(area.height);
+        let (notes, _) = self.notes_above(width, 0);
+        height.saturating_sub(HEADER + 1 + notes.lines.len())
+    }
+
+    fn notes_at(&self, width: usize, height: usize, frame: usize) -> NotesAt {
+        let (mut notes, buttons) = self.notes_above(width, frame);
         let room = height.saturating_sub(HEADER + 1 + notes.lines.len());
         let above = notes.lines.len();
         let (lines, spotted) = match self.bottom() {
@@ -6395,7 +6748,6 @@ impl Sidebar {
             notes,
             bottom: spotted,
             buttons,
-            bottom_room: room,
         }
     }
 
@@ -6495,6 +6847,20 @@ impl Sidebar {
             | Mode::Afloat { .. }
             | Mode::AfloatNote(_) => Bottom::Nothing,
         }
+    }
+}
+
+fn reveal(rows: &[Row], top: &mut usize, at: usize, room: usize) {
+    let start: usize = rows[..at].iter().map(Row::height).sum();
+    let end = start + rows[at].height();
+    if start < *top {
+        *top = start;
+    } else if end > *top + room {
+        *top = end.saturating_sub(room);
+    }
+    if end - start <= room {
+        assert!(*top <= start);
+        assert!(end <= *top + room);
     }
 }
 
@@ -7593,6 +7959,59 @@ mod tests {
     use crate::spots::Hit;
     use luned::rebases;
 
+    impl std::ops::Deref for Sidebar {
+        type Target = SidebarState;
+
+        fn deref(&self) -> &SidebarState {
+            self.state()
+        }
+    }
+
+    impl Sidebar {
+        fn light(&mut self, spot: Spot) {
+            self.edit(|state| state.light(spot));
+        }
+
+        fn step(&mut self, by: isize) {
+            self.edit(|state| state.step(by));
+        }
+
+        fn end(&mut self, last: bool) {
+            self.edit(|state| state.end(last));
+        }
+
+        fn rebuild(&mut self, wall: SystemTime) {
+            self.edit(|state| state.rebuild(wall));
+        }
+
+        fn place_rows(&mut self, area: Rect) {
+            self.edit_without_layout(|state| state.place_rows(area));
+        }
+
+        fn collapse_rows(&mut self, area: Rect) {
+            self.edit_without_layout(|state| state.collapse_rows(area));
+        }
+
+        fn mouse_rows(&mut self, mouse: MouseEvent, area: Rect, wall: SystemTime) -> Asked {
+            self.edit(|state| {
+                state.place_rows(area);
+                state.mouse_in(mouse, area, wall)
+            })
+        }
+
+        fn draw_rows(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Drawn {
+            self.state().draw_rows(buffer, area, wall)
+        }
+
+        fn draw_collapsed_rows(&self, buffer: &mut Buffer, area: Rect) {
+            self.state().draw_collapsed_rows(buffer, area);
+        }
+
+        fn set_top(&mut self, top: usize) {
+            self.edit(|state| state.set_top(top));
+        }
+    }
+
     fn directory(path: &str) -> Directory {
         Directory::parse(path.to_owned()).unwrap()
     }
@@ -7769,6 +8188,7 @@ mod tests {
             News::default(),
             Kept::default(),
             "mac".to_owned(),
+            Rect::new(0, 0, COLUMNS, 24),
         )
     }
 
@@ -7806,9 +8226,11 @@ mod tests {
 
     fn fold(sidebar: &mut Sidebar, name: &str) {
         let project = project_named(sidebar, name);
-        sidebar
-            .folds
-            .set(Fold::Project(&Machine::Local, project), true);
+        sidebar.edit(|state| {
+            let _ = state
+                .folds
+                .set(Fold::Project(&Machine::Local, project), true);
+        });
     }
 
     fn project_row(name: &str, id: u64) -> ProjectRow {
@@ -8009,7 +8431,7 @@ mod tests {
     fn collapsed(sidebar: &mut Sidebar, height: u16, _now: Moment) -> Buffer {
         let area = Rect::new(0, 0, COLLAPSED_ROWS, height);
         let mut buffer = Buffer::empty(area);
-        sidebar.collapse();
+        sidebar.collapse_rows(area);
         sidebar.draw_collapsed_rows(&mut buffer, area);
         in_moonlight(&buffer, &[Color::Reset]);
         buffer
@@ -8393,9 +8815,9 @@ mod tests {
         let mut sidebar = two_sessions();
         let (kept, gone) = (tab_of(10, 0), tab_of(10, 1));
         for tab in [kept, gone] {
-            sidebar
-                .folds
-                .set(Fold::Worktree(&Machine::Local, tab), true);
+            sidebar.edit(|state| {
+                let _ = state.folds.set(Fold::Worktree(&Machine::Local, tab), true);
+            });
         }
         let older = session("older", 10, vec![view(1, 0, "/w/lune/main", "claude")]);
         let newer = session("newer", 20, vec![view(1, 0, "/w/b", "fish")]);
@@ -9114,7 +9536,9 @@ mod tests {
     #[test]
     fn going_into_a_project_on_a_folded_machine_unfolds_the_machine() {
         let mut sidebar = own_two_sessions();
-        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
+        sidebar.edit(|state| {
+            let _ = state.folds.set(Fold::Machine(&Machine::Local), true);
+        });
         sidebar.rebuild(test_wall());
         let folded = " ▸ \u{f108} MAC                    ●1";
         assert_eq!(screen(&mut sidebar, false, 32, 5)[2], folded);
@@ -11282,7 +11706,7 @@ mod tests {
             assert_eq!(sidebar.key(&char('p'), now), Asked::Nothing, "{note}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
             assert_eq!(sidebar.copied, None);
-            sidebar.notice = None;
+            let _ = sidebar.clear_notice();
             assert_eq!(open_pull(&mut sidebar, now), Asked::Nothing, "{note}");
             assert_eq!(sidebar.notice.as_deref(), Some(note));
         }
@@ -11424,7 +11848,7 @@ mod tests {
             .zip(5..)
             .map(|(cwd, id)| view(id, id, cwd, "fish"));
         let mut sidebar = pulls_with(views.collect());
-        let host = sidebar.host.as_mut().unwrap();
+        let mut host = sidebar.host.clone().unwrap();
         let (statuses, pulls) = (&mut host.git_statuses, &mut host.pull_requests);
         let long = "handoff-eng-11259-and-more";
         let (merged, draft) = (LINK.replace("246", "4321"), LINK.replace("246", "12"));
@@ -11442,7 +11866,6 @@ mod tests {
             "日本語の枝の名前が長い",
             Some((State::Draft, &draft)),
         );
-        let host = sidebar.host.clone().unwrap();
         sidebar.hear(host);
 
         for keys in [Keys::Terminal, Keys::Sidebar] {
@@ -11484,12 +11907,11 @@ mod tests {
         let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         assert_eq!(number_spot(&drawn, 6).len(), "#246".len());
 
-        sidebar.top = 5;
-        sidebar.relayout();
+        sidebar.set_top(5);
         let drawn = sidebar.draw_rows(&mut buffer, area, test_wall());
         assert_eq!((0..8).flat_map(|y| number_spot(&drawn, y)).count(), 0);
 
-        sidebar.top = 0;
+        sidebar.set_top(0);
         sidebar.notify("something went wrong".to_owned());
         let short = Rect::new(0, 0, 32, 7);
         sidebar.place_rows(short);
@@ -12048,10 +12470,12 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join("agent");
         let mut sidebar = two_sessions();
-        sidebar.agent = Kept::within(file.clone()).0;
-        if let Some(host) = &mut sidebar.host {
-            host.agents[0].harness = Some(Harness::Pi.into());
-        }
+        sidebar.edit(|state| {
+            state.agent = Kept::within(file.clone()).0;
+            if let Some(host) = &mut state.host {
+                host.agents[0].harness = Some(Harness::Pi.into());
+            }
+        });
         sidebar.focus(Keys::Sidebar, test_wall());
         step_onto_its_first_view(&mut sidebar);
         let started = |session: &str, beside, harness, spelled| {
@@ -12210,12 +12634,14 @@ mod tests {
     }
 
     fn check_out_pull(sidebar: &mut Sidebar, dir: &str, number: u32) {
-        let Some(host) = &mut sidebar.host else {
-            panic!("the sidebar has heard of no host");
-        };
-        let url = format!("https://github.com/lorenzolfm/lune/pull/{number}");
-        let pull = Some((State::Open, url.as_str()));
-        checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
+        sidebar.edit(|state| {
+            let Some(host) = &mut state.host else {
+                panic!("the sidebar has heard of no host");
+            };
+            let url = format!("https://github.com/lorenzolfm/lune/pull/{number}");
+            let pull = Some((State::Open, url.as_str()));
+            checked_out(&mut Vec::new(), &mut host.pull_requests, dir, "feat", pull);
+        });
     }
 
     #[test]
@@ -12495,7 +12921,7 @@ mod tests {
         assert_eq!(sidebar.open().map(Menu::number), Some(number));
         sidebar.focus(Keys::Terminal, test_wall());
         assert!(sidebar.working.contains_key(&number));
-        sidebar.notice = None;
+        let _ = sidebar.clear_notice();
         sidebar.focus(Keys::Terminal, test_wall());
         assert_eq!(sidebar.paste(page, test_wall()), Asked::Nothing);
         assert!(sidebar.open().is_none());
@@ -13392,7 +13818,7 @@ mod tests {
         let mut sidebar = searched();
         sidebar.focus(Keys::Sidebar, test_wall());
         let bipa = Spot::Local(Place::Session(listed("bipa", 10)));
-        sidebar.lit = None;
+        sidebar.edit(|state| state.lit = None);
         assert_eq!(sidebar.aimed_row(), Aim::Unplaced(PALETTE_NO_ROW));
         sidebar.light(bipa.clone());
         let Aim::At { target, .. } = sidebar.aimed_row() else {
@@ -14264,10 +14690,12 @@ mod tests {
         for (onto, wanted) in [(" ▸ bipa", [20, 10, 30]), (" ▸ zed", [10, 30, 20])] {
             let mut sidebar = searched();
             for id in [10, 20, 30] {
-                sidebar.folds.set(
-                    Fold::Project(&Machine::Local, ProjectId::of(id).unwrap()),
-                    true,
-                );
+                sidebar.edit(|state| {
+                    let _ = state.folds.set(
+                        Fold::Project(&Machine::Local, ProjectId::of(id).unwrap()),
+                        true,
+                    );
+                });
             }
             sidebar.rebuild(test_wall());
             let lines = screen(&mut sidebar, true, area.width, area.height);
@@ -14595,7 +15023,7 @@ mod tests {
                 framed(sidebar, Rect::new(0, 0, 28, 26));
             },
             &|sidebar| {
-                sidebar.collapse();
+                sidebar.collapse_rows(area);
                 sidebar.draw_collapsed_rows(&mut Buffer::empty(area), area);
             },
         ];
@@ -14700,7 +15128,7 @@ mod tests {
         checked_out(statuses, pulls, "/w/a", long, Some((State::Open, LINK)));
         local.remotes = vec![remote("me@a-host-too-long-for-the-sidebar", down(100))];
         let mut sidebar = fresh();
-        sidebar.this = long.to_owned();
+        sidebar.edit(|state| state.this = long.to_owned());
         sidebar.hear(local);
         let area = Rect::new(0, 0, 24, 14);
         framed(&mut sidebar, area);
@@ -14942,10 +15370,12 @@ mod tests {
                 .map(|machine| sidebar.folds.contains(Fold::Machine(&machine)))
         };
         sidebar.hear(machines());
-        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
-        sidebar
-            .folds
-            .set(Fold::Machine(&Machine::Remote(nixos())), true);
+        sidebar.edit(|state| {
+            let _ = state.folds.set(Fold::Machine(&Machine::Local), true);
+            let _ = state
+                .folds
+                .set(Fold::Machine(&Machine::Remote(nixos())), true);
+        });
         sidebar.hear(machines());
         assert_eq!(folded(&sidebar), [true, true]);
         let none = up(Vec::new(), Vec::new());
@@ -14963,7 +15393,9 @@ mod tests {
     #[test]
     fn a_machine_s_fold_no_lune_saw_go_goes_on_the_first_listing() {
         let mut sidebar = fresh();
-        sidebar.folds.set(Fold::Machine(&Machine::Local), true);
+        sidebar.edit(|state| {
+            let _ = state.folds.set(Fold::Machine(&Machine::Local), true);
+        });
         sidebar.hear(host(Vec::new(), Vec::new()));
         assert!(!sidebar.folds.contains(Fold::Machine(&Machine::Local)));
         sidebar.hear(host(vec![session("x", 10, Vec::new())], Vec::new()));
@@ -16096,7 +16528,7 @@ mod tests {
         assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
         assert_eq!(sidebar.notice, Some(stale.clone()));
 
-        sidebar.notice = None;
+        let _ = sidebar.clear_notice();
         assert_eq!(shift(&mut sidebar), moved(&[10, 20, 30], &[20, 10, 30], 2));
         refused(&mut sidebar, 1);
         assert_eq!(
@@ -16117,7 +16549,7 @@ mod tests {
             "another machine's refusal says so"
         );
 
-        sidebar.notice = None;
+        let _ = sidebar.clear_notice();
         refused(&mut sidebar, 2);
         assert_eq!(projects_shown(&mut sidebar), ["bipa", "notes", "zed"]);
         assert_eq!(sidebar.notice, Some(stale));
@@ -16479,8 +16911,8 @@ mod tests {
                 );
             }
             let mut buffer = Buffer::empty(area);
-            sidebar.collapse();
-            sidebar.draw_collapsed(&mut buffer, area);
+            sidebar.collapse(area);
+            let _ = sidebar.draw(&mut buffer, area, test_wall());
             assert_eq!(sidebar.aloud_buttons(), &Spots::default());
         }
     }
@@ -16492,7 +16924,7 @@ mod tests {
             let mut sidebar = fresh();
             let _ = sidebar.aloud(Some(shown));
             let mut buffer = Buffer::empty(area);
-            sidebar.collapse();
+            sidebar.collapse_rows(area);
             sidebar.draw_collapsed_rows(&mut buffer, area);
             buffer
                 .content()
@@ -16768,27 +17200,27 @@ mod tests {
         sidebar.place(area);
         let _ = sidebar.draw(&mut buffer, area, t0.system);
 
-        let before = sidebar.view(false);
+        let before = sidebar.view();
         sidebar.copied(
             Copied::text(&Excerpt::of("copied".to_owned()).unwrap()),
             t0.steady,
         );
         assert_ne!(
-            sidebar.view(false),
+            sidebar.view(),
             before,
             "SidebarView reflects copied toast"
         );
-        sidebar.copied = None;
-        assert_eq!(sidebar.view(false), before);
+        sidebar.edit(|state| state.copied = None);
+        assert_eq!(sidebar.view(), before);
 
         sidebar.key(&char('g'), t0);
-        let waiting_view = sidebar.view(false);
+        let waiting_view = sidebar.view();
         assert!(matches!(sidebar.bottom(), Bottom::Nothing));
 
         let shown_at = t0 + PAUSE;
         assert!(sidebar.ticked(shown_at, true));
         assert_ne!(
-            sidebar.view(false),
+            sidebar.view(),
             waiting_view,
             "SidebarView changes once the chord hint becomes shown"
         );
@@ -16869,7 +17301,7 @@ mod tests {
         for _ in 0..4 {
             sidebar.key(&char('j'), moment(160_000));
         }
-        assert_eq!(sidebar.top, 0);
+        assert_eq!(sidebar.viewport.top(), 0);
 
         let short = Rect::new(0, 0, 32, 8);
         sidebar.place(short);
@@ -16885,21 +17317,21 @@ mod tests {
             "new button spot is ready before any draw"
         );
         assert!(
-            sidebar.top > 0,
+            sidebar.viewport.top() > 0,
             "resizing smaller reveals the lit row immediately before any draw"
         );
-        let top_before_draw = sidebar.top;
+        let top_before_draw = sidebar.viewport.top();
         let expected_lit = sidebar.lit_spot().cloned();
         let rows = framed_rows(short);
         let lit_row = sidebar.lit_index().unwrap();
         let lit_line: usize = sidebar.rows[..lit_row].iter().map(Row::height).sum();
-        let lit_y = rows.y + u16::try_from(HEADER + lit_line - sidebar.top).unwrap();
+        let lit_y = rows.y + u16::try_from(HEADER + lit_line - sidebar.viewport.top()).unwrap();
 
         let draw_shared =
             |sidebar: &Sidebar, buffer: &mut Buffer| sidebar.draw(buffer, short, wall);
         let mut buffer = Buffer::empty(short);
         let _ = draw_shared(&sidebar, &mut buffer);
-        assert_eq!(sidebar.top, top_before_draw);
+        assert_eq!(sidebar.viewport.top(), top_before_draw);
         assert_eq!(sidebar.lit_spot().cloned(), expected_lit);
 
         let left = MouseButton::Left;
@@ -16914,12 +17346,12 @@ mod tests {
         );
 
         let narrow = Rect::new(0, 0, COLLAPSED, 8);
-        sidebar.collapse();
+        sidebar.collapse(narrow);
         assert_eq!(sidebar.aloud_buttons(), &Spots::default());
         let draw_collapsed_shared =
-            |sidebar: &Sidebar, buffer: &mut Buffer| sidebar.draw_collapsed(buffer, narrow);
+            |sidebar: &Sidebar, buffer: &mut Buffer| sidebar.draw(buffer, narrow, wall);
         let mut collapsed_buffer = Buffer::empty(narrow);
-        draw_collapsed_shared(&sidebar, &mut collapsed_buffer);
+        let _ = draw_collapsed_shared(&sidebar, &mut collapsed_buffer);
     }
 
     #[test]
@@ -16972,7 +17404,7 @@ mod tests {
             Asked::Nothing
         );
         assert!(
-            !matches!(sidebar.moving, Moving::Lifted(_)),
+            !matches!(sidebar.viewport.moving(), Some(Moving::Lifted(_))),
             "dragging from a row that was covered by the open menu does not lift a hidden row"
         );
         let _ = sidebar.mouse(mouse(MouseEventKind::Up(left), 5, menu_top + 2), wall);
@@ -17014,13 +17446,17 @@ mod tests {
         let y = rows_area.y + u16::try_from(HEADER + project_line).unwrap();
         let left = MouseButton::Left;
 
+        let narrow = Rect::new(0, 0, COLLAPSED, 16);
         assert_eq!(
             sidebar.mouse(mouse(MouseEventKind::Down(left), 10, y), wall),
             Asked::Nothing
         );
-        assert!(matches!(sidebar.moving, Moving::Down { .. }));
-        sidebar.collapse();
-        assert!(matches!(sidebar.moving, Moving::Still));
+        assert!(matches!(
+            sidebar.viewport.moving(),
+            Some(Moving::Down { .. })
+        ));
+        sidebar.collapse(narrow);
+        assert!(sidebar.viewport.moving().is_none());
 
         sidebar.place(framed);
         assert_eq!(
@@ -17031,15 +17467,14 @@ mod tests {
             sidebar.mouse(mouse(MouseEventKind::Drag(left), 10, y + 2), wall),
             Asked::Take
         );
-        assert!(matches!(sidebar.moving, Moving::Lifted(_)));
+        assert!(matches!(sidebar.viewport.moving(), Some(Moving::Lifted(_))));
 
-        sidebar.collapse();
-        assert!(matches!(sidebar.viewport, Viewport::Collapsed));
-        assert!(matches!(sidebar.moving, Moving::Still));
+        sidebar.collapse(narrow);
+        assert!(matches!(sidebar.viewport, Viewport::Collapsed { .. }));
+        assert!(sidebar.viewport.moving().is_none());
 
-        let narrow = Rect::new(0, 0, COLLAPSED, 16);
         let mut buffer = Buffer::empty(narrow);
-        sidebar.draw_collapsed(&mut buffer, narrow);
+        let _ = sidebar.draw(&mut buffer, narrow, wall);
     }
 
     #[test]
@@ -17078,5 +17513,214 @@ mod tests {
         assert!(!sidebar.ticked(now + Duration::from_millis(50), false));
         let mut buffer = Buffer::empty(framed);
         let _ = sidebar.draw(&mut buffer, framed, now.system);
+    }
+
+    #[test]
+    fn clicking_a_row_does_not_activate_a_different_row_when_rows_shift_before_release() {
+        let wall = test_wall();
+        let framed = Rect::new(0, 0, 32, 16);
+        let rows_area = framed_rows(framed);
+        let left = MouseButton::Left;
+
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+        let older_view = Spot::Local(view_of("older", 10, 1));
+        let view_index = sidebar.row_of(&older_view).unwrap();
+        let view_line: usize = sidebar.rows[..view_index].iter().map(Row::height).sum();
+        let view_y = rows_area.y + u16::try_from(HEADER + view_line).unwrap();
+
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, view_y), wall),
+            Asked::Nothing
+        );
+        sidebar.hear(host(
+            vec![session(
+                "newer",
+                20,
+                vec![view(1, 0, "/w/b", "fish"), view(2, 0, "/w/c", "fish")],
+            )],
+            Vec::new(),
+        ));
+        assert!(
+            sidebar
+                .line_of(view_y, rows_area)
+                .and_then(|line| sidebar.row_at(line))
+                .is_some(),
+            "another row shifted into the pressed line"
+        );
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Up(left), 10, view_y), wall),
+            Asked::Take,
+            "releasing after the pressed row disappears never activates the shifted row"
+        );
+
+        let mut sidebar = two_sessions();
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+        let newer_spot = Spot::Local(Place::Session(listed("newer", 20)));
+        let newer_index = sidebar.row_of(&newer_spot).unwrap();
+        let newer_line: usize = sidebar.rows[..newer_index]
+            .iter()
+            .map(Row::height)
+            .sum::<usize>()
+            + sidebar.rows[newer_index].gap();
+        let newer_y = rows_area.y + u16::try_from(HEADER + newer_line).unwrap();
+
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Down(left), 10, newer_y), wall),
+            Asked::Nothing
+        );
+        sidebar.hear(host(
+            vec![
+                session("alpha", 5, vec![view(1, 0, "/w/a", "fish")]),
+                session(
+                    "older",
+                    10,
+                    vec![
+                        view(2, 1, "/w/c", "nvim src/main.rs"),
+                        view(1, 0, "/w/lune/main", "claude"),
+                    ],
+                ),
+                session("newer", 20, vec![view(1, 0, "/w/b", "fish")]),
+            ],
+            Vec::new(),
+        ));
+        let shifted_at = sidebar
+            .line_of(newer_y, rows_area)
+            .and_then(|line| sidebar.row_at(line))
+            .map(|at| sidebar.rows[at].spot());
+        assert_ne!(shifted_at, Some(newer_spot));
+        assert_eq!(
+            sidebar.mouse(mouse(MouseEventKind::Up(left), 10, newer_y), wall),
+            go_here(Place::Session(listed("newer", 20))),
+            "releasing activates the pressed row rather than the row that shifted under the pointer"
+        );
+    }
+
+    #[test]
+    fn all_keys_scroll_uses_post_clear_bottom_room_when_a_notice_clears() {
+        let mut sidebar = two_sessions();
+        let wall = test_wall();
+        let now = moment(160_000);
+        let framed = Rect::new(0, 0, 33, 22);
+        sidebar.focus(Keys::Sidebar, wall);
+        sidebar.place(framed);
+
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('?'), now), Asked::Nothing);
+        for _ in 0..200 {
+            assert_eq!(sidebar.key(&char('j'), now), Asked::Nothing);
+        }
+        sidebar.notify("a long error note ".repeat(8));
+        assert_eq!(sidebar.key(&char('j'), now), Asked::Nothing);
+        assert_eq!(sidebar.key(&char('k'), now), Asked::Nothing);
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, wall);
+        let rows_area = framed_rows(framed);
+        let second_to_last: String = (rows_area.x..rows_area.right() - 1)
+            .map(|x| buffer[(x, rows_area.bottom() - 2)].symbol())
+            .collect();
+        assert_eq!(second_to_last.trim_end(), " Alt u        Read aloud, pause");
+    }
+
+    #[test]
+    fn sidebar_view_tracks_viewport_and_draw_handles_collapsed_and_expanded() {
+        let wall = test_wall();
+        let framed = Rect::new(0, 0, COLUMNS, 16);
+        let mut sidebar = Sidebar::new(
+            Folds::default(),
+            News::default(),
+            Kept::default(),
+            "mac".to_owned(),
+            framed,
+        );
+        sidebar.hear(with_nvim());
+        assert!(matches!(sidebar.view(), SidebarView::Expanded(_)));
+
+        let mut expanded_buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut expanded_buffer, framed, wall);
+
+        let narrow = Rect::new(0, 0, COLLAPSED, 16);
+        sidebar.collapse(narrow);
+        assert!(matches!(sidebar.view(), SidebarView::Collapsed { .. }));
+        let mut collapsed_buffer = Buffer::empty(narrow);
+        let (drawn, cadence) = sidebar.draw(&mut collapsed_buffer, narrow, wall);
+        assert_eq!(drawn, Drawn::Nothing);
+        assert_eq!(cadence, Cadence::default());
+
+        let taller = Rect::new(0, 0, COLLAPSED, 20);
+        sidebar.collapse(taller);
+        let mut taller_buffer = Buffer::empty(taller);
+        let _ = sidebar.draw(&mut taller_buffer, taller, wall);
+
+        sidebar.place(framed);
+        assert!(matches!(sidebar.view(), SidebarView::Expanded(_)));
+        let _ = sidebar.draw(&mut expanded_buffer, framed, wall);
+    }
+
+    #[test]
+    fn set_fold_relayouts_when_fold_folder_is_lost_on_an_unchanged_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = crate::state::Folder::at(dir.path().to_owned());
+        let folds = Folds::shared(&folder);
+        let framed = Rect::new(0, 0, 32, 16);
+        let wall = test_wall();
+        let now = moment(160_000);
+        let mut sidebar = Sidebar::new(
+            folds,
+            News::default(),
+            Kept::default(),
+            "mac".to_owned(),
+            framed,
+        );
+        sidebar.hear(with_nvim());
+        sidebar.focus(Keys::Sidebar, wall);
+
+        let sessions = dir.path().join("folded");
+        std::fs::remove_dir_all(&sessions).unwrap();
+        std::fs::write(&sessions, "blocked").unwrap();
+
+        assert_eq!(sidebar.key(&char('l'), now), Asked::Nothing);
+        assert!(sidebar.folds.lost().is_some());
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, wall);
+    }
+
+    #[test]
+    fn ticked_relayouts_when_news_loses_sharing_without_row_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let news = News::within(dir.path());
+        let framed = Rect::new(0, 0, 32, 16);
+        let start = moment(160_000);
+        let mut sidebar = Sidebar::new(
+            Folds::default(),
+            news,
+            Kept::default(),
+            "mac".to_owned(),
+            framed,
+        );
+        sidebar.hear(host(
+            vec![own_session("s", 1, vec![view(1, 0, "/w/a", "fish")])],
+            Vec::new(),
+        ));
+        sit(&mut sidebar, &own_view_of("s", 1, 1));
+        assert!(!sidebar.ticked(start, true));
+
+        let stayed = dir.path().join("stayed");
+        std::fs::remove_dir_all(&stayed).unwrap();
+        std::fs::write(&stayed, "blocked").unwrap();
+
+        let after_dwell = start + Duration::from_secs(2);
+        assert!(
+            sidebar.ticked(after_dwell, true),
+            "losing news sharing on a row-neutral dwell reports changed"
+        );
+        assert!(sidebar.news.lost().is_some());
+
+        let mut buffer = Buffer::empty(framed);
+        let _ = sidebar.draw(&mut buffer, framed, after_dwell.system);
     }
 }

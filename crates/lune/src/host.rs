@@ -335,45 +335,6 @@ fn resized(chord: Chord) -> Option<Growth> {
     (chord == SHRINK).then_some(Growth::Shrink)
 }
 
-#[derive(Debug)]
-struct Focus {
-    side: Side,
-    over: Option<Over>,
-}
-
-impl Focus {
-    fn on(side: Side) -> Focus {
-        Focus { side, over: None }
-    }
-
-    fn keys(&self) -> Keys {
-        match (&self.over, self.side) {
-            (None, Side::Sidebar) => Keys::Sidebar,
-            (
-                Some(
-                    Over::Brief(_)
-                    | Over::Ask(_)
-                    | Over::Issue(_)
-                    | Over::Picker(_)
-                    | Over::Dictation(..),
-                ),
-                Side::Sidebar,
-            ) => Keys::Lent,
-            (
-                None
-                | Some(
-                    Over::Brief(_)
-                    | Over::Ask(_)
-                    | Over::Issue(_)
-                    | Over::Picker(_)
-                    | Over::Dictation(..),
-                ),
-                Side::Session | Side::Collapsed,
-            ) => Keys::Terminal,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum Holder<'a> {
     Terminal,
@@ -382,19 +343,21 @@ enum Holder<'a> {
 }
 
 impl<'a> Holder<'a> {
-    fn of(focus: &'a Focus, holding: Holding) -> Holder<'a> {
-        if let Some(over) = &focus.over {
+    fn of(side: SplitSide, over: Option<&'a Over>, holding: Holding) -> Holder<'a> {
+        if let Some(over) = over {
             assert_ne!(holding, Holding::Afloat, "nothing floats under a box");
             return Holder::Box(over);
         }
-        match (holding, focus.side) {
-            (holding @ Holding::Afloat, _) | (holding, Side::Sidebar) => Holder::Sidebar(holding),
-            (Holding::Nothing | Holding::Press, Side::Session | Side::Collapsed) => {
+        match (holding, side) {
+            (holding @ Holding::Afloat, _) | (holding, SplitSide::Sidebar) => {
+                Holder::Sidebar(holding)
+            }
+            (Holding::Nothing | Holding::Press, SplitSide::Session | SplitSide::Collapsed) => {
                 Holder::Terminal
             }
             (
                 Holding::Chord | Holding::Search | Holding::Reorder | Holding::Menu,
-                Side::Session | Side::Collapsed,
+                SplitSide::Session | SplitSide::Collapsed,
             ) => unreachable!("the sidebar's own modes end as its keys go"),
         }
     }
@@ -423,17 +386,92 @@ enum Reported {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Side {
+enum SplitSide {
     Session,
     Sidebar,
     Collapsed,
 }
 
-impl Side {
-    fn session(self) -> Side {
+impl SplitSide {
+    fn session(self) -> SplitSide {
         match self {
-            Side::Collapsed => Side::Collapsed,
-            Side::Session | Side::Sidebar => Side::Session,
+            SplitSide::Collapsed => SplitSide::Collapsed,
+            SplitSide::Session | SplitSide::Sidebar => SplitSide::Session,
+        }
+    }
+}
+
+#[expect(
+    clippy::large_enum_variant,
+    reason = "lune holds one right side, shown at a time"
+)]
+enum Pane {
+    SidebarOnly,
+    Split { right: Right, side: SplitSide },
+}
+
+impl Pane {
+    fn side(&self) -> SplitSide {
+        match self {
+            Pane::SidebarOnly => SplitSide::Sidebar,
+            Pane::Split { side, .. } => *side,
+        }
+    }
+
+    fn collapsed(&self) -> bool {
+        matches!(
+            self,
+            Pane::Split {
+                side: SplitSide::Collapsed,
+                ..
+            }
+        )
+    }
+
+    fn right(&self) -> Option<&Right> {
+        match self {
+            Pane::SidebarOnly => None,
+            Pane::Split { right, .. } => Some(right),
+        }
+    }
+
+    fn right_mut(&mut self) -> Option<&mut Right> {
+        match self {
+            Pane::SidebarOnly => None,
+            Pane::Split { right, .. } => Some(right),
+        }
+    }
+
+    fn set_side(&mut self, next: SplitSide) {
+        if let Pane::Split { side, .. } = self {
+            *side = next;
+        }
+    }
+
+    fn keys(&self, over: Option<&Over>) -> Keys {
+        match (over, self.side()) {
+            (None, SplitSide::Sidebar) => Keys::Sidebar,
+            (
+                Some(
+                    Over::Brief(_)
+                    | Over::Ask(_)
+                    | Over::Issue(_)
+                    | Over::Picker(_)
+                    | Over::Dictation(..),
+                ),
+                SplitSide::Sidebar,
+            ) => Keys::Lent,
+            (
+                None
+                | Some(
+                    Over::Brief(_)
+                    | Over::Ask(_)
+                    | Over::Issue(_)
+                    | Over::Picker(_)
+                    | Over::Dictation(..),
+                ),
+                SplitSide::Session | SplitSide::Collapsed,
+            ) => Keys::Terminal,
         }
     }
 }
@@ -704,7 +742,7 @@ impl Pacing {
 }
 
 pub struct App {
-    right: Option<Right>,
+    pane: Pane,
     homes: home::Homes,
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
@@ -713,11 +751,10 @@ pub struct App {
     movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
     frame: Rect,
-    areas: (Rect, Rect),
     width: Width,
     held: Held,
     last_press: LastPress,
-    focus: Focus,
+    over: Option<Over>,
     reported: Reported,
     focused: bool,
     burst: Option<Burst>,
@@ -1057,7 +1094,15 @@ impl App {
             .map(|file| agents::watch(file, events.clone()))
             .transpose();
         let wall = SystemTime::now();
-        let mut sidebar = Sidebar::new(folds, news, agent, machines::local_name());
+        let frame = Rect::new(0, 0, columns, rows);
+        let initial_areas = areas(frame, width.columns());
+        let mut sidebar = Sidebar::new(
+            folds,
+            news,
+            agent,
+            machines::local_name(),
+            initial_areas.0,
+        );
         if let Some(why) = unkept {
             sidebar.notify(format!("what goes wrong is kept in no log: {why}"));
         }
@@ -1101,8 +1146,6 @@ impl App {
                 None
             }
         };
-        let frame = Rect::new(0, 0, columns, rows);
-        let areas = areas(frame, width.columns());
         let luned = daemon.clone().unwrap_or_default();
         let exact_cell = cell;
         let cell = embedded::cell_pixels(exact_cell, window_pixels, columns, rows);
@@ -1111,37 +1154,42 @@ impl App {
             cell,
             colours,
         };
-        let (size, greeting, here) = (layout_size(areas.1), greeting(colours), Machine::Local);
+        let (size, greeting, here) = (
+            layout_size(initial_areas.1),
+            greeting(colours),
+            Machine::Local,
+        );
         let (start, root) = match start {
             Some(Arrival::Worktree(start)) => (Some(start), None),
             Some(Arrival::Home(root)) => (None, Some(root)),
             None => (None, None),
         };
-        let right = start.map(|start| {
-            let viewed = Viewed::start(
-                1,
-                luned.clone(),
-                here,
-                start,
-                size,
-                greeting,
-                runs_in,
-                browser_config,
-                &events,
-            );
-            Right::Worktree(viewed)
-        });
-        let focus = Focus::on(if right.is_some() {
-            Side::Session
-        } else {
-            Side::Sidebar
-        });
-        sidebar.focus(focus.keys(), wall);
-        sidebar.place(areas.0);
-        let reported = Holder::of(&focus, sidebar.holding()).reported();
+        let pane = match start {
+            Some(start) => {
+                let viewed = Viewed::start(
+                    1,
+                    luned.clone(),
+                    here,
+                    start,
+                    size,
+                    greeting,
+                    runs_in,
+                    browser_config,
+                    &events,
+                );
+                Pane::Split {
+                    right: Right::Worktree(viewed),
+                    side: SplitSide::Session,
+                }
+            }
+            None => Pane::SidebarOnly,
+        };
+        let over: Option<Over> = None;
+        sidebar.focus(pane.keys(over.as_ref()), wall);
+        let reported = Holder::of(pane.side(), over.as_ref(), sidebar.holding()).reported();
         let focused = true;
         let mut app = App {
-            right,
+            pane,
             homes: home::Homes::default(),
             shown_number_dropped: 0,
             runs_in,
@@ -1150,11 +1198,10 @@ impl App {
             movers: HashMap::new(),
             sidebar,
             frame,
-            areas,
             width,
             held: Held::Nothing,
             last_press: LastPress::Elsewhere,
-            focus,
+            over,
             reported,
             focused,
             burst: None,
@@ -1203,7 +1250,7 @@ impl App {
         app.watch();
         if let Some(root) = root {
             app.go_home(&Machine::Local, root, wall);
-            app.give(Focus::on(Side::Session), wall);
+            app.give(SplitSide::Session, None, wall);
         }
         app
     }
@@ -1514,7 +1561,7 @@ impl App {
                     Projected::default()
                 });
                 let mut changed = false;
-                if let Some(Right::Worktree(right)) = &mut self.right {
+                if let Some(Right::Worktree(right)) = self.pane.right_mut() {
                     let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
                     changed |= right.tabs(tabs, titles);
                 }
@@ -1542,9 +1589,7 @@ impl App {
                 if let Some(sayings) = self.sidebar.sayings() {
                     self.aloud.hear(sayings, self.desktop.reads_aloud());
                 }
-                changed
-                    || matches!(self.focus.over, Some(Over::Picker(_)))
-                    || self.sidebar_changed()
+                changed || matches!(self.over, Some(Over::Picker(_))) || self.sidebar_changed()
             }
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => {
@@ -1642,7 +1687,7 @@ impl App {
                 true
             }
             Event::Briefed { number, written } => {
-                if let Some(Over::Brief(briefing)) = &mut self.focus.over
+                if let Some(Over::Brief(briefing)) = &mut self.over
                     && briefing.number() == number
                 {
                     briefing.written(written);
@@ -1652,12 +1697,12 @@ impl App {
                 }
             }
             Event::Heard { number, heard } => {
-                if let Some(Over::Ask(ask)) = &mut self.focus.over
+                if let Some(Over::Ask(ask)) = &mut self.over
                     && ask.number() == number
                 {
                     ask.heard(heard);
                     true
-                } else if let Some(Right::Home(shown)) = &self.right
+                } else if let Some(Right::Home(shown)) = self.pane.right()
                     && let Some(ask) = self.homes.shown_mut(shown).ask_numbered(number)
                 {
                     ask.heard(heard);
@@ -1675,7 +1720,7 @@ impl App {
             }
             Event::Remotes { number, remotes } => {
                 if let Some(Over::Issue(issue) | Over::Dictation(_, Where::Issue(issue))) =
-                    &mut self.focus.over
+                    &mut self.over
                     && issue.number() == number
                 {
                     issue.listed(remotes);
@@ -1702,7 +1747,7 @@ impl App {
                 true
             }
             Event::Picker { number, heard } => {
-                if let Some(Over::Picker(picker)) = &mut self.focus.over
+                if let Some(Over::Picker(picker)) = &mut self.over
                     && picker.number() == number
                 {
                     let did = picker.heard(heard);
@@ -1713,7 +1758,7 @@ impl App {
                 }
             }
             Event::Spoken { number, spoken } => {
-                if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
+                if let Some(Over::Dictation(dictation, _)) = &mut self.over
                     && dictation.number() == number
                 {
                     if let Some(dictated) = dictation.spoken(spoken, now.steady) {
@@ -1730,7 +1775,7 @@ impl App {
                     self.sidebar.notify(why.clone());
                     dirty = true;
                 }
-                if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
+                if let Some(Over::Dictation(dictation, _)) = &mut self.over
                     && dictation.number() == number
                 {
                     if let Some(dictated) = dictation.found(skills) {
@@ -1789,16 +1834,15 @@ impl App {
         let Some(painted) = self.pacing.clean() else {
             return false;
         };
-        let collapsed = self.focus.side == Side::Collapsed;
-        painted.sidebar_view != self.sidebar.view(collapsed)
+        painted.sidebar_view != self.sidebar.view()
     }
 
     fn relist(&mut self) {
-        if !matches!(self.focus.over, Some(Over::Picker(_))) {
+        if !matches!(self.over, Some(Over::Picker(_))) {
             return;
         }
         let listing = self.sidebar.listing();
-        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+        if let Some(Over::Picker(picker)) = &mut self.over {
             picker.listed(listing);
         }
     }
@@ -1845,7 +1889,7 @@ impl App {
     }
 
     fn due(&self, now: Moment) -> Option<Instant> {
-        let picker = match &self.focus.over {
+        let picker = match &self.over {
             Some(Over::Picker(picker)) => picker.due(),
             _ => None,
         };
@@ -1888,7 +1932,7 @@ impl App {
                 aloud: None,
             };
         };
-        let (_, right) = self.areas;
+        let (_, right) = self.areas();
         let spot = (!self.covered() && right.contains(pointer)).then(|| attached::Spot {
             row: pointer.y - right.y,
             column: pointer.x - right.x,
@@ -1955,11 +1999,11 @@ impl App {
     }
 
     fn ticked(&mut self, now: Instant) {
-        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+        if let Some(Over::Picker(picker)) = &mut self.over {
             picker.ticked(now);
         }
         self.ask_picker();
-        match &mut self.right {
+        match self.pane.right_mut() {
             Some(Right::Worktree(right)) => right.ticked(),
             Some(Right::Home(_)) => self.ask_work(now),
             None => {}
@@ -1967,7 +2011,7 @@ impl App {
     }
 
     fn ask_picker(&mut self) {
-        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+        if let Some(Over::Picker(picker)) = &mut self.over {
             let number = picker.number();
             for ask in picker.asks() {
                 picker::ask(number, ask, &self.projected, &self.events);
@@ -2009,7 +2053,7 @@ impl App {
                 self.mouse(mouse, now);
                 !moved || was_pressed || Some(self.hover()) != hover_before
             }
-            Input::Paste(text) => match &mut self.focus.over {
+            Input::Paste(text) => match &mut self.over {
                 Some(Over::Ask(ask)) => {
                     ask.paste(&text);
                     true
@@ -2046,7 +2090,7 @@ impl App {
     fn key(&mut self, key: &KeyEvent, now: Moment) -> bool {
         let key = self.repeats.read(*key, now.steady);
         let key = &self.aloud_repeats.read(key, now.steady);
-        if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
+        if let Some(Over::Dictation(dictation, _)) = &mut self.over {
             return match dictation.key(key, now.steady) {
                 dictation::Keyed::Nothing => false,
                 dictation::Keyed::Changed => true,
@@ -2077,13 +2121,13 @@ impl App {
         if aloud::stops(chord) {
             return self.stop_aloud();
         }
-        match &mut self.focus.over {
+        match &mut self.over {
             Some(Over::Ask(ask)) => {
                 match ask.key(key) {
                     Keyed::Nothing => {}
                     Keyed::Send => self.converse(),
                     Keyed::Close | Keyed::Interrupt => {
-                        self.give(Focus::on(self.focus.side), now.system);
+                        self.give(self.pane.side(), None, now.system);
                     }
                 }
                 return true;
@@ -2103,7 +2147,7 @@ impl App {
             }
             Some(Over::Brief(briefing)) => {
                 if briefing.closes(key) {
-                    self.give(Focus::on(self.focus.side), now.system);
+                    self.give(self.pane.side(), None, now.system);
                     return true;
                 }
                 return false;
@@ -2159,7 +2203,7 @@ impl App {
     fn chord(&mut self, chord: Chord, now: SystemTime) -> bool {
         if chord == MENU {
             self.let_go();
-            if matches!(&self.right, Some(Right::Home(_))) {
+            if matches!(self.pane.right(), Some(Right::Home(_))) {
                 self.sidebar.float_note(HOME_MENU.to_owned());
             } else if self.viewed().is_some_and(Viewed::welcomes) {
                 self.sidebar.float_note(WELCOME_MENU.to_owned());
@@ -2174,42 +2218,37 @@ impl App {
         }
         if let Some(list) = List::opened_by(chord) {
             self.pickers += 1;
-            let aim = match (list, self.focus.side) {
-                (List::Projects, Side::Sidebar) => self.sidebar.on_header(),
+            let aim = match (list, self.pane.side()) {
+                (List::Projects, SplitSide::Sidebar) => self.sidebar.on_header(),
                 _ => None,
             };
             let aim = aim.unwrap_or_default();
             let (listing, palette) = (self.sidebar.listing(), self.palette());
             let picker = Box::new(Picker::open(self.pickers, list, listing, aim, palette));
-            self.give(
-                Focus {
-                    side: self.focus.side,
-                    over: Some(Over::Picker(picker)),
-                },
-                now,
-            );
+            self.give(self.pane.side(), Some(Over::Picker(picker)), now);
             return true;
         }
         if chord == SWAP {
             let on_terminal = matches!(self.holder(), Holder::Terminal);
             self.give(
-                Focus::on(if on_terminal {
-                    Side::Sidebar
+                if on_terminal {
+                    SplitSide::Sidebar
                 } else {
-                    Side::Session
-                }),
+                    SplitSide::Session
+                },
+                None,
                 now,
             );
             return true;
         }
         if chord == COLLAPSE {
-            let collapsed = self.focus.side == Side::Collapsed;
             self.give(
-                Focus::on(if collapsed {
-                    Side::Session
+                if self.pane.collapsed() {
+                    SplitSide::Session
                 } else {
-                    Side::Collapsed
-                }),
+                    SplitSide::Collapsed
+                },
+                None,
                 now,
             );
             return true;
@@ -2232,19 +2271,19 @@ impl App {
         let non_terminal = self
             .viewed()
             .is_some_and(|right| right.welcomes() || right.browses() || right.reviews());
-        let (aim, origin) = match self.focus.side {
-            Side::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
-            Side::Session | Side::Collapsed if non_terminal => {
+        let (aim, origin) = match self.pane.side() {
+            SplitSide::Sidebar => (self.sidebar.aimed_row(), Origin::Sidebar),
+            SplitSide::Session | SplitSide::Collapsed if non_terminal => {
                 (self.sidebar.aimed_worktree(), Origin::Views)
             }
-            Side::Session | Side::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
+            SplitSide::Session | SplitSide::Collapsed => (self.sidebar.aimed_view(), Origin::Views),
         };
         Palette { aim, origin }
     }
 
     #[must_use]
     fn key_to_session(&mut self, key: &KeyEvent, now: SystemTime) -> bool {
-        let (heeded, action, home_dirty) = match &mut self.right {
+        let (heeded, action, home_dirty) = match self.pane.right_mut() {
             Some(Right::Worktree(right)) => {
                 let (heeded, action) = right.key(key, self.inputs);
                 (heeded, action, false)
@@ -2275,7 +2314,7 @@ impl App {
 
     #[must_use]
     fn paste(&mut self, text: &str) -> bool {
-        match &mut self.right {
+        match self.pane.right_mut() {
             Some(Right::Worktree(right)) => right.paste(text),
             Some(Right::Home(shown)) => {
                 self.homes.shown_mut(shown).paste(text);
@@ -2292,28 +2331,28 @@ impl App {
     }
 
     fn viewed(&self) -> Option<&Viewed> {
-        match &self.right {
+        match self.pane.right() {
             Some(Right::Worktree(right)) => Some(right),
             Some(Right::Home(_)) | None => None,
         }
     }
 
     fn viewed_mut(&mut self) -> Option<&mut Viewed> {
-        match &mut self.right {
+        match self.pane.right_mut() {
             Some(Right::Worktree(right)) => Some(right),
             Some(Right::Home(_)) | None => None,
         }
     }
 
     fn home(&self) -> Option<&Home> {
-        match &self.right {
+        match self.pane.right() {
             Some(Right::Home(shown)) => Some(self.homes.shown(shown)),
             Some(Right::Worktree(_)) | None => None,
         }
     }
 
     fn ask_work(&mut self, now: Instant) {
-        let Some(Right::Home(shown)) = &self.right else {
+        let Some(Right::Home(shown)) = self.pane.right() else {
             return;
         };
         let home = self.homes.shown_mut(shown);
@@ -2327,10 +2366,9 @@ impl App {
             on: on.clone(),
             project,
         };
-        if matches!(&self.right, Some(Right::Home(shown)) if *shown == key) {
+        if matches!(self.pane.right(), Some(Right::Home(shown)) if *shown == key) {
             return;
         }
-        self.drop_shown();
         let (luned, events, asks) = (&self.luned, &self.events, &mut self.asks);
         let dropped = self.homes.show(&key, |number| {
             *asks += 1;
@@ -2341,7 +2379,7 @@ impl App {
         if let Some(dropped) = dropped {
             self.dropped_home(&dropped);
         }
-        self.right = Some(Right::Home(key));
+        self.replace_right(Right::Home(key));
         let homed = self.name_home();
         let fresh = matches!(homed, Some(Homed::Named { .. } | Homed::Unknown));
         assert!(
@@ -2353,7 +2391,7 @@ impl App {
 
     #[must_use]
     fn name_home(&mut self) -> Option<Homed> {
-        let Some(Right::Home(shown)) = &self.right else {
+        let Some(Right::Home(shown)) = self.pane.right() else {
             return None;
         };
         let home = self.homes.shown_mut(shown);
@@ -2369,8 +2407,23 @@ impl App {
         }
     }
 
+    fn replace_right(&mut self, next: Right) {
+        let side = self.pane.side();
+        let old = mem::replace(&mut self.pane, Pane::Split { right: next, side });
+        self.finish_dropped(old);
+    }
+
     fn drop_shown(&mut self) {
-        if let Some(Right::Worktree(mut right)) = self.right.take() {
+        let old = mem::replace(&mut self.pane, Pane::SidebarOnly);
+        self.finish_dropped(old);
+    }
+
+    fn finish_dropped(&mut self, old: Pane) {
+        if let Pane::Split {
+            right: Right::Worktree(mut right),
+            ..
+        } = old
+        {
             self.pending_graphics.extend(right.drain_all_deletes());
             let number = right.number();
             let dropped = self.shown_number_dropped;
@@ -2380,10 +2433,6 @@ impl App {
             );
             self.shown_number_dropped = number;
         }
-        assert!(
-            self.right.is_none(),
-            "lune shows nothing on the right once it dropped it"
-        );
     }
 
     fn dropped_home(&mut self, dropped: &Home) {
@@ -2450,12 +2499,12 @@ impl App {
 
     fn image_not_pasted(&mut self, why: &str) {
         let note = format!("image not pasted: {why}");
-        match (self.holder(), self.focus.side) {
-            (Holder::Terminal, Side::Collapsed) => {
+        match (self.holder(), self.pane.side()) {
+            (Holder::Terminal, SplitSide::Collapsed) => {
                 log::say(&note);
                 self.sidebar.float_note(note);
             }
-            (Holder::Terminal, Side::Session | Side::Sidebar)
+            (Holder::Terminal, SplitSide::Session | SplitSide::Sidebar)
             | (Holder::Sidebar(_) | Holder::Box(_), _) => self.sidebar.notify(note),
         }
     }
@@ -2515,25 +2564,25 @@ impl App {
             return;
         }
         let off = !self.drawn.boxed().is_some_and(|area| area.contains(at));
-        if let Some(Over::Picker(picker)) = &mut self.focus.over {
+        if let Some(Over::Picker(picker)) = &mut self.over {
             match (mouse.kind, wheel) {
                 (_, Some(by)) => picker.scroll(by),
                 (MouseEventKind::Down(_), _) if off => {
                     self.let_go();
                     self.held = Held::Taken;
-                    self.give(Focus::on(self.focus.side), now.system);
+                    self.give(self.pane.side(), None, now.system);
                 }
                 _ => {}
             }
             return;
         }
-        match &self.focus.over {
+        match &self.over {
             Some(Over::Ask(_) | Over::Issue(_) | Over::Picker(_) | Over::Dictation(..)) => return,
             Some(Over::Brief(briefing)) => {
                 if down && briefing.clicked() {
                     self.let_go();
                     self.held = Held::Taken;
-                    self.give(Focus::on(self.focus.side), now.system);
+                    self.give(self.pane.side(), None, now.system);
                 }
                 return;
             }
@@ -2568,7 +2617,7 @@ impl App {
                 _ => self.held = Held::Nothing,
             }
         }
-        let (sidebar, right) = self.areas;
+        let (sidebar, right) = self.areas();
         if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
             return;
         }
@@ -2594,9 +2643,9 @@ impl App {
             self.session_mouse(mouse, now.system);
             return;
         }
-        if self.focus.side == Side::Collapsed {
+        if self.pane.collapsed() {
             if down {
-                self.give(Focus::on(Side::Session), now.system);
+                self.give(SplitSide::Session, None, now.system);
                 self.burst = Some(Burst::new(at, now.steady));
             }
             return;
@@ -2617,12 +2666,12 @@ impl App {
                 let asked = self.sidebar.keys_clicked(keyed, &key, now);
                 self.follow(asked, now);
             }
-            Hit::Menu(menu, choice) if self.focus.over.is_none() => {
+            Hit::Menu(menu, choice) if self.over.is_none() => {
                 let asked = self.sidebar.chose(menu, choice, now);
                 self.follow(asked, now);
             }
             Hit::Picker(number, pick) => {
-                if let Some(Over::Picker(picker)) = &mut self.focus.over
+                if let Some(Over::Picker(picker)) = &mut self.over
                     && picker.number() == number
                 {
                     let did = picker.click(pick);
@@ -2640,7 +2689,7 @@ impl App {
 
     fn session_mouse(&mut self, mouse: MouseEvent, now: SystemTime) {
         let at = self.session_cell(mouse);
-        let width = self.areas.1.width;
+        let width = self.areas().1.width;
         let Some(right) = self.viewed_mut() else {
             return;
         };
@@ -2651,7 +2700,7 @@ impl App {
     }
 
     fn session_cell(&self, mouse: MouseEvent) -> attached::Spot {
-        let (_, right) = self.areas;
+        let (_, right) = self.areas();
         let column = mouse
             .column
             .saturating_sub(right.x)
@@ -2665,7 +2714,7 @@ impl App {
 
     fn select(&mut self, mouse: MouseEvent, now: SystemTime) -> bool {
         let at = self.session_cell(mouse);
-        let Some(Right::Worktree(own)) = &mut self.right else {
+        let Some(Right::Worktree(own)) = self.pane.right_mut() else {
             return false;
         };
         match (mouse.kind, self.held) {
@@ -2699,7 +2748,7 @@ impl App {
     }
 
     fn resize(&mut self, mouse: MouseEvent) -> bool {
-        let sidebar = self.areas.0;
+        let sidebar = self.areas().0;
         if let MouseEventKind::Drag(_) = mouse.kind {
             let terminal = self.frame.width;
             self.width
@@ -2728,7 +2777,7 @@ impl App {
         match asked {
             Asked::Nothing => {}
             Asked::OpenWorktree { on, project } => self.open_worktree(on, project.id(), wall),
-            Asked::Take => self.give(Focus::on(Side::Sidebar), wall),
+            Asked::Take => self.give(SplitSide::Sidebar, None, wall),
             Asked::Leave => self.leave(wall),
             Asked::Copy(link) => {
                 let _ = self.events.send(Event::Copy(Clip::Pull(link)));
@@ -2899,35 +2948,17 @@ impl App {
             Asked::Brief(brief) => {
                 self.briefs += 1;
                 let briefing = brief::ask(self.briefs, brief, &self.events);
-                self.give(
-                    Focus {
-                        side: self.focus.side,
-                        over: Some(Over::Brief(briefing)),
-                    },
-                    wall,
-                );
+                self.give(self.pane.side(), Some(Over::Brief(briefing)), wall);
             }
             Asked::Ask(target) => {
                 self.asks += 1;
                 let ask = Ask::new(self.asks, &target, &self.dir);
-                self.give(
-                    Focus {
-                        side: self.focus.side,
-                        over: Some(Over::Ask(ask)),
-                    },
-                    wall,
-                );
+                self.give(self.pane.side(), Some(Over::Ask(ask)), wall);
             }
             Asked::Issue(repository) => {
                 self.issues += 1;
                 let issue = Issue::open(self.issues, repository, &self.unfiled, &self.events);
-                self.give(
-                    Focus {
-                        side: self.focus.side,
-                        over: Some(Over::Issue(issue)),
-                    },
-                    wall,
-                );
+                self.give(self.pane.side(), Some(Over::Issue(issue)), wall);
             }
             Asked::Ssh(destination) => match machines::add(&destination) {
                 Ok(Added::Named) => {}
@@ -3227,13 +3258,7 @@ impl App {
         if send_now {
             ask.send(Marked::default(), &self.events);
         }
-        self.give(
-            Focus {
-                side: self.focus.side,
-                over: Some(Over::Ask(ask)),
-            },
-            now,
-        );
+        self.give(self.pane.side(), Some(Over::Ask(ask)), now);
     }
 
     fn arrange(
@@ -3290,23 +3315,17 @@ impl App {
             (on, project),
             palette,
         ));
-        self.give(
-            Focus {
-                side: self.focus.side,
-                over: Some(Over::Picker(picker)),
-            },
-            now,
-        );
+        self.give(self.pane.side(), Some(Over::Picker(picker)), now);
     }
 
     fn picked(&mut self, picked: Picked, now: Moment) {
         let wall = now.system;
         match picked {
             Picked::Nothing => {}
-            Picked::Close => self.give(Focus::on(self.focus.side), wall),
+            Picked::Close => self.give(self.pane.side(), None, wall),
             Picked::Go { on, place } => {
                 self.go(&on, &place, wall);
-                self.give(Focus::on(self.focus.side.session()), wall);
+                self.give(self.pane.side().session(), None, wall);
             }
             Picked::Add {
                 on,
@@ -3318,15 +3337,15 @@ impl App {
                     let added = worktrees::add_worktree(luned, on, (project, folder.as_str()));
                     added.map(Landing::Worktree)
                 });
-                self.give(Focus::on(self.focus.side.session()), wall);
+                self.give(self.pane.side().session(), None, wall);
             }
             Picked::Make { on, folder } => {
                 self.make_worktree(on, move |luned, on| worktrees::made_at(luned, on, &folder));
-                self.give(Focus::on(self.focus.side.session()), wall);
+                self.give(self.pane.side().session(), None, wall);
             }
             Picked::Plan { on, session, scope } => {
                 let plan = self.sidebar.plan(&on, &session, scope);
-                if let Some(Over::Picker(picker)) = &mut self.focus.over {
+                if let Some(Over::Picker(picker)) = &mut self.over {
                     let did = picker.planned(plan);
                     self.picked(did, now);
                 }
@@ -3334,10 +3353,10 @@ impl App {
             Picked::Act { on, act } => {
                 let ticket = self.sidebar.ticket();
                 self.project_act(on, act, ticket);
-                self.give(Focus::on(self.focus.side.session()), wall);
+                self.give(self.pane.side().session(), None, wall);
             }
             Picked::Chord(chord) => {
-                self.give(Focus::on(self.focus.side), wall);
+                self.give(self.pane.side(), None, wall);
                 match chord {
                     aloud::KEY => {
                         let _ = self.read_aloud();
@@ -3356,7 +3375,7 @@ impl App {
                 origin,
                 action,
             } => {
-                self.give(Focus::on(self.focus.side), wall);
+                self.give(self.pane.side(), None, wall);
                 let asked = self.sidebar.act_in_menu(&target, action, origin);
                 self.follow(asked, now);
             }
@@ -3366,17 +3385,17 @@ impl App {
                 pull,
                 origin,
             } => {
-                self.give(Focus::on(self.focus.side), wall);
+                self.give(self.pane.side(), None, wall);
                 let asked = self.sidebar.pull_in_menu(target, work, pull, origin);
                 self.follow(asked, now);
             }
             Picked::Row { target, action } => {
-                self.give(Focus::on(self.focus.side), wall);
+                self.give(self.pane.side(), None, wall);
                 let asked = self.sidebar.act_on_row(&target, action, wall);
                 self.follow(asked, now);
             }
             Picked::Done { done, origin } => {
-                self.give(Focus::on(self.focus.side), wall);
+                self.give(self.pane.side(), None, wall);
                 let asked = self.sidebar.chained(done, origin);
                 self.follow(asked, now);
             }
@@ -3384,16 +3403,13 @@ impl App {
     }
 
     fn converse(&mut self) {
-        if let Some(Over::Ask(ask)) = &mut self.focus.over {
+        if let Some(Over::Ask(ask)) = &mut self.over {
             ask.send(Marked::default(), &self.events);
         }
     }
 
     fn file_issue(&mut self, now: SystemTime) {
-        let open = self
-            .focus
-            .over
-            .take_if(|over| matches!(over, Over::Issue(_)));
+        let open = self.over.take_if(|over| matches!(over, Over::Issue(_)));
         let Some(Over::Issue(issue)) = open else {
             return;
         };
@@ -3401,28 +3417,25 @@ impl App {
             self.sidebar.filing(number, &to.to_string());
             self.keep_change(filing);
         }
-        self.give(Focus::on(self.focus.side), now);
+        self.give(self.pane.side(), None, now);
     }
 
     fn close_issue(&mut self, now: SystemTime) {
-        let open = self
-            .focus
-            .over
-            .take_if(|over| matches!(over, Over::Issue(_)));
+        let open = self.over.take_if(|over| matches!(over, Over::Issue(_)));
         if let Some(Over::Issue(issue)) = open {
             issue.close(&mut self.unfiled);
         }
-        self.give(Focus::on(self.focus.side), now);
+        self.give(self.pane.side(), None, now);
     }
 
     fn dictate(&mut self, now: Moment) -> bool {
         let on_session = matches!(self.holder(), Holder::Terminal);
-        let under = match self.focus.over.take() {
+        let under = match self.over.take() {
             None if on_session => Where::Session(self.sidebar.here_agent()),
             Some(Over::Ask(ask)) if !ask.turning() => Where::Ask(ask),
             Some(Over::Issue(issue)) => Where::Issue(issue),
             other => {
-                self.focus.over = other;
+                self.over = other;
                 return false;
             }
         };
@@ -3445,13 +3458,7 @@ impl App {
             Dictation::fetching(number, self.fetching.get_or_insert_with(fetching).got)
         };
         let over = Some(Over::Dictation(dictation, under));
-        self.give(
-            Focus {
-                side: self.focus.side,
-                over,
-            },
-            now.system,
-        );
+        self.give(self.pane.side(), over, now.system);
         true
     }
 
@@ -3498,23 +3505,20 @@ impl App {
     }
 
     fn hold_aloud(&mut self) {
-        let here = matches!(self.focus.over, Some(Over::Dictation(..)));
+        let here = matches!(self.over, Some(Over::Dictation(..)));
         self.desktop.dictating(here);
         self.aloud.hold(here || self.desktop.another_dictates());
     }
 
     fn undictate(&mut self, dictated: Option<Dictated>, now: SystemTime) {
-        let open = self
-            .focus
-            .over
-            .take_if(|over| matches!(over, Over::Dictation(..)));
+        let open = self.over.take_if(|over| matches!(over, Over::Dictation(..)));
         let Some(Over::Dictation(_, under)) = open else {
             return;
         };
-        let side = self.focus.side;
+        let side = self.pane.side();
         match under {
             Where::Session(agent) => {
-                self.give(Focus::on(side), now);
+                self.give(side, None, now);
                 let Some(dictated) = dictated else {
                     return;
                 };
@@ -3534,13 +3538,7 @@ impl App {
                 if let Some(dictated) = &dictated {
                     ask.dictated(&dictated.written.to_string());
                 }
-                self.give(
-                    Focus {
-                        side,
-                        over: Some(Over::Ask(ask)),
-                    },
-                    now,
-                );
+                self.give(side, Some(Over::Ask(ask)), now);
                 if dictated.is_some_and(|dictated| dictated.sends) {
                     self.converse();
                 }
@@ -3550,13 +3548,7 @@ impl App {
                     issue.dictated(&dictated.written.to_string());
                 }
                 let sends = dictated.is_some_and(|dictated| dictated.sends) && issue.ready();
-                self.give(
-                    Focus {
-                        side,
-                        over: Some(Over::Issue(issue)),
-                    },
-                    now,
-                );
+                self.give(side, Some(Over::Issue(issue)), now);
                 if sends {
                     self.file_issue(now);
                 }
@@ -3575,7 +3567,7 @@ impl App {
             }
             Fetched::Ended(ended) => {
                 self.fetching = None;
-                let shown = matches!(self.focus.over, Some(Over::Dictation(..)));
+                let shown = matches!(self.over, Some(Over::Dictation(..)));
                 if let (Err(why), false) = (ended, shown) {
                     self.sidebar
                         .notify(format!("the speech model did not come: {why}"));
@@ -3583,7 +3575,7 @@ impl App {
                 }
             }
         }
-        if let Some(Over::Dictation(dictation, _)) = &mut self.focus.over {
+        if let Some(Over::Dictation(dictation, _)) = &mut self.over {
             dictation.fetched(fetched);
             dirty = true;
         }
@@ -3591,23 +3583,20 @@ impl App {
     }
 
     fn step(&mut self, direction: Direction, now: SystemTime) {
-        assert!(
-            self.focus.over.is_none(),
-            "a box takes the key before a step"
-        );
-        match (self.focus.side, direction) {
-            (Side::Sidebar, Direction::Left) => {}
-            (Side::Sidebar, Direction::Right) => self.leave(now),
-            (Side::Session | Side::Collapsed, Direction::Left) => {
+        assert!(self.over.is_none(), "a box takes the key before a step");
+        match (self.pane.side(), direction) {
+            (SplitSide::Sidebar, Direction::Left) => {}
+            (SplitSide::Sidebar, Direction::Right) => self.leave(now),
+            (SplitSide::Session | SplitSide::Collapsed, Direction::Left) => {
                 if self.home().is_some() {
                     self.step_to_sidebar(now);
                 } else {
                     self.step_asked(direction, now);
                 }
             }
-            (Side::Sidebar, Direction::Up | Direction::Down)
+            (SplitSide::Sidebar, Direction::Up | Direction::Down)
             | (
-                Side::Session | Side::Collapsed,
+                SplitSide::Session | SplitSide::Collapsed,
                 Direction::Right | Direction::Up | Direction::Down,
             ) => self.step_asked(direction, now),
         }
@@ -3621,7 +3610,7 @@ impl App {
     }
 
     fn step_to_sidebar(&mut self, now: SystemTime) {
-        self.give(Focus::on(Side::Sidebar), now);
+        self.give(SplitSide::Sidebar, None, now);
         let held = matches!(self.holder(), Holder::Sidebar(_));
         assert!(
             held,
@@ -3721,8 +3710,7 @@ impl App {
             let deletes = right.go(on, worktree);
             self.pending_graphics.extend(deletes);
         } else {
-            self.drop_shown();
-            let (size, greeting) = (layout_size(self.areas.1), greeting(self.colours));
+            let (size, greeting) = (layout_size(self.areas().1), greeting(self.colours));
             let (folder, events) = (self.luned.clone(), &self.events);
             let (number, on) = (self.shown_number_dropped + 1, on.clone());
             let runs_in = self.runs_in;
@@ -3738,7 +3726,7 @@ impl App {
                 browser_config,
                 events,
             );
-            self.right = Some(Right::Worktree(started));
+            self.replace_right(Right::Worktree(started));
         }
         let right = self.shown();
         assert_eq!(right.machine(), on, "lune shows the machine it went to");
@@ -3761,7 +3749,7 @@ impl App {
     }
 
     fn leave_view(&mut self, now: SystemTime) {
-        let (on, left) = match &self.right {
+        let (on, left) = match self.pane.right() {
             Some(Right::Worktree(right)) => (right.machine().clone(), Some(right.worktree())),
             Some(Right::Home(shown)) => (shown.on.clone(), None),
             None => return,
@@ -3788,16 +3776,11 @@ impl App {
     fn unview(&mut self, now: SystemTime) {
         self.drop_shown();
         self.sidebar.unseat(now);
-        self.give(Focus::on(Side::Sidebar), now);
-        assert_eq!(
-            self.focus.side,
-            Side::Sidebar,
-            "with no worktree shown, no keys go to it"
-        );
+        self.give(SplitSide::Sidebar, None, now);
     }
 
     fn seat(&mut self, now: SystemTime) {
-        let right = match &self.right {
+        let right = match self.pane.right() {
             None => return,
             Some(Right::Home(shown)) => {
                 let (on, project) = (shown.on.clone(), shown.project);
@@ -4000,7 +3983,7 @@ impl App {
     }
 
     fn give_opened(&mut self, opener: Opener, now: SystemTime) {
-        assert!(self.right.is_some(), "lune shows the view it opened");
+        assert!(self.pane.right().is_some(), "lune shows the view it opened");
         match (opener, self.holder()) {
             (Opener::Holds, _) => {
                 self.leave(now);
@@ -4011,7 +3994,7 @@ impl App {
                 );
             }
             (Opener::LetGo, Holder::Terminal | Holder::Sidebar(Holding::Nothing)) => {
-                self.give(Focus::on(self.focus.side.session()), now);
+                self.give(self.pane.side().session(), None, now);
                 let on_terminal = matches!(self.holder(), Holder::Terminal);
                 assert!(on_terminal, "the opened view takes the keys");
             }
@@ -4031,7 +4014,7 @@ impl App {
     }
 
     fn holder(&self) -> Holder<'_> {
-        Holder::of(&self.focus, self.sidebar.holding())
+        Holder::of(self.pane.side(), self.over.as_ref(), self.sidebar.holding())
     }
 
     fn covered(&self) -> bool {
@@ -4060,33 +4043,19 @@ impl App {
         }
     }
 
-    fn sync_areas(&mut self) {
-        let collapsed = self.focus.side == Side::Collapsed;
-        if collapsed {
-            assert!(self.right.is_some(), "a collapsed sidebar has a right side");
-        }
-        let own = if collapsed {
+    fn areas(&self) -> (Rect, Rect) {
+        let own = if self.pane.collapsed() {
             sidebar::COLLAPSED
         } else {
             self.width.columns()
         };
-        let (sidebar, right) = areas(self.frame, own);
-        assert_eq!(
-            sidebar.width + right.width,
-            self.frame.width,
-            "sidebar and right fill the frame width"
-        );
-        assert_eq!(
-            sidebar.height, self.frame.height,
-            "sidebar fills the frame height"
-        );
-        assert_eq!(
-            right.height, self.frame.height,
-            "right fills the frame height"
-        );
-        self.areas = (sidebar, right);
-        if collapsed {
-            self.sidebar.collapse();
+        areas(self.frame, own)
+    }
+
+    fn sync_areas(&mut self) {
+        let (sidebar, right) = self.areas();
+        if self.pane.collapsed() {
+            self.sidebar.collapse(sidebar);
         } else {
             self.sidebar.place(sidebar);
         }
@@ -4114,36 +4083,31 @@ impl App {
             }
         }
         self.sync_areas();
-        assert_eq!(self.frame, frame, "resizing updates the frame");
-        assert_eq!(
-            self.areas.0.width + self.areas.1.width,
-            frame.width,
-            "resized areas match the frame width"
-        );
     }
 
-    fn give(&mut self, focus: Focus, wall: SystemTime) {
-        let focus = match focus.side {
-            Side::Session | Side::Collapsed if self.right.is_none() => Focus {
-                side: Side::Sidebar,
-                ..focus
-            },
-            Side::Session | Side::Sidebar | Side::Collapsed => focus,
-        };
-        if focus.side == Side::Collapsed || focus.over.is_some() {
+    fn give(&mut self, side: SplitSide, over: Option<Over>, wall: SystemTime) {
+        self.pane.set_side(side);
+        self.over = over;
+        let collapsed = self.pane.collapsed();
+        if collapsed || self.over.is_some() {
             self.let_go();
             self.sidebar.let_go();
         }
         if let Some(right) = self.viewed_mut() {
             right.forget_step();
         }
-        self.sidebar.focus(focus.keys(), wall);
+        if collapsed {
+            self.sync_areas();
+        }
+        self.sidebar
+            .focus(self.pane.keys(self.over.as_ref()), wall);
         assert!(
             self.sidebar.floating().is_none(),
             "a focus change closes what floats"
         );
-        self.focus = focus;
-        self.sync_areas();
+        if !collapsed {
+            self.sync_areas();
+        }
         self.hold_aloud();
         self.tell();
     }
@@ -4154,7 +4118,7 @@ impl App {
             Holder::Terminal | Holder::Box(_) => false,
         };
         if leaves {
-            self.give(Focus::on(self.focus.side.session()), wall);
+            self.give(self.pane.side().session(), None, wall);
         }
     }
 
@@ -4165,7 +4129,7 @@ impl App {
         self.focus_alerts();
         let mut dirty = false;
         if !focused
-            && let Some(Over::Dictation(dictation, _)) = &mut self.focus.over
+            && let Some(Over::Dictation(dictation, _)) = &mut self.over
             && dictation.unfocused()
         {
             dirty = true;
@@ -4313,7 +4277,7 @@ impl App {
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
             self.cursor = Some(cursor);
         }
-        let (_, right_area) = self.areas;
+        let (_, right_area) = self.areas();
         let covered = self.covered();
         let hover = self
             .pointer
@@ -4395,6 +4359,7 @@ impl App {
 
     pub fn paint(&mut self, frame: &mut Frame<'_>) {
         let now = Moment::now();
+        let _ = self.sync_aloud();
         self.resize_frame(frame.area());
         let (painted, _) = self.paint_at(frame, now);
         self.settling
@@ -4407,13 +4372,12 @@ impl App {
 
     fn paint_at(&mut self, frame: &mut Frame<'_>, now: Moment) -> (Painted, Option<Position>) {
         let mut cadence = Cadence::default();
-        let collapsed = self.focus.side == Side::Collapsed;
         let frame_area = frame.area();
         assert_eq!(
             frame_area, self.frame,
             "the app's layout matches the frame it paints"
         );
-        let (expected_sidebar, expected_right) = self.areas;
+        let (expected_sidebar, expected_right) = self.areas();
         let clean = attached::Clean::of_frame(frame);
         let ((sidebar, beside), right_clean) =
             clean.paint_left(expected_sidebar.width, |buffer, sidebar| {
@@ -4421,15 +4385,9 @@ impl App {
                     sidebar, expected_sidebar,
                     "the painted sidebar matches the laid-out area"
                 );
-                let beside = if collapsed {
-                    self.sidebar.draw_collapsed(buffer, sidebar);
-                    Drawn::Nothing
-                } else {
-                    let (drawn, sidebar_cadence) = self.sidebar.draw(buffer, sidebar, now.system);
-                    cadence.merge(sidebar_cadence);
-                    drawn
-                };
-                (sidebar, beside)
+                let (drawn, sidebar_cadence) = self.sidebar.draw(buffer, sidebar, now.system);
+                cadence.merge(sidebar_cadence);
+                (sidebar, drawn)
             });
         let right = right_clean.area();
         assert_eq!(
@@ -4445,7 +4403,7 @@ impl App {
         };
         let hover = self.pointer.filter(uncovered).map(spot);
         let kitty_cell_px = self.ribbons.cell_px(frame_area, covered);
-        let (cursor, overlays) = match &mut self.right {
+        let (cursor, overlays) = match self.pane.right_mut() {
             Some(Right::Worktree(shown)) => shown.draw(right_clean, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
                 let (buffer, right) = right_clean.into_buffer();
@@ -4461,7 +4419,7 @@ impl App {
         };
         self.ribbons.set_pending(overlays);
         let buffer = frame.buffer_mut();
-        let drawn = match &self.focus.over {
+        let drawn = match &self.over {
             Some(Over::Brief(briefing)) => {
                 cadence.merge(briefing.draw(buffer, right, now.system));
                 Drawn::Nothing
@@ -4515,7 +4473,7 @@ impl App {
         let painted = Painted {
             at: now,
             cadence,
-            sidebar_view: self.sidebar.view(collapsed),
+            sidebar_view: self.sidebar.view(),
         };
         (painted, cursor_position)
     }
@@ -5038,7 +4996,7 @@ mod tests {
             None,
             at(collapsed_at).system,
         );
-        app.give(Focus::on(Side::Collapsed), at(collapsed_at).system);
+        app.give(SplitSide::Collapsed, None, at(collapsed_at).system);
         app.pacing.mark_dirty();
         assert!(drew(&mut app, &mut terminal, &written, at(collapsed_at)));
         written.borrow_mut().clear();
@@ -5066,7 +5024,7 @@ mod tests {
 
         let (mut tall, tall_written) = test_terminal(80, 20);
         let shown_at = Duration::from_secs(10);
-        app.give(Focus::on(Side::Sidebar), at(shown_at).system);
+        app.give(SplitSide::Sidebar, None, at(shown_at).system);
         app.pacing.mark_dirty();
         assert!(drew(&mut app, &mut tall, &tall_written, at(shown_at)));
         tall_written.borrow_mut().clear();
@@ -5269,7 +5227,7 @@ mod tests {
         let now = at(Duration::from_secs(step));
         let dictation =
             Dictation::hearing(1, listening, Skills::Found(Vec::new()), true, now.steady);
-        app.focus.over = Some(Over::Dictation(dictation, Where::Session(None)));
+        app.over = Some(Over::Dictation(dictation, Where::Session(None)));
         app.pacing.mark_dirty();
         assert!(drew(&mut app, &mut terminal, &written, now));
         step += 1;
@@ -5415,7 +5373,7 @@ mod tests {
             at(Duration::ZERO),
         )
         .unwrap();
-        let initial_view = app.sidebar.view(false);
+        let initial_view = app.sidebar.view();
 
         app.handle_at(
             Event::Input(Input::Resize(100, 8)),
@@ -5425,9 +5383,9 @@ mod tests {
         .unwrap();
         let expected = areas(Rect::new(0, 0, 100, 8), app.width.columns());
         assert_eq!(app.frame, Rect::new(0, 0, 100, 8));
-        assert_eq!(app.areas, expected);
+        assert_eq!(app.areas(), expected);
         assert_ne!(
-            app.sidebar.view(false),
+            app.sidebar.view(),
             initial_view,
             "sidebar layout updates on Input::Resize before any draw"
         );
@@ -5439,9 +5397,9 @@ mod tests {
             None,
             collapse_at.system,
         );
-        app.give(Focus::on(Side::Collapsed), collapse_at.system);
+        app.give(SplitSide::Collapsed, None, collapse_at.system);
         assert_eq!(
-            app.areas,
+            app.areas(),
             areas(Rect::new(0, 0, 100, 8), sidebar::COLLAPSED),
             "collapsing updates areas before any draw"
         );
@@ -5470,7 +5428,7 @@ mod tests {
         terminal.draw(|frame| app.paint(frame)).unwrap();
         assert_eq!(app.frame, Rect::new(0, 0, 100, 12));
         assert_eq!(
-            app.areas,
+            app.areas(),
             areas(Rect::new(0, 0, 100, 12), app.width.columns())
         );
 
@@ -5480,6 +5438,49 @@ mod tests {
         app.tick(later);
         assert!(drew(&mut app, &mut terminal, &written, later));
         assert_eq!(app.frame, resized);
-        assert_eq!(app.areas, areas(resized, app.width.columns()));
+        assert_eq!(app.areas(), areas(resized, app.width.columns()));
+    }
+
+    #[test]
+    fn unview_while_collapsed_returns_to_expanded_sidebar_and_paints_cleanly() {
+        let (mut terminal, _written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let now = Moment::now();
+
+        app.handle_at(Event::Daemon(Ok(busy_host(1, "work"))), &mut terminal, now)
+            .unwrap();
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None, now.system);
+        app.give(SplitSide::Collapsed, None, now.system);
+        assert!(app.pane.collapsed());
+        assert!(matches!(app.sidebar.view(), SidebarView::Collapsed { .. }));
+
+        app.unview(now.system);
+        assert!(matches!(app.pane, Pane::SidebarOnly));
+        assert!(!app.pane.collapsed());
+        assert!(matches!(app.sidebar.view(), SidebarView::Expanded(_)));
+        assert_eq!(
+            app.areas(),
+            areas(Rect::new(0, 0, 80, 20), app.width.columns())
+        );
+        terminal.draw(|frame| app.paint(frame)).unwrap();
+    }
+
+    #[test]
+    fn public_paint_syncs_aloud_state_before_drawing() {
+        let (mut terminal, _written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let now = Moment::now();
+
+        assert!(app.sidebar.aloud(Some(aloud::Shown::Fetching {
+            got: 0,
+            paused: false,
+        })));
+        assert_ne!(app.sidebar.aloud_buttons(), &crate::spots::Spots::default());
+
+        terminal.draw(|frame| app.paint(frame)).unwrap();
+        assert_eq!(app.sidebar.aloud_buttons(), &crate::spots::Spots::default());
+
+        app.pacing.mark_dirty();
+        app.draw_due(&mut terminal, now + FRAME_INTERVAL).unwrap();
     }
 }
