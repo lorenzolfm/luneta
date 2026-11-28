@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
-use lune_protocol::github::PullRequest;
+use lune_protocol::github::{PULL_REQUESTS_MAX, PullRequest};
 use lune_protocol::made::Made;
 
 use crate::api::project::clone;
@@ -301,9 +301,15 @@ fn inbox_place(agent: &Agent) -> (bool, bool, Option<SystemTime>) {
 }
 
 fn held_of(seat: &Seat<'_>) -> Held {
+    let kept = match seat.projects.and_then(|projects| projects.held.as_ref()) {
+        Some(projects::Held::Kept(kept)) => kept,
+        Some(projects::Held::Unkept(why)) => return Held::Unkept { why: why.clone() },
+        None => return Held::Untold,
+    };
     let branches: HashMap<&str, &str> = seat
         .git_statuses
         .iter()
+        .take(PULL_REQUESTS_MAX)
         .filter_map(|status| match &status.stands {
             Some(api::git_status::Stands::Checkout(api::Checkout {
                 head: Some(api::checkout::Head::Branch(branch)),
@@ -315,21 +321,16 @@ fn held_of(seat: &Seat<'_>) -> Held {
     let conflicts: HashSet<&str> = seat
         .pull_requests
         .iter()
+        .take(PULL_REQUESTS_MAX)
         .filter(|pull| PullRequest::of_api(pull).is_some_and(|pull| pull.has_conflicts()))
         .map(|pull| pull.dir.as_str())
         .collect();
-    match seat.projects.and_then(|projects| projects.held.as_ref()) {
-        Some(projects::Held::Kept(kept)) => {
-            let projects = kept
-                .projects
-                .iter()
-                .map(|it| project_of(seat.on, it, &branches, &conflicts))
-                .collect();
-            Held::Kept { projects }
-        }
-        Some(projects::Held::Unkept(why)) => Held::Unkept { why: why.clone() },
-        None => Held::Untold,
-    }
+    let projects = kept
+        .projects
+        .iter()
+        .map(|it| project_of(seat.on, it, &branches, &conflicts))
+        .collect();
+    Held::Kept { projects }
 }
 
 fn project_of(
@@ -390,8 +391,19 @@ fn worktree_of(
         },
         None => Seen::Untold,
     };
-    let conflicting = !matches!(seen, Seen::Missing | Seen::NoBranch | Seen::Merged)
-        && conflicts.contains(worktree.folder.as_str());
+    let open_pull = match seen {
+        Seen::PullRequestOpen | Seen::ChecksFailing => true,
+        Seen::Missing
+        | Seen::Unread
+        | Seen::NoBranch
+        | Seen::Working
+        | Seen::Merged
+        | Seen::Untold => false,
+    };
+    let conflicting = open_pull && conflicts.contains(worktree.folder.as_str());
+    if conflicting {
+        assert!(matches!(seen, Seen::PullRequestOpen | Seen::ChecksFailing));
+    }
     Worktree {
         id: worktree.id,
         name: worktree.name.clone(),
@@ -727,16 +739,20 @@ mod tests {
             conflicting,
         };
         let worktree = |id, name: &str, seen| api::Worktree {
-            seen: Some(seen),
+            seen,
             ..worktree_with(id, name, u32::try_from(id).unwrap())
         };
-        let stage = |stage: api::Stage| worktree::Seen::Stage(stage.into());
+        let stage = |stage: api::Stage| Some(worktree::Seen::Stage(stage.into()));
         let worktrees = vec![
             worktree(1, "open", stage(api::Stage::PullRequestOpen)),
             worktree(2, "draft", stage(api::Stage::ChecksFailing)),
             worktree(3, "clean", stage(api::Stage::PullRequestOpen)),
             worktree(4, "merged", stage(api::Stage::Merged)),
-            worktree(5, "gone", worktree::Seen::Missing(())),
+            worktree(5, "gone", Some(worktree::Seen::Missing(()))),
+            worktree(6, "working", stage(api::Stage::Working)),
+            worktree(7, "unread", Some(worktree::Seen::Unread(()))),
+            worktree(8, "detached", stage(api::Stage::NoBranch)),
+            worktree(9, "untold", None),
         ];
         let host = api::Host {
             pull_requests: vec![
@@ -745,6 +761,10 @@ mod tests {
                 pull("/w/lune/clean", api::PullRequestState::Open, false),
                 pull("/w/lune/merged", api::PullRequestState::Merged, true),
                 pull("/w/lune/gone", api::PullRequestState::Open, true),
+                pull("/w/lune/working", api::PullRequestState::Open, true),
+                pull("/w/lune/unread", api::PullRequestState::Open, true),
+                pull("/w/lune/detached", api::PullRequestState::Open, true),
+                pull("/w/lune/untold", api::PullRequestState::Open, true),
             ],
             projects: Some(kept(vec![clone_of(worktrees)])),
             ..api::Host::default()
@@ -765,7 +785,11 @@ mod tests {
                 ("draft", true),
                 ("clean", false),
                 ("merged", false),
-                ("gone", false)
+                ("gone", false),
+                ("working", false),
+                ("unread", false),
+                ("detached", false),
+                ("untold", false),
             ]
         );
     }

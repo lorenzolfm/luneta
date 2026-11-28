@@ -2,6 +2,10 @@ use std::num::NonZeroU32;
 
 use crate::v1;
 
+pub const PULL_REQUESTS_MAX: usize = 2048;
+
+const _: () = assert!(PULL_REQUESTS_MAX > 0);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
     pub page: PullPage,
@@ -127,6 +131,12 @@ impl PullRequest {
 
     #[must_use]
     pub fn to_api(&self, dir: &str) -> v1::PullRequest {
+        if matches!(self.state, State::Merged | State::Closed) {
+            assert!(
+                !self.conflicting,
+                "a merged or closed pull request does not have merge conflicts"
+            );
+        }
         let state = match self.state {
             State::Open => v1::PullRequestState::Open,
             State::Draft => v1::PullRequestState::Draft,
@@ -149,7 +159,7 @@ impl PullRequest {
                 },
             ),
             stale: self.stale,
-            conflicting: self.conflicting,
+            conflicting: self.has_conflicts(),
         }
     }
 
@@ -174,12 +184,16 @@ impl PullRequest {
                 passed,
             },
         );
+        let conflicting = matches!(state, State::Open | State::Draft) && pull_request.conflicting;
+        if matches!(state, State::Merged | State::Closed) {
+            assert!(!conflicting);
+        }
         Some(PullRequest {
             page,
             state,
             checks,
             stale: pull_request.stale,
-            conflicting: pull_request.conflicting,
+            conflicting,
         })
     }
 }
@@ -198,10 +212,11 @@ mod tests {
         });
         for state in [State::Open, State::Draft, State::Merged, State::Closed] {
             let none = Some(Checks::default());
+            let open = matches!(state, State::Open | State::Draft);
             for (checks, stale, conflicting) in [
                 (checks, false, false),
-                (None, false, true),
-                (none, true, true),
+                (None, false, open),
+                (none, true, open),
             ] {
                 let pull_request = PullRequest {
                     page: page.clone(),
@@ -327,5 +342,19 @@ mod tests {
         assert!(!conflicts(State::Draft, false));
         assert!(!conflicts(State::Merged, true));
         assert!(!conflicts(State::Closed, true));
+
+        for state in [v1::PullRequestState::Merged, v1::PullRequestState::Closed] {
+            let api = v1::PullRequest {
+                dir: "/w/repo".to_owned(),
+                state: state.into(),
+                url: page.url().to_owned(),
+                checks: None,
+                stale: false,
+                conflicting: true,
+            };
+            let read = PullRequest::of_api(&api).expect("a merged or closed pull request reads");
+            assert!(!read.conflicting);
+            assert!(!read.has_conflicts());
+        }
     }
 }

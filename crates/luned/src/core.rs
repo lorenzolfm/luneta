@@ -167,6 +167,7 @@ pub enum Listing {
 pub const FOLLOW_DIRS_MAX: usize = WORKTREES_MAX + VIEWS_MAX;
 
 const _: () = assert!(FOLLOW_DIRS_MAX > 0);
+const _: () = assert!(FOLLOW_DIRS_MAX <= lune_protocol::github::PULL_REQUESTS_MAX);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FollowDirs(BTreeSet<Dir>);
@@ -1204,7 +1205,8 @@ impl Known {
                 let parsed = Dir::parse(dir).ok()?;
                 Some(self.pull_request(&parsed)?.to_api(dir))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        assert!(pull_requests.len() <= lune_protocol::github::PULL_REQUESTS_MAX);
         Local {
             git_statuses: self
                 .statuses

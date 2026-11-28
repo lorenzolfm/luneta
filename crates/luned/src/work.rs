@@ -17,6 +17,7 @@ use crate::api::list_work_response::{
     Work as SaidWork,
 };
 use crate::directory::Directory;
+use crate::github::Mergeability;
 use crate::panics::{self, Panicked};
 use crate::{git, issues, program};
 
@@ -444,7 +445,7 @@ struct ListedPull {
     head_ref_name: String,
     author: Option<Author>,
     #[serde(default)]
-    mergeable: Option<String>,
+    mergeable: Option<Mergeability>,
 }
 
 #[derive(Deserialize)]
@@ -513,7 +514,7 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
             draft: pull.is_draft,
             branch: cut(pull.head_ref_name, NAME_BYTES_MAX),
             author: author.filter(|login| !login.is_empty()),
-            conflicting: pull.mergeable.as_deref() == Some("CONFLICTING"),
+            conflicting: pull.mergeable.is_some_and(Mergeability::is_conflicting),
         })
     });
     let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
@@ -872,5 +873,24 @@ mod tests {
         assert_eq!(cut.len(), TITLE_BYTES_MAX - 1);
         assert!(cut.ends_with('é'));
         assert_eq!(super::cut("short".to_owned(), TITLE_BYTES_MAX), "short");
+    }
+
+    #[test]
+    fn a_listed_pull_reads_mergeable_as_gh_writes_it() {
+        let read = |extra: &str| {
+            let said = format!(
+                r#"{{"number":12,"title":"Fix","isDraft":false,"headRefName":"fix","author":null{extra}}}"#
+            );
+            serde_json::from_str::<ListedPull>(&said)
+                .map(|pull| pull.mergeable.is_some_and(Mergeability::is_conflicting))
+                .map_err(|error| error.to_string())
+        };
+        assert_eq!(read(r#","mergeable":"CONFLICTING""#), Ok(true));
+        assert_eq!(read(r#","mergeable":"MERGEABLE""#), Ok(false));
+        assert_eq!(read(r#","mergeable":"UNKNOWN""#), Ok(false));
+        assert_eq!(read(r#","mergeable":null"#), Ok(false));
+        assert_eq!(read(""), Ok(false));
+        assert!(read(r#","mergeable":"DIRTY""#).is_err());
+        assert!(read(r#","mergeable":"conflicting""#).is_err());
     }
 }

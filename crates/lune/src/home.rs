@@ -41,6 +41,14 @@ const ISSUES_OFF: &str = "   the repository has its issues turned off on GitHub"
 
 const CONFLICTS: &str = "conflicts";
 
+const CONFLICTS_CUT: &str = "conflicts ";
+
+const SIDE_SEPARATOR: &str = " · ";
+
+const _: () = assert!(CONFLICTS.is_ascii());
+const _: () = assert!(CONFLICTS_CUT.len() == CONFLICTS.len() + 1);
+const _: () = assert!(CONFLICTS_CUT.as_bytes()[CONFLICTS.len()] == b' ');
+
 const ASK_ROWS_MIN: u16 = 4;
 
 #[derive(Debug)]
@@ -509,12 +517,17 @@ impl Home {
             } else {
                 pull.branch.clone()
             };
+            let side = if pull.conflicting {
+                Side::Conflicting(&side)
+            } else {
+                Side::Plain(&side)
+            };
             lines.push(row(
                 width,
                 (here, marked),
                 (&numbered(pull.number), number_width),
                 &pull.title,
-                (pull.conflicting, &side),
+                side,
             ));
         }
         lines.push(Line::default());
@@ -543,7 +556,7 @@ impl Home {
                 (here, marked),
                 (&numbered(issue.number), number_width),
                 &issue.title,
-                (false, &side),
+                Side::Plain(&side),
             ));
         }
         (lines, at)
@@ -628,12 +641,18 @@ impl Homes {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Side<'a> {
+    Plain(&'a str),
+    Conflicting(&'a str),
+}
+
 fn row(
     width: usize,
     (here, marked): (bool, bool),
     (number, number_width): (&str, usize),
     title: &str,
-    (conflicting, side): (bool, &str),
+    side: Side<'_>,
 ) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let margin = if here {
@@ -652,17 +671,21 @@ fn row(
     );
     let lead = margin.width() + mark.width() + number.width();
     let room = width.saturating_sub(lead + 1);
-    let side_text = match (conflicting, side.is_empty()) {
-        (true, true) => CONFLICTS.to_owned(),
-        (true, false) => format!("{CONFLICTS} · {side}"),
-        (false, _) => side.to_owned(),
+    let side_width = match side {
+        Side::Plain(text) => text.width(),
+        Side::Conflicting(text) => {
+            assert!(!text.is_empty(), "a conflicting pull request has a branch");
+            CONFLICTS.len() + SIDE_SEPARATOR.width() + text.width()
+        }
     };
-    let side_room = if side_text.is_empty() {
+    let side_room = if side_width == 0 {
         0
     } else {
-        (side_text.width() + 2).min(room / 3)
+        (side_width + 2).min(room / 3)
     };
+    assert!(side_room <= room);
     let title_room = room.saturating_sub(side_room);
+    assert_eq!(title_room + side_room, room);
     let title = sidebar::cut(title, title_room);
     let gap = title_room.saturating_sub(title.width());
     let title_style = if here {
@@ -675,19 +698,22 @@ fn row(
     let mut spans = vec![margin, mark, number, Span::styled(title, title_style)];
     if side_room > 2 {
         spans.push(Span::raw(" ".repeat(gap + 2)));
-        let shown = sidebar::cut(&side_text, side_room - 2);
-        let red = Style::new().fg(moonlight::RED);
-        if conflicting {
-            if let Some(rest) = shown.strip_prefix(CONFLICTS) {
-                spans.push(Span::styled(CONFLICTS, red));
-                if !rest.is_empty() {
-                    spans.push(Span::styled(rest.to_owned(), dim));
+        let shown_room = side_room - 2;
+        match side {
+            Side::Plain(text) => spans.push(Span::styled(sidebar::cut(text, shown_room), dim)),
+            Side::Conflicting(text) => {
+                let red = Style::new().fg(moonlight::RED);
+                if shown_room > CONFLICTS.len() {
+                    spans.push(Span::styled(CONFLICTS, red));
+                    let rest = sidebar::cut(
+                        &format!("{SIDE_SEPARATOR}{text}"),
+                        shown_room - CONFLICTS.len(),
+                    );
+                    spans.push(Span::styled(rest, dim));
+                } else {
+                    spans.push(Span::styled(sidebar::cut(CONFLICTS_CUT, shown_room), red));
                 }
-            } else {
-                spans.push(Span::styled(shown, red));
             }
-        } else {
-            spans.push(Span::styled(shown, dim));
         }
     }
     Line::from(spans)
@@ -1174,5 +1200,32 @@ mod tests {
             "{:?}",
             shown(&home, 60, 10)
         );
+        let narrow = Rect::new(0, 0, 45, 10);
+        let mut narrow_buffer = Buffer::empty(narrow);
+        home.draw(&mut narrow_buffer, narrow, SystemTime::UNIX_EPOCH);
+        let narrow_line: String = (0..narrow.width)
+            .map(|x| narrow_buffer[(x, 3)].symbol())
+            .collect();
+        let narrow_line = narrow_line.trim_end();
+        assert!(narrow_line.ends_with("conflict…"), "{narrow_line:?}");
+        let ellipsis_x = narrow.width - 2;
+        assert_eq!(narrow_buffer[(ellipsis_x, 3)].symbol(), "…");
+        assert_eq!(narrow_buffer[(ellipsis_x, 3)].fg, moonlight::RED);
+
+        let tight = Rect::new(0, 0, 48, 10);
+        let mut tight_buffer = Buffer::empty(tight);
+        home.draw(&mut tight_buffer, tight, SystemTime::UNIX_EPOCH);
+        let tight_line: String = (0..tight.width)
+            .map(|x| tight_buffer[(x, 3)].symbol())
+            .collect();
+        let tight_line = tight_line.trim_end();
+        assert!(tight_line.ends_with("conflicts…"), "{tight_line:?}");
+        let tight_ellipsis_x = tight.width - 2;
+        assert_eq!(tight_buffer[(tight_ellipsis_x, 3)].symbol(), "…");
+        assert_eq!(
+            tight_buffer[(tight_ellipsis_x, 3)].fg,
+            ratatui::style::Color::Reset
+        );
+        assert_eq!(tight_buffer[(tight_ellipsis_x - 1, 3)].fg, moonlight::RED);
     }
 }

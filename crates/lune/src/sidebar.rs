@@ -10080,9 +10080,11 @@ mod tests {
                 state,
                 checks,
                 stale,
-                conflicting,
+                conflicting: matches!(state, State::Open | State::Draft) && conflicting,
             };
-            host.pull_requests.push(pull_request.to_api(dir));
+            let mut api = pull_request.to_api(dir);
+            api.conflicting = conflicting;
+            host.pull_requests.push(api);
         }
         let mut sidebar = fresh();
         sidebar.hear(host);
