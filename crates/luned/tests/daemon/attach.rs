@@ -823,7 +823,23 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_lune_picks
         "one's last pane closed, lune goes to the first open of those left",
         || (gone_to() == [two]).then_some(()),
     );
-    let row = sidebar_row(&window, "● other");
+    let row = eventually("one, with no pane left, leaves lune's sidebar", || {
+        let rows: Vec<String> = window
+            .screen()
+            .iter()
+            .map(|line| in_sidebar(line))
+            .collect();
+        let work = rows.iter().position(|row| row.contains("● work"))?;
+        let other = rows.iter().position(|row| row.contains("● other"))?;
+        assert!(
+            work < other,
+            "work precedes other in sidebar ({work} >= {other}): {rows:?}"
+        );
+        let work_rows = &rows[work + 1..other];
+        let keeps_two = work_rows.iter().any(|row| row.contains("▾ two"));
+        let dropped_main = work_rows.iter().all(|row| !row.contains("▾ main"));
+        (keeps_two && dropped_main).then_some(other)
+    });
     click(&mut window, row);
     eventually("a click on other's row shows its home", || {
         window.shows(UNHOSTED).then_some(())
