@@ -20,7 +20,7 @@ use crate::api::{AskRequest, AskResponse, AskReviewRequest, On, ask_review_reque
 use crate::mux;
 use crate::program::{self, Wanted};
 use crate::state;
-use crate::transcripts::SessionId;
+use crate::transcripts::{SESSION_ID_BYTES_MAX, SessionId};
 use crate::work::{self, Item};
 use crate::{git, log};
 
@@ -32,9 +32,11 @@ pub const HIGHLIGHTED_BYTES_MAX: usize = 4096;
 
 pub const SESSIONS_FILE: &str = "ask_sessions";
 
-const SESSIONS_MAX: usize = 4096;
+const SESSIONS_PER_MODE_MAX: usize = 4096;
 
-const SESSIONS_BYTES_MAX: usize = 512 * 1024;
+const SESSION_LINE_BYTES_MAX: usize = "general ".len() + SESSION_ID_BYTES_MAX + 1;
+
+const SESSIONS_BYTES_MAX: usize = 2 * 1024 * 1024;
 
 const LINES_QUEUED_MAX: usize = 64;
 
@@ -50,8 +52,11 @@ const _: () = assert!(
     SYSTEM.len() + SKILL.len() + HIGHLIGHTED_BYTES_MAX + 4 < 64 * 1024,
     "general system prompt fits within OS argv limits"
 );
-const _: () = assert!(SESSIONS_MAX > 0);
-const _: () = assert!(SESSIONS_BYTES_MAX >= SESSIONS_MAX * 64);
+const _: () = assert!(SESSIONS_PER_MODE_MAX > 0);
+const _: () = assert!(
+    SESSIONS_BYTES_MAX >= SESSIONS_PER_MODE_MAX * 2 * SESSION_LINE_BYTES_MAX,
+    "serialized session ledger always fits within SESSIONS_BYTES_MAX"
+);
 const _: () = assert!(LINES_QUEUED_MAX > 0);
 const _: () = assert!(LINES_PER_TURN_MAX > 0);
 const _: () = assert!(LINE_BYTES_MAX as u64 <= program::SAID_MAX);
@@ -204,14 +209,86 @@ impl fmt::Display for AskMode {
     }
 }
 
+enum SessionStorage {
+    InMemory,
+    Writable { path: PathBuf, persisted: u64 },
+    Unreadable { why: String },
+}
+
+#[derive(Default)]
+struct SessionEntries {
+    modes: HashMap<SessionId, AskMode>,
+    review: VecDeque<SessionId>,
+    general: VecDeque<SessionId>,
+}
+
+impl SessionEntries {
+    fn get(&self, session: &SessionId) -> Option<AskMode> {
+        self.modes.get(session).copied()
+    }
+
+    fn contains(&self, session: &SessionId) -> bool {
+        self.modes.contains_key(session)
+    }
+
+    fn insert(&mut self, session: SessionId, mode: AskMode) {
+        assert!(
+            session.as_str().len() <= SESSION_ID_BYTES_MAX,
+            "session id stays within SESSION_ID_BYTES_MAX"
+        );
+        self.modes.insert(session.clone(), mode);
+        let queue = match mode {
+            AskMode::Review => &mut self.review,
+            AskMode::General => &mut self.general,
+        };
+        queue.push_back(session);
+        while queue.len() > SESSIONS_PER_MODE_MAX {
+            if let Some(evicted) = queue.pop_front() {
+                self.modes.remove(&evicted);
+            }
+        }
+        assert_eq!(
+            self.modes.len(),
+            self.review.len() + self.general.len(),
+            "session ledger map and queues stay in sync"
+        );
+        assert!(
+            self.review.len() <= SESSIONS_PER_MODE_MAX,
+            "review session ledger stays within SESSIONS_PER_MODE_MAX"
+        );
+        assert!(
+            self.general.len() <= SESSIONS_PER_MODE_MAX,
+            "general session ledger stays within SESSIONS_PER_MODE_MAX"
+        );
+    }
+
+    fn serialize(&self) -> String {
+        let mut out = String::new();
+        for id in self.review.iter().chain(self.general.iter()) {
+            if let Some(mode) = self.modes.get(id) {
+                out.push_str(mode.label());
+                out.push(' ');
+                out.push_str(id.as_str());
+                out.push('\n');
+            }
+        }
+        assert!(
+            out.len() <= SESSIONS_BYTES_MAX,
+            "serialized session ledger stays within SESSIONS_BYTES_MAX"
+        );
+        out
+    }
+}
+
 struct SessionLedger {
-    file: Option<PathBuf>,
-    entries: HashMap<SessionId, AskMode>,
-    order: VecDeque<SessionId>,
+    storage: SessionStorage,
+    generation: u64,
+    entries: SessionEntries,
 }
 
 pub struct SessionModes {
     ledger: Mutex<SessionLedger>,
+    write_lock: Mutex<()>,
 }
 
 impl SessionModes {
@@ -230,44 +307,78 @@ impl SessionModes {
     pub fn in_memory() -> SessionModes {
         SessionModes {
             ledger: Mutex::new(SessionLedger {
-                file: None,
-                entries: HashMap::new(),
-                order: VecDeque::new(),
+                storage: SessionStorage::InMemory,
+                generation: 0,
+                entries: SessionEntries::default(),
             }),
+            write_lock: Mutex::new(()),
         }
     }
 
     #[must_use]
     pub fn at(path: PathBuf) -> SessionModes {
-        let (entries, order) = load_sessions(&path);
+        let (storage, entries) = match load_sessions(&path) {
+            Ok(entries) => (SessionStorage::Writable { path, persisted: 0 }, entries),
+            Err(why) => {
+                log::say(&format!("{}: {why}", path.display()));
+                (
+                    SessionStorage::Unreadable { why },
+                    SessionEntries::default(),
+                )
+            }
+        };
         SessionModes {
             ledger: Mutex::new(SessionLedger {
-                file: Some(path),
+                storage,
+                generation: 0,
                 entries,
-                order,
             }),
+            write_lock: Mutex::new(()),
         }
     }
 
     pub fn check_resume(&self, session: &SessionId, mode: AskMode) -> Result<(), String> {
         let ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(&recorded) = ledger.entries.get(session)
-            && recorded != mode
-        {
-            let why = format!(
-                "session {} was started in {recorded} mode and cannot be resumed in {mode} mode",
-                session.as_str()
-            );
-            log::say(&format!("ask: rejected cross-mode resume: {why}"));
-            return Err(why);
+        match ledger.entries.get(session) {
+            Some(recorded) if recorded == mode => Ok(()),
+            Some(recorded) => {
+                let why = format!(
+                    "session {} was started in {recorded} mode and cannot be resumed in {mode} mode",
+                    session.as_str()
+                );
+                log::say(&format!("ask: rejected cross-mode resume: {why}"));
+                Err(why)
+            }
+            None => {
+                if let SessionStorage::Unreadable { why } = &ledger.storage {
+                    let reason = format!(
+                        "ask session ledger is unreadable ({why}); refusing to resume unknown \
+                         session {}",
+                        session.as_str()
+                    );
+                    log::say(&format!(
+                        "ask: rejected resume with unreadable ledger: {reason}"
+                    ));
+                    return Err(reason);
+                }
+                if mode == AskMode::Review {
+                    let why = format!(
+                        "session {} is not a recorded review session and cannot be resumed in \
+                         review mode",
+                        session.as_str()
+                    );
+                    log::say(&format!("ask: rejected unrecorded review resume: {why}"));
+                    return Err(why);
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     pub fn record(&self, session: SessionId, mode: AskMode) {
-        let snapshot = {
+        let should_persist = {
             let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(&existing) = ledger.entries.get(&session) {
+            if let Some(existing) = ledger.entries.get(&session) {
                 if existing != mode {
                     log::say(&format!(
                         "ask: keeping recorded mode {existing} for session {} (ignored {mode})",
@@ -276,63 +387,63 @@ impl SessionModes {
                 }
                 return;
             }
-            ledger.entries.insert(session.clone(), mode);
-            ledger.order.push_back(session);
-            while ledger.order.len() > SESSIONS_MAX {
-                if let Some(evicted) = ledger.order.pop_front() {
-                    ledger.entries.remove(&evicted);
+            ledger.entries.insert(session, mode);
+            ledger.generation = ledger
+                .generation
+                .checked_add(1)
+                .expect("ask session generation does not wrap");
+            matches!(ledger.storage, SessionStorage::Writable { .. })
+        };
+        if !should_persist {
+            return;
+        }
+        let _writing = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let snapshot = {
+            let ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+            match &ledger.storage {
+                SessionStorage::Writable { path, persisted } if *persisted < ledger.generation => {
+                    Some((path.clone(), ledger.generation, ledger.entries.serialize()))
+                }
+                SessionStorage::Writable { .. }
+                | SessionStorage::InMemory
+                | SessionStorage::Unreadable { .. } => None,
+            }
+        };
+        if let Some((path, target_generation, contents)) = snapshot {
+            match write_sessions(&path, &contents) {
+                Ok(()) => {
+                    let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+                    if let SessionStorage::Writable { persisted, .. } = &mut ledger.storage {
+                        *persisted = (*persisted).max(target_generation);
+                    }
+                }
+                Err(error) => {
+                    log::say(&format!("{}: {error}", path.display()));
                 }
             }
-            assert_eq!(
-                ledger.entries.len(),
-                ledger.order.len(),
-                "session ledger map and queue stay in sync"
-            );
-            assert!(
-                ledger.entries.len() <= SESSIONS_MAX,
-                "session ledger stays within SESSIONS_MAX"
-            );
-            ledger
-                .file
-                .clone()
-                .map(|path| (path, serialize_sessions(&ledger.order, &ledger.entries)))
-        };
-        if let Some((path, contents)) = snapshot
-            && let Err(error) = write_sessions(&path, &contents)
-        {
-            log::say(&format!("{}: {error}", path.display()));
         }
     }
 }
 
-fn load_sessions(path: &Path) -> (HashMap<SessionId, AskMode>, VecDeque<SessionId>) {
-    let mut entries = HashMap::new();
-    let mut order = VecDeque::new();
+fn load_sessions(path: &Path) -> Result<SessionEntries, String> {
+    let mut entries = SessionEntries::default();
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == ErrorKind::NotFound => return (entries, order),
-        Err(error) => {
-            log::say(&format!("{}: {error}", path.display()));
-            return (entries, order);
-        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(entries),
+        Err(error) => return Err(error.to_string()),
     };
     let limit = u64::try_from(SESSIONS_BYTES_MAX).expect("SESSIONS_BYTES_MAX fits u64") + 1;
     let mut raw = Vec::new();
-    if let Err(error) = file.take(limit).read_to_end(&mut raw) {
-        log::say(&format!("{}: {error}", path.display()));
-        return (entries, order);
-    }
+    file.take(limit)
+        .read_to_end(&mut raw)
+        .map_err(|error| error.to_string())?;
     if raw.len() > SESSIONS_BYTES_MAX {
-        log::say(&format!(
-            "{}: exceeds {SESSIONS_BYTES_MAX} bytes, ignoring saved ask session modes",
-            path.display()
-        ));
-        return (entries, order);
+        return Err(format!("exceeds {SESSIONS_BYTES_MAX} bytes"));
     }
-    let Ok(text) = String::from_utf8(raw) else {
-        log::say(&format!("{}: not valid UTF-8", path.display()));
-        return (entries, order);
-    };
+    let text = String::from_utf8(raw).map_err(|_| "not valid UTF-8".to_owned())?;
     for line in text.lines() {
         let Some((mode_raw, id_raw)) = line.split_once(' ') else {
             continue;
@@ -340,43 +451,12 @@ fn load_sessions(path: &Path) -> (HashMap<SessionId, AskMode>, VecDeque<SessionI
         let (Some(mode), Some(id)) = (AskMode::parse(mode_raw), SessionId::parse(id_raw)) else {
             continue;
         };
-        if entries.contains_key(&id) {
+        if entries.contains(&id) {
             continue;
         }
-        entries.insert(id.clone(), mode);
-        order.push_back(id);
-        while order.len() > SESSIONS_MAX {
-            if let Some(evicted) = order.pop_front() {
-                entries.remove(&evicted);
-            }
-        }
+        entries.insert(id, mode);
     }
-    assert_eq!(
-        entries.len(),
-        order.len(),
-        "loaded session ledger map and queue stay in sync"
-    );
-    (entries, order)
-}
-
-fn serialize_sessions(
-    order: &VecDeque<SessionId>,
-    entries: &HashMap<SessionId, AskMode>,
-) -> String {
-    let mut out = String::new();
-    for id in order {
-        if let Some(mode) = entries.get(id) {
-            out.push_str(mode.label());
-            out.push(' ');
-            out.push_str(id.as_str());
-            out.push('\n');
-        }
-    }
-    assert!(
-        out.len() <= SESSIONS_BYTES_MAX,
-        "serialized session ledger stays within SESSIONS_BYTES_MAX"
-    );
-    out
+    Ok(entries)
 }
 
 fn write_sessions(path: &Path, contents: &str) -> io::Result<()> {
@@ -1613,6 +1693,92 @@ mod tests {
         assert!(reloaded.check_resume(&review_id, AskMode::General).is_err());
         assert!(reloaded.check_resume(&general_id, AskMode::General).is_ok());
         assert!(reloaded.check_resume(&general_id, AskMode::Review).is_err());
+        let unknown_id = session("cccc");
+        assert!(reloaded.check_resume(&unknown_id, AskMode::General).is_ok());
+        assert!(
+            reloaded.check_resume(&unknown_id, AskMode::Review).is_err(),
+            "unrecorded sessions cannot be resumed in review mode"
+        );
+
+        let max_len_id = SessionId::parse(&"f".repeat(SESSION_ID_BYTES_MAX)).unwrap();
+        reloaded.record(max_len_id.clone(), AskMode::Review);
+        for index in 0..=SESSIONS_PER_MODE_MAX {
+            let general = session(&format!("{index:08x}"));
+            let mut ledger = reloaded
+                .ledger
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            ledger.entries.insert(general, AskMode::General);
+        }
+        assert!(
+            reloaded.check_resume(&review_id, AskMode::General).is_err(),
+            "general session eviction never evicts review sessions"
+        );
+        assert!(
+            reloaded
+                .check_resume(&max_len_id, AskMode::General)
+                .is_err()
+        );
+        reloaded.record(session("dddd"), AskMode::General);
+
+        let corrupt_path = dir.path().join("corrupt_sessions");
+        let original = b"\xff\xfeinvalid";
+        fs::write(&corrupt_path, original).unwrap();
+        let corrupt = SessionModes::at(corrupt_path.clone());
+        assert!(
+            corrupt.check_resume(&unknown_id, AskMode::General).is_err(),
+            "unreadable ledger fails closed on unknown resumes"
+        );
+        assert!(corrupt.check_resume(&unknown_id, AskMode::Review).is_err());
+        corrupt.record(review_id.clone(), AskMode::Review);
+        assert!(corrupt.check_resume(&review_id, AskMode::Review).is_ok());
+        assert!(corrupt.check_resume(&review_id, AskMode::General).is_err());
+        assert_eq!(
+            fs::read(&corrupt_path).unwrap(),
+            original,
+            "recording while unreadable does not wipe the existing file"
+        );
+
+        let concurrent_path = dir.path().join("concurrent_sessions");
+        let shared = Arc::new(SessionModes::at(concurrent_path.clone()));
+        let mut handles = Vec::new();
+        for worker in 0..4usize {
+            let modes = Arc::clone(&shared);
+            handles.push(thread::spawn(move || {
+                for step in 0..16usize {
+                    let id = session(&format!("{worker:02x}{step:04x}"));
+                    let mode = if (worker + step).is_multiple_of(2) {
+                        AskMode::Review
+                    } else {
+                        AskMode::General
+                    };
+                    modes.record(id, mode);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let persisted = SessionModes::at(concurrent_path);
+        for worker in 0..4usize {
+            for step in 0..16usize {
+                let id = session(&format!("{worker:02x}{step:04x}"));
+                let expected = if (worker + step).is_multiple_of(2) {
+                    AskMode::Review
+                } else {
+                    AskMode::General
+                };
+                let other = match expected {
+                    AskMode::Review => AskMode::General,
+                    AskMode::General => AskMode::Review,
+                };
+                assert!(persisted.check_resume(&id, expected).is_ok());
+                assert!(
+                    persisted.check_resume(&id, other).is_err(),
+                    "concurrent record persisted {id:?} as {expected}"
+                );
+            }
+        }
     }
 
     #[test]

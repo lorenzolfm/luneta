@@ -16,6 +16,8 @@ pub const TAILS_BYTES: usize = 512 * 1024;
 
 pub const IDS_MAX: usize = 32;
 
+pub const SESSION_ID_BYTES_MAX: usize = 128;
+
 pub const STEPS_MAX: usize = 64;
 
 const TITLE_CHARS: usize = 120;
@@ -64,6 +66,7 @@ const _: () = assert!(WINDOW_BYTES < u64::MAX);
 const _: () = assert!(WINDOW_BYTES < usize::MAX as u64);
 const _: () = assert!(TAILS_BYTES > 0);
 const _: () = assert!(TAILS_BYTES as u64 <= WINDOW_BYTES);
+const _: () = assert!(SESSION_ID_BYTES_MAX >= 36);
 const _: () = assert!(STEPS_MAX > 0);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -161,6 +164,9 @@ pub struct SessionId(String);
 impl SessionId {
     #[must_use]
     pub fn parse(id: &str) -> Option<Self> {
+        if id.len() > SESSION_ID_BYTES_MAX {
+            return None;
+        }
         let first = id
             .bytes()
             .next()
@@ -1325,6 +1331,11 @@ mod tests {
     #[test]
     fn a_transcript_s_id_is_a_uuid_s_digits_and_dashes() {
         assert!(SessionId::parse("0b7c5e1a-2f3d-4c6b-9a8e-1d2c3b4a5f60").is_some());
+        assert!(SessionId::parse(&"a".repeat(SESSION_ID_BYTES_MAX)).is_some());
+        assert_eq!(
+            SessionId::parse(&"a".repeat(SESSION_ID_BYTES_MAX + 1)),
+            None
+        );
         for id in ["", "../0b7c5e1a", "0b7c5e1a/x", "id-1", "-0b7c5e1a", "--"] {
             assert_eq!(SessionId::parse(id), None, "{id}");
         }

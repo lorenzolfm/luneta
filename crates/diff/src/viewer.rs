@@ -964,6 +964,10 @@ impl Viewer {
 
     #[must_use]
     pub fn selected_excerpt(&self) -> Option<SelectionExcerpt> {
+        enum CodeLine {
+            Old(u32),
+            New(u32),
+        }
         let count = self.row_count();
         if count == 0 {
             return None;
@@ -979,7 +983,8 @@ impl Viewer {
         );
         let file = &self.patch.files[file_index];
         let path = file.path().clone();
-        let mut selected_lines: Option<LineRange> = None;
+        let mut new_lines: Option<LineRange> = None;
+        let mut old_lines: Option<LineRange> = None;
         let mut selected = ExcerptBuffer::new();
         let mut touched_hunks = BTreeSet::new();
         let mut seen_context: BTreeSet<ContextRef> = BTreeSet::new();
@@ -1045,13 +1050,20 @@ impl Viewer {
                     );
                     if let Some(left) = pair.left() {
                         let left_entry = match left {
-                            LeftRow::Deleted { line, .. } => {
-                                Some((Some('-'), left.text(&self.patch), Some(*line)))
-                            }
-                            LeftRow::Context { at, line }
+                            LeftRow::Deleted { line, .. } => Some((
+                                Some('-'),
+                                left.text(&self.patch),
+                                Some(CodeLine::Old(*line)),
+                            )),
+                            LeftRow::Context { at, .. }
                                 if !same_context && seen_context.insert(*at) =>
                             {
-                                Some((Some(' '), left.text(&self.patch), Some(*line)))
+                                let context = at.get(&self.patch);
+                                Some((
+                                    Some(' '),
+                                    context.text.as_str(),
+                                    Some(CodeLine::New(context.new_line)),
+                                ))
                             }
                             LeftRow::HunkHeader { hunk, text, .. }
                                 if !same_hunk_header && seen_hunk_headers.insert(*hunk) =>
@@ -1061,22 +1073,28 @@ impl Viewer {
                             LeftRow::Context { .. } | LeftRow::HunkHeader { .. } => None,
                         };
                         if let Some((prefix, text, code_line)) = left_entry {
-                            if let Some(line) = code_line {
-                                extend_lines(&mut selected_lines, line);
-                            }
                             if !selected.try_push_line(prefix, text) {
                                 break;
+                            }
+                            match code_line {
+                                Some(CodeLine::New(line)) => extend_lines(&mut new_lines, line),
+                                Some(CodeLine::Old(line)) => extend_lines(&mut old_lines, line),
+                                None => {}
                             }
                         }
                     }
                     if let Some(right) = pair.right() {
                         let right_entry = match right {
-                            RightRow::Added { line, .. } => {
-                                Some((Some('+'), right.text(&self.patch), Some(*line)))
-                            }
-                            RightRow::Context { at, line } if seen_context.insert(*at) => {
-                                Some((Some(' '), right.text(&self.patch), Some(*line)))
-                            }
+                            RightRow::Added { line, .. } => Some((
+                                Some('+'),
+                                right.text(&self.patch),
+                                Some(CodeLine::New(*line)),
+                            )),
+                            RightRow::Context { at, line } if seen_context.insert(*at) => Some((
+                                Some(' '),
+                                right.text(&self.patch),
+                                Some(CodeLine::New(*line)),
+                            )),
                             RightRow::HunkHeader { hunk, text, .. }
                                 if seen_hunk_headers.insert(*hunk) =>
                             {
@@ -1085,11 +1103,13 @@ impl Viewer {
                             RightRow::Context { .. } | RightRow::HunkHeader { .. } => None,
                         };
                         if let Some((prefix, text, code_line)) = right_entry {
-                            if let Some(line) = code_line {
-                                extend_lines(&mut selected_lines, line);
-                            }
                             if !selected.try_push_line(prefix, text) {
                                 break;
+                            }
+                            match code_line {
+                                Some(CodeLine::New(line)) => extend_lines(&mut new_lines, line),
+                                Some(CodeLine::Old(line)) => extend_lines(&mut old_lines, line),
+                                None => {}
                             }
                         }
                     }
@@ -1104,31 +1124,39 @@ impl Viewer {
                         touched_hunks.insert(hunk_index);
                     }
                     let entry = match row {
-                        UnifiedRow::Added { new_line, .. } => {
-                            Some((Some('+'), row.text(&self.patch), Some(*new_line)))
-                        }
-                        UnifiedRow::Deleted { old_line, .. } => {
-                            Some((Some('-'), row.text(&self.patch), Some(*old_line)))
-                        }
-                        UnifiedRow::Context { new_line, .. } => {
-                            Some((Some(' '), row.text(&self.patch), Some(*new_line)))
-                        }
+                        UnifiedRow::Added { new_line, .. } => Some((
+                            Some('+'),
+                            row.text(&self.patch),
+                            Some(CodeLine::New(*new_line)),
+                        )),
+                        UnifiedRow::Deleted { old_line, .. } => Some((
+                            Some('-'),
+                            row.text(&self.patch),
+                            Some(CodeLine::Old(*old_line)),
+                        )),
+                        UnifiedRow::Context { new_line, .. } => Some((
+                            Some(' '),
+                            row.text(&self.patch),
+                            Some(CodeLine::New(*new_line)),
+                        )),
                         UnifiedRow::HunkHeader { text, .. } => Some((None, text.as_str(), None)),
                         UnifiedRow::FileHeader { .. } | UnifiedRow::BinaryNotice { .. } => None,
                     };
                     if let Some((prefix, text, code_line)) = entry {
-                        if let Some(line) = code_line {
-                            extend_lines(&mut selected_lines, line);
-                        }
                         if !selected.try_push_line(prefix, text) {
                             break;
+                        }
+                        match code_line {
+                            Some(CodeLine::New(line)) => extend_lines(&mut new_lines, line),
+                            Some(CodeLine::Old(line)) => extend_lines(&mut old_lines, line),
+                            None => {}
                         }
                     }
                 }
             }
         }
 
-        if let Some(lines) = selected_lines {
+        if let Some(lines) = new_lines.or(old_lines) {
             assert!(
                 !touched_hunks.is_empty(),
                 "code line selection touches at least one hunk"
@@ -1151,6 +1179,7 @@ impl Viewer {
     }
 
     pub fn start_search(&mut self) {
+        self.committed_search = None;
         self.focus = ViewerFocus::SearchEditing {
             query: String::new(),
             found: None,
@@ -2100,6 +2129,65 @@ diff --git a/src/multi.rs b/src/multi.rs
         assert!(
             !viewer.is_tree_focused(),
             "clicking a directory folds it without trapping focus in the file tree"
+        );
+
+        let shifted = "\
+diff --git a/src/shifted.rs b/src/shifted.rs
+--- a/src/shifted.rs
++++ b/src/shifted.rs
+@@ -10,4 +60,3 @@
+ fn moved() {
+-    old_a();
+-    old_b();
++    new_a();
+ }
+";
+        let mut shifted_viewer = Viewer::new(
+            Patch::parse(shifted.as_bytes()),
+            "main".to_owned(),
+            "feat".to_owned(),
+        );
+        shifted_viewer.sync_layout(120);
+        shifted_viewer.click_diff_row(3, 20);
+        let modified_row = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            modified_row.lines(),
+            Some(LineRange::single(61)),
+            "single modified split row uses new-file line instead of old..=new range"
+        );
+        shifted_viewer.click_diff_row(5, 20);
+        let drifted_ctx = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            drifted_ctx.lines(),
+            Some(LineRange::single(62)),
+            "drifted left-only context line uses its new-file line"
+        );
+        shifted_viewer.sync_layout(60);
+        shifted_viewer.click_diff_row(3, 20);
+        let pure_delete = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            pure_delete.lines(),
+            Some(LineRange::single(11)),
+            "pure deletion uses old-file line"
+        );
+        shifted_viewer.toggle_select();
+        shifted_viewer.move_down(2, 20);
+        let unified_pair = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            unified_pair.lines(),
+            Some(LineRange::single(61)),
+            "unified selection with deletions and additions prefers new-file lines"
+        );
+
+        shifted_viewer.start_search();
+        shifted_viewer.search_push('m', 20);
+        shifted_viewer.search_commit();
+        assert!(shifted_viewer.committed_search().is_some());
+        shifted_viewer.start_search();
+        assert_eq!(
+            shifted_viewer.committed_search(),
+            None,
+            "starting a new search clears stale committed search"
         );
     }
 }
