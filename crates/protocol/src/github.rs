@@ -260,6 +260,9 @@ impl PullRequest {
                 if legacy_state != v1::PullRequestState::Unspecified && legacy_state != expected {
                     return None;
                 }
+                if pull_request.checks.is_some() && pull_request.checks != open.checks {
+                    return None;
+                }
                 let mergeability = Mergeability::of_api(open.mergeability).ok()?;
                 State::Open {
                     draft: open.draft,
@@ -273,12 +276,18 @@ impl PullRequest {
                 {
                     return None;
                 }
+                if pull_request.checks.is_some() {
+                    return None;
+                }
                 State::Merged
             }
             Some(v1::pull_request::Detail::Closed(())) => {
                 if legacy_state != v1::PullRequestState::Unspecified
                     && legacy_state != v1::PullRequestState::Closed
                 {
+                    return None;
+                }
+                if pull_request.checks.is_some() {
                     return None;
                 }
                 State::Closed
@@ -442,8 +451,38 @@ mod tests {
 
         let open = i32::from(v1::PullRequestState::Open);
         let merged = i32::from(v1::PullRequestState::Merged);
+        let closed = i32::from(v1::PullRequestState::Closed);
         let unspecified = i32::from(v1::PullRequestState::Unspecified);
         let url = "https://github.com/owner/repo/pull/126";
+        let detail_only = v1::PullRequest {
+            dir: "/w/repo".to_owned(),
+            state: unspecified,
+            url: url.to_owned(),
+            checks: None,
+            stale: false,
+            detail: Some(v1::pull_request::Detail::Open(v1::pull_request::Open {
+                draft: false,
+                checks: checks.map(Checks::to_api),
+                mergeability: v1::Mergeability::Conflicting.into(),
+            })),
+        };
+        assert_eq!(
+            PullRequest::of_api(&detail_only),
+            Some(PullRequest {
+                page: page.clone(),
+                state: State::Open {
+                    draft: false,
+                    checks,
+                    mergeability: Some(Mergeability::Conflicting),
+                },
+                stale: false,
+            })
+        );
+        let other_checks = Some(v1::Checks {
+            pending: 0,
+            failed: 0,
+            passed: 1,
+        });
         let unread = [
             v1::PullRequest {
                 dir: "/w/repo".to_owned(),
@@ -508,6 +547,46 @@ mod tests {
                 checks: None,
                 stale: false,
                 detail: Some(v1::pull_request::Detail::Merged(())),
+            },
+            v1::PullRequest {
+                dir: "/w/repo".to_owned(),
+                state: open,
+                url: url.to_owned(),
+                checks: other_checks,
+                stale: false,
+                detail: Some(v1::pull_request::Detail::Open(v1::pull_request::Open {
+                    draft: false,
+                    checks: checks.map(Checks::to_api),
+                    mergeability: v1::Mergeability::Mergeable.into(),
+                })),
+            },
+            v1::PullRequest {
+                dir: "/w/repo".to_owned(),
+                state: open,
+                url: url.to_owned(),
+                checks: other_checks,
+                stale: false,
+                detail: Some(v1::pull_request::Detail::Open(v1::pull_request::Open {
+                    draft: false,
+                    checks: None,
+                    mergeability: v1::Mergeability::Mergeable.into(),
+                })),
+            },
+            v1::PullRequest {
+                dir: "/w/repo".to_owned(),
+                state: merged,
+                url: url.to_owned(),
+                checks: other_checks,
+                stale: false,
+                detail: Some(v1::pull_request::Detail::Merged(())),
+            },
+            v1::PullRequest {
+                dir: "/w/repo".to_owned(),
+                state: closed,
+                url: url.to_owned(),
+                checks: other_checks,
+                stale: false,
+                detail: Some(v1::pull_request::Detail::Closed(())),
             },
         ];
         for pull_request in unread {

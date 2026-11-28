@@ -31,6 +31,10 @@ pub const ANSWERED_MAX: Duration = PATIENCE.saturating_mul(2);
 
 pub const FRESH: Duration = Duration::from_secs(15);
 
+const UNKNOWN_FRESH: Duration = Duration::from_secs(3);
+
+const _: () = assert!(UNKNOWN_FRESH.as_secs() > 0 && UNKNOWN_FRESH.as_secs() < FRESH.as_secs());
+
 const LISTINGS_MAX: usize = PROJECTS_MAX;
 
 const WAITERS_MAX: usize = LISTINGS_MAX;
@@ -281,13 +285,17 @@ impl Work {
     }
 }
 
-fn should_cache(result: &Result<Listed, String>) -> bool {
+fn cache_ttl(result: &Result<Listed, String>) -> Duration {
     match result {
-        Ok(Listed::Work(work)) => !work
-            .pulls()
-            .iter()
-            .any(|pull| pull.mergeability == Some(Mergeability::Unknown)),
-        Ok(Listed::Unhosted) | Err(_) => true,
+        Ok(Listed::Work(work))
+            if work
+                .pulls()
+                .iter()
+                .any(|pull| pull.mergeability == Some(Mergeability::Unknown)) =>
+        {
+            UNKNOWN_FRESH
+        }
+        Ok(Listed::Work(_) | Listed::Unhosted) | Err(_) => FRESH,
     }
 }
 
@@ -316,11 +324,11 @@ impl Listings {
         }
         drop(slots);
         let listed = panics::contained(|| listed_by_gh(dir));
-        let kept = listed
-            .as_ref()
-            .ok()
-            .filter(|result| should_cache(result))
-            .map(|listed| (Instant::now(), listed.clone()));
+        let kept = listed.as_ref().ok().map(|listed| Kept {
+            at: Instant::now(),
+            ttl: cache_ttl(listed),
+            listed: listed.clone(),
+        });
         locked(&self.slots).ran(dir, kept);
         self.done.notify_all();
         let panicked = |Panicked| {
@@ -359,11 +367,18 @@ struct Slots {
     waiters: usize,
 }
 
+struct Kept {
+    at: Instant,
+    ttl: Duration,
+    listed: Result<Listed, String>,
+}
+
 #[derive(Debug)]
 enum Slot {
     Running,
     Listed {
         at: Instant,
+        ttl: Duration,
         listed: Result<Listed, String>,
     },
 }
@@ -379,7 +394,7 @@ impl Slots {
     fn seen(&self, dir: &Dir, now: Instant) -> Seen<'_> {
         match self.slots.get(dir) {
             Some(Slot::Running) => Seen::Running,
-            Some(Slot::Listed { at, listed }) if fresh(*at, now) => Seen::Fresh(listed),
+            Some(Slot::Listed { at, ttl, listed }) if fresh(*at, *ttl, now) => Seen::Fresh(listed),
             Some(Slot::Listed { .. }) | None => Seen::Unlisted,
         }
     }
@@ -387,7 +402,7 @@ impl Slots {
     fn run(&mut self, dir: &Dir, now: Instant) -> Result<(), String> {
         self.slots.retain(|_, slot| match slot {
             Slot::Running => true,
-            Slot::Listed { at, .. } => fresh(*at, now),
+            Slot::Listed { at, ttl, .. } => fresh(*at, *ttl, now),
         });
         if self.slots.len() == LISTINGS_MAX {
             let listed = self.slots.iter().filter_map(|(dir, slot)| match slot {
@@ -410,20 +425,21 @@ impl Slots {
         Ok(())
     }
 
-    fn ran(&mut self, dir: &Dir, kept: Option<(Instant, Result<Listed, String>)>) {
+    fn ran(&mut self, dir: &Dir, kept: Option<Kept>) {
         let was = self.slots.remove(dir);
         assert!(
             matches!(was, Some(Slot::Running)),
             "only a listing that runs ends"
         );
-        if let Some((at, listed)) = kept {
-            self.slots.insert(dir.clone(), Slot::Listed { at, listed });
+        if let Some(Kept { at, ttl, listed }) = kept {
+            self.slots
+                .insert(dir.clone(), Slot::Listed { at, ttl, listed });
         }
     }
 }
 
-fn fresh(at: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(at) < FRESH
+fn fresh(at: Instant, ttl: Duration, now: Instant) -> bool {
+    now.saturating_duration_since(at) < ttl
 }
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -788,6 +804,14 @@ mod tests {
         Dir::parse(path).unwrap()
     }
 
+    fn kept(at: Instant, listed: Result<Listed, String>) -> Kept {
+        Kept {
+            at,
+            ttl: cache_ttl(&listed),
+            listed,
+        }
+    }
+
     #[test]
     fn a_listing_is_kept_a_while_and_none_is_kept_of_one_that_panicked() {
         let (mut slots, now, lune) = (Slots::default(), Instant::now(), dir("/w/lune"));
@@ -796,7 +820,7 @@ mod tests {
         assert_eq!(slots.seen(&lune, now), Seen::Running);
         let work = Work::new(Issues::Open(vec![issue(1, "one")]), vec![], More::default());
         let work = Ok(Listed::Work(work.unwrap()));
-        slots.ran(&lune, Some((now, work.clone())));
+        slots.ran(&lune, Some(kept(now, work.clone())));
         assert_eq!(
             slots.seen(&lune, now + FRESH.saturating_sub(Duration::from_millis(1))),
             Seen::Fresh(&work)
@@ -804,7 +828,7 @@ mod tests {
         assert_eq!(slots.seen(&lune, now + FRESH), Seen::Unlisted);
         let refused = Err("gh is not on the PATH".to_owned());
         slots.run(&lune, now + FRESH).unwrap();
-        slots.ran(&lune, Some((now + FRESH, refused.clone())));
+        slots.ran(&lune, Some(kept(now + FRESH, refused.clone())));
         assert_eq!(
             slots.seen(&lune, now + FRESH),
             Seen::Fresh(&refused),
@@ -824,7 +848,7 @@ mod tests {
         let after = |millis: usize| now + Duration::from_millis(u64::try_from(millis).unwrap());
         for (at, dir) in dirs[..LISTINGS_MAX].iter().enumerate() {
             slots.run(dir, after(at)).unwrap();
-            slots.ran(dir, Some((after(at), Ok(Listed::Unhosted))));
+            slots.ran(dir, Some(kept(after(at), Ok(Listed::Unhosted))));
         }
         slots.run(&dirs[LISTINGS_MAX], after(LISTINGS_MAX)).unwrap();
         assert_eq!(
@@ -877,7 +901,7 @@ mod tests {
                 "the ask waits on the listing that runs, and counts itself",
                 || (locked(&listings.slots).waiters == WAITERS_MAX).then_some(()),
             );
-            locked(&listings.slots).ran(&lune, Some((Instant::now(), Ok(Listed::Unhosted))));
+            locked(&listings.slots).ran(&lune, Some(kept(Instant::now(), Ok(Listed::Unhosted))));
             listings.done.notify_all();
             waiting.join().unwrap()
         });
@@ -931,7 +955,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_with_unknown_mergeability_is_not_cached() {
+    fn a_listing_with_unknown_mergeability_coalesces_and_expires_sooner() {
         let listed = |mergeability| {
             let pull = Pull {
                 number: NonZeroU32::new(12).unwrap(),
@@ -945,11 +969,38 @@ mod tests {
                 Work::new(Issues::Off, vec![pull], More::default()).unwrap(),
             ))
         };
-        assert!(!should_cache(&listed(Some(Mergeability::Unknown))));
-        assert!(should_cache(&listed(Some(Mergeability::Mergeable))));
-        assert!(should_cache(&listed(Some(Mergeability::Conflicting))));
-        assert!(should_cache(&listed(None)));
-        assert!(should_cache(&Ok(Listed::Unhosted)));
-        assert!(should_cache(&Err("gh failed".to_owned())));
+        let unknown = listed(Some(Mergeability::Unknown));
+        assert_eq!(cache_ttl(&unknown), UNKNOWN_FRESH);
+        assert_eq!(cache_ttl(&listed(Some(Mergeability::Mergeable))), FRESH);
+        assert_eq!(cache_ttl(&listed(Some(Mergeability::Conflicting))), FRESH);
+        assert_eq!(cache_ttl(&listed(None)), FRESH);
+        assert_eq!(cache_ttl(&Ok(Listed::Unhosted)), FRESH);
+        assert_eq!(cache_ttl(&Err("gh failed".to_owned())), FRESH);
+
+        let (mut slots, now, lune) = (Slots::default(), Instant::now(), dir("/w/lune"));
+        slots.run(&lune, now).unwrap();
+        slots.ran(&lune, Some(kept(now, unknown.clone())));
+        assert_eq!(
+            slots.seen(
+                &lune,
+                now + UNKNOWN_FRESH.saturating_sub(Duration::from_millis(1))
+            ),
+            Seen::Fresh(&unknown)
+        );
+        assert_eq!(slots.seen(&lune, now + UNKNOWN_FRESH), Seen::Unlisted);
+
+        let listings = Listings::default();
+        locked(&listings.slots).run(&lune, Instant::now()).unwrap();
+        let came = thread::scope(|scope| {
+            let waiting = scope.spawn(|| listings.list(&lune));
+            eventually("the waiter blocks on the in-flight listing", || {
+                (locked(&listings.slots).waiters == 1).then_some(())
+            });
+            locked(&listings.slots).ran(&lune, Some(kept(Instant::now(), unknown.clone())));
+            listings.done.notify_all();
+            waiting.join().unwrap()
+        });
+        assert_eq!(came, unknown);
+        assert_eq!(locked(&listings.slots).waiters, 0);
     }
 }

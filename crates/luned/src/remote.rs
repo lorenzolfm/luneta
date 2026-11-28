@@ -751,6 +751,7 @@ async fn watched(
     let mut seen = Seen::Initial(InitialSeen::Reaching {
         since: SystemTime::now(),
     });
+    let mut anomalies = Troubles::default();
     let said = Arc::default();
     loop {
         let current = {
@@ -851,17 +852,21 @@ async fn watched(
             |subagent| prost::Message::encoded_len(subagent).saturating_add(16),
             lune_protocol::HOST_SUBAGENTS_BYTES_MAX,
         );
-        sanitize_remote_host(&destination, &mut host);
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
         if !told(&core, &destination, Reached::Host(host)) {
             return;
         }
     }
 }
 
-fn sanitize_remote_host(destination: &Destination, host: &mut api::remote::Host) {
+fn sanitize_remote_host(
+    destination: &Destination,
+    host: &mut api::remote::Host,
+    anomalies: &mut Troubles,
+) {
     let parsed = ParsedPullRequests::of_api(&host.pull_requests);
     if let Some(why) = parsed.anomalies() {
-        log::say(&format!("{destination}: {why}"));
+        anomalies.say(format!("{destination}: {why}"));
         let mut clean: Vec<_> = parsed
             .by_dir
             .iter()
@@ -872,7 +877,7 @@ fn sanitize_remote_host(destination: &Destination, host: &mut api::remote::Host)
     }
     let parsed = ParsedGitStatuses::of_api(&host.git_statuses);
     if let Some(why) = parsed.anomalies() {
-        log::say(&format!("{destination}: {why}"));
+        anomalies.say(format!("{destination}: {why}"));
         let mut clean: Vec<_> = parsed
             .by_dir
             .iter()
@@ -881,6 +886,7 @@ fn sanitize_remote_host(destination: &Destination, host: &mut api::remote::Host)
         clean.sort_by(|(a, _), (b, _)| a.cmp(b));
         host.git_statuses = clean.into_iter().map(|(_, status)| status).collect();
     }
+    anomalies.done();
 }
 
 async fn handle_failure(
@@ -1650,7 +1656,8 @@ mod tests {
             git_statuses: vec![valid_status.clone(), dup_status, bad_status],
             ..api::remote::Host::default()
         };
-        sanitize_remote_host(&destination, &mut host);
+        let mut anomalies = Troubles::default();
+        sanitize_remote_host(&destination, &mut host, &mut anomalies);
         assert_eq!(host.pull_requests, vec![first]);
         assert_eq!(host.git_statuses, vec![valid_status]);
     }

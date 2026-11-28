@@ -627,7 +627,7 @@ fn checks_changed(
     at: Instant,
 ) -> Option<String> {
     let (said, was, now) = (was.at, was.found.as_ref()?, now?);
-    if was.page != now.page {
+    if was.page != now.page || !was.is_open() || !now.is_open() {
         return None;
     }
     let (before, after) = (was.verdict(), now.verdict());
@@ -986,6 +986,11 @@ mod tests {
         let other = pull("owner/repo", 8, open_state(checks(0, 0, 3), None));
         assert_eq!(changed(&open(checks(1, 0, 0)), &other, 0), None);
         assert_eq!(checks_changed(&said(None), Some(&other), 0, at), None);
+        let merged = pull("owner/repo", 7, State::Merged);
+        let closed = pull("owner/repo", 7, State::Closed);
+        assert_eq!(changed(&open(checks(0, 0, 3)), &merged, 0), None);
+        assert_eq!(changed(&open(checks(0, 1, 0)), &closed, 0), None);
+        assert_eq!(changed(&closed, &open(checks(0, 0, 3)), 0), None);
     }
 
     #[test]

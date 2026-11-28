@@ -31,7 +31,7 @@ use luned::prunes;
 use luned::rebases::{Rebased, Unrebased};
 use luned::seats::{self, Unread, seated};
 use luned::transcripts::SessionId;
-use luned::{Destination, Directory, log};
+use luned::{Destination, Directory, Troubles, log};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -1833,6 +1833,7 @@ pub struct Sidebar {
     menus: u64,
     wall: SystemTime,
     due: Option<SystemTime>,
+    anomalies: Troubles,
 }
 
 #[derive(Debug)]
@@ -2209,6 +2210,7 @@ impl Sidebar {
             menus: 0,
             wall,
             due: None,
+            anomalies: Troubles::default(),
         }
     }
 
@@ -2237,7 +2239,6 @@ impl Sidebar {
     }
 
     pub fn heard(&mut self, host: Host, wall: SystemTime) {
-        log_host_anomalies(&host);
         self.wall = wall;
         self.shelve(&host);
         for shelf in &self.shelves {
@@ -3194,6 +3195,24 @@ impl Sidebar {
                 Ok(heard) => (Some(heard), None),
                 Err(away) => (None, Some(away)),
             };
+            let parsed_statuses = heard
+                .as_ref()
+                .map(|heard| ParsedGitStatuses::of_api(heard.git_statuses));
+            let parsed_pulls = heard
+                .as_ref()
+                .map(|heard| ParsedPullRequests::of_api(heard.pull_requests));
+            if let Some(why) = parsed_pulls
+                .as_ref()
+                .and_then(ParsedPullRequests::anomalies)
+            {
+                self.anomalies.say(anomaly_note(&machine, &why));
+            }
+            if let Some(why) = parsed_statuses
+                .as_ref()
+                .and_then(ParsedGitStatuses::anomalies)
+            {
+                self.anomalies.say(anomaly_note(&machine, &why));
+            }
             if projects.is_empty() {
                 if finder.is_none() {
                     rows.push(Row::Machine {
@@ -3209,8 +3228,8 @@ impl Sidebar {
             let mut machine_rows = Vec::new();
             let (mut machine_tally, mut machine_here) = (Tally::default(), false);
             let agents = heard.as_ref().map_or_default(Seen::seated);
-            let statuses = git_statuses(heard.as_ref().map_or(&[], |heard| heard.git_statuses));
-            let pull_requests = pull_requests(heard.as_ref().map_or(&[], |it| it.pull_requests));
+            let statuses = parsed_statuses.map_or_default(|parsed| parsed.by_dir);
+            let pull_requests = parsed_pulls.map_or_default(|parsed| parsed.by_dir);
             counts.projects += projects.len();
             for known in projects {
                 let listed = known.listed();
@@ -3437,6 +3456,7 @@ impl Sidebar {
             });
             rows.append(&mut machine_rows);
         }
+        self.anomalies.done();
         if finder.is_none() {
             assert!(!rows.is_empty(), "this machine always has a row");
         } else if best.is_none() && typos == Typos::None {
@@ -6188,21 +6208,10 @@ fn git_statuses(statuses: &[luned::api::GitStatus]) -> HashMap<&str, GitStatus> 
     ParsedGitStatuses::of_api(statuses).by_dir
 }
 
-fn log_host_anomalies(host: &Host) {
-    let say =
-        |where_at: &str, pulls: &[luned::api::PullRequest], statuses: &[luned::api::GitStatus]| {
-            if let Some(why) = ParsedPullRequests::of_api(pulls).anomalies() {
-                log::say(&format!("{where_at}: {why}"));
-            }
-            if let Some(why) = ParsedGitStatuses::of_api(statuses).anomalies() {
-                log::say(&format!("{where_at}: {why}"));
-            }
-        };
-    say("local", &host.pull_requests, &host.git_statuses);
-    for remote in &host.remotes {
-        if let Some(Reached::Host(far)) = &remote.reached {
-            say(&remote.destination, &far.pull_requests, &far.git_statuses);
-        }
+fn anomaly_note(machine: &Machine, why: &str) -> String {
+    match machine {
+        Machine::Local => format!("local: {why}"),
+        Machine::Remote(destination) => format!("{destination}: {why}"),
     }
 }
 
