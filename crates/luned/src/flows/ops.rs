@@ -174,16 +174,21 @@ pub fn poll_pr(dir: &str) -> Result<Option<PrSnapshot>, String> {
 }
 
 pub fn snapshot_of_pulled(pulled: Pulled) -> Result<PrSnapshot, String> {
-    let state = match pulled.pull_request.state {
-        State::Open => PrState::Open,
-        State::Draft => PrState::Draft,
-        State::Merged => PrState::Merged,
-        State::Closed => PrState::Closed,
+    let (state, checks) = match pulled.pull_request.state {
+        State::Open {
+            draft: false,
+            checks,
+            ..
+        } => (PrState::Open, checks),
+        State::Open {
+            draft: true,
+            checks,
+            ..
+        } => (PrState::Draft, checks),
+        State::Merged => (PrState::Merged, None),
+        State::Closed => (PrState::Closed, None),
     };
-    let (pending, failed, passed) = pulled
-        .pull_request
-        .checks
-        .map_or((0, 0, 0), |c| (c.pending, c.failed, c.passed));
+    let (pending, failed, passed) = checks.map_or((0, 0, 0), |c| (c.pending, c.failed, c.passed));
     let head_oid = GitOid::parse(&pulled.head)
         .map_err(|why| format!("{}: head {why}", pulled.pull_request.page.url()))?;
     Ok(PrSnapshot {

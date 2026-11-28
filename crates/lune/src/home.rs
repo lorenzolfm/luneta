@@ -3,9 +3,12 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use lune_domain::projects::{Dir, ProjectId};
+use lune_protocol::github::Mergeability;
+use lune_protocol::said::Said;
 use luned::asks::Marked;
+use luned::headless::Harness;
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -27,8 +30,6 @@ pub const KEPT_MAX: usize = 16;
 
 const _: () = assert!(work::FRESH.as_millis() < AGAIN.as_millis());
 
-const ASK_TITLE: &str = "Ask";
-
 const MARKED: &str = "◆";
 
 const UNMARKED: &str = "◇";
@@ -38,6 +39,16 @@ const ASKING: &str = "asking gh for the open issues and pull requests…";
 const UNHOSTED: &str = "no remote on GitHub, so nothing is listed here";
 
 const ISSUES_OFF: &str = "   the repository has its issues turned off on GitHub";
+
+const CONFLICTS: &str = "conflicts";
+
+const CONFLICTS_CUT: &str = "conflicts ";
+
+const SIDE_SEPARATOR: &str = " · ";
+
+const _: () = assert!(CONFLICTS.is_ascii());
+const _: () = assert!(CONFLICTS_CUT.len() == CONFLICTS.len() + 1);
+const _: () = assert!(CONFLICTS_CUT.as_bytes()[CONFLICTS.len()] == b' ');
 
 const ASK_ROWS_MIN: u16 = 4;
 
@@ -267,7 +278,7 @@ impl Home {
             .collect()
     }
 
-    pub fn key(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
+    pub fn key(&mut self, key: &KeyEvent, asks: &mut u64, picked: Harness, events: &Sender<Event>) {
         let bare = key.modifiers.is_empty();
         match key.code {
             KeyCode::Up if bare => self.step_up(),
@@ -280,16 +291,16 @@ impl Home {
                 self.mark();
                 self.step_up();
             }
-            _ => self.prompt(key, asks, events),
+            _ => self.prompt(key, asks, picked, events),
         }
     }
 
-    fn prompt(&mut self, key: &KeyEvent, asks: &mut u64, events: &Sender<Event>) {
+    fn prompt(&mut self, key: &KeyEvent, asks: &mut u64, picked: Harness, events: &Sender<Event>) {
         let Named::As { name, dir, ask } = &mut self.named else {
             return;
         };
         match ask.key(key) {
-            ask::Keyed::Send => ask.send(self.marked.clone(), events),
+            ask::Keyed::Send => ask.send(self.marked.clone(), picked, events),
             ask::Keyed::Close | ask::Keyed::Interrupt if ask.turning() => {
                 *asks += 1;
                 ask.stop(*asks);
@@ -336,7 +347,36 @@ impl Home {
         matches!(&self.named, Named::As { ask, .. } if ask.turning())
     }
 
-    pub fn draw(&self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
+    pub fn mouse(&mut self, mouse: MouseEvent) -> ask::Mouse {
+        let Named::As { ask, .. } = &mut self.named else {
+            return ask::Mouse::Ignored;
+        };
+        ask.mouse(mouse)
+    }
+
+    pub fn pressed(&self) -> bool {
+        matches!(&self.named, Named::As { ask, .. } if ask.pressed())
+    }
+
+    pub fn unsweep(&mut self) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.unsweep();
+        }
+    }
+
+    pub fn let_go(&mut self) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.let_go();
+        }
+    }
+
+    pub fn unshown(&mut self) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.unshown();
+        }
+    }
+
+    pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
         let mut cadence = Cadence::default();
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
@@ -345,48 +385,27 @@ impl Home {
                 }
             }
         }
-        let Some(inner) = area
-            .width
-            .checked_sub(2)
-            .map(usize::from)
-            .filter(|inner| *inner > 0)
-        else {
+        if area.width < 3 {
+            self.unshown();
             return cadence;
-        };
-        let Named::As { dir, ask, .. } = &self.named else {
+        }
+        let hints = self.hints();
+        let on = &self.on;
+        let Named::As { dir, ask, .. } = &mut self.named else {
             self.draw_lists(buffer, area);
             return cadence;
         };
         let most = (area.height / 2).max(ASK_ROWS_MIN).min(area.height);
-        let room = usize::from(most.saturating_sub(3));
-        let (mut talk, spinner) = ask.talked(inner, wall);
-        let mut kept_spinner = spinner.is_some_and(|at| at < room);
-        if talk.len() > room {
-            let kept = room.saturating_sub(1);
-            let drained = talk.len() - kept;
-            kept_spinner = spinner.is_some_and(|at| at >= drained);
-            talk.drain(..drained);
-            if room > 0 {
-                talk.insert(
-                    0,
-                    Line::styled(" …", Style::new().add_modifier(Modifier::DIM)),
-                );
-            }
-        }
-        talk.push(menu::keys_line(inner, &self.hints()));
-        let rows = u16::try_from(talk.len() + 2).map_or(most, |rows| rows.min(most));
-        assert!(rows <= area.height, "the prompt's box fits in the home");
-        let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
-        let right = match &self.on {
+        assert!(most <= area.height, "docked ask budget fits in home area");
+        let right = match on {
             Machine::Local => sidebar::short_cwd(dir.as_str()),
             Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(dir.as_str())),
         };
-        menu::boxed(buffer, asked, &menu::rule(ASK_TITLE, &right, inner), &talk);
+        let (rows, ask_cadence) = ask.draw_docked(buffer, area, most, &right, &hints, wall);
+        assert!(rows <= area.height, "docked ask height fits in home area");
+        cadence.merge(ask_cadence);
         let lists = Rect::new(area.x, area.y, area.width, area.height - rows);
         self.draw_lists(buffer, lists);
-        if kept_spinner {
-            cadence.spin();
-        }
         cadence
     }
 
@@ -502,17 +521,24 @@ impl Home {
             let here = self.cursor == Some(Item::Pull(pull.number));
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Pull(pull.number));
-            let side = if pull.draft {
-                format!("{} · draft", pull.branch)
+            let plain;
+            let side = if pull.mergeability == Some(Mergeability::Conflicting) {
+                Side::Conflicting {
+                    branch: &pull.branch,
+                    draft: pull.draft,
+                }
+            } else if pull.draft {
+                plain = format!("{}{SIDE_SEPARATOR}draft", pull.branch);
+                Side::Plain(&plain)
             } else {
-                pull.branch.clone()
+                Side::Plain(pull.branch.as_str())
             };
             lines.push(row(
                 width,
                 (here, marked),
                 (&numbered(pull.number), number_width),
                 &pull.title,
-                &side,
+                side,
             ));
         }
         lines.push(Line::default());
@@ -541,7 +567,7 @@ impl Home {
                 (here, marked),
                 (&numbered(issue.number), number_width),
                 &issue.title,
-                &side,
+                Side::Plain(&side),
             ));
         }
         (lines, at)
@@ -626,12 +652,18 @@ impl Homes {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Side<'a> {
+    Plain(&'a str),
+    Conflicting { branch: &'a Said, draft: bool },
+}
+
 fn row(
     width: usize,
     (here, marked): (bool, bool),
     (number, number_width): (&str, usize),
     title: &str,
-    side: &str,
+    side: Side<'_>,
 ) -> Line<'static> {
     let dim = Style::new().add_modifier(Modifier::DIM);
     let margin = if here {
@@ -650,12 +682,25 @@ fn row(
     );
     let lead = margin.width() + mark.width() + number.width();
     let room = width.saturating_sub(lead + 1);
-    let side_room = if side.is_empty() {
+    let side_width = match side {
+        Side::Plain(text) => text.width(),
+        Side::Conflicting { branch, draft } => {
+            let draft = if draft {
+                SIDE_SEPARATOR.width() + "draft".len()
+            } else {
+                0
+            };
+            CONFLICTS.len() + SIDE_SEPARATOR.width() + branch.as_str().width() + draft
+        }
+    };
+    let side_room = if side_width == 0 {
         0
     } else {
-        (side.width() + 2).min(room / 3)
+        (side_width + 2).min(room / 3)
     };
+    assert!(side_room <= room);
     let title_room = room.saturating_sub(side_room);
+    assert_eq!(title_room + side_room, room);
     let title = sidebar::cut(title, title_room);
     let gap = title_room.saturating_sub(title.width());
     let title_style = if here {
@@ -668,7 +713,25 @@ fn row(
     let mut spans = vec![margin, mark, number, Span::styled(title, title_style)];
     if side_room > 2 {
         spans.push(Span::raw(" ".repeat(gap + 2)));
-        spans.push(Span::styled(sidebar::cut(side, side_room - 2), dim));
+        let shown_room = side_room - 2;
+        match side {
+            Side::Plain(text) => spans.push(Span::styled(sidebar::cut(text, shown_room), dim)),
+            Side::Conflicting { branch, draft } => {
+                let red = Style::new().fg(moonlight::RED);
+                if shown_room > CONFLICTS.len() {
+                    spans.push(Span::styled(CONFLICTS, red));
+                    let rest = if draft {
+                        format!("{SIDE_SEPARATOR}{branch}{SIDE_SEPARATOR}draft")
+                    } else {
+                        format!("{SIDE_SEPARATOR}{branch}")
+                    };
+                    let rest = sidebar::cut(&rest, shown_room - CONFLICTS.len());
+                    spans.push(Span::styled(rest, dim));
+                } else {
+                    spans.push(Span::styled(sidebar::cut(CONFLICTS_CUT, shown_room), red));
+                }
+            }
+        }
     }
     Line::from(spans)
 }
@@ -685,6 +748,10 @@ mod tests {
         NonZeroU32::new(at).unwrap()
     }
 
+    fn said(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
     fn work(issues: &[(u32, &str, &[&str])], pulls: &[(u32, &str, &str, bool)]) -> Listed {
         let issues = issues.iter().map(|(at, title, labels)| Issue {
             number: number(*at),
@@ -695,8 +762,9 @@ mod tests {
             number: number(*at),
             title: (*title).to_owned(),
             draft: *draft,
-            branch: (*branch).to_owned(),
+            branch: said(branch),
             author: None,
+            mergeability: None,
         });
         Listed::Work(
             Work::new(
@@ -725,15 +793,25 @@ mod tests {
     fn press(home: &mut Home, code: KeyCode) {
         let (events, _heard) = mpsc::channel();
         let mut asks = 1;
-        home.key(&KeyEvent::from(code), &mut asks, &events);
+        home.key(
+            &KeyEvent::from(code),
+            &mut asks,
+            Harness::ClaudeCode,
+            &events,
+        );
     }
 
     fn start_over(home: &mut Home, asks: &mut u64) {
         let (events, _heard) = mpsc::channel();
-        home.key(&KeyEvent::from(KeyCode::Esc), asks, &events);
+        home.key(
+            &KeyEvent::from(KeyCode::Esc),
+            asks,
+            Harness::ClaudeCode,
+            &events,
+        );
     }
 
-    fn shown(home: &Home, width: u16, height: u16) -> Vec<String> {
+    fn shown(home: &mut Home, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
         let mut buffer = Buffer::empty(area);
         home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
@@ -755,7 +833,7 @@ mod tests {
         let (mut home, now) = (home(), Instant::now());
         assert!(!home.relist(now), "a new home is asking already");
         assert_eq!(
-            shown(&home, 60, 12)[2],
+            shown(&mut home, 60, 12)[2],
             "   asking gh for the open issues and pull requests…"
         );
         home.listed(Ok(listed()), now);
@@ -774,7 +852,7 @@ mod tests {
         );
         press(&mut home, KeyCode::Down);
         assert_eq!(
-            shown(&home, 60, 14)[..9],
+            shown(&mut home, 60, 14)[..9],
             [
                 " lune  w/lune",
                 "",
@@ -788,7 +866,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            shown(&home, 60, 14)[10..],
+            shown(&mut home, 60, 14)[10..],
             [
                 "┌─ Ask ─────────────────────────────────────────── w/lune ─┐",
                 "│ › _                                                      │",
@@ -801,7 +879,7 @@ mod tests {
         }
         let typed = "│ › go_                                                    │";
         assert_eq!(
-            shown(&home, 60, 14)[11],
+            shown(&mut home, 60, 14)[11],
             typed,
             "the rest of the keys are the prompt's"
         );
@@ -834,7 +912,7 @@ mod tests {
         let (mut home, now) = (home(), Instant::now());
         home.listed(Err("gh is not on the PATH".to_owned()), now);
         assert_eq!(
-            shown(&home, 60, 10)[2],
+            shown(&mut home, 60, 10)[2],
             " gh lists nothing here: gh is not on the PATH"
         );
         home.relist(now + AGAIN);
@@ -847,7 +925,7 @@ mod tests {
         );
         home.relist(now + AGAIN * 2);
         home.listed(Err("HTTP 502".to_owned()), now + AGAIN * 2);
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[1], " not listed again: HTTP 502");
         assert!(lines[4].contains("#524"), "{lines:?}");
         home.relist(now + AGAIN * 3);
@@ -916,8 +994,9 @@ mod tests {
             number: number(524),
             title: "Say view, not pane".to_owned(),
             draft: false,
-            branch: "issue-511".to_owned(),
+            branch: said("issue-511"),
             author: None,
+            mergeability: None,
         };
         home.listed(
             Ok(Listed::Work(
@@ -925,7 +1004,7 @@ mod tests {
             )),
             now,
         );
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[2], " Pull requests · 1");
         assert!(
             lines[3].starts_with(" › ◇ #524  Say view, not pane")
@@ -957,13 +1036,13 @@ mod tests {
         };
         let full = Work::new(Issues::Open(issues.collect()), vec![], more).unwrap();
         home.listed(Ok(Listed::Work(full)), now);
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[2], " Pull requests · 0");
         assert_eq!(lines[5], " Issues · 50+");
         home.relist(now + AGAIN);
         home.listed(Ok(Listed::Unhosted), now + AGAIN);
         assert_eq!(home.cursor, None, "nothing is listed to be on");
-        let lines = shown(&home, 60, 14);
+        let lines = shown(&mut home, 60, 14);
         assert_eq!(lines[2], " no remote on GitHub, so nothing is listed here");
         press(&mut home, KeyCode::Tab);
         assert_eq!(home.marked, Marked::default());
@@ -978,7 +1057,7 @@ mod tests {
             now + AGAIN * 2,
         );
         assert_eq!(
-            shown(&home, 60, 14)[2],
+            shown(&mut home, 60, 14)[2],
             " gh lists nothing here: git did not say the remotes"
         );
     }
@@ -994,7 +1073,7 @@ mod tests {
             press(&mut home, KeyCode::Char(typed));
         }
         press(&mut home, KeyCode::Enter);
-        let unnamed = shown(&home, 60, 14);
+        let unnamed = shown(&mut home, 60, 14);
         assert_eq!(
             unnamed[..3],
             [
@@ -1013,7 +1092,7 @@ mod tests {
             home.ask_numbered(2).is_none(),
             "a prompt is heard only by its own number"
         );
-        let named = shown(&home, 60, 14);
+        let named = shown(&mut home, 60, 14);
         assert!(
             named.contains(
                 &"│ › _                                                      │".to_owned()
@@ -1072,11 +1151,8 @@ mod tests {
         press(&mut home, KeyCode::Char('x'));
         let mut asks = 1;
         let (events, _heard) = mpsc::channel();
-        home.key(
-            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &mut asks,
-            &events,
-        );
+        let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        home.key(&interrupt, &mut asks, Harness::ClaudeCode, &events);
         assert_eq!(
             (asks, home.marked.iter().count()),
             (1, 1),
@@ -1084,7 +1160,7 @@ mod tests {
         );
         assert!(home.ask_numbered(1).is_some());
         assert!(
-            shown(&home, 60, 14).contains(
+            shown(&mut home, 60, 14).contains(
                 &"│ › x_                                                     │".to_owned()
             )
         );
@@ -1093,9 +1169,165 @@ mod tests {
         assert_eq!(home.marked, Marked::default());
         assert!(home.ask_numbered(1).is_none() && home.ask_numbered(2).is_some());
         assert!(
-            shown(&home, 60, 14).contains(
+            shown(&mut home, 60, 14).contains(
                 &"│ › _                                                      │".to_owned()
             )
         );
+    }
+
+    #[test]
+    fn text_in_a_home_s_ask_box_can_be_selected_and_copied_while_the_lists_above_cannot() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let event = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        let mut home = home();
+        let asked = home.ask_numbered(1).expect("named home holds ask");
+        asked.in_a_turn(Harness::ClaudeCode, None);
+        asked.heard(ask::Heard::Step(luned::asks::Step::Said(
+            "Ready to merge #524.".to_owned(),
+        )));
+        asked.heard(ask::Heard::Ended(Ok(())));
+        let area = Rect::new(10, 0, 50, 16);
+        let mut buffer = Buffer::empty(area);
+        home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+        let left = MouseButton::Left;
+        assert_eq!(
+            home.mouse(event(MouseEventKind::Down(left), 12, 0)),
+            ask::Mouse::Ignored,
+            "lists above the ask box do not start ask selection"
+        );
+
+        let answer_y = (area.top()..area.bottom())
+            .find(|&y| {
+                let row: String = (area.left()..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                row.contains("Ready to merge #524.")
+            })
+            .expect("answer row drawn inside home ask box");
+        let start_x = area.x + 2;
+        let end_x = area.x + 21;
+        assert_eq!(
+            home.mouse(event(MouseEventKind::Down(left), start_x, answer_y)),
+            ask::Mouse::Started
+        );
+        assert_eq!(
+            home.mouse(event(MouseEventKind::Drag(left), end_x, answer_y)),
+            ask::Mouse::Active
+        );
+        let ask::Mouse::Copied(excerpt) =
+            home.mouse(event(MouseEventKind::Up(left), end_x, answer_y))
+        else {
+            panic!("releasing drag inside home ask box copies excerpt");
+        };
+        assert_eq!(&*excerpt, "Ready to merge #524.");
+
+        let mut redrawn = Buffer::empty(area);
+        home.draw(&mut redrawn, area, SystemTime::UNIX_EPOCH);
+        assert!(
+            redrawn[(start_x, answer_y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert!(
+            redrawn[(end_x, answer_y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        home.unsweep();
+        let mut cleared = Buffer::empty(area);
+        home.draw(&mut cleared, area, SystemTime::UNIX_EPOCH);
+        assert!(
+            !cleared[(start_x, answer_y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+    }
+
+    #[test]
+    fn a_conflicting_pull_request_shows_conflicts_in_red_ahead_of_its_branch() {
+        let (mut home, now) = (home(), Instant::now());
+        let pulls = vec![
+            Pull {
+                number: number(524),
+                title: "Fix merge".to_owned(),
+                draft: false,
+                branch: said("issue-511"),
+                author: None,
+                mergeability: Some(Mergeability::Conflicting),
+            },
+            Pull {
+                number: number(526),
+                title: "Clean change".to_owned(),
+                draft: false,
+                branch: said("issue-520"),
+                author: None,
+                mergeability: Some(Mergeability::Mergeable),
+            },
+        ];
+        home.listed(
+            Ok(Listed::Work(
+                Work::new(Issues::Open(vec![]), pulls, More::default()).unwrap(),
+            )),
+            now,
+        );
+        let area = Rect::new(0, 0, 90, 10);
+        let mut buffer = Buffer::empty(area);
+        home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+        let line = |y: u16| {
+            let text: String = (0..area.width).map(|x| buffer[(x, y)].symbol()).collect();
+            text.trim_end().to_owned()
+        };
+        assert!(line(3).ends_with("conflicts · issue-511"), "{}", line(3));
+        assert!(
+            line(4).ends_with("issue-520") && !line(4).contains("conflicts"),
+            "{}",
+            line(4)
+        );
+        let cells: Vec<&str> = (0..area.width).map(|x| buffer[(x, 3)].symbol()).collect();
+        let start = cells
+            .windows("conflicts".len())
+            .position(|it| it.concat() == "conflicts");
+        let start = u16::try_from(start.expect("conflicts")).unwrap();
+        assert_eq!(buffer[(start, 3)].fg, moonlight::RED);
+        let dot = start + u16::try_from("conflicts".len()).unwrap();
+        assert_eq!(buffer[(dot, 3)].fg, ratatui::style::Color::Reset);
+        assert!(
+            shown(&mut home, 60, 10)[3].ends_with("conflicts · i…"),
+            "{:?}",
+            shown(&mut home, 60, 10)
+        );
+        let narrow = Rect::new(0, 0, 45, 10);
+        let mut narrow_buffer = Buffer::empty(narrow);
+        home.draw(&mut narrow_buffer, narrow, SystemTime::UNIX_EPOCH);
+        let narrow_line: String = (0..narrow.width)
+            .map(|x| narrow_buffer[(x, 3)].symbol())
+            .collect();
+        let narrow_line = narrow_line.trim_end();
+        assert!(narrow_line.ends_with("conflict…"), "{narrow_line:?}");
+        let ellipsis_x = narrow.width - 2;
+        assert_eq!(narrow_buffer[(ellipsis_x, 3)].symbol(), "…");
+        assert_eq!(narrow_buffer[(ellipsis_x, 3)].fg, moonlight::RED);
+
+        let tight = Rect::new(0, 0, 48, 10);
+        let mut tight_buffer = Buffer::empty(tight);
+        home.draw(&mut tight_buffer, tight, SystemTime::UNIX_EPOCH);
+        let tight_line: String = (0..tight.width)
+            .map(|x| tight_buffer[(x, 3)].symbol())
+            .collect();
+        let tight_line = tight_line.trim_end();
+        assert!(tight_line.ends_with("conflicts…"), "{tight_line:?}");
+        let tight_ellipsis_x = tight.width - 2;
+        assert_eq!(tight_buffer[(tight_ellipsis_x, 3)].symbol(), "…");
+        assert_eq!(
+            tight_buffer[(tight_ellipsis_x, 3)].fg,
+            ratatui::style::Color::Reset
+        );
+        assert_eq!(tight_buffer[(tight_ellipsis_x - 1, 3)].fg, moonlight::RED);
     }
 }

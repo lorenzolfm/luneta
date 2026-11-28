@@ -69,10 +69,21 @@ extension Seen {
         case .unread: "unread"
         case .noBranch: "no branch"
         case .working: nil
-        case .pullRequestOpen: "pull request open"
-        case .checksFailing: "checks failing"
+        case .pullRequestOpen(let conflicting):
+            conflicting ? "pull request open · merge conflicts" : "pull request open"
+        case .checksFailing(let conflicting):
+            conflicting ? "checks failing · merge conflicts" : "checks failing"
         case .merged: "merged"
         case .untold: nil
+        }
+    }
+}
+
+extension Mergeability {
+    var words: String? {
+        switch self {
+        case .conflicting: "conflicts"
+        case .mergeable, .unknown, .untold: nil
         }
     }
 }

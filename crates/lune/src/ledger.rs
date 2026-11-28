@@ -179,16 +179,19 @@ impl<M: Mark> Ledger<M> {
         self.moments.keys().chain(&self.leftovers).copied()
     }
 
-    pub fn set(&mut self, mark: M, moment: Option<SystemTime>) {
+    pub fn set(&mut self, mark: M, moment: Option<SystemTime>) -> bool {
+        let mut lost = false;
         if let Shared::Through(dir) = &self.shared
             && let Err(why) = write(dir, &self.unfinished, mark, moment)
         {
             self.shared = Shared::Lost(why);
+            lost = true;
         }
         match moment {
             Some(moment) => self.moments.insert(mark, moment),
             None => self.moments.remove(&mark),
         };
+        lost
     }
 
     pub fn reload(&mut self) -> bool {
@@ -228,13 +231,14 @@ impl<M: Mark> Ledger<M> {
         true
     }
 
-    pub fn forget(&mut self, gone: &BTreeSet<M>) {
+    pub fn forget(&mut self, gone: &BTreeSet<M>) -> bool {
         if gone.is_empty() {
-            return;
+            return false;
         }
+        let mut lost = false;
         for mark in gone {
             if self.moments.contains_key(mark) {
-                self.set(*mark, None);
+                lost |= self.set(*mark, None);
             }
         }
         self.leftovers.retain(|mark| !gone.contains(mark));
@@ -243,10 +247,10 @@ impl<M: Mark> Ledger<M> {
             "a ledger keeps no mark it forgot"
         );
         let Shared::Through(dir) = &self.shared else {
-            return;
+            return lost;
         };
         let Ok(entries) = fs::read_dir(dir) else {
-            return;
+            return lost;
         };
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -257,6 +261,7 @@ impl<M: Mark> Ledger<M> {
                 let _ = fs::remove_file(entry.path());
             }
         }
+        lost
     }
 }
 

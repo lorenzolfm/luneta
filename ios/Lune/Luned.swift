@@ -118,7 +118,8 @@ final class Luned {
 
     func close(_ worktree: Worktree, on machine: String?) async throws {
         try await reached().closeWorktree(
-            on: machine, worktree: worktree.id, seen: worktree.views.map(\.id))
+            on: machine, worktree: worktree.id, seen: worktree.views.map(\.id),
+            seenBrowsers: worktree.browsers)
     }
 
     func startFlow(

@@ -220,6 +220,17 @@ impl Window {
         self.screen().iter().any(|line| line.contains(text))
     }
 
+    pub fn seats(&self, view: &str) -> bool {
+        seats_in(&self.screen(), view)
+    }
+
+    pub fn seated(&self, view: &str) {
+        assert!(!view.is_empty(), "sidebar view label must be non-empty");
+        eventually(&format!("the sidebar seats {view}"), || {
+            self.seats(view).then_some(())
+        });
+    }
+
     pub fn spot_of(&self, text: &str) -> (usize, usize) {
         eventually(&format!("lune shows {text:?}"), || {
             let screen = self.screen();
@@ -242,6 +253,42 @@ impl Window {
         });
         decoded.collect()
     }
+}
+
+pub fn in_sidebar(line: &str) -> String {
+    line.chars()
+        .skip_while(|it| *it == '│')
+        .take_while(|it| *it != '│')
+        .collect()
+}
+
+fn is_worktree_row(sidebar: &str) -> bool {
+    let body = sidebar
+        .strip_prefix('▌')
+        .or_else(|| sidebar.strip_prefix(' '))
+        .unwrap_or(sidebar);
+    body.starts_with(" ▾ ") || body.starts_with(" ▸ ")
+}
+
+pub fn seats_in(screen: &[String], view: &str) -> bool {
+    assert!(!view.is_empty(), "sidebar view label must be non-empty");
+    let want = format!(" {view}");
+    screen.iter().any(|line| {
+        let sidebar = in_sidebar(line);
+        sidebar.starts_with('▌') && !is_worktree_row(&sidebar) && sidebar.contains(&want)
+    })
+}
+
+pub fn sidebar_view_rows(screen: &[String], view: &str) -> usize {
+    assert!(!view.is_empty(), "sidebar view label must be non-empty");
+    let want = format!(" {view}");
+    screen
+        .iter()
+        .filter(|line| {
+            let sidebar = in_sidebar(line);
+            !is_worktree_row(&sidebar) && sidebar.contains(&want)
+        })
+        .count()
 }
 
 pub fn mouse(code: u8, (row, column): (usize, usize), last: char) -> String {
@@ -473,28 +520,13 @@ fn a_new_worktree_on_a_view_in_a_folder_of_a_project_shows_that_folder_in_the_pr
     );
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar seats its view", || {
-        window
-            .screen()
-            .iter()
-            .any(|line| {
-                let sidebar: String = line
-                    .chars()
-                    .skip_while(|it| *it == '│')
-                    .take_while(|it| *it != '│')
-                    .collect();
-                sidebar.starts_with('▌') && sidebar.contains(" work/main")
-            })
-            .then_some(())
-    });
+    window.seated("work/main");
     window.send(SPLIT);
     eventually("a second view opens in work", || {
         (shown(&owned, &dir.path)?.terminals.len() == 2).then_some(())
     });
     window.send(CD_FEAT);
-    eventually("the view works in feat", || {
-        window.shows(" work/feat ").then_some(())
-    });
+    window.seated("work/feat");
     window.send("\x1b[97;3unw");
     eventually("lune shows feat", || shown(&owned, &feat));
     let projects = projects_of(&owned);
@@ -758,4 +790,39 @@ fn a_luned_that_does_not_start_is_started_once_a_second_at_the_most() {
     assert_eq!(ended.status.code(), Some(1), "{}", ended.said);
     let starts = fs::read_to_string(&started).unwrap().lines().count();
     lasted.at_most_once_a_second(starts, "lune starts luned");
+}
+
+const REVIVE: &str = "\x1b[116;10u";
+
+#[test]
+fn super_shift_t_in_lune_revives_a_closed_view() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "revive");
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    let first = eventually("lune opens the worktree's first view", || {
+        let worktree = shown(&owned, &dir.path)?;
+        let terminal = worktree.terminals.first()?;
+        matches!(terminal.found, Some(Found::Key(_))).then_some((worktree.id, terminal.id))
+    });
+    window.seated("revive/main");
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
+    });
+
+    window.send("\x1b[97;3u");
+    eventually("menu opens over the view", || {
+        (window.shows("n  New ▸") && window.shows("d  Close ▸")).then_some(())
+    });
+    window.send("dd");
+    eventually("closing the last view unviews lune", || {
+        (shown(&owned, &dir.path).is_none() && window.shows(UNSHOWN)).then_some(())
+    });
+
+    window.send(REVIVE);
+    let revived = eventually("Super+Shift+T revives the closed view", || {
+        let worktree = shown(&owned, &dir.path)?;
+        let terminal = worktree.terminals.first()?;
+        (!window.shows(UNSHOWN)).then_some((worktree.id, terminal.id))
+    });
+    assert_ne!(revived.1, first.1, "revived view gets a fresh view id");
 }

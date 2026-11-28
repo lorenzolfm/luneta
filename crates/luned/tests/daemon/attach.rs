@@ -10,8 +10,11 @@ use crate::host::{LUNE, script};
 use crate::own::Owned;
 use crate::projects::{project, worktree};
 use crate::starts::UNSHOWN;
-use crate::starts::{SPLIT, Window, cloned, directory, mouse, projects_of, shown, work_in};
-use crate::worktree::worktree_added;
+use crate::starts::{
+    SPLIT, Window, cloned, directory, in_sidebar, mouse, projects_of, seats_in, shown,
+    sidebar_view_rows, work_in,
+};
+use crate::worktree::{git, worktree_added};
 
 const TYPED: &str = "printf 'own-%s\\n' 42\r";
 
@@ -51,6 +54,8 @@ const CLOSE: &str = "\x1b[97;3udd";
 
 const WELCOME: &str = "\x1b[97;3unh";
 
+const REVIEW: &str = "\x1b[97;3unr";
+
 const PANES: &str = "\x1b[97;3us";
 
 const TABS: &str = "\x1b[97;3ut";
@@ -63,26 +68,12 @@ fn as_panes(owned: &Owned, window: &mut Window, folder: &Path) {
     });
 }
 
-fn seated(window: &Window, view: &str) {
-    let want = format!(" {view}");
-    eventually(&format!("the sidebar seats {view}"), || {
-        window
-            .screen()
-            .iter()
-            .any(|line| {
-                let sidebar = in_sidebar(line);
-                sidebar.starts_with('▌') && sidebar.contains(&want)
-            })
-            .then_some(())
-    });
+fn frames_in(screen: &[String]) -> Option<usize> {
+    screen.iter().map(|line| line.matches('╭').count()).max()
 }
 
 fn frames(window: &Window) -> Option<usize> {
-    window
-        .screen()
-        .iter()
-        .map(|line| line.matches('╭').count())
-        .max()
+    frames_in(&window.screen())
 }
 
 fn seam(window: &Window) -> Option<usize> {
@@ -108,8 +99,7 @@ fn side(window: &Window, split: usize) -> Option<Side> {
     })
 }
 
-fn tops(window: &Window) -> Vec<(usize, usize)> {
-    let screen = window.screen();
+fn tops_in(screen: &[String]) -> Vec<(usize, usize)> {
     let edge = screen
         .first()
         .and_then(|line| line.chars().position(|it| it == '╮'));
@@ -121,6 +111,10 @@ fn tops(window: &Window) -> Vec<(usize, usize)> {
             .map(move |(column, _)| (row, column))
     });
     tops.collect()
+}
+
+fn tops(window: &Window) -> Vec<(usize, usize)> {
+    tops_in(&window.screen())
 }
 
 #[test]
@@ -179,7 +173,7 @@ fn the_menu_opens_a_view_beside_the_one_lune_shows_and_closes_it() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("a second terminal opens in the layout", || {
@@ -201,7 +195,11 @@ fn the_menu_opens_a_view_beside_the_one_lune_shows_and_closes_it() {
     window.send(CLOSE);
     let id = eventually("the view lune is on closes", || {
         let worktree = shown(&owned, &dir.path)?;
-        (worktree.terminals.len() == 1).then_some(worktree.id)
+        let screen = window.screen();
+        let closed = worktree.terminals.len() == 1
+            && frames_in(&screen) == Some(1)
+            && seats_in(&screen, "work/main");
+        closed.then_some(worktree.id)
     });
     window.send(CLOSE);
     eventually(
@@ -225,7 +223,7 @@ fn views_open_as_tabs_ctrl_h_and_ctrl_l_step_through_them_and_the_menu_shows_pan
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     window.send(SPLIT);
     eventually("a second terminal opens as a tab of the first", || {
         let terminals = shown(&owned, &dir.path)?.terminals;
@@ -251,6 +249,7 @@ fn views_open_as_tabs_ctrl_h_and_ctrl_l_step_through_them_and_the_menu_shows_pan
     eventually("Ctrl l shows the tab after", || {
         window.shows(PRINTED).then_some(())
     });
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     eventually("panes are drawn beside each other", || seam(&window));
     window.send(TABS);
@@ -267,7 +266,7 @@ fn keys_typed_right_after_opening_a_tab_reach_the_tab_opened() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     window.send(&format!("{SPLIT}{TYPED}"));
     eventually("the tab opened has the keys", || {
         window.shows(PRINTED).then_some(())
@@ -284,7 +283,7 @@ fn keys_typed_right_after_stepping_to_a_tab_reach_the_tab_stepped_to() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     window.send(SPLIT);
     eventually("a second terminal opens as a tab of the first", || {
         let terminals = shown(&owned, &dir.path)?.terminals;
@@ -309,7 +308,7 @@ fn keys_typed_right_after_stepping_into_a_staying_right_edge_reach_the_terminal(
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     window.send(&format!("{RIGHT}{TYPED}"));
     eventually("the terminal that kept focus gets the keys", || {
         window.shows(PRINTED).then_some(())
@@ -322,7 +321,7 @@ fn the_menu_opens_a_welcome_view_beside_the_terminal_and_d_d_in_it_closes_it() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(WELCOME);
     eventually("a welcome view is drawn beside the terminal", || {
@@ -351,7 +350,7 @@ fn the_menu_and_its_note_over_the_view_give_the_keys_back_as_they_close() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     assert!(!window.shows(MENU_SHOWS), "no menu is open yet");
     window.send(MENU);
     window.spot_of(MENU_SHOWS);
@@ -381,7 +380,7 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     window.send(PALETTE);
     window.spot_of("─ Actions ");
     window.send("new view\r");
@@ -390,7 +389,12 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
         let found = terminals
             .iter()
             .filter(|it| matches!(it.found, Some(Found::Key(_))));
-        (found.count() == 2 && !window.shows("─ Actions ")).then_some(())
+        let screen = window.screen();
+        let ready = found.count() == 2
+            && !screen.iter().any(|line| line.contains("─ Actions "))
+            && sidebar_view_rows(&screen, "work/main") == 2
+            && seats_in(&screen, "work/main");
+        ready.then_some(())
     });
     window.send(PALETTE);
     window.spot_of("─ Actions ");
@@ -404,10 +408,9 @@ fn super_k_runs_an_action_and_asks_for_a_name_in_its_own_box() {
             .any(|it| it.name.as_deref() == Some("logs"))
             .then_some(())
     });
-    assert!(
-        !window.shows("its new name"),
-        "the palette closes once the name is given"
-    );
+    eventually("the palette closes once the name is given", || {
+        (!window.shows("its new name")).then_some(())
+    });
 }
 
 #[test]
@@ -431,7 +434,7 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     let mut before = tops(&window);
     for (keys, count) in [
@@ -444,8 +447,11 @@ fn a_view_opened_from_the_sidebar_or_its_menu_takes_the_keys() {
             let found = terminals
                 .iter()
                 .filter(|it| matches!(it.found, Some(Found::Key(_))));
-            let drawn = tops(&window);
-            (found.count() == count && drawn.len() == count).then_some(drawn)
+            let screen = window.screen();
+            let drawn = tops_in(&screen);
+            let ready =
+                found.count() == count && drawn.len() == count && seats_in(&screen, "work/main");
+            ready.then_some(drawn)
         });
         window.send(&format!("printf 'own-%s\\n' {count}\r"));
         let (row, column) = window.spot_of(&format!("own-{count}"));
@@ -477,9 +483,7 @@ fn a_worktree_opened_or_made_while_lune_shows_none_takes_the_keys() {
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the sidebar lists it", || {
-        window.shows(" work ").then_some(())
-    });
+    window.seated("work/main");
     let other = directory("other");
     let typed_in = |window: &mut Window, folder: &Path, typed: u32| {
         eventually(&format!("a shell opens in {}", folder.display()), || {
@@ -493,6 +497,7 @@ fn a_worktree_opened_or_made_while_lune_shows_none_takes_the_keys() {
         window.spot_of(&format!("own-{typed}"));
     };
     let unshow = |window: &mut Window| {
+        window.seated("work/main");
         window.send(CLOSE);
         eventually("lune shows no worktree", || {
             window.shows(UNSHOWN).then_some(())
@@ -546,7 +551,7 @@ fn ctrl_h_and_ctrl_l_move_between_views_and_alt_equals_and_minus_resize_the_focu
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
@@ -653,7 +658,7 @@ fn an_edge_answered_after_a_click_on_another_view_leaves_the_keys_with_the_view(
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
@@ -696,7 +701,7 @@ fn a_click_on_a_worktree_s_row_goes_to_the_view_last_focused_there_and_on_a_view
     let dir = work_in(&owned, "work");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let first = eventually("lune shows work", || shown(&owned, &dir.path)).id;
-    seated(&window, "work/main");
+    window.seated("work/main");
     as_panes(&owned, &mut window, &dir.path);
     window.send(SPLIT);
     let split = eventually("two frames are drawn beside each other", || seam(&window));
@@ -765,6 +770,12 @@ fn a_click_on_a_project_s_row_goes_to_its_home_and_one_on_a_worktree_s_back() {
     let root = dir.path.parent().unwrap();
     worktree_added(root, "docs");
     let docs = worktree(&owned.host, project, &root.join("docs"));
+    eventually("the tab bar lists docs", || {
+        window.shows("docs").then_some(())
+    });
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
+    });
     let used = |id: u64| used(&owned, id);
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || {
@@ -818,12 +829,39 @@ fn a_tie_for_the_worktree_used_last_goes_to_the_first_listed_wherever_lune_picks
     eventually("luned's start at work's root goes to its first", || {
         (gone_to() == [one]).then_some(())
     });
+    window.seated("sleep 600");
     window.send(CLOSE);
     eventually(
         "one's last pane closed, lune goes to the first open of those left",
-        || (gone_to() == [two]).then_some(()),
+        || {
+            if gone_to() != [two] {
+                return None;
+            }
+            let screen = window.screen();
+            let work_row = screen
+                .iter()
+                .position(|line| in_sidebar(line).contains("● work"))?;
+            let next = in_sidebar(screen.get(work_row + 1)?);
+            (next.starts_with('▌') && next.contains("▾ two")).then_some(())
+        },
     );
-    let row = sidebar_row(&window, "● other");
+    let row = eventually("one, with no pane left, leaves lune's sidebar", || {
+        let rows: Vec<String> = window
+            .screen()
+            .iter()
+            .map(|line| in_sidebar(line))
+            .collect();
+        let work = rows.iter().position(|row| row.contains("● work"))?;
+        let other = rows.iter().position(|row| row.contains("● other"))?;
+        assert!(
+            work < other,
+            "work precedes other in sidebar ({work} >= {other}): {rows:?}"
+        );
+        let work_rows = &rows[work + 1..other];
+        let keeps_two = work_rows.iter().any(|row| row.contains("▾ two"));
+        let dropped_main = work_rows.iter().all(|row| !row.contains("▾ main"));
+        (keeps_two && dropped_main).then_some(other)
+    });
     click(&mut window, row);
     eventually("a click on other's row shows its home", || {
         window.shows(UNHOSTED).then_some(())
@@ -929,13 +967,6 @@ fn sidebar_row(window: &Window, text: &str) -> usize {
     })
 }
 
-fn in_sidebar(line: &str) -> String {
-    line.chars()
-        .skip_while(|it| *it == '│')
-        .take_while(|it| *it != '│')
-        .collect()
-}
-
 fn click(window: &mut Window, row: usize) {
     window.send(&[mouse(0, (row, 10), 'M'), mouse(0, (row, 10), 'm')].concat());
 }
@@ -959,10 +990,14 @@ fn a_worktree_s_last_view_closed_takes_lune_to_the_one_used_before_with_no_note(
     worktree_added(root, "docs");
     let docs = root.join("docs");
     let gone = worktree(&owned.host, project, &docs);
+    eventually("the tab bar lists docs", || {
+        window.shows("docs").then_some(())
+    });
     window.send(RIGHT);
     eventually("Ctrl l goes to docs", || {
         used(&owned, gone).is_some().then_some(())
     });
+    window.seated("sleep 600");
     window.send(CLOSE);
     eventually(
         "docs goes with its last view, and lune goes back to main",
@@ -1042,4 +1077,81 @@ fn a_lune_started_in_a_shell_of_the_view_it_shows_leaves_the_view_its_size() {
     let resized = || (size() != Some(first)).then(|| (size(), window.screen()));
     let quiet = const { Span::of(QUIET.saturating_mul(2)) };
     lune_waits::through(quiet, "the inner lune resizes its view", resized);
+}
+
+#[test]
+fn review_explain_and_ask_send_diff_context_and_use_system_prompt() {
+    let owned = Owned::new();
+    let dir = work_in(&owned, "work");
+    fs::create_dir_all(dir.path.join("src")).unwrap();
+    fs::write(
+        dir.path.join("src/lib.rs"),
+        "fn alpha() {\n    old_call();\n}\n",
+    )
+    .unwrap();
+    git(&dir.path, &["add", "src/lib.rs"]);
+    git(&dir.path, &["commit", "-m", "add lib"]);
+    fs::write(
+        dir.path.join("src/lib.rs"),
+        "fn alpha() {\n    new_call();\n}\n",
+    )
+    .unwrap();
+
+    let home = owned.host.home.path().to_owned();
+    let at = home.display();
+    let claude = format!(
+        r#"n=$(cat "{at}/turns" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$@" > "{at}/args-$n"
+cat > "{at}/words-$n"
+echo "$n" > "{at}/turns.tmp"
+mv "{at}/turns.tmp" "{at}/turns"
+echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Replaces old_call with new_call."}}'
+"#
+    );
+    script(&owned.host.bin().join("claude"), &claude);
+
+    let mut window = Window::open(&owned.host, &dir, &[]);
+    eventually("lune shows work", || shown(&owned, &dir.path));
+    window.seated("work/main");
+    window.send(REVIEW);
+    eventually("review loads the diff", || {
+        (window.shows("src/lib.rs") && window.shows("new_call")).then_some(())
+    });
+
+    window.send("e");
+    eventually("explain answers on row 0", || {
+        window
+            .shows("Replaces old_call with new_call.")
+            .then_some(())
+    });
+    let args1 = fs::read_to_string(home.join("args-1")).unwrap();
+    let lines1: Vec<&str> = args1.lines().collect();
+    assert!(
+        lines1.windows(2).any(|pair| pair == ["--tools", ""]),
+        "{args1}"
+    );
+    assert!(lines1.contains(&"--system-prompt"), "{args1}");
+    assert!(!lines1.contains(&"--append-system-prompt"), "{args1}");
+    let words1 = fs::read_to_string(home.join("words-1")).unwrap();
+    assert!(words1.contains("<untrusted-diff-excerpt"), "{words1}");
+    assert!(words1.contains("-    old_call();"), "{words1}");
+    assert!(words1.contains("+    new_call();"), "{words1}");
+
+    window.send(ESC);
+    eventually("ask box closes", || (!window.shows("┌─ Ask")).then_some(()));
+    window.send("jjj?");
+    eventually("ask box opens", || window.shows("┌─ Ask").then_some(()));
+    window.send("why?\r");
+    eventually("second review turn answers", || {
+        (fs::read_to_string(home.join("turns")).ok()?.trim() == "2"
+            && window.shows("Replaces old_call with new_call."))
+        .then_some(())
+    });
+    let words2 = fs::read_to_string(home.join("words-2")).unwrap();
+    assert!(words2.contains("<untrusted-diff-hunk"), "{words2}");
+    assert!(words2.contains(" fn alpha() {"), "{words2}");
+    assert!(words2.contains("<untrusted-diff-excerpt"), "{words2}");
+    assert!(words2.contains("why?"), "{words2}");
 }

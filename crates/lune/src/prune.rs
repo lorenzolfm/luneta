@@ -12,6 +12,7 @@ use crate::agreed::{self, Agreed, PLANNED};
 use crate::due::Due;
 use crate::host::Event;
 use crate::machines::Machine;
+use crate::menu::MenuId;
 use crate::reach::{self, Luned};
 
 pub use luned::prunes::UNTOLD;
@@ -188,7 +189,7 @@ fn listed(plan: &Plan) -> Vec<String> {
     goes.chain(kept).chain(unasked).collect()
 }
 
-pub fn plan(menu: u64, on: Machine, dir: Directory, events: &Sender<Event>) {
+pub fn plan(menu: MenuId, on: Machine, dir: Directory, events: &Sender<Event>) {
     let due = Due::new(events, move |plan| Event::Prunes { menu, plan });
     thread::spawn(move || due.pay(planned(&on, &dir)));
 }
@@ -198,7 +199,7 @@ fn planned(on: &Machine, dir: &Directory) -> Result<Plan, String> {
 }
 
 pub fn delete(
-    menu: u64,
+    menu: MenuId,
     on: Machine,
     dir: Directory,
     agreed: BTreeSet<Deleting>,

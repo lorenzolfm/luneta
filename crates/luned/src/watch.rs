@@ -17,7 +17,7 @@ use crate::{log, process};
 
 pub const SETTLE: Duration = Duration::from_millis(25);
 
-const SETTLE_MAX: Duration = Duration::from_millis(250);
+pub(crate) const SETTLE_MAX: Duration = Duration::from_millis(250);
 
 const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 
@@ -197,7 +197,7 @@ pub fn listed(dir: &Path) -> io::Result<Vec<PathBuf>> {
     entries.map(|entry| Ok(entry?.path())).collect()
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Troubles {
     said: HashSet<String>,
     now: HashSet<String>,
@@ -468,5 +468,23 @@ mod tests {
             mark.changed(),
         ));
         assert!(FolderWatch::on(&scratch.path().join("missing"), names).is_none());
+    }
+
+    #[test]
+    fn troubles_tracks_active_messages_until_they_clear() {
+        let mut troubles = Troubles::default();
+        troubles.say("bad entry".to_owned());
+        troubles.say("bad entry".to_owned());
+        assert_eq!(troubles.now.len(), 1);
+        assert!(troubles.said.is_empty());
+        troubles.done();
+        assert!(troubles.said.contains("bad entry"));
+        assert!(troubles.now.is_empty());
+        troubles.say("bad entry".to_owned());
+        troubles.say("another bad entry".to_owned());
+        troubles.done();
+        assert_eq!(troubles.said.len(), 2);
+        troubles.done();
+        assert!(troubles.said.is_empty());
     }
 }

@@ -312,6 +312,18 @@ impl Dir {
         self.join(&subfolder.0)
     }
 
+    pub fn try_at(&self, subfolder: &Subfolder) -> Result<Dir, String> {
+        let joined_len = self.0.len() + 1 + subfolder.as_str().len();
+        if joined_len > PATH_BYTES_MAX {
+            return Err(format!(
+                "{}/{}: a path is longer than {PATH_BYTES_MAX} bytes",
+                self.0,
+                subfolder.as_str()
+            ));
+        }
+        Ok(self.at(subfolder))
+    }
+
     #[must_use]
     pub fn join(&self, below: &Below) -> Dir {
         if below.is_own() {
@@ -487,6 +499,34 @@ impl Project {
         self.placed()
             .find(|(_, it)| it.id == worktree)
             .map(|(folder, _)| folder)
+    }
+
+    #[must_use]
+    pub fn subfolder(&self, worktree: WorktreeId) -> Option<&Subfolder> {
+        let Holds::Clone(rows) = &self.holds else {
+            return None;
+        };
+        assert!(
+            rows.len() <= WORKTREES_MAX,
+            "clone worktrees stay within WORKTREES_MAX"
+        );
+        rows.iter()
+            .find(|(_, it)| it.id == worktree)
+            .map(|(subfolder, _)| subfolder)
+    }
+
+    #[must_use]
+    pub fn worktree_at(&self, subfolder: &Subfolder) -> Option<WorktreeId> {
+        let Holds::Clone(rows) = &self.holds else {
+            return None;
+        };
+        assert!(
+            rows.len() <= WORKTREES_MAX,
+            "clone worktrees stay within WORKTREES_MAX"
+        );
+        rows.iter()
+            .find(|(it, _)| it == subfolder)
+            .map(|(_, it)| it.id)
     }
 
     fn alike_but_laid_out(&self, other: &Project) -> bool {
@@ -793,6 +833,16 @@ pub enum Relaid {
     },
 }
 
+#[derive(Debug)]
+pub struct ReviveWorktree {
+    pub project: ProjectId,
+    pub listed: Listed,
+    pub subfolder: Subfolder,
+    pub name: Option<Name>,
+    pub arranged: Arranged,
+    pub view: View,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MoveTo {
     Worktree(WorktreeId),
@@ -837,27 +887,36 @@ pub enum BrowserTarget {
     Folder(Spot),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseTarget {
+    Terminal(TerminalKey),
+    Browser(ViewId),
+}
+
 #[derive(Debug)]
 pub enum Ask {
     Change(Change),
     CloseWorktree {
         worktree: WorktreeId,
         seen: BTreeSet<ViewId>,
+        seen_browsers: Option<BTreeSet<ViewId>>,
     },
     CloseProject {
         project: ProjectId,
         worktrees: BTreeSet<WorktreeId>,
         seen: BTreeSet<ViewId>,
+        seen_browsers: Option<BTreeSet<ViewId>>,
     },
     Bring {
         worktree: WorktreeId,
         from: TerminalKey,
     },
-    CloseView(TerminalKey),
+    CloseView(CloseTarget),
     OpenBrowser {
         target: BrowserTarget,
         url: Option<BrowserUrl>,
     },
+    ReviveView,
 }
 
 impl Ask {
@@ -957,16 +1016,33 @@ impl Ask {
             Asked::ForgetProject(asked::ForgetProject { project }) => Change::ForgetProject {
                 project: id("project", project).map(ProjectId)?,
             },
-            Asked::CloseWorktree(asked::CloseWorktree { worktree, seen }) => {
+            Asked::CloseWorktree(asked::CloseWorktree {
+                worktree,
+                seen,
+                seen_browsers,
+            }) => {
                 let worktree = id("worktree", worktree).map(WorktreeId)?;
                 let seen = seen.into_iter().map(|it| id("seen", it).map(ViewId));
                 let seen = seen.collect::<Result<BTreeSet<ViewId>, String>>()?;
-                return Ok(Ask::CloseWorktree { worktree, seen });
+                let seen_browsers = seen_browsers
+                    .map(|seen| {
+                        seen.ids
+                            .into_iter()
+                            .map(|it| id("seen_browsers", it).map(ViewId))
+                            .collect::<Result<BTreeSet<ViewId>, String>>()
+                    })
+                    .transpose()?;
+                return Ok(Ask::CloseWorktree {
+                    worktree,
+                    seen,
+                    seen_browsers,
+                });
             }
             Asked::CloseProject(asked::CloseProject {
                 project,
                 worktrees,
                 seen,
+                seen_browsers,
             }) => {
                 let project = id("project", project).map(ProjectId)?;
                 let held = worktrees
@@ -975,10 +1051,19 @@ impl Ask {
                 let worktrees = held.collect::<Result<BTreeSet<WorktreeId>, String>>()?;
                 let seen = seen.into_iter().map(|it| id("seen", it).map(ViewId));
                 let seen = seen.collect::<Result<BTreeSet<ViewId>, String>>()?;
+                let seen_browsers = seen_browsers
+                    .map(|seen| {
+                        seen.ids
+                            .into_iter()
+                            .map(|it| id("seen_browsers", it).map(ViewId))
+                            .collect::<Result<BTreeSet<ViewId>, String>>()
+                    })
+                    .transpose()?;
                 return Ok(Ask::CloseProject {
                     project,
                     worktrees,
                     seen,
+                    seen_browsers,
                 });
             }
             Asked::Bring(asked::Bring { worktree, from }) => {
@@ -988,9 +1073,16 @@ impl Ask {
                 return Ok(Ask::Bring { worktree, from });
             }
             Asked::CloseView(asked::CloseView { terminal }) => {
-                let terminal = terminal.ok_or("terminal: it names no terminal")?;
+                let terminal = terminal.ok_or("close_view: it names no terminal")?;
                 return TerminalKey::of(&terminal)
                     .map_err(field("terminal"))
+                    .map(CloseTarget::Terminal)
+                    .map(Ask::CloseView);
+            }
+            Asked::CloseBrowser(asked::CloseBrowser { view }) => {
+                return id("view", view)
+                    .map(ViewId)
+                    .map(CloseTarget::Browser)
                     .map(Ask::CloseView);
             }
             Asked::RenameTerminal(asked::RenameTerminal { terminal, to }) => {
@@ -1037,6 +1129,7 @@ impl Ask {
                     .map_err(field("url"))?;
                 return Ok(Ask::OpenBrowser { target, url });
             }
+            Asked::ReviveView(asked::ReviveView {}) => return Ok(Ask::ReviveView),
         };
         Ok(Ask::Change(change))
     }
@@ -1103,8 +1196,8 @@ impl Stage {
         match (pull_request.state, pull_request.verdict()) {
             (State::Merged, _) => Stage::Merged,
             (State::Closed, _) => Stage::Working,
-            (State::Open | State::Draft, Some(Verdict::Failing)) => Stage::ChecksFailing,
-            (State::Open | State::Draft, Some(Verdict::Pending | Verdict::Passing) | None) => {
+            (State::Open { .. }, Some(Verdict::Failing)) => Stage::ChecksFailing,
+            (State::Open { .. }, Some(Verdict::Pending | Verdict::Passing) | None) => {
                 Stage::PullRequestOpen
             }
         }
@@ -1609,6 +1702,71 @@ impl Projects {
         Ok((changed, made))
     }
 
+    pub fn revive_worktree(
+        &self,
+        revive: ReviveWorktree,
+        mut draw: impl FnMut() -> io::Result<Id>,
+    ) -> Result<(Projects, WorktreeId), String> {
+        let ReviveWorktree {
+            project,
+            listed,
+            subfolder,
+            name,
+            arranged,
+            view,
+        } = revive;
+        let id = layout::Leaf::id(&view);
+        if self.holds(id.0) {
+            return Err(format!("the id {id} is taken"));
+        }
+        if self.view_count() >= VIEWS_MAX {
+            let many = format!("there are {VIEWS_MAX} views");
+            return Err(format!("{many}, as many as are kept"));
+        }
+        let mut changed = self.clone();
+        let _folder = changed.project(project)?.dir.try_at(&subfolder)?;
+        if changed
+            .rows(project)?
+            .iter()
+            .any(|(it, _)| *it == subfolder)
+        {
+            return Err(format!(
+                "project {project} already holds a worktree at {}",
+                subfolder.as_str()
+            ));
+        }
+        if !listed.subfolders().contains(&subfolder) {
+            return Err(format!(
+                "project {project}'s clone holds no worktree at {}",
+                subfolder.as_str()
+            ));
+        }
+        let made = changed.drawn_excluding(id.0, &mut draw)?;
+        assert_ne!(made.0, id.0, "revived worktree and view have distinct ids");
+        let mut layout = Layout::first_as(view, arranged);
+        layout.focused(id);
+        let mut worktree = Worktree::new(made, name);
+        worktree.layout = layout;
+        changed.rows(project)?.push((subfolder, worktree));
+        let worktrees_count = changed.worktree_count();
+        assert_eq!(
+            worktrees_count,
+            self.worktree_count() + 1,
+            "reviving a worktree adds one worktree"
+        );
+        assert_eq!(
+            changed.view_count(),
+            self.view_count() + 1,
+            "reviving a worktree adds one view"
+        );
+        assert!(
+            worktrees_count <= WORKTREES_MAX,
+            "{worktrees_count} worktrees are kept, over {WORKTREES_MAX}"
+        );
+        Projects::kept_as(&changed);
+        Ok((changed, made))
+    }
+
     pub fn moved(
         &self,
         terminal: TerminalViewId,
@@ -1633,7 +1791,7 @@ impl Projects {
         }
         let (_, target) = changed.find(to).ok_or_else(|| unknown("worktree", to))?;
         let placed = if target.layout.is_empty() {
-            Placed::Alone
+            Placed::Alone(Arranged::Tabs)
         } else {
             let room = target.layout.room_for(terminal.view(), None, size);
             room.ok_or_else(|| format!("worktree {to} has no room for {terminal}"))?
@@ -1876,6 +2034,24 @@ impl Projects {
             return Err(format!("{many}, as many as are kept"));
         }
         self.fresh(draw).map(WorktreeId)
+    }
+
+    fn drawn_excluding(
+        &self,
+        excluded: Id,
+        draw: &mut impl FnMut() -> io::Result<Id>,
+    ) -> Result<WorktreeId, String> {
+        if self.worktree_count() >= WORKTREES_MAX {
+            let many = format!("there are {WORKTREES_MAX} worktrees");
+            return Err(format!("{many}, as many as are kept"));
+        }
+        for _ in 0..FRESH_TRIES {
+            let candidate = draw().map_err(|error| format!("no id is drawn: {error}"))?;
+            if candidate != excluded && !self.holds(candidate) {
+                return Ok(WorktreeId(candidate));
+            }
+        }
+        Err(format!("{FRESH_TRIES} ids drawn were all taken"))
     }
 
     fn rows(&mut self, project: ProjectId) -> Result<&mut Vec<(Subfolder, Worktree)>, String> {
@@ -3259,7 +3435,7 @@ mod tests {
         let lune = clone(&mut projects, "/w/lune", &[]);
         let main = worktree(&mut projects, lune, "/w/lune/main");
         let one = first(&projects, main);
-        let refused = change(&projects, opening(main, 100, Placed::Alone));
+        let refused = change(&projects, opening(main, 100, Placed::Alone(Arranged::Tabs)));
         assert!(
             refused.unwrap_err().contains("holds views already"),
             "it opens with one"
@@ -3442,7 +3618,7 @@ mod tests {
 
         let vault = project(&mut projects, "/w/vault");
         let own = own(&projects, vault);
-        let three = opened(&mut projects, own, 102, Placed::Alone);
+        let three = opened(&mut projects, own, 102, Placed::Alone(Arranged::Tabs));
         (projects, _) = change(&projects, Change::Close { view: three }).unwrap();
         assert!(
             layout(&projects, own).is_empty(),
@@ -3719,7 +3895,7 @@ mod tests {
         );
         let vault = project(&mut projects, "/w/vault");
         let own = own(&projects, vault);
-        opened(&mut projects, own, 102, Placed::Alone);
+        opened(&mut projects, own, 102, Placed::Alone(Arranged::Tabs));
         projects = projects.closed(Closing::Worktree(own)).unwrap();
         assert!(
             layout(&projects, own).is_empty(),
@@ -3977,7 +4153,7 @@ mod tests {
         let mut projects = Projects::default();
         let lune = project(&mut projects, "/w/lune");
         let own = own(&projects, lune);
-        let one = opened(&mut projects, own, 100, Placed::Alone);
+        let one = opened(&mut projects, own, 100, Placed::Alone(Arranged::Tabs));
         let right = Placed::Beside {
             at: one,
             towards: layout::Towards::Right,
@@ -4202,7 +4378,7 @@ mod tests {
         let mut projects = Projects::default();
         let lune = project(&mut projects, "/w/lune");
         let main = worktree(&mut projects, lune, "/w/lune/main");
-        let one = opened(&mut projects, main, 100, Placed::Alone);
+        let one = opened(&mut projects, main, 100, Placed::Alone(Arranged::Tabs));
         let welcome = ViewId::of(101).unwrap();
         let placed = Placed::Beside {
             at: one,
@@ -4288,7 +4464,7 @@ mod tests {
         );
         let one = first(&projects, main);
         assert!(
-            change(&projects, open(101, Placed::Alone))
+            change(&projects, open(101, Placed::Alone(Arranged::Tabs)))
                 .unwrap_err()
                 .contains("already")
         );
@@ -4352,17 +4528,11 @@ mod tests {
         );
     }
 
-    fn pull_request(state: State, failed: u32) -> PullRequest {
-        let checks = Some(Checks {
-            pending: 0,
-            failed,
-            passed: 1,
-        });
+    fn pull_request(state: State) -> PullRequest {
         let page = PullPage::parse("https://github.com/o/r/pull/1").unwrap();
         PullRequest {
             page,
             state,
-            checks,
             stale: false,
         }
     }
@@ -4388,18 +4558,27 @@ mod tests {
     #[test]
     fn the_stage_is_read_off_the_branch_and_its_pull_request() {
         let branch = Some("issue-1");
-        let stage = |state, failed| Stage::of(branch, Some(&pull_request(state, failed)));
+        let open = |draft, failed| State::Open {
+            draft,
+            checks: Some(Checks {
+                pending: 0,
+                failed,
+                passed: 1,
+            }),
+            mergeability: None,
+        };
+        let stage = |state| Stage::of(branch, Some(&pull_request(state)));
         assert_eq!(Stage::of(None, None), Stage::NoBranch);
         assert_eq!(
-            Stage::of(None, Some(&pull_request(State::Merged, 0))),
+            Stage::of(None, Some(&pull_request(State::Merged))),
             Stage::NoBranch
         );
         assert_eq!(Stage::of(branch, None), Stage::Working);
-        assert_eq!(stage(State::Open, 0), Stage::PullRequestOpen);
-        assert_eq!(stage(State::Draft, 0), Stage::PullRequestOpen);
-        assert_eq!(stage(State::Open, 1), Stage::ChecksFailing);
-        assert_eq!(stage(State::Closed, 1), Stage::Working);
-        assert_eq!(stage(State::Merged, 1), Stage::Merged);
+        assert_eq!(stage(open(false, 0)), Stage::PullRequestOpen);
+        assert_eq!(stage(open(true, 0)), Stage::PullRequestOpen);
+        assert_eq!(stage(open(false, 1)), Stage::ChecksFailing);
+        assert_eq!(stage(State::Closed), Stage::Working);
+        assert_eq!(stage(State::Merged), Stage::Merged);
     }
 
     #[test]
@@ -4441,5 +4620,277 @@ mod tests {
             },
         );
         assert_eq!(failed.unwrap_err(), "that project has no open worktree");
+    }
+
+    #[test]
+    fn close_view_and_close_browser_parse_their_targets_and_refuse_missing_or_zero() {
+        use api::change_projects_request::{
+            Change as Asked, CloseBrowser, CloseProject, CloseView, CloseWorktree, SeenViews,
+        };
+
+        let key = api::TerminalKey {
+            id: 4,
+            made_at: Some(prost_types::Timestamp::default()),
+        };
+        let terminal = Asked::CloseView(CloseView {
+            terminal: Some(key),
+        });
+        let ask = Ask::of_api(terminal, |_| panic!("spot must not run")).unwrap();
+        assert!(matches!(
+            ask,
+            Ask::CloseView(CloseTarget::Terminal(k)) if k == TerminalKey::of(&key).unwrap()
+        ));
+
+        let browser = Asked::CloseBrowser(CloseBrowser { view: 42 });
+        let ask = Ask::of_api(browser, |_| panic!("spot must not run")).unwrap();
+        assert!(matches!(
+            ask,
+            Ask::CloseView(CloseTarget::Browser(id)) if id == ViewId::of(42).unwrap()
+        ));
+
+        let zero = Asked::CloseBrowser(CloseBrowser { view: 0 });
+        assert!(
+            Ask::of_api(zero, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("no id is 0")
+        );
+
+        let missing = Asked::CloseView(CloseView { terminal: None });
+        assert!(
+            Ask::of_api(missing, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("names no terminal")
+        );
+
+        let worktree_with_browsers = Asked::CloseWorktree(CloseWorktree {
+            worktree: 10,
+            seen: vec![1],
+            seen_browsers: Some(SeenViews { ids: vec![30] }),
+        });
+        assert!(matches!(
+            Ask::of_api(worktree_with_browsers, |_| panic!("spot must not run")).unwrap(),
+            Ask::CloseWorktree {
+                seen_browsers: Some(browsers),
+                ..
+            } if browsers == BTreeSet::from([ViewId::of(30).unwrap()])
+        ));
+
+        let zero_browser = Asked::CloseProject(CloseProject {
+            project: 1,
+            worktrees: vec![10],
+            seen: vec![],
+            seen_browsers: Some(SeenViews { ids: vec![0] }),
+        });
+        assert!(
+            Ask::of_api(zero_browser, |_| panic!("spot must not run"))
+                .unwrap_err()
+                .contains("no id is 0")
+        );
+    }
+
+    #[test]
+    fn revive_worktree_reopens_a_closed_clone_worktree_with_its_view_name_and_arrangement() {
+        use api::change_projects_request::{Change as Asked, ReviveView};
+
+        let ask = Ask::of_api(Asked::ReviveView(ReviveView {}), |_| {
+            panic!("spot must not run")
+        })
+        .unwrap();
+        assert!(matches!(ask, Ask::ReviveView));
+
+        let mut projects = Projects::default();
+        let lune = clone(&mut projects, "/w/lune", &["main", "feat"]);
+        let feat = at(&projects, "/w/lune/feat").unwrap();
+        assert_eq!(
+            projects.project_of(lune).unwrap().subfolder(feat),
+            Some(&tree("feat"))
+        );
+        assert_eq!(
+            projects
+                .project_of(lune)
+                .unwrap()
+                .worktree_at(&tree("feat")),
+            Some(feat)
+        );
+        let first_view = layout::Leaf::id(
+            projects
+                .find(feat)
+                .unwrap()
+                .1
+                .layout()
+                .views()
+                .next()
+                .unwrap(),
+        );
+        (projects, _) = change(&projects, Change::Close { view: first_view }).unwrap();
+        assert!(projects.find(feat).is_none());
+        assert_eq!(
+            projects
+                .project_of(lune)
+                .unwrap()
+                .worktree_at(&tree("feat")),
+            None
+        );
+
+        let revive = |projects: &Projects, revive: ReviveWorktree| {
+            let mut drawn = counting();
+            let taken = |id: &Id| projects.holds(*id);
+            projects.revive_worktree(revive, || {
+                loop {
+                    let id = drawn()?;
+                    if !taken(&id) {
+                        return Ok(id);
+                    }
+                }
+            })
+        };
+
+        let revived_view = ViewId::of(99).unwrap();
+        let browser = View::Browser(Browser::new(
+            revived_view,
+            Some(BrowserUrl::parse("https://example.com").unwrap()),
+        ));
+        let listed = listing(&["main", "feat"]);
+        let reopened;
+        (projects, reopened) = revive(
+            &projects,
+            ReviveWorktree {
+                project: lune,
+                listed: listed.clone(),
+                subfolder: tree("feat"),
+                name: Some(name("feature work")),
+                arranged: Arranged::Panes,
+                view: browser,
+            },
+        )
+        .unwrap();
+        let (revived_project, revived_worktree) = projects.find(reopened).unwrap();
+        assert_eq!(revived_project.id(), lune);
+        assert_eq!(revived_project.subfolder(reopened), Some(&tree("feat")));
+        assert_eq!(revived_project.worktree_at(&tree("feat")), Some(reopened));
+        assert_eq!(revived_worktree.renamed(), Some(&name("feature work")));
+        assert_eq!(revived_worktree.layout().arranged(), Some(Arranged::Panes));
+        assert_eq!(revived_worktree.layout().last_focus(), Some(revived_view));
+
+        let duplicate = revive(
+            &projects,
+            ReviveWorktree {
+                project: lune,
+                listed: listed.clone(),
+                subfolder: tree("feat"),
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Review(ViewId::of(100).unwrap()),
+            },
+        );
+        assert!(duplicate.unwrap_err().contains("already holds a worktree"));
+
+        let unlisted = revive(
+            &projects,
+            ReviveWorktree {
+                project: lune,
+                listed: listed.clone(),
+                subfolder: tree("removed"),
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Review(ViewId::of(100).unwrap()),
+            },
+        );
+        assert!(unlisted.unwrap_err().contains("clone holds no worktree"));
+
+        let taken_id = revive(
+            &projects,
+            ReviveWorktree {
+                project: lune,
+                listed: listing(&["main", "feat", "other"]),
+                subfolder: tree("other"),
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Review(revived_view),
+            },
+        );
+        assert!(taken_id.unwrap_err().contains("is taken"));
+
+        let plain = project(&mut projects, "/w/plain");
+        let in_plain = revive(
+            &projects,
+            ReviveWorktree {
+                project: plain,
+                listed: listing(&["sub"]),
+                subfolder: tree("sub"),
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Welcome(ViewId::of(101).unwrap()),
+            },
+        );
+        assert!(in_plain.unwrap_err().contains("holds no worktree"));
+
+        let own_plain = own(&projects, plain);
+        let alone_panes = opened(
+            &mut projects,
+            own_plain,
+            105,
+            Placed::Alone(Arranged::Panes),
+        );
+        assert_eq!(
+            layout(&projects, own_plain).arranged(),
+            Some(Arranged::Panes)
+        );
+        assert_eq!(layout(&projects, own_plain).last_focus(), Some(alone_panes));
+
+        let colliding_view = ViewId::of(102).unwrap();
+        let mut draws = [colliding_view.0, Id::of(103).unwrap()].into_iter();
+        let (reopened_projects, made) = projects
+            .revive_worktree(
+                ReviveWorktree {
+                    project: lune,
+                    listed: listing(&["main", "feat", "collide"]),
+                    subfolder: tree("collide"),
+                    name: None,
+                    arranged: Arranged::Tabs,
+                    view: View::Welcome(colliding_view),
+                },
+                || Ok(draws.next().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            made,
+            WorktreeId::of(103).unwrap(),
+            "revived worktree skips drawing the view's own id"
+        );
+        assert!(reopened_projects.holding_view(colliding_view).is_some());
+
+        let always_collides = projects.revive_worktree(
+            ReviveWorktree {
+                project: lune,
+                listed: listing(&["main", "feat", "collide-all"]),
+                subfolder: tree("collide-all"),
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Welcome(colliding_view),
+            },
+            || Ok(colliding_view.0),
+        );
+        assert!(always_collides.unwrap_err().contains("were all taken"));
+
+        let long_subfolder = Subfolder::parse(&"a".repeat(PATH_BYTES_MAX - 2)).unwrap();
+        assert!(
+            dir("/w/lune")
+                .try_at(&long_subfolder)
+                .unwrap_err()
+                .contains("longer than")
+        );
+        let too_long = revive(
+            &projects,
+            ReviveWorktree {
+                project: lune,
+                listed,
+                subfolder: long_subfolder,
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Welcome(ViewId::of(104).unwrap()),
+            },
+        );
+        assert!(too_long.unwrap_err().contains("longer than"));
     }
 }

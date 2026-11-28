@@ -12,7 +12,7 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -23,13 +23,14 @@ pub use lune_protocol::PATCH_BYTES_MAX;
 use lune_protocol::diff::{ReadDiff, RelativePath, UntrackedFile};
 use lune_protocol::git::{self, Changed, GitStatus, Head};
 use lune_protocol::said::Said;
+use lune_protocol::watch::LocalVersion;
 use lune_protocol::{UNTRACKED_BYTES_MAX, UNTRACKED_FILES_MAX, UNTRACKED_TOTAL_BYTES_MAX};
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, PathsMut, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
-use crate::core::{self, FOLLOW_DIRS_MAX};
+use crate::core::{self, FOLLOW_DIRS_MAX, FollowDirs, GitStatusStored};
 use crate::directory::Directory;
 use crate::log;
 use crate::program::{self, Ran};
@@ -59,6 +60,10 @@ const PATH_ANCESTORS_MAX: usize = PATH_BYTES_MAX / 2 + 2;
 
 const RECURSIVE_ADD_RETRIES: usize = 4;
 
+const REFRESHES_MAX: usize = 16;
+
+pub(crate) const REFRESH_WAIT_MAX: Duration = Duration::from_secs(5);
+
 const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
 const _: () = assert!(UNTRACKED_PATHS_INSPECTED_MAX >= UNTRACKED_FILES_MAX);
 const _: () =
@@ -72,6 +77,9 @@ const _: () = assert!(WATCHES_MAX == FOLLOW_DIRS_MAX);
 const _: () = assert!(WATCHES_MAX <= u32::MAX as usize);
 const _: () = assert!(PATH_ANCESTORS_MAX > 0);
 const _: () = assert!(RECURSIVE_ADD_RETRIES > 0);
+const _: () = assert!(REFRESHES_MAX > 0);
+const _: () = assert!(!REFRESH_WAIT_MAX.is_zero());
+const _: () = assert!(REFRESH_WAIT_MAX.as_nanos() <= LIMIT.as_nanos());
 
 pub const REPOSITORY_VARS: [&str; 13] = [
     "GIT_DIR",
@@ -1203,7 +1211,45 @@ struct Place {
     common: AbsPath,
 }
 
-fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
+#[derive(PartialEq, Eq)]
+enum PlaceOutcome {
+    In(Place),
+    Outside,
+    Unanswered,
+}
+
+#[cfg(test)]
+impl PlaceOutcome {
+    fn unwrap_in(self) -> Place {
+        match self {
+            PlaceOutcome::In(place) => place,
+            PlaceOutcome::Outside => panic!("expected git worktree place, got Outside"),
+            PlaceOutcome::Unanswered => panic!("expected git worktree place, got Unanswered"),
+        }
+    }
+}
+
+fn place(dir: impl AsRef<OsStr>) -> PlaceOutcome {
+    place_within(dir, LIMIT)
+}
+
+const NOT_IN_WORK_TREE: &str = "fatal: this operation must be run in a work tree";
+
+fn not_a_directory(stderr: &[u8]) -> bool {
+    stderr.starts_with(b"fatal: cannot change to ")
+        && stderr.trim_ascii_end().ends_with(b": Not a directory")
+}
+
+fn outside_place(stderr: &[u8]) -> bool {
+    stderr.starts_with(IN_NO_REPOSITORY.as_bytes())
+        || stderr.starts_with(NOT_IN_WORK_TREE.as_bytes())
+        || stderr.starts_with(BARE_UNREAD.as_bytes())
+        || directory_gone(stderr)
+        || not_a_directory(stderr)
+}
+
+fn place_within(dir: impl AsRef<OsStr>, limit: Duration) -> PlaceOutcome {
+    assert!(!limit.is_zero() && limit <= LIMIT);
     let mut git = Git::at(dir, "rev-parse");
     git.args([
         "--path-format=absolute",
@@ -1211,14 +1257,19 @@ fn place(dir: &str) -> Result<Option<Place>, Unanswered> {
         "--git-dir",
         "--git-common-dir",
     ]);
-    match git.run(LIMIT) {
-        Ok(Ran::Ended { status, stdout, .. }) if status.success() => Ok(Place::parse(&stdout)),
-        Ok(Ran::Ended { .. }) => Ok(None),
-        Ok(Ran::Stuck) | Err(_) => Err(Unanswered),
+    match git.run(limit) {
+        Ok(Ran::Ended { status, stdout, .. }) if status.success() => match Place::parse(&stdout) {
+            Some(place) => PlaceOutcome::In(place),
+            None => PlaceOutcome::Unanswered,
+        },
+        Ok(Ran::Ended { status, stderr, .. })
+            if status.code().is_some() && outside_place(&stderr) =>
+        {
+            PlaceOutcome::Outside
+        }
+        Ok(Ran::Ended { .. } | Ran::Stuck) | Err(_) => PlaceOutcome::Unanswered,
     }
 }
-
-struct Unanswered;
 
 impl Place {
     fn parse(said: &[u8]) -> Option<Place> {
@@ -3682,7 +3733,7 @@ fn ask(
     troubles: &mut Troubles,
 ) -> (Placed, Stood, bool) {
     let (placed, anew, common) = match place(dir.as_str()) {
-        Ok(Some(place)) => {
+        PlaceOutcome::In(place) => {
             match before {
                 Some(Placed::Outside(outside)) => {
                     if let Some(id) = outside.watching.into_id() {
@@ -3700,7 +3751,7 @@ fn ask(
             trees.insert(top.clone(), tree);
             (Placed::In(top), anew, Some(common))
         }
-        Ok(None) => {
+        PlaceOutcome::Outside => {
             let before = match before {
                 Some(Placed::Outside(outside)) => Some(outside),
                 Some(Placed::In(old_top)) => {
@@ -3712,13 +3763,240 @@ fn ask(
             let (outside, anew) = Outside::watch(dir, before, watches, troubles);
             (Placed::Outside(outside), anew, None)
         }
-        Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false, None),
+        PlaceOutcome::Unanswered => (before.unwrap_or(Placed::Unsaid), false, None),
     };
     assert!(trees.len() <= WATCHES_MAX);
     let said = status(dir, &placed, common.as_ref());
-    let elsewhere = |now: Option<Place>| now.map(|place| place.top).as_ref() != placed.top();
-    let moved = anew && place(dir.as_str()).is_ok_and(elsewhere);
+    let moved = anew
+        && match place(dir.as_str()) {
+            PlaceOutcome::In(now) => placed.top() != Some(&now.top),
+            PlaceOutcome::Outside => placed.top().is_some(),
+            PlaceOutcome::Unanswered => false,
+        };
     (placed, said, moved)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefreshReply {
+    Refreshed(LocalVersion),
+    Untracked,
+    Failed,
+}
+
+struct Refresh {
+    dir: Directory,
+    done: SyncSender<RefreshReply>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefreshOutcome {
+    Refreshed(LocalVersion),
+    Untracked,
+    Failed,
+    Full,
+    TimedOut,
+    Disconnected,
+}
+
+#[derive(Clone)]
+pub(crate) struct Refresher {
+    requests: SyncSender<Refresh>,
+    wake: SyncSender<()>,
+}
+
+impl Refresher {
+    fn pair(wake: SyncSender<()>) -> (Self, Receiver<Refresh>) {
+        let (requests, refreshes) = mpsc::sync_channel(REFRESHES_MAX);
+        (Refresher { requests, wake }, refreshes)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disconnected() -> Self {
+        let (refresher, _dropped) = Self::pair(mpsc::sync_channel(1).0);
+        refresher
+    }
+
+    #[must_use]
+    pub(crate) fn refresh(&self, dir: &Directory) -> RefreshOutcome {
+        self.refresh_within(dir, REFRESH_WAIT_MAX)
+    }
+
+    fn refresh_within(&self, dir: &Directory, wait: Duration) -> RefreshOutcome {
+        assert!(!wait.is_zero() && wait <= REFRESH_WAIT_MAX);
+        let (done, waited) = mpsc::sync_channel(1);
+        match self.requests.try_send(Refresh {
+            dir: dir.clone(),
+            done,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                wake_up(&self.wake);
+                return RefreshOutcome::Full;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                return RefreshOutcome::Disconnected;
+            }
+        }
+        wake_up(&self.wake);
+        match waited.recv_timeout(wait) {
+            Ok(RefreshReply::Refreshed(version)) => RefreshOutcome::Refreshed(version),
+            Ok(RefreshReply::Untracked) => RefreshOutcome::Untracked,
+            Ok(RefreshReply::Failed) => RefreshOutcome::Failed,
+            Err(RecvTimeoutError::Timeout) => RefreshOutcome::TimedOut,
+            Err(RecvTimeoutError::Disconnected) => RefreshOutcome::Disconnected,
+        }
+    }
+}
+
+fn drain_refreshes(refreshes: &Receiver<Refresh>, pending: &mut Vec<Refresh>) {
+    assert!(pending.capacity() >= REFRESHES_MAX);
+    assert!(pending.len() <= REFRESHES_MAX);
+    while pending.len() < REFRESHES_MAX {
+        match refreshes.try_recv() {
+            Ok(request) => pending.push(request),
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+    assert!(pending.len() <= REFRESHES_MAX);
+}
+
+fn settle_without_refreshes(
+    woken: &Receiver<()>,
+    refreshes: &Receiver<Refresh>,
+    pending: &mut Vec<Refresh>,
+) {
+    assert!(pending.capacity() >= REFRESHES_MAX);
+    assert!(pending.is_empty());
+    let deadline = Instant::now() + watch::SETTLE_MAX;
+    while pending.is_empty() {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return;
+        };
+        if left.is_zero() {
+            return;
+        }
+        match woken.recv_timeout(left.min(watch::SETTLE)) {
+            Ok(()) => drain_refreshes(refreshes, pending),
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryKind {
+    Forced,
+    Scheduled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryResult {
+    Published(LocalVersion),
+    Untracked,
+    Failed,
+    CoreStopped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RefreshKey {
+    Canonical(AbsPath),
+    Raw(Directory),
+}
+
+impl RefreshKey {
+    fn of(dir: &Directory) -> Self {
+        match AbsPath::canonical(Path::new(dir.as_str())) {
+            Ok(path) => RefreshKey::Canonical(path),
+            Err(_) => RefreshKey::Raw(dir.clone()),
+        }
+    }
+
+    fn as_os_str(&self) -> &OsStr {
+        match self {
+            RefreshKey::Canonical(path) => path.as_ref(),
+            RefreshKey::Raw(dir) => OsStr::new(dir.as_str()),
+        }
+    }
+
+    fn display(&self) -> std::path::Display<'_> {
+        Path::new(self.as_os_str()).display()
+    }
+
+    fn matches_dir(&self, dir: &Dir, dir_canonical: Option<&AbsPath>) -> bool {
+        match self {
+            RefreshKey::Canonical(requested) => dir_canonical == Some(requested),
+            RefreshKey::Raw(raw) => dir.as_str() == raw.as_str(),
+        }
+    }
+}
+
+fn in_same_worktree(path: &AbsPath, top: &AbsPath) -> bool {
+    if !path.starts_with(top.as_path()) {
+        return false;
+    }
+    let mut current = path.as_path();
+    let mut depth = 0usize;
+    while current != top.as_path() {
+        if depth == PATH_ANCESTORS_MAX {
+            return false;
+        }
+        depth += 1;
+        if current.file_name() == Some(OsStr::new(".git")) {
+            return false;
+        }
+        match fs::symlink_metadata(current.join(".git")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => return false,
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        current = parent;
+    }
+    assert!(depth <= PATH_ANCESTORS_MAX);
+    true
+}
+
+enum ResolvedTarget {
+    In(AbsPath),
+    Outside,
+    Failed,
+}
+
+enum RefreshPlan {
+    Failed,
+    Matched(Vec<Dir>),
+}
+
+fn refresh_reply(plan: &RefreshPlan, results: &BTreeMap<Dir, QueryResult>) -> RefreshReply {
+    let RefreshPlan::Matched(dirs) = plan else {
+        return RefreshReply::Failed;
+    };
+    let mut latest: Option<LocalVersion> = None;
+    for dir in dirs {
+        match results.get(dir) {
+            Some(QueryResult::Published(version)) => {
+                latest = Some(match latest {
+                    Some(current) => {
+                        assert_eq!(current.pid(), version.pid());
+                        if version.seq() > current.seq() {
+                            *version
+                        } else {
+                            current
+                        }
+                    }
+                    None => *version,
+                });
+            }
+            Some(QueryResult::Untracked) => {}
+            Some(QueryResult::Failed | QueryResult::CoreStopped) | None => {
+                return RefreshReply::Failed;
+            }
+        }
+    }
+    match latest {
+        Some(version) => RefreshReply::Refreshed(version),
+        None => RefreshReply::Untracked,
+    }
 }
 
 struct Follow {
@@ -3738,8 +4016,170 @@ impl Follow {
         }
     }
 
-    fn run(&mut self, core: &SyncSender<core::Command>, woken: &Receiver<()>, sweep: Duration) {
+    fn query(
+        &mut self,
+        core: &SyncSender<core::Command>,
+        dir: Dir,
+        kind: QueryKind,
+    ) -> QueryResult {
+        assert!(self.asked.len() <= FOLLOW_DIRS_MAX);
+        let started = Instant::now();
+        let was = self.asked.remove(&dir);
+        let why = match kind {
+            QueryKind::Forced => None,
+            QueryKind::Scheduled => was.as_ref().map(|was| was.next),
+        };
+        let before = was.map(|was| was.placed);
+        let (placed, said, moved) = ask(
+            &dir,
+            before,
+            &self.asked,
+            &mut self.trees,
+            &mut self.watches,
+            &mut self.troubles,
+        );
+        let (took, ended) = (started.elapsed(), Instant::now());
+        let trouble = match &said {
+            Ok((_, uncounted)) => uncounted.clone(),
+            Err(why) => Some(why.clone()),
+        };
+        if let Some(trouble) = &trouble {
+            self.troubles.say(trouble.clone());
+        }
+        let next = if moved { Why::Moved } else { Why::Swept };
+        self.asked.insert(
+            dir.clone(),
+            Asked {
+                ended,
+                took,
+                next,
+                placed,
+                trouble,
+            },
+        );
+        assert!(self.asked.contains_key(&dir));
+        assert!(self.asked.len() <= FOLLOW_DIRS_MAX);
+        assert_watches_consistent(&self.asked, &self.trees, &self.watches);
+        let Ok((status, _)) = said else {
+            return QueryResult::Failed;
+        };
+        let stored = |answer| core::Command::GitStatus {
+            dir,
+            status,
+            why,
+            answer,
+        };
+        match core::ask(core, stored) {
+            Some(GitStatusStored::Published { version, log }) => {
+                if let Some(line) = log {
+                    log::say(&line);
+                }
+                QueryResult::Published(version)
+            }
+            Some(GitStatusStored::Untracked) => QueryResult::Untracked,
+            None => QueryResult::CoreStopped,
+        }
+    }
+
+    fn plan_refreshes(
+        &mut self,
+        dirs: &FollowDirs,
+        pending: &[Refresh],
+    ) -> (Vec<RefreshPlan>, BTreeSet<Dir>) {
+        assert!(pending.len() <= REFRESHES_MAX);
+        assert!(dirs.len() <= FOLLOW_DIRS_MAX);
+        if pending.is_empty() {
+            return (Vec::new(), BTreeSet::new());
+        }
+        let keys: Vec<RefreshKey> = pending
+            .iter()
+            .map(|request| RefreshKey::of(&request.dir))
+            .collect();
+        let mut resolved: BTreeMap<RefreshKey, ResolvedTarget> = BTreeMap::new();
+        for key in &keys {
+            if resolved.contains_key(key) {
+                continue;
+            }
+            let target = match place_within(key.as_os_str(), REFRESH_WAIT_MAX) {
+                PlaceOutcome::In(found) => ResolvedTarget::In(found.top),
+                PlaceOutcome::Outside => ResolvedTarget::Outside,
+                PlaceOutcome::Unanswered => {
+                    self.troubles.say(format!(
+                        "git rev-parse in {} did not answer during refresh",
+                        key.display()
+                    ));
+                    ResolvedTarget::Failed
+                }
+            };
+            resolved.insert(key.clone(), target);
+        }
+        assert!(resolved.len() <= REFRESHES_MAX);
+        let needs_dirs = !dirs.is_empty()
+            && resolved
+                .values()
+                .any(|target| !matches!(target, ResolvedTarget::Failed));
+        let tracked: Vec<(&Dir, Option<&AbsPath>, Option<AbsPath>)> = if needs_dirs {
+            dirs.iter()
+                .map(|dir| {
+                    let placed_top = self.asked.get(dir).and_then(|was| was.placed.top());
+                    let canonical = AbsPath::canonical(Path::new(dir.as_str())).ok();
+                    (dir, placed_top, canonical)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut forced = BTreeSet::new();
+        let mut plans = Vec::with_capacity(keys.len());
+        for key in &keys {
+            let plan = match &resolved[key] {
+                ResolvedTarget::Failed => RefreshPlan::Failed,
+                ResolvedTarget::Outside => {
+                    let mut matched = Vec::new();
+                    for &(dir, _, ref canonical) in &tracked {
+                        if key.matches_dir(dir, canonical.as_ref()) {
+                            matched.push(dir.clone());
+                            forced.insert(dir.clone());
+                        }
+                    }
+                    RefreshPlan::Matched(matched)
+                }
+                ResolvedTarget::In(top) => {
+                    let mut matched = Vec::new();
+                    for &(dir, placed_top, ref canonical) in &tracked {
+                        let in_worktree = match placed_top {
+                            Some(known_top) => known_top == top,
+                            None => canonical
+                                .as_ref()
+                                .is_some_and(|path| in_same_worktree(path, top)),
+                        };
+                        if key.matches_dir(dir, canonical.as_ref()) || in_worktree {
+                            matched.push(dir.clone());
+                            forced.insert(dir.clone());
+                        }
+                    }
+                    RefreshPlan::Matched(matched)
+                }
+            };
+            plans.push(plan);
+        }
+        assert_eq!(plans.len(), pending.len());
+        assert!(forced.len() <= dirs.len());
+        debug_assert!(forced.iter().all(|dir| dirs.contains(dir)));
+        (plans, forced)
+    }
+
+    fn run(
+        &mut self,
+        core: &SyncSender<core::Command>,
+        woken: &Receiver<()>,
+        refreshes: &Receiver<Refresh>,
+        sweep: Duration,
+    ) {
+        let mut pending = Vec::with_capacity(REFRESHES_MAX);
         'sweep: loop {
+            assert!(pending.len() <= REFRESHES_MAX);
+            drain_refreshes(refreshes, &mut pending);
             let Some(dirs) = core::ask(core, core::Command::Dirs) else {
                 return;
             };
@@ -3788,55 +4228,43 @@ impl Follow {
                     }
                 }
             }
+            if !pending.is_empty() {
+                let (plans, forced) = self.plan_refreshes(&dirs, &pending);
+                assert_eq!(plans.len(), pending.len());
+                assert!(forced.len() <= FOLLOW_DIRS_MAX);
+                let mut results = BTreeMap::new();
+                for dir in forced {
+                    let result = self.query(core, dir.clone(), QueryKind::Forced);
+                    if matches!(result, QueryResult::CoreStopped) {
+                        return;
+                    }
+                    results.insert(dir, result);
+                }
+                for (request, plan) in pending.drain(..).zip(plans) {
+                    let reply = refresh_reply(&plan, &results);
+                    assert!(
+                        matches!(
+                            request.done.try_send(reply),
+                            Ok(()) | Err(TrySendError::Disconnected(_))
+                        ),
+                        "each refresh acknowledges its waiter once"
+                    );
+                }
+                assert!(pending.is_empty());
+                if woken.try_recv().is_ok() {
+                    continue 'sweep;
+                }
+            }
             let now = Instant::now();
             let due = |dir: &&Dir| self.asked.get(*dir).is_none_or(|was| was.due(sweep) <= now);
             let mut due: Vec<Dir> = dirs.iter().filter(due).cloned().collect();
             due.sort_by_key(|dir| self.asked.get(dir).map(|was| was.due(sweep)));
             for dir in due {
-                let started = Instant::now();
-                let was = self.asked.remove(&dir);
-                let why = was.as_ref().map(|was| was.next);
-                let before = was.map(|was| was.placed);
-                let (placed, said, moved) = ask(
-                    &dir,
-                    before,
-                    &self.asked,
-                    &mut self.trees,
-                    &mut self.watches,
-                    &mut self.troubles,
-                );
-                let (took, ended) = (started.elapsed(), Instant::now());
-                let trouble = match &said {
-                    Ok((_, uncounted)) => uncounted.clone(),
-                    Err(why) => Some(why.clone()),
-                };
-                if let Some(trouble) = &trouble {
-                    self.troubles.say(trouble.clone());
-                }
-                let next = if moved { Why::Moved } else { Why::Swept };
-                self.asked.insert(
-                    dir.clone(),
-                    Asked {
-                        ended,
-                        took,
-                        next,
-                        placed,
-                        trouble,
-                    },
-                );
-                assert_watches_consistent(&self.asked, &self.trees, &self.watches);
-                if let Ok((status, _)) = said {
-                    let stored = |answer| core::Command::GitStatus {
-                        dir,
-                        status,
-                        why,
-                        answer,
-                    };
-                    match core::ask(core, stored) {
-                        Some(Some(line)) => log::say(&line),
-                        Some(None) => {}
-                        None => return,
-                    }
+                if matches!(
+                    self.query(core, dir, QueryKind::Scheduled),
+                    QueryResult::CoreStopped
+                ) {
+                    return;
                 }
                 if woken.try_recv().is_ok() {
                     continue 'sweep;
@@ -3862,7 +4290,12 @@ impl Follow {
                 .values()
                 .map(|was| was.due(sweep).saturating_duration_since(now));
             match woken.recv_timeout(next.min().unwrap_or(sweep)) {
-                Ok(()) => watch::settle(woken),
+                Ok(()) => {
+                    drain_refreshes(refreshes, &mut pending);
+                    if pending.is_empty() {
+                        settle_without_refreshes(woken, refreshes, &mut pending);
+                    }
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -3888,19 +4321,20 @@ impl Drop for Follow {
     }
 }
 
-pub fn follow(
+pub(crate) fn follow(
     core: SyncSender<core::Command>,
     wake: SyncSender<()>,
     woken: Receiver<()>,
     sweep: Duration,
-) -> io::Result<()> {
+) -> io::Result<Refresher> {
+    let (refresher, requests) = Refresher::pair(wake.clone());
     thread::Builder::new()
         .name("git".to_owned())
         .spawn(move || {
             let mut state = Follow::new(wake);
-            state.run(&core, &woken, sweep);
+            state.run(&core, &woken, &requests, sweep);
         })?;
-    Ok(())
+    Ok(refresher)
 }
 
 #[cfg(test)]
@@ -4425,7 +4859,7 @@ mod tests {
         let mut watches = Watches::new(wake);
         let mut troubles = Troubles::default();
         let at = root.to_str().unwrap();
-        let first = place(at).ok().flatten().unwrap();
+        let first = place(at).unwrap_in();
         let (tree, anew) = Tree::watch(None, first, &mut watches, &mut troubles);
         assert!(anew);
         let Watching::Whole { id, .. } = &tree.watching else {
@@ -4438,7 +4872,7 @@ mod tests {
         assert!(git(root.as_path(), &["add", "src/lib.rs"]));
         assert!(git(root.as_path(), &["commit", "-q", "-m", "edit"]));
         assert_ne!(stamp(tree.place.own.join("index").as_path()), tree.index);
-        let next = place(at).ok().flatten().unwrap();
+        let next = place(at).unwrap_in();
         let (tree, anew) = Tree::watch(Some(tree), next, &mut watches, &mut troubles);
         assert!(!anew);
         assert_eq!(tree.watching.id().map(TreeWatch::id), Some(id));
@@ -4448,7 +4882,7 @@ mod tests {
         fs::write(extra.join("mod.rs").as_path(), "extra\n").unwrap();
         assert!(git(root.as_path(), &["add", "extra/mod.rs"]));
         assert!(git(root.as_path(), &["commit", "-q", "-m", "extra"]));
-        let next = place(at).ok().flatten().unwrap();
+        let next = place(at).unwrap_in();
         let (tree, anew) = Tree::watch(Some(tree), next, &mut watches, &mut troubles);
         assert!(anew);
         assert_eq!(tree.watching.id().map(TreeWatch::id), Some(id));
@@ -4456,7 +4890,7 @@ mod tests {
 
         assert!(git(root.as_path(), &["rm", "-q", "-r", "extra"]));
         assert!(git(root.as_path(), &["commit", "-q", "-m", "drop"]));
-        let next = place(at).ok().flatten().unwrap();
+        let next = place(at).unwrap_in();
         let (tree, anew) = Tree::watch(Some(tree), next, &mut watches, &mut troubles);
         assert!(anew);
         assert_eq!(tree.watching.id().map(TreeWatch::id), Some(id));
@@ -4678,7 +5112,7 @@ mod tests {
         assert!(git(root.as_path(), &["add", "src/lib.rs"]));
         assert!(git(root.as_path(), &["commit", "-q", "-m", "start"]));
 
-        let placed = place(root.to_str().unwrap()).ok().flatten().unwrap();
+        let placed = place(root.to_str().unwrap()).unwrap_in();
         let old_tracked = TrackedDirs::from_paths(BTreeSet::from([root.clone(), src.clone()]));
         let ghost = root.join("ghost");
         let new_tracked =
@@ -5400,7 +5834,7 @@ mod tests {
         assert!(git(root.as_path(), &["add", "Src/lib.rs"]));
         assert!(git(root.as_path(), &["commit", "-q", "-m", "start"]));
 
-        let placed = place(root.to_str().unwrap()).ok().flatten().unwrap();
+        let placed = place(root.to_str().unwrap()).unwrap_in();
         let tracked_dirs =
             TrackedDirs::from_paths(BTreeSet::from([root.clone(), logical_src.clone()]));
         let resolve = |path: &AbsPath| {
@@ -5489,7 +5923,7 @@ mod tests {
         fs::remove_dir_all(external_git.join("refs").as_path()).unwrap();
         symlink(old_refs.as_path(), external_git.join("refs").as_path()).unwrap();
 
-        let placed = place(repo.to_str().unwrap()).ok().flatten().unwrap();
+        let placed = place(repo.to_str().unwrap()).unwrap_in();
         let old_tracked = TrackedDirs::from_paths(BTreeSet::from([
             repo.clone(),
             kept_dir.clone(),
@@ -5635,5 +6069,440 @@ mod tests {
         );
         let remote = String::from_utf8(remote.unwrap()).unwrap();
         assert_eq!(remote.trim(), pushed_head.as_str());
+    }
+
+    #[test]
+    fn refresher_replaces_stale_detached_status_before_returning() {
+        use lune_domain::mux::{OwnMade, TerminalKey};
+        use lune_domain::projects::ViewId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = AbsPath::canonical(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let sub = repo.join("sub");
+        let later_sub = repo.join("later");
+        let untracked = root.join("untracked");
+        for path in [&repo, &sub, &untracked] {
+            fs::create_dir_all(path.as_path()).unwrap();
+        }
+        assert!(git(repo.as_path(), &["init", "-q", "-b", "fix"]));
+        fs::write(repo.join("file").as_path(), "hello\n").unwrap();
+        assert!(git(repo.as_path(), &["add", "file"]));
+        assert!(git(repo.as_path(), &["commit", "-q", "-m", "init"]));
+
+        let (wake_git, git_woken) = mpsc::sync_channel(1);
+        let (wake_github, _github_woken) = mpsc::sync_channel(1);
+        let (wake_projects, _projects_woken) = mpsc::sync_channel(1);
+        let core = crate::core::start(crate::core::Wakes {
+            git: wake_git.clone(),
+            github: wake_github,
+            projects: wake_projects,
+        })
+        .unwrap();
+        let repo_dir = Dir::parse(repo.to_str().unwrap()).unwrap();
+        let later_dir = Dir::parse(later_sub.to_str().unwrap()).unwrap();
+        let make_terminal = |id: u32, cwd: Dir| {
+            crate::core::Located::Shown(crate::core::Shown::Listed {
+                key: TerminalKey {
+                    id: NonZeroU32::new(id).unwrap(),
+                    made: OwnMade::from_nanos(u64::from(id) * 10),
+                },
+                cwd: Some(cwd),
+                titled: None,
+                program: crate::core::Program::Ended,
+            })
+        };
+        core.send(crate::core::Command::Terminals(BTreeMap::from([
+            (ViewId::of(1).unwrap(), make_terminal(1, repo_dir.clone())),
+            (ViewId::of(2).unwrap(), make_terminal(2, later_dir.clone())),
+        ])))
+        .unwrap();
+
+        let refresher =
+            super::follow(core.clone(), wake_git, git_woken, Duration::from_mins(5)).unwrap();
+        let status_of = |core: &mpsc::SyncSender<crate::core::Command>, target: &Dir| {
+            let host = crate::core::ask(core, crate::core::Command::HostAll)?.to_api();
+            let status = host
+                .git_statuses
+                .iter()
+                .find(|it| it.dir == target.as_str())?;
+            lune_protocol::git::GitStatus::of_api(status)
+        };
+        let branch_of =
+            |core: &mpsc::SyncSender<crate::core::Command>, target: &Dir| match status_of(
+                core, target,
+            )? {
+                lune_protocol::git::GitStatus::Checkout {
+                    head: lune_protocol::git::Head::Branch { name, .. },
+                    ..
+                } => Some(name.as_str().to_owned()),
+                _ => None,
+            };
+        lune_waits::eventually(
+            "git follow reads repo branch and caches missing subdir outside",
+            || {
+                let repo_ready = branch_of(&core, &repo_dir).as_deref() == Some("fix");
+                let later_outside = matches!(
+                    status_of(&core, &later_dir),
+                    Some(lune_protocol::git::GitStatus::Outside)
+                );
+                (repo_ready && later_outside).then_some(())
+            },
+        );
+
+        let stale = crate::core::ask(&core, |answer| crate::core::Command::GitStatus {
+            dir: repo_dir.clone(),
+            status: lune_protocol::git::GitStatus::Checkout {
+                repository: None,
+                head: lune_protocol::git::Head::Detached,
+                changes: lune_protocol::git::Changes::default(),
+                stashes: 0,
+            },
+            why: None,
+            answer,
+        });
+        assert!(matches!(
+            stale,
+            Some(crate::core::GitStatusStored::Published { .. })
+        ));
+        assert_eq!(
+            branch_of(&core, &repo_dir),
+            None,
+            "core holds the stale detached snapshot"
+        );
+
+        fs::create_dir(later_sub.as_path()).unwrap();
+        let sub_dir = Directory::parse(sub.to_str().unwrap().to_owned()).unwrap();
+        let outcome = refresher.refresh(&sub_dir);
+        let super::RefreshOutcome::Refreshed(version) = outcome else {
+            panic!("refresh must return Refreshed with local version, got {outcome:?}");
+        };
+        assert_eq!(
+            version,
+            crate::core::ask(&core, crate::core::Command::HostLocal)
+                .unwrap()
+                .version(),
+            "refresh version matches published core local version"
+        );
+        assert_eq!(
+            branch_of(&core, &repo_dir).as_deref(),
+            Some("fix"),
+            "refresh restores the live branch in core before returning"
+        );
+        assert_eq!(
+            branch_of(&core, &later_dir).as_deref(),
+            Some("fix"),
+            "refresh also updates a tracked subdir previously cached as Placed::Outside"
+        );
+
+        let stale_again = crate::core::ask(&core, |answer| crate::core::Command::GitStatus {
+            dir: repo_dir.clone(),
+            status: lune_protocol::git::GitStatus::Checkout {
+                repository: None,
+                head: lune_protocol::git::Head::Detached,
+                changes: lune_protocol::git::Changes::default(),
+                stashes: 0,
+            },
+            why: None,
+            answer,
+        });
+        assert!(matches!(
+            stale_again,
+            Some(crate::core::GitStatusStored::Published { .. })
+        ));
+        assert_eq!(branch_of(&core, &repo_dir), None);
+        let trailing_dir = Directory::parse(format!("{}/", sub.to_str().unwrap())).unwrap();
+        assert!(
+            matches!(
+                refresher.refresh(&trailing_dir),
+                super::RefreshOutcome::Refreshed(_)
+            ),
+            "refresh accepts valid non-normalized directories"
+        );
+        assert_eq!(
+            branch_of(&core, &repo_dir).as_deref(),
+            Some("fix"),
+            "refresh with a trailing slash restores the live branch in core before returning"
+        );
+
+        let untracked_dir = Directory::parse(untracked.to_str().unwrap().to_owned()).unwrap();
+        assert_eq!(
+            refresher.refresh(&untracked_dir),
+            super::RefreshOutcome::Untracked,
+            "untracked directory reports Untracked rather than Refreshed"
+        );
+        assert_eq!(branch_of(&core, &repo_dir).as_deref(), Some("fix"));
+
+        let missing_dir =
+            Directory::parse(root.join("missing").to_str().unwrap().to_owned()).unwrap();
+        assert_eq!(
+            refresher.refresh(&missing_dir),
+            super::RefreshOutcome::Untracked,
+            "nonexistent untracked path reports Untracked"
+        );
+    }
+
+    #[test]
+    fn refresher_reports_failed_when_git_status_fails_on_tracked_dir() {
+        use lune_domain::mux::{OwnMade, TerminalKey};
+        use lune_domain::projects::ViewId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = AbsPath::canonical(dir.path()).unwrap();
+        let repo = root.join("repo");
+        fs::create_dir_all(repo.as_path()).unwrap();
+        assert!(git(repo.as_path(), &["init", "-q", "-b", "fix"]));
+        fs::write(repo.join("file").as_path(), "hello\n").unwrap();
+        assert!(git(repo.as_path(), &["add", "file"]));
+        assert!(git(repo.as_path(), &["commit", "-q", "-m", "init"]));
+
+        let (wake_git, git_woken) = mpsc::sync_channel(1);
+        let (wake_github, _github_woken) = mpsc::sync_channel(1);
+        let (wake_projects, _projects_woken) = mpsc::sync_channel(1);
+        let core = crate::core::start(crate::core::Wakes {
+            git: wake_git.clone(),
+            github: wake_github,
+            projects: wake_projects,
+        })
+        .unwrap();
+        let repo_dir = Dir::parse(repo.to_str().unwrap()).unwrap();
+        let terminal = crate::core::Located::Shown(crate::core::Shown::Listed {
+            key: TerminalKey {
+                id: NonZeroU32::new(1).unwrap(),
+                made: OwnMade::from_nanos(10),
+            },
+            cwd: Some(repo_dir.clone()),
+            titled: None,
+            program: crate::core::Program::Ended,
+        });
+        core.send(crate::core::Command::Terminals(BTreeMap::from([(
+            ViewId::of(1).unwrap(),
+            terminal,
+        )])))
+        .unwrap();
+
+        let refresher =
+            super::follow(core.clone(), wake_git, git_woken, Duration::from_mins(5)).unwrap();
+        lune_waits::eventually("git follow reads initial status", || {
+            let host = crate::core::ask(&core, crate::core::Command::HostAll)?.to_api();
+            host.git_statuses
+                .iter()
+                .any(|it| it.dir == repo_dir.as_str())
+                .then_some(())
+        });
+
+        fs::write(repo.join(".git/index").as_path(), b"corrupt").unwrap();
+        let dir_req = Directory::parse(repo.to_str().unwrap().to_owned()).unwrap();
+        assert_eq!(
+            refresher.refresh(&dir_req),
+            super::RefreshOutcome::Failed,
+            "failed git status reports Failed instead of Refreshed"
+        );
+    }
+
+    #[test]
+    fn settle_exits_immediately_when_refresh_arrives() {
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, requests) = super::Refresher::pair(wake.clone());
+        let dir = Directory::parse("/tmp/lune-settle-test".to_owned()).unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut pending = Vec::with_capacity(super::REFRESHES_MAX);
+            super::settle_without_refreshes(&woken, &requests, &mut pending);
+            pending.len()
+        });
+        let (done, _waited) = mpsc::sync_channel(1);
+        refresher
+            .requests
+            .try_send(super::Refresh { dir, done })
+            .unwrap();
+        super::wake_up(&wake);
+        assert_eq!(handle.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn refresher_reports_full_timed_out_and_disconnected_outcomes() {
+        let dir = Directory::parse("/tmp/lune-refresher-test".to_owned()).unwrap();
+
+        let (wake, _woken) = mpsc::sync_channel(1);
+        let (refresher, requests) = super::Refresher::pair(wake);
+        drop(requests);
+        assert_eq!(
+            refresher.refresh(&dir),
+            super::RefreshOutcome::Disconnected,
+            "dropped refresh receiver reports Disconnected"
+        );
+
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, requests) = super::Refresher::pair(wake);
+        let reader = std::thread::spawn(move || {
+            let _dropped = lune_waits::heard("refresh request reaches receiver", &requests);
+        });
+        assert_eq!(
+            refresher.refresh(&dir),
+            super::RefreshOutcome::Disconnected,
+            "dropped reply sender reports Disconnected"
+        );
+        reader.join().unwrap();
+        assert_eq!(woken.try_recv(), Ok(()));
+
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, _requests) = super::Refresher::pair(wake);
+        let mut held = Vec::with_capacity(super::REFRESHES_MAX);
+        for _ in 0..super::REFRESHES_MAX {
+            let (done, waiter) = mpsc::sync_channel(1);
+            refresher
+                .requests
+                .try_send(super::Refresh {
+                    dir: dir.clone(),
+                    done,
+                })
+                .unwrap();
+            held.push(waiter);
+        }
+        assert_eq!(
+            refresher.refresh(&dir),
+            super::RefreshOutcome::Full,
+            "saturated queue reports Full"
+        );
+        assert_eq!(woken.try_recv(), Ok(()));
+        drop(held);
+
+        let (wake, woken) = mpsc::sync_channel(1);
+        let (refresher, _requests) = super::Refresher::pair(wake);
+        assert_eq!(
+            refresher.refresh_within(&dir, Duration::from_millis(1)),
+            super::RefreshOutcome::TimedOut,
+            "unacknowledged refresh reports TimedOut"
+        );
+        assert_eq!(woken.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn place_within_distinguishes_outside_from_git_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AbsPath::canonical(dir.path()).unwrap();
+        let plain = root.join("plain");
+        let missing = root.join("missing");
+        let regular = root.join("file");
+        let repo = root.join("repo");
+        let bare = root.join("bare.git");
+        let broken_gitfile = root.join("broken-gitfile");
+        let invalid_gitfile = root.join("invalid-gitfile");
+        for path in [&plain, &repo, &bare, &broken_gitfile, &invalid_gitfile] {
+            fs::create_dir_all(path.as_path()).unwrap();
+        }
+        fs::write(regular.as_path(), "content\n").unwrap();
+        assert!(git(repo.as_path(), &["init", "-q", "-b", "main"]));
+        assert!(git(bare.as_path(), &["init", "--bare", "-q"]));
+        fs::write(
+            broken_gitfile.join(".git").as_path(),
+            "gitdir: /nonexistent/path/for/lune-test\n",
+        )
+        .unwrap();
+        fs::write(invalid_gitfile.join(".git").as_path(), "not a gitdir\n").unwrap();
+
+        assert!(matches!(
+            super::place_within(repo.as_path(), super::REFRESH_WAIT_MAX),
+            super::PlaceOutcome::In(_)
+        ));
+        for outside in [
+            plain.as_path(),
+            missing.as_path(),
+            regular.as_path(),
+            repo.join(".git").as_path(),
+            bare.as_path(),
+        ] {
+            assert!(
+                super::place_within(outside, super::REFRESH_WAIT_MAX)
+                    == super::PlaceOutcome::Outside,
+                "{} should classify as Outside",
+                outside.display()
+            );
+        }
+        for broken in [broken_gitfile.as_path(), invalid_gitfile.as_path()] {
+            assert!(
+                super::place_within(broken, super::REFRESH_WAIT_MAX)
+                    == super::PlaceOutcome::Unanswered,
+                "{} should classify as Unanswered",
+                broken.display()
+            );
+        }
+        assert!(!super::outside_place(
+            b"fatal: detected dubious ownership in repository at '/tmp/repo'\n"
+        ));
+        assert!(!super::outside_place(
+            b"fatal: cannot change to '/tmp/secret': Permission denied\n"
+        ));
+    }
+
+    #[test]
+    fn plan_refreshes_excludes_unqueried_nested_repo_from_parent_worktree() {
+        use lune_domain::mux::{OwnMade, TerminalKey};
+        use lune_domain::projects::ViewId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = AbsPath::canonical(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let sub = repo.join("sub");
+        let nested = repo.join("nested");
+        let nested_sub = nested.join("inner");
+        let submodule = repo.join("submodule");
+        for path in [&repo, &sub, &nested, &nested_sub, &submodule] {
+            fs::create_dir_all(path.as_path()).unwrap();
+        }
+        assert!(git(repo.as_path(), &["init", "-q", "-b", "main"]));
+        assert!(git(nested.as_path(), &["init", "-q", "-b", "main"]));
+        fs::write(submodule.join(".git").as_path(), "gitdir: ../nested/.git\n").unwrap();
+
+        let (wake, _woken) = mpsc::sync_channel(1);
+        let core = crate::core::start(crate::core::Wakes {
+            git: mpsc::sync_channel(1).0,
+            github: mpsc::sync_channel(1).0,
+            projects: mpsc::sync_channel(1).0,
+        })
+        .unwrap();
+        let mut follow = super::Follow::new(wake);
+        let repo_dir = Dir::parse(repo.to_str().unwrap()).unwrap();
+        let sub_dir = Dir::parse(sub.to_str().unwrap()).unwrap();
+        let git_dir = Dir::parse(repo.join(".git").to_str().unwrap()).unwrap();
+        let nested_dir = Dir::parse(nested.to_str().unwrap()).unwrap();
+        let nested_sub_dir = Dir::parse(nested_sub.to_str().unwrap()).unwrap();
+        let submodule_dir = Dir::parse(submodule.to_str().unwrap()).unwrap();
+        let make_terminal = |id: u32, cwd: Dir| {
+            crate::core::Located::Shown(crate::core::Shown::Listed {
+                key: TerminalKey {
+                    id: NonZeroU32::new(id).unwrap(),
+                    made: OwnMade::from_nanos(u64::from(id) * 10),
+                },
+                cwd: Some(cwd),
+                titled: None,
+                program: crate::core::Program::Ended,
+            })
+        };
+        core.send(crate::core::Command::Terminals(BTreeMap::from([
+            (ViewId::of(1).unwrap(), make_terminal(1, repo_dir.clone())),
+            (ViewId::of(2).unwrap(), make_terminal(2, sub_dir.clone())),
+            (ViewId::of(3).unwrap(), make_terminal(3, git_dir)),
+            (ViewId::of(4).unwrap(), make_terminal(4, nested_dir)),
+            (ViewId::of(5).unwrap(), make_terminal(5, nested_sub_dir)),
+            (ViewId::of(6).unwrap(), make_terminal(6, submodule_dir)),
+        ])))
+        .unwrap();
+        let dirs = crate::core::ask(&core, crate::core::Command::Dirs).unwrap();
+        let (done, _waited) = mpsc::sync_channel(1);
+        let pending = [super::Refresh {
+            dir: Directory::parse(repo.to_str().unwrap().to_owned()).unwrap(),
+            done,
+        }];
+
+        let (plans, forced) = follow.plan_refreshes(&dirs, &pending);
+        assert_eq!(forced, BTreeSet::from([repo_dir.clone(), sub_dir.clone()]));
+        let [super::RefreshPlan::Matched(matched)] = plans.as_slice() else {
+            panic!("expected one matched refresh plan");
+        };
+        assert_eq!(
+            matched.iter().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([repo_dir, sub_dir])
+        );
     }
 }

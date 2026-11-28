@@ -14,7 +14,7 @@ use luned::api::{
     KeepChecksRequest, ListContentsRequest, ListRepositoriesRequest, ListRepositoriesResponse,
     ListSkillsRequest, On, StartFlowRequest, TranscriptEndsResponse,
 };
-use luned::asks::{self, Asked, Step};
+use luned::asks::{self, AskWire, Asked, Step};
 use luned::checks::{self, Failed, Failing, Log, PullPage};
 use luned::images::{self, Png};
 use luned::issues::{self, Filed, Filing, Remote, Unfiled};
@@ -210,12 +210,16 @@ impl Luned {
         if !wanted.still() {
             return None;
         }
-        let request = asked.asked(self.asked_on());
+        let wire = asked.to_wire(self.asked_on());
         let (patience, daemon) = (self.patience, self.daemon.clone());
         let on = self.on.destination();
         let deadline = Instant::now() + asks::TURN + patience.waits();
         self.tasks.block_on(async move {
-            let steps = match daemon.ask(patience, request).await {
+            let steps = match wire {
+                AskWire::General(request) => daemon.ask(patience, request).await,
+                AskWire::Review(request) => daemon.ask_review(patience, request).await,
+            };
+            let steps = match steps {
                 Ok(steps) => steps,
                 Err(unasked) => return Some(Err(unasked.said(on))),
             };
@@ -683,6 +687,7 @@ mod tests {
 
         let unnamed = AskResponse {
             step: Some(ask_response::Step::Session("../x".to_owned())),
+            runner: None,
         };
         let none = heard_of(stuck(vec![Ok(unnamed), Ok(said.answer())]), true);
         let why = "nixos: session: \"../x\" names no session".to_owned();

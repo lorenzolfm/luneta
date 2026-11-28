@@ -73,6 +73,26 @@ fn start_in(stat: &str) -> Option<String> {
 
 pub struct Exit(OwnedFd);
 
+fn poll_pidfd_ready(fd: &OwnedFd) -> io::Result<bool> {
+    let mut fds = [PollFd::new(fd, PollFlags::IN)];
+    let zero = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    match retry_on_intr(|| poll(&mut fds, Some(&zero))) {
+        Ok(0) => Ok(false),
+        Ok(count) => {
+            assert_eq!(count, 1, "poll checked one pidfd");
+            assert!(
+                !fds[0].revents().is_empty(),
+                "a ready pidfd reported an event"
+            );
+            Ok(true)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 impl Exit {
     pub fn watch(pid: Pid) -> io::Result<Option<Exit>> {
         match pidfd_open(pid, PidfdFlags::empty()) {
@@ -86,27 +106,18 @@ impl Exit {
         pidfd_send_signal(&self.0, signal)
     }
 
+    pub fn has_exited(&self) -> io::Result<bool> {
+        poll_pidfd_ready(&self.0)
+    }
+
     pub async fn wait(self) -> io::Result<()> {
         let ready = readable_fd(self.0)?;
         for _ in 0..SPURIOUS_WAKES_MAX {
             let mut guard = ready.readable().await?;
-            let mut fds = [PollFd::new(ready.get_ref(), PollFlags::IN)];
-            let zero = Timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            match retry_on_intr(|| poll(&mut fds, Some(&zero))) {
-                Ok(0) => guard.clear_ready(),
-                Ok(count) => {
-                    assert_eq!(count, 1, "poll checked one pidfd");
-                    assert!(
-                        !fds[0].revents().is_empty(),
-                        "a ready pidfd reported an event"
-                    );
-                    return Ok(());
-                }
-                Err(error) => return Err(error.into()),
+            if poll_pidfd_ready(ready.get_ref())? {
+                return Ok(());
             }
+            guard.clear_ready();
         }
         Err(io::Error::other(
             "pidfd woke too many times without becoming readable",

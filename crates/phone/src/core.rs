@@ -21,7 +21,7 @@ use tower::service_fn;
 
 use crate::api::change_projects_request::{
     Change, CloseView, CloseWorktree, RenameProject, RenameTerminal, RenameWorktree,
-    ReorderProjects, ReorderWorktrees,
+    ReorderProjects, ReorderWorktrees, SeenViews,
 };
 use crate::api::daemon_client::DaemonClient;
 use crate::api::{self, On};
@@ -606,10 +606,11 @@ impl Core {
         on: Option<String>,
         worktree: u64,
         seen: Vec<u64>,
+        seen_browsers: Option<Vec<u64>>,
     ) -> Result<(), Unanswered> {
         self.changed(
             self::on(on),
-            Change::CloseWorktree(CloseWorktree { worktree, seen }),
+            close_worktree_change(worktree, seen, seen_browsers),
         )
         .await
     }
@@ -845,6 +846,7 @@ impl Core {
             dir,
             words,
             repository,
+            harness: None,
         };
         self.on_runtime(async move {
             let said = rpc
@@ -1117,6 +1119,14 @@ async fn watched(
     }
 }
 
+fn close_worktree_change(worktree: u64, seen: Vec<u64>, seen_browsers: Option<Vec<u64>>) -> Change {
+    Change::CloseWorktree(CloseWorktree {
+        worktree,
+        seen,
+        seen_browsers: seen_browsers.map(|ids| SeenViews { ids }),
+    })
+}
+
 fn chance() -> u64 {
     RandomState::new().build_hasher().finish()
 }
@@ -1143,6 +1153,7 @@ impl Conversation {
             marked_issues: marked.issues,
             marked_pulls: marked.pulls,
             review_only: false,
+            harness: None,
         };
         let (tell, told) = mpsc::channel(STEPS_HELD);
         let talk = Talk {
@@ -1542,5 +1553,33 @@ mod tests {
                 "a gRPC NotFound from local luned still proves luned was reached and wakes the watch",
             );
         });
+    }
+
+    #[test]
+    fn close_worktree_threads_seen_browsers_through_when_known() {
+        assert_eq!(
+            close_worktree_change(5, vec![1, 2], Some(vec![20, 21])),
+            Change::CloseWorktree(CloseWorktree {
+                worktree: 5,
+                seen: vec![1, 2],
+                seen_browsers: Some(SeenViews { ids: vec![20, 21] }),
+            })
+        );
+        assert_eq!(
+            close_worktree_change(5, vec![1], Some(Vec::new())),
+            Change::CloseWorktree(CloseWorktree {
+                worktree: 5,
+                seen: vec![1],
+                seen_browsers: Some(SeenViews { ids: Vec::new() }),
+            })
+        );
+        assert_eq!(
+            close_worktree_change(5, vec![1], None),
+            Change::CloseWorktree(CloseWorktree {
+                worktree: 5,
+                seen: vec![1],
+                seen_browsers: None,
+            })
+        );
     }
 }

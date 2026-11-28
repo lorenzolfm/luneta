@@ -85,9 +85,9 @@ lune info
   than this lune. `lune watch [--after <pid>:<seq>] [--changes]` is for
   programs, not for you.
 
-In lune's ask box, only the commands its prompt lists run, and Claude Code
-denies the others. Where one you need is denied there, tell the user to run it
-in a terminal instead.
+In lune's ask box, only the commands its prompt lists run, and the others are
+denied. Where one you need is denied there, tell the user to run it in a
+terminal instead.
 
 ## What the user does in lune
 
@@ -106,6 +106,7 @@ each action by name. When they ask you for one, tell them which:
   start page) beside the view they are on.
 - "close the view", "close the worktree" and "close the project" end the
   shells and agents in their views.
+- "Revive last view" (`Super T`) reopens the most recently closed view.
 - "/thermo-nuclear-review", "/tigerstyle" and
   "/make-illegal-states-unrepresentable" start an agent on that skill beside
   the view they are on. "Search skills" finds any other skill.

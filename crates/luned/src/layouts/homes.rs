@@ -240,7 +240,9 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use lune_domain::projects::{Change, Dir, Id, Made, Placed, Projects, Ran, Runs, Size, Spot};
+    use lune_domain::projects::{
+        Arranged, Change, Dir, Id, Made, Placed, Projects, Ran, Runs, Size, Spot,
+    };
     use lune_domain::projects::{Terminal, TerminalViewId, View, WorktreeId};
     use lune_waits::eventually;
 
@@ -291,7 +293,7 @@ mod tests {
         for &folder in folders {
             let id = projects.fresh_terminal(&mut || draw(&projects)).unwrap();
             let placed = if ids.is_empty() {
-                Placed::Alone
+                Placed::Alone(Arranged::Tabs)
             } else {
                 projects
                     .find(worktree)

@@ -827,6 +827,17 @@ impl Shared {
         .await
     }
 
+    pub async fn ask_review(
+        &self,
+        answer: Answer,
+        request: api::AskReviewRequest,
+    ) -> Result<Held<Streaming<api::AskResponse>>, Unasked> {
+        self.hold_stream(answer, |mut daemon| async move {
+            daemon.ask_review(request).await
+        })
+        .await
+    }
+
     pub async fn paste(
         &self,
         answer: Answer,
@@ -1742,7 +1753,7 @@ mod tests {
     use crate::api::daemon_client::DaemonClient;
     use crate::api::daemon_server::{Daemon as DaemonService, DaemonServer};
     use crate::api::{
-        self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest,
+        self, AnswerRequest, AskRequest, AskResponse, AskReviewRequest, ChangeProjectsRequest,
         ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
         IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
         KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
@@ -1871,6 +1882,7 @@ mod tests {
 
     #[tonic::async_trait]
     impl DaemonService for Stub {
+        type AskReviewStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
         type AskStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
         type FileIssueStream =
             Pin<Box<dyn Stream<Item = Result<FileIssueResponse, Status>> + Send>>;
@@ -2004,7 +2016,11 @@ mod tests {
                     let chunk = "x".repeat(16 * 1024);
                     for _ in 0..256 {
                         let step = Some(api::ask_response::Step::Said(chunk.clone()));
-                        if sent.send(Ok(AskResponse { step })).await.is_err() {
+                        if sent
+                            .send(Ok(AskResponse { step, runner: None }))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                         flooded.fetch_add(chunk.len(), Ordering::Relaxed);
@@ -2014,9 +2030,16 @@ mod tests {
             }
             let (sent, heard) = mpsc::channel(1);
             let step = Some(api::ask_response::Step::Said("held".to_owned()));
-            let _ = sent.send(Ok(AskResponse { step })).await;
+            let _ = sent.send(Ok(AskResponse { step, runner: None })).await;
             let hold = ReceiverStream::new(heard).chain(tokio_stream::pending());
             Ok(GrpcResponse::new(Box::pin(hold)))
+        }
+
+        async fn ask_review(
+            &self,
+            _: GrpcRequest<AskReviewRequest>,
+        ) -> Result<GrpcResponse<Self::AskReviewStream>, Status> {
+            Err(unserved())
         }
 
         async fn list_skills(

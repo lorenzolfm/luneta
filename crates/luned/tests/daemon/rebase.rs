@@ -2,26 +2,40 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 
+use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::said::Said;
 use lune_waits::eventually;
 use luned::Directory;
 use luned::api::daemon_client::DaemonClient;
 use luned::api::projects::Held;
+use luned::api::remote::Reached;
 use luned::api::{On, RebaseRequest};
-use luned::rebases::{self, Came, Rebased};
+use luned::rebases::{self, Came, Rebased, StatusRefresh};
 use serde_json::json;
 use tonic::Code;
 
 use crate::host::{Host, LUNE, PATIENT, answered, folder_in, script, start};
 use crate::own::Owned;
-use crate::projects::project;
+use crate::projects::{project, worktree};
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::starts::{Window, makes_shells, shown, work_in};
 use crate::worktree::{cloned_as_wt, git};
 
 const UNFINISHED: i32 = 4;
 
-const REBASE: &str = "\x1b[97;3ugr";
+const MENU: &str = "\x1b[97;3u";
+
+const ESC: &str = "\x1b[27u";
+
+const MENU_ROOT: &str = "n  New ▸";
+
+const MENU_GIT: &str = "g  Git ▸";
+
+const MENU_CLOSES: &str = "<ESC> - Close";
+
+const MENU_ATTEMPTS_MAX: u32 = 128;
+
+const _: () = assert!(MENU_ATTEMPTS_MAX > 0);
 
 const SAYS_WHERE: &str = "printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
@@ -426,15 +440,140 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
                 .await
                 .unwrap();
             let answer = answer.into_inner().message().await.unwrap().unwrap();
-            let rebased = Rebased::of_api(answer, Some(&fix)).unwrap();
+            let (rebased, refresh) = Rebased::of_api_with_refresh(answer, Some(&fix)).unwrap();
             assert_eq!(
                 (rebased.branch.as_str(), rebased.onto.as_str()),
                 ("fix", "origin/main")
             );
             assert_eq!(rebased.came, came);
+            refresh
         };
-        rebase(Came::Clean { ahead: 1 }).await;
-        rebase(Came::Already).await;
+        assert_eq!(
+            rebase(Came::Clean { ahead: 1 }).await,
+            Some(StatusRefresh::Untracked)
+        );
+        assert_eq!(rebase(Came::Already).await, Some(StatusRefresh::Untracked));
+    });
+
+    let tracked = project(&far, &scratch.join("n"), None);
+    worktree(&far, tracked, &repository.fix);
+    let fix_dir = repository.fix.to_str().unwrap();
+    let far_branch = |host: &luned::api::remote::Host| {
+        let status = host
+            .git_statuses
+            .iter()
+            .find(|status| status.dir == fix_dir)?;
+        match GitStatus::of_api(status)? {
+            GitStatus::Checkout {
+                head: Head::Branch { name, .. },
+                ..
+            } => Some(name.as_str().to_owned()),
+            _ => None,
+        }
+    };
+    reached(&here, "far", |host| {
+        far_branch(host).as_deref() == Some("fix")
+    });
+
+    commit(&repository.up, "more", "m\n");
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        let dir = Directory::parse(fix_dir.to_owned()).unwrap();
+        let fix = Said::new("fix".to_owned()).unwrap();
+        let answer = daemon
+            .rebase(rebases::asked(
+                Some(On {
+                    destination: "far".to_owned(),
+                }),
+                &dir,
+                Some(&fix),
+            ))
+            .await
+            .unwrap();
+        let answer = answer.into_inner().message().await.unwrap().unwrap();
+        let (rebased, refresh) = Rebased::of_api_with_refresh(answer, Some(&fix)).unwrap();
+        assert_eq!(rebased.came, Came::Clean { ahead: 1 });
+        assert!(
+            matches!(refresh, Some(StatusRefresh::Refreshed(_))),
+            "bridged tracked rebase reports Refreshed: {refresh:?}"
+        );
+    });
+    let far_host = here
+        .host()
+        .remotes
+        .into_iter()
+        .find(|remote| remote.destination == "far")
+        .and_then(|remote| match remote.reached {
+            Some(Reached::Host(host)) => Some(host),
+            _ => None,
+        })
+        .expect("far remote host is present immediately after bridged rebase");
+    assert_eq!(
+        far_branch(&far_host).as_deref(),
+        Some("fix"),
+        "local KnownRemotes reflects the post-rebase branch before bridged RebaseResponse returns"
+    );
+}
+
+fn screen_shows(screen: &[String], text: &str) -> bool {
+    assert!(!screen.is_empty(), "screen snapshot has rows");
+    assert!(!text.is_empty(), "search text is non-empty");
+    screen.iter().any(|line| line.contains(text))
+}
+
+enum MenuWait {
+    Opening { retries_left: u32 },
+    Closing { retries_left: u32 },
+}
+
+fn open_menu_and_rebase(window: &mut Window) {
+    let before = window.screen();
+    assert!(
+        !screen_shows(&before, MENU_CLOSES),
+        "no menu or overlay is open before triggering rebase"
+    );
+    let mut state = MenuWait::Opening {
+        retries_left: MENU_ATTEMPTS_MAX - 1,
+    };
+    window.send(MENU);
+    eventually("lune opens the menu offering Git", || {
+        let screen = window.screen();
+        let open = screen_shows(&screen, MENU_CLOSES);
+        match state {
+            MenuWait::Opening { retries_left } => {
+                if !open {
+                    return None;
+                }
+                if screen_shows(&screen, MENU_GIT) {
+                    assert!(
+                        screen_shows(&screen, MENU_ROOT),
+                        "root menu is open when Git is offered"
+                    );
+                    return Some(());
+                }
+                let Some(next) = retries_left.checked_sub(1) else {
+                    panic!(
+                        "menu opened {MENU_ATTEMPTS_MAX} times without offering Git: {screen:?}"
+                    );
+                };
+                window.send(ESC);
+                state = MenuWait::Closing { retries_left: next };
+                None
+            }
+            MenuWait::Closing { retries_left } => {
+                if open {
+                    return None;
+                }
+                window.send(MENU);
+                state = MenuWait::Opening { retries_left };
+                None
+            }
+        }
+    });
+    window.send("gr");
+    eventually("lune closes the menu after gr", || {
+        let screen = window.screen();
+        (!screen_shows(&screen, MENU_CLOSES)).then_some(())
     });
 }
 
@@ -461,23 +600,43 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
 
     let mut window = Window::open(host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    window.send(SAYS_WHERE);
-    eventually("the view's row says its branch", || {
-        window.shows(" fix").then_some(())
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
     });
-    window.send(REBASE);
+    window.send(SAYS_WHERE);
+    window.seated("work/main");
+    eventually("the view's row says its branch and folder", || {
+        let screen = window.screen();
+        (screen_shows(&screen, " fix") && screen_shows(&screen, " work/main")).then_some(())
+    });
+    open_menu_and_rebase(&mut window);
     let clean = "fix is rebased onto origin/main, one commit on top";
     eventually("a note says it is rebased", || {
         window.shows(clean).then_some(())
     });
     assert!(!asked.exists(), "a clean rebase starts no agent");
+    let work_dir = fs::canonicalize(&dir.path).unwrap();
+    let status = host
+        .host()
+        .git_statuses
+        .into_iter()
+        .find(|status| status.dir == work_dir.to_str().unwrap())
+        .and_then(|status| GitStatus::of_api(&status));
+    assert!(
+        matches!(
+            status,
+            Some(GitStatus::Checkout { head: Head::Branch { ref name, .. }, .. })
+                if name.as_str() == "fix"
+        ),
+        "luned refreshed the branch status before reporting rebase completion: {status:?}"
+    );
 
     commit(&dir.path, "theirs", "mine\n");
     commit(&up, "theirs", "yours\n");
     eventually("the view's row sees the commit on fix", || {
         window.shows(" fix +2 -1").then_some(())
     });
-    window.send(REBASE);
+    open_menu_and_rebase(&mut window);
     let agent = eventually("an agent starts on the conflicts", || {
         fs::read_to_string(&asked).ok()
     });
@@ -493,4 +652,74 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
     eventually("the agent opens beside the view", || {
         (terminals() == 2).then_some(())
     });
+}
+
+#[test]
+fn a_rebase_from_a_deleted_subdirectory_still_refreshes_the_tracked_worktree() {
+    let owned = Owned::new();
+    let host = &owned.host;
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let (up, fix) = (&repository.up, &repository.fix);
+    let up_sub = up.join("sub");
+    fs::create_dir(&up_sub).unwrap();
+    commit(up, "sub/gone", "a\n");
+    git(fix, &["fetch", "-q", "origin"]);
+    git(fix, &["reset", "-q", "--hard", "origin/main"]);
+    commit(fix, "own", "o\n");
+    git(up, &["rm", "-q", "sub/gone"]);
+    git(up, &["commit", "-q", "-m", "drop sub"]);
+
+    let sub = fix.join("sub");
+    assert!(sub.is_dir(), "subdirectory exists before rebase");
+
+    let tracked = project(host, &scratch.join("n"), None);
+    worktree(host, tracked, fix);
+    let fix_dir = fix.to_str().unwrap();
+    let branch_of = || {
+        let status = host
+            .host()
+            .git_statuses
+            .into_iter()
+            .find(|status| status.dir == fix_dir)?;
+        match GitStatus::of_api(&status)? {
+            GitStatus::Checkout {
+                head: Head::Branch { name, .. },
+                ..
+            } => Some(name.as_str().to_owned()),
+            _ => None,
+        }
+    };
+    eventually("luned tracks the worktree branch before rebase", || {
+        (branch_of().as_deref() == Some("fix")).then_some(())
+    });
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let refresh = runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        let sub_dir = Directory::parse(sub.to_str().unwrap().to_owned()).unwrap();
+        let fix_branch = Said::new("fix".to_owned()).unwrap();
+        let answer = daemon
+            .rebase(rebases::asked(None, &sub_dir, Some(&fix_branch)))
+            .await
+            .unwrap();
+        let answer = answer.into_inner().message().await.unwrap().unwrap();
+        let (rebased, refresh) = Rebased::of_api_with_refresh(answer, Some(&fix_branch)).unwrap();
+        assert_eq!(rebased.came, Came::Clean { ahead: 1 });
+        refresh
+    });
+    assert!(
+        !sub.exists(),
+        "rebase deleted the subdirectory it was invoked from"
+    );
+    assert!(
+        matches!(refresh, Some(StatusRefresh::Refreshed(_))),
+        "rebase from a deleted subdirectory still refreshes its tracked worktree: {refresh:?}"
+    );
+    assert_eq!(branch_of().as_deref(), Some("fix"));
 }

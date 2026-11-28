@@ -13,8 +13,10 @@ use lune_domain::rows::{self, Holds, Project};
 use luned::api::ChangeProjectsResponse;
 use luned::api::change_projects_request::RenameProject;
 use luned::api::change_projects_request::{AddProject, AddWorktree, Change, CloseProject};
-use luned::api::change_projects_request::{Bring, Join, RenameTerminal};
-use luned::api::change_projects_request::{CloseView, CloseWorktree, Pull, Start};
+use luned::api::change_projects_request::{Bring, Join, RenameTerminal, ReviveView};
+use luned::api::change_projects_request::{
+    CloseBrowser, CloseView, CloseWorktree, Pull, SeenViews, Start,
+};
 use luned::api::change_projects_request::{ReorderProjects, ReorderWorktrees};
 use luned::api::change_projects_response::Made;
 use luned::api::make_worktree_response::Landed as Answered;
@@ -394,20 +396,58 @@ pub fn closed(
     machine: &Machine,
     worktree: WorktreeId,
     seen: &[ViewId],
+    seen_browsers: &[ViewId],
 ) -> Result<(), Unchanged> {
-    changed_on(path, on(machine), close(worktree, seen)).map(drop)
+    changed_on(path, on(machine), close(worktree, seen, seen_browsers)).map(drop)
 }
 
 pub fn closed_view(path: &Path, machine: &Machine, terminal: TerminalKey) -> Result<(), Unchanged> {
     let (id, made_at) = (terminal.id.get(), Some(terminal.made.into()));
-    let terminal = Some(luned::api::TerminalKey { id, made_at });
-    let change = Change::CloseView(CloseView { terminal });
+    let terminal = luned::api::TerminalKey { id, made_at };
+    let change = Change::CloseView(CloseView {
+        terminal: Some(terminal),
+    });
     changed_on(path, on(machine), change).map(drop)
 }
 
-fn close(worktree: WorktreeId, seen: &[ViewId]) -> Change {
+pub fn closed_browser_view(path: &Path, machine: &Machine, view: ViewId) -> Result<(), Unchanged> {
+    let change = Change::CloseBrowser(CloseBrowser { view: view.get() });
+    changed_on(path, on(machine), change).map(drop)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Revived {
+    pub worktree: WorktreeId,
+    pub view: ViewId,
+}
+
+pub fn revive_view(path: &Path, machine: &Machine) -> Result<Revived, Unchanged> {
+    let change = Change::ReviveView(ReviveView {});
+    change_answered(path, on(machine), change, Unchanged::of_asked).and_then(revived_of)
+}
+
+fn revived_of(answered: ChangeProjectsResponse) -> Result<Revived, Unchanged> {
+    let ChangeProjectsResponse { made, opened, .. } = answered;
+    let worktree = landed(made)?.worktree();
+    let opened = Opened::of_api(opened).map_err(Unchanged::InDoubt)?;
+    match opened {
+        Some(Opened::View(view)) => Ok(Revived { worktree, view }),
+        other => Err(Unchanged::InDoubt(format!(
+            "lune can't read luned's answer: worktree {worktree} revived {other:?}, not a view"
+        ))),
+    }
+}
+
+fn close(worktree: WorktreeId, seen: &[ViewId], seen_browsers: &[ViewId]) -> Change {
     let (worktree, seen) = (worktree.get(), seen.iter().map(|it| it.get()).collect());
-    Change::CloseWorktree(CloseWorktree { worktree, seen })
+    let seen_browsers = Some(SeenViews {
+        ids: seen_browsers.iter().map(|it| it.get()).collect(),
+    });
+    Change::CloseWorktree(CloseWorktree {
+        worktree,
+        seen,
+        seen_browsers,
+    })
 }
 
 pub fn closed_project(
@@ -416,14 +456,19 @@ pub fn closed_project(
     project: ProjectId,
     worktrees: &[WorktreeId],
     seen: &[ViewId],
+    seen_browsers: &[ViewId],
 ) -> Result<(), Unchanged> {
     let project = project.get();
     let worktrees = worktrees.iter().map(|it| it.get()).collect();
     let seen = seen.iter().map(|it| it.get()).collect();
+    let seen_browsers = Some(SeenViews {
+        ids: seen_browsers.iter().map(|it| it.get()).collect(),
+    });
     let change = Change::CloseProject(CloseProject {
         project,
         worktrees,
         seen,
+        seen_browsers,
     });
     changed_on(path, on(machine), change).map(drop)
 }
@@ -927,6 +972,37 @@ mod tests {
         );
         assert!(matches!(project_of(Some(Made::Project(4))), Ok(id) if id.get() == 4));
         assert!(matches!(landed(Some(Made::Found(5))), Ok(Landed::Found(id)) if id.get() == 5));
+        let revived = |made, opened| {
+            revived_of(ChangeProjectsResponse {
+                made,
+                kept: None,
+                opened,
+            })
+        };
+        let view = Some(luned::api::change_projects_response::Opened::View(9));
+        assert_eq!(
+            revived(Some(Made::Found(5)), view.clone()),
+            Ok(Revived {
+                worktree: WorktreeId::of(5).unwrap(),
+                view: ViewId::of(9).unwrap(),
+            })
+        );
+        assert_eq!(
+            revived(Some(Made::Worktree(6)), view),
+            Ok(Revived {
+                worktree: WorktreeId::of(6).unwrap(),
+                view: ViewId::of(9).unwrap(),
+            })
+        );
+        assert!(matches!(
+            revived(Some(Made::Found(5)), None),
+            Err(Unchanged::InDoubt(_))
+        ));
+        let zero_view = Some(luned::api::change_projects_response::Opened::View(0));
+        assert!(matches!(
+            revived(Some(Made::Found(5)), zero_view),
+            Err(Unchanged::InDoubt(_))
+        ));
     }
 
     #[test]

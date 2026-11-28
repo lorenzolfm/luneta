@@ -8,7 +8,9 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 
-use lune_domain::projects::{Change, Closing, Dir, Made, MoveTo, Parsed, Projects, parse, written};
+use lune_domain::projects::{
+    Change, Closing, Dir, Made, MoveTo, Parsed, Projects, ReviveWorktree, parse, written,
+};
 use lune_domain::projects::{FILE_BYTES_MAX, PATH_BYTES_MAX};
 use lune_domain::projects::{Refused, Relaid, Size, Spot, TerminalViewId, ViewId, WorktreeId};
 
@@ -289,6 +291,21 @@ impl Store {
         self.written_as(&changed)?;
         self.took(changed)?;
         Ok(to)
+    }
+
+    pub fn revive_worktree(&mut self, revive: ReviveWorktree) -> Result<WorktreeId, Failed> {
+        let (changed, worktree) = self
+            .kept()?
+            .revive_worktree(revive, random_id)
+            .map_err(Failed::Refused)?;
+        assert_ne!(
+            self.projects(),
+            Some(&changed),
+            "reviving a worktree changes the projects"
+        );
+        self.written_as(&changed)?;
+        self.took(changed)?;
+        Ok(worktree)
     }
 
     pub fn relaid(&mut self, relaid: Relaid) -> Result<(), Failed> {
@@ -1095,7 +1112,7 @@ mod tests {
             panic!("/a/b is in /a's own worktree");
         };
         let terminal = Terminal::new(store.fresh_terminal().unwrap(), dir("/a"), Runs::Shell);
-        let (placed, size) = (Placed::Alone, Size::of(80, 24).unwrap());
+        let (placed, size) = (Placed::Alone(Arranged::Tabs), Size::of(80, 24).unwrap());
         let view = View::Terminal(terminal);
         store
             .change(Change::Open {
@@ -1270,7 +1287,9 @@ mod tests {
                 size,
             }
         };
-        store.change(opened(first, Placed::Alone)).unwrap();
+        store
+            .change(opened(first, Placed::Alone(Arranged::Tabs)))
+            .unwrap();
         let beside = Placed::Beside {
             at: one,
             towards: Towards::Right,
@@ -1353,7 +1372,9 @@ mod tests {
                 size,
             }
         };
-        store.change(opened(first, Placed::Alone)).unwrap();
+        store
+            .change(opened(first, Placed::Alone(Arranged::Tabs)))
+            .unwrap();
         store
             .change(opened(
                 second,

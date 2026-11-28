@@ -5,6 +5,7 @@ use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use luned::Directory;
+use luned::headless::{self, Harness};
 use luned::issues::{self, Filed, Filing, OnGitHub, Remote, Unfiled};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -77,6 +78,7 @@ enum Stage {
 pub struct Issue {
     number: u64,
     repository: Repository,
+    harness: Harness,
     typed: String,
     kept: Option<u64>,
     sent_to: Option<OnGitHub>,
@@ -84,7 +86,13 @@ pub struct Issue {
 }
 
 impl Issue {
-    pub fn open(number: u64, repository: Repository, kept: &Kept, events: &Sender<Event>) -> Self {
+    pub fn open(
+        number: u64,
+        repository: Repository,
+        harness: Harness,
+        kept: &Kept,
+        events: &Sender<Event>,
+    ) -> Self {
         let due = Due::new(
             events,
             move |remotes: Result<Result<Vec<Remote>, String>, String>| Event::Remotes {
@@ -98,10 +106,10 @@ impl Issue {
                 Luned::on(&on, reach::ANSWER).and_then(|mut luned| luned.issue_remotes(&dir));
             due.pay(Ok(remotes));
         });
-        Issue::new(number, repository, kept)
+        Issue::new(number, repository, harness, kept)
     }
 
-    fn new(number: u64, repository: Repository, kept: &Kept) -> Self {
+    fn new(number: u64, repository: Repository, harness: Harness, kept: &Kept) -> Self {
         let (kept, sent_to, typed) = match kept.oldest(&repository) {
             Some((number, to, words)) => (Some(number), Some(to), words),
             None => (None, None, String::new()),
@@ -109,6 +117,7 @@ impl Issue {
         Issue {
             number,
             repository,
+            harness,
             typed,
             kept,
             sent_to,
@@ -245,7 +254,7 @@ impl Issue {
         let words = self.typed.trim().to_owned();
         let filing = self.picked().cloned().and_then(|to| {
             let filing = Filing::new(self.repository.dir.clone(), to.clone(), &words);
-            Some((to, filing.ok()?))
+            Some((to, filing.ok()?.run_in(self.harness)))
         });
         let Some((to, filing)) = filing else {
             self.close(kept);
@@ -337,7 +346,7 @@ impl Issue {
             } => {
                 let says = format!(
                     "{} writes it as {} does, and gh files it there.",
-                    issues::MODEL,
+                    headless::writer(self.harness, issues::MODEL),
                     remotes[*at].on
                 );
                 let mut lines = brief::paragraphs(&says, inner, dim);
@@ -438,7 +447,7 @@ mod tests {
     }
 
     fn open(number: u64, repository: &Repository, kept: &Kept, remotes: Vec<Remote>) -> Issue {
-        let mut issue = Issue::new(number, repository.clone(), kept);
+        let mut issue = Issue::new(number, repository.clone(), Harness::ClaudeCode, kept);
         issue.listed(Ok(remotes));
         issue
     }
@@ -475,6 +484,17 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn the_box_names_the_harness_you_picked_as_what_writes_the_issue() {
+        let only = vec![remote("origin", "o/lune")];
+        let mut issue = Issue::new(1, repository(Machine::Local), Harness::Pi, &Kept::default());
+        issue.listed(Ok(only));
+        assert_eq!(
+            shown(&issue, 50, 9)[1],
+            "│ pi writes it as o/lune does, and gh files it   │"
+        );
     }
 
     #[test]
@@ -578,7 +598,12 @@ mod tests {
 
     #[test]
     fn the_box_waits_for_the_remotes_and_says_where_none_is_on_github() {
-        let mut issue = Issue::new(1, repository(Machine::Local), &Kept::default());
+        let mut issue = Issue::new(
+            1,
+            repository(Machine::Local),
+            Harness::ClaudeCode,
+            &Kept::default(),
+        );
         assert!(issue.turning());
         typed(&mut issue, "red");
         assert_eq!(issue.key(&key(KeyCode::Enter)), Keyed::Nothing);
@@ -608,7 +633,12 @@ mod tests {
         issue.listed(Ok(fork()));
         assert_eq!(issue.picked(), None);
 
-        let mut unsaid = Issue::new(2, repository(Machine::Local), &Kept::default());
+        let mut unsaid = Issue::new(
+            2,
+            repository(Machine::Local),
+            Harness::ClaudeCode,
+            &Kept::default(),
+        );
         unsaid.listed(Err("git did not say".to_owned()));
         assert_eq!(
             shown(&unsaid, 50, 5)[1],

@@ -20,6 +20,7 @@ pub use crate::terminal::{
 pub use crate::unanswered::{Refusals, Unanswered};
 pub use crate::verbs::{
     Answer, Asks, Came, Filed, Goes, Issue, IssueRepository, Issues, Kept, Landed, Listed, Marked,
-    Order, Outcome, Plan, Pruned, Pull, Pushed, Rebase, Rebased, Screen, Step, Unasked, Waiting,
+    Mergeability, Order, Outcome, Plan, Pruned, Pull, Pushed, Rebase, Rebased, Screen, Step,
+    Unasked, Waiting,
 };
 pub use crate::waits::NonZeroDuration;

@@ -8,7 +8,7 @@ use luned::mux::own::api::terminal::Program;
 use rustix::process::{Pid, test_kill_process};
 
 use crate::host::{Host, LUNE, LUNED, Running, Vars, answered, start};
-use crate::own::{Owned, built_server};
+use crate::own::Owned;
 use crate::projects::{kept, project, worktree};
 use crate::remote::{FakeSsh, hosts};
 
@@ -63,12 +63,7 @@ fn kept_in_home(host: &Host) {
 fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_projects() {
     let mut owned = Owned::new();
     kept_in_home(&owned.host);
-    let server = built_server();
-    let mut mux = owned.host.vars().command(server.to_str().unwrap());
-    mux.arg(owned.host.folder());
-    let mut mux = Running::spawn(mux.stdin(Stdio::null()));
-    let socket = owned.socket();
-    eventually("the server listens", || socket.exists().then_some(()));
+    owned.spawn_mux(|_| {});
     owned.new_terminal(b"kept");
     let listing = owned.listing();
     let Some(Program::Runs(runs)) = &listing.terminals[0].program else {
@@ -96,7 +91,7 @@ fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_pro
             .collect::<Vec<_>>(),
         [says]
     );
-    assert!(mux.exit_status().is_none(), "a plan ends nothing");
+    assert!(owned.mux_exit_status().is_none(), "a plan ends nothing");
     assert!(kept(&owned.host).exists());
 
     let ended = terminate(owned.host.vars(), Some(&plan_in(&planned)));
@@ -111,7 +106,7 @@ fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_pro
         [says]
     );
     owned.daemon_ended("luned ends");
-    mux.ended("lune-mux ends");
+    owned.mux_ended("lune-mux ends");
     bridge.ended("lune bridge ends");
     eventually("the terminal's program ends with lune-mux", || {
         gone(shell).then_some(())
@@ -134,7 +129,7 @@ fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_pro
             .collect::<Vec<_>>(),
         [says]
     );
-    let _daemon = start(owned.host.vars()).unwrap();
+    owned.start_daemon();
     let held = owned
         .host
         .host()
@@ -150,12 +145,7 @@ fn lune_terminate_ends_luned_the_mux_its_terminals_and_lunes_and_forgets_the_pro
 fn lune_terminate_ends_the_luned_that_keeps_the_projects_and_its_mux_from_another_folder() {
     let mut owned = Owned::new();
     kept_in_home(&owned.host);
-    let server = built_server();
-    let mut mux = owned.host.vars().command(server.to_str().unwrap());
-    mux.arg(owned.host.folder());
-    let mut mux = Running::spawn(mux.stdin(Stdio::null()));
-    let socket = owned.socket();
-    eventually("the server listens", || socket.exists().then_some(()));
+    owned.spawn_mux(|_| {});
     let other = tempfile::tempdir().unwrap();
     let there = Vars {
         runtime: Some(other.path()),
@@ -187,7 +177,7 @@ fn lune_terminate_ends_the_luned_that_keeps_the_projects_and_its_mux_from_anothe
     );
     let keeps = "the luned that keeps the projects ends";
     owned.daemon_ended(keeps);
-    mux.ended(&format!("the lune-mux of {keeps}"));
+    owned.mux_ended(&format!("the lune-mux of {keeps}"));
 }
 
 #[test]

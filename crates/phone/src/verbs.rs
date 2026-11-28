@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use crate::api::{
@@ -5,6 +6,8 @@ use crate::api::{
     prunes_response, rebase_response, waiting_response,
 };
 use lune_protocol::CONFLICTED_NAMED_MAX;
+use lune_protocol::github::Mergeability as WireMergeability;
+use lune_protocol::work::{LABELS_MAX, check_full, check_name, check_title};
 
 use crate::model::TerminalKey;
 use crate::unanswered::Unanswered;
@@ -118,6 +121,26 @@ pub struct Issue {
     pub labels: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Mergeability {
+    Mergeable,
+    Conflicting,
+    Unknown,
+    Untold,
+}
+
+impl Mergeability {
+    fn of(said: i32) -> Result<Mergeability, Unanswered> {
+        match WireMergeability::of_api(said) {
+            Ok(Some(WireMergeability::Mergeable)) => Ok(Mergeability::Mergeable),
+            Ok(Some(WireMergeability::Conflicting)) => Ok(Mergeability::Conflicting),
+            Ok(Some(WireMergeability::Unknown)) => Ok(Mergeability::Unknown),
+            Ok(None) => Ok(Mergeability::Untold),
+            Err(why) => Err(Unanswered::unread(why)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Pull {
     pub number: u32,
@@ -125,6 +148,7 @@ pub struct Pull {
     pub draft: bool,
     pub branch: String,
     pub author: Option<String>,
+    pub mergeability: Mergeability,
 }
 
 impl Listed {
@@ -135,14 +159,28 @@ impl Listed {
             list_work_response::Listed::Work(work) => work,
         };
         let issues = match work.issues {
-            Some(list_work_response::work::Issues::Open(open)) => Issues::Open {
-                issues: open.issues.into_iter().map(Issue::of).collect(),
-                more: open.more,
-            },
+            Some(list_work_response::work::Issues::Open(open)) => {
+                check_full("issues", open.issues.len(), open.more).map_err(Unanswered::unread)?;
+                let issues = open
+                    .issues
+                    .into_iter()
+                    .map(Issue::of)
+                    .collect::<Result<Vec<_>, _>>()?;
+                Issues::Open {
+                    issues,
+                    more: open.more,
+                }
+            }
             Some(list_work_response::work::Issues::Off(())) => Issues::Off,
             None => return Err(Unanswered::unread("it says nothing of the issues")),
         };
-        let pulls = work.pulls.into_iter().map(Pull::of).collect();
+        check_full("pull requests", work.pulls.len(), work.more_pulls)
+            .map_err(Unanswered::unread)?;
+        let pulls = work
+            .pulls
+            .into_iter()
+            .map(Pull::of)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Listed::Work {
             issues,
             pulls,
@@ -152,31 +190,52 @@ impl Listed {
 }
 
 impl Issue {
-    fn of(said: list_work_response::Issue) -> Issue {
-        Issue {
-            number: said.number,
+    fn of(said: list_work_response::Issue) -> Result<Issue, Unanswered> {
+        let number = NonZeroU32::new(said.number)
+            .ok_or_else(|| Unanswered::unread("an issue or pull request of number 0"))?;
+        check_title(number, &said.title).map_err(Unanswered::unread)?;
+        if said.labels.len() > LABELS_MAX {
+            return Err(Unanswered::unread(format!(
+                "#{number} has more than {LABELS_MAX} labels"
+            )));
+        }
+        for label in &said.labels {
+            check_name(number, "a label", label).map_err(Unanswered::unread)?;
+        }
+        Ok(Issue {
+            number: number.get(),
             title: said.title,
             labels: said.labels,
-        }
+        })
     }
 }
 
 impl Pull {
-    fn of(said: list_work_response::Pull) -> Pull {
+    fn of(said: list_work_response::Pull) -> Result<Pull, Unanswered> {
         let list_work_response::Pull {
             number,
             title,
             draft,
             branch,
             author,
+            mergeability,
         } = said;
-        Pull {
-            number,
+        let number = NonZeroU32::new(number)
+            .ok_or_else(|| Unanswered::unread("an issue or pull request of number 0"))?;
+        check_title(number, &title).map_err(Unanswered::unread)?;
+        check_name(number, "its branch", &branch).map_err(Unanswered::unread)?;
+        if let Some(author) = &author {
+            check_name(number, "its author", author).map_err(Unanswered::unread)?;
+        }
+        let mergeability = Mergeability::of(mergeability)?;
+        Ok(Pull {
+            number: number.get(),
             title,
             draft,
             branch,
             author,
-        }
+            mergeability,
+        })
     }
 }
 
@@ -458,6 +517,13 @@ impl Rebased {
                 }
             }
         };
+        if let Some(rebase_response::StatusRefresh::RefreshedAt(version)) = said.status_refresh
+            && let Err(why) = lune_protocol::watch::LocalVersion::of_api(version)
+        {
+            return Err(Unanswered::unread(format!(
+                "it sent an invalid refresh version: {why}"
+            )));
+        }
         Ok(Rebased {
             branch: said.branch,
             onto: said.onto,
@@ -595,5 +661,92 @@ mod tests {
             Rebased::of(Some(unsaid)),
             Err(Unanswered::InDoubt { .. })
         ));
+    }
+
+    #[test]
+    fn listed_pulls_carry_mergeability_and_validate_bounds() {
+        let pull = |number, branch: &str, author: Option<&str>, mergeability: i32| {
+            list_work_response::Pull {
+                number,
+                title: "Fix".to_owned(),
+                draft: false,
+                branch: branch.to_owned(),
+                author: author.map(str::to_owned),
+                mergeability,
+            }
+        };
+        let of = |pulls, more_pulls| {
+            let work = list_work_response::Work {
+                issues: Some(list_work_response::work::Issues::Off(())),
+                pulls,
+                more_pulls,
+            };
+            Listed::of(Some(api::ListWorkResponse {
+                listed: Some(list_work_response::Listed::Work(work)),
+            }))
+        };
+        let ok = of(
+            vec![
+                pull(12, "a", None, api::Mergeability::Conflicting.into()),
+                pull(13, "b", Some("me"), api::Mergeability::Mergeable.into()),
+                pull(14, "c", None, api::Mergeability::Unknown.into()),
+                pull(15, "d", None, api::Mergeability::Unspecified.into()),
+            ],
+            false,
+        );
+        assert_eq!(
+            ok,
+            Ok(Listed::Work {
+                issues: Issues::Off,
+                pulls: vec![
+                    Pull {
+                        number: 12,
+                        title: "Fix".to_owned(),
+                        draft: false,
+                        branch: "a".to_owned(),
+                        author: None,
+                        mergeability: Mergeability::Conflicting,
+                    },
+                    Pull {
+                        number: 13,
+                        title: "Fix".to_owned(),
+                        draft: false,
+                        branch: "b".to_owned(),
+                        author: Some("me".to_owned()),
+                        mergeability: Mergeability::Mergeable,
+                    },
+                    Pull {
+                        number: 14,
+                        title: "Fix".to_owned(),
+                        draft: false,
+                        branch: "c".to_owned(),
+                        author: None,
+                        mergeability: Mergeability::Unknown,
+                    },
+                    Pull {
+                        number: 15,
+                        title: "Fix".to_owned(),
+                        draft: false,
+                        branch: "d".to_owned(),
+                        author: None,
+                        mergeability: Mergeability::Untold,
+                    },
+                ],
+                more_pulls: false,
+            })
+        );
+        let invalid = [
+            of(vec![pull(0, "a", None, 0)], false),
+            of(vec![pull(1, "", None, 0)], false),
+            of(vec![pull(1, "a", Some(""), 0)], false),
+            of(vec![pull(1, "a", None, 99)], false),
+            of(vec![pull(1, "a", None, 0)], true),
+        ];
+        for bad in invalid {
+            assert!(
+                matches!(bad, Err(Unanswered::InDoubt { .. })),
+                "expected unread error, got {bad:?}"
+            );
+        }
     }
 }
