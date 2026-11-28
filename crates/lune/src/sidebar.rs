@@ -2492,6 +2492,24 @@ impl Sidebar {
         }
     }
 
+    #[must_use]
+    pub fn floating_waits(&self) -> bool {
+        matches!(&self.mode, Mode::Afloat { menu, .. } if menu.waits())
+    }
+
+    #[must_use]
+    pub fn leave_waiting(&mut self) -> bool {
+        if !self.floating_waits() {
+            return false;
+        }
+        self.end_mode();
+        assert!(
+            self.floating().is_none(),
+            "leaving a waiting menu leaves nothing afloat"
+        );
+        true
+    }
+
     pub fn float_note(&mut self, note: String) {
         self.end_mode();
         self.let_go();
@@ -2512,6 +2530,8 @@ impl Sidebar {
     pub fn drop_menu(&mut self, menu: u64) {
         if self.open().is_some_and(|open| open.number() == menu) {
             self.take_open();
+        } else {
+            self.working.remove(&menu);
         }
     }
 
@@ -3737,6 +3757,12 @@ impl Sidebar {
         if menu::closes(key) && self.open().is_some_and(Menu::waits) {
             self.close_menu();
             return Asked::Nothing;
+        }
+        if matches!(&self.mode, Mode::Menu { menu, .. } if menu.waits())
+            && key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+            && !matches!(key.code, KeyCode::Modifier(_))
+        {
+            self.close_menu();
         }
         if key.code == KeyCode::Char(menu::ALL_KEYS)
             && let Mode::Menu { menu, .. } = &self.mode
@@ -16319,5 +16345,123 @@ mod tests {
             Some(steady_now + COPIED_SHOWS),
             "overflowing shell deadline does not suppress other timers"
         );
+    }
+
+    #[test]
+    fn moving_in_the_sidebar_while_tackle_or_worktree_loads_tucks_it_and_moves_at_once() {
+        let mut sidebar = own_two_sessions();
+        sidebar.focus(Keys::Sidebar);
+        let first = sidebar.lit_spot().cloned();
+        let issue = "https://github.com/lorenzolfm/lune/issues/5";
+        assert_eq!(sidebar.paste(issue), Asked::Nothing);
+        let Asked::Pull { menu: tackle, .. } = sidebar.key(&char('t'), moment(160_000)) else {
+            panic!("tackle did not start");
+        };
+        assert!(sidebar.open().is_some_and(Menu::pulling));
+
+        assert_eq!(sidebar.key(&char('j'), moment(160_100)), Asked::Nothing);
+        assert_ne!(
+            sidebar.lit_spot().cloned(),
+            first,
+            "j moves the highlight on the first press"
+        );
+        assert!(sidebar.open().is_none(), "the loading box tucks away");
+        assert!(
+            sidebar.working.contains_key(&tackle),
+            "tackle keeps running in the background"
+        );
+        let lines = screen(&mut sidebar, true, 40, 17);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Making a worktree of #5…")),
+            "{lines:?}"
+        );
+
+        let found = Found {
+            on: Machine::Local,
+            ready: Ready {
+                at: At::Unopened,
+                folder: directory("/w/lune/issue-5"),
+                branch: None,
+                moved_off: false,
+                work: Readied::Link(Link::parse(issue).unwrap()),
+            },
+        };
+        let asked = sidebar.pulled(tackle, Ok(found));
+        assert!(
+            matches!(asked, Asked::Make { menu, .. } if menu == tackle),
+            "{asked:?}"
+        );
+        assert_eq!(sidebar.made_for(tackle), Some(Held::Kept));
+        assert!(sidebar.working.is_empty());
+
+        let pull = "https://github.com/lorenzolfm/lune/pull/6";
+        assert_eq!(sidebar.paste(pull), Asked::Nothing);
+        let Asked::Pull { menu: worktree, .. } = sidebar.key(&char('w'), moment(161_000)) else {
+            panic!("worktree did not start");
+        };
+        let found = Found {
+            on: Machine::Local,
+            ready: Ready {
+                at: At::Unopened,
+                folder: directory("/w/lune/pr-6"),
+                branch: None,
+                moved_off: false,
+                work: Readied::Link(Link::parse(pull).unwrap()),
+            },
+        };
+        let asked = sidebar.pulled(worktree, Ok(found));
+        assert!(
+            matches!(asked, Asked::Make { menu, .. } if menu == worktree),
+            "{asked:?}"
+        );
+        assert!(sidebar.open().is_some_and(Menu::opens_pulled));
+
+        let entered = sidebar.key(&KeyEvent::from(KeyCode::Enter), moment(161_100));
+        assert!(matches!(entered, Asked::Go { .. }), "{entered:?}");
+        assert!(sidebar.open().is_none());
+        assert!(sidebar.working.contains_key(&worktree));
+        let lines = screen(&mut sidebar, true, 40, 17);
+        assert!(
+            lines.iter().any(|line| line.contains("Opening #6…")),
+            "{lines:?}"
+        );
+        sidebar.drop_menu(worktree);
+        assert!(
+            sidebar.working.is_empty(),
+            "dropping a tucked menu clears its background spinner"
+        );
+    }
+
+    #[test]
+    fn leave_waiting_tucks_only_waiting_floating_menus_and_keeps_their_notice() {
+        let mut sidebar = own_two_sessions();
+        sit(&mut sidebar, &own_view_of("older", 1, 1));
+        float_a_menu(&mut sidebar);
+        assert!(!sidebar.floating_waits());
+        assert!(
+            !sidebar.leave_waiting(),
+            "an interactive floating menu stays open"
+        );
+        assert!(sidebar.floating().is_some());
+
+        let issue = "https://github.com/lorenzolfm/lune/issues/9";
+        let work = Work::parse(issue, None).unwrap();
+        let target = sidebar
+            .target_at(&Machine::Local, own_view_of("older", 1, 1))
+            .unwrap();
+        let Asked::Pull { menu, .. } =
+            sidebar.pull_in_menu(target, work, Pull::Agent, Origin::Views)
+        else {
+            panic!("floating tackle did not start");
+        };
+        assert!(sidebar.floating_waits());
+        sidebar.say("background note".to_owned());
+        assert!(sidebar.leave_waiting());
+        assert!(sidebar.floating().is_none());
+        assert_eq!(sidebar.holding(), Holding::Nothing);
+        assert!(sidebar.working.contains_key(&menu));
+        assert_eq!(sidebar.notice.as_deref(), Some("background note"));
     }
 }
