@@ -703,12 +703,23 @@ impl Pacing {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SyncedTabs {
+    viewed: u64,
+    on: Machine,
+    worktree: WorktreeId,
+    projected_revision: u64,
+    titles_revision: u64,
+}
+
 pub struct App {
     right: Option<Right>,
     homes: home::Homes,
     shown_number_dropped: u64,
     runs_in: Option<TerminalKey>,
     projected: Projected,
+    projected_revision: u64,
+    tabs_synced: Option<SyncedTabs>,
     luned: PathBuf,
     movers: HashMap<Machine, Mover>,
     sidebar: Sidebar,
@@ -1148,6 +1159,8 @@ impl App {
             shown_number_dropped: 0,
             runs_in,
             projected: Projected::default(),
+            projected_revision: 0,
+            tabs_synced: None,
             luned,
             movers: HashMap::new(),
             sidebar,
@@ -1510,15 +1523,15 @@ impl App {
                 dirty
             }
             Event::Daemon(Ok(host)) => {
-                self.projected = Projected::adapted(&host).unwrap_or_else(|why| {
+                let projected = Projected::adapted(&host).unwrap_or_else(|why| {
                     log::say(&format!("luned's projects: {why}"));
                     Projected::default()
                 });
-                let mut changed = false;
-                if let Some(Right::Worktree(right)) = &mut self.right {
-                    let (tabs, titles) = self.projected.tabs(right.machine(), right.worktree());
-                    changed |= right.tabs(tabs, titles);
+                if self.projected != projected {
+                    self.projected = projected;
+                    self.projected_revision = self.projected_revision.wrapping_add(1);
                 }
+                let mut changed = false;
                 match self.name_home() {
                     Some(Homed::Named { changed: named }) => changed |= named,
                     Some(Homed::Gone { on }) => {
@@ -1865,6 +1878,7 @@ impl App {
         self.alerting(now.steady);
         let mut dirty = self.sidebar.ticked(now, self.focused);
         dirty |= self.sync_aloud();
+        dirty |= self.sync_tabs();
         if let Some(painted) = self.pacing.clean()
             && painted.cadence.due(painted.at, now)
         {
@@ -1878,6 +1892,40 @@ impl App {
     #[must_use]
     fn sync_aloud(&mut self) -> bool {
         self.sidebar.aloud(self.aloud.shown())
+    }
+
+    #[must_use]
+    fn sync_tabs(&mut self) -> bool {
+        let Some(Right::Worktree(right)) = &mut self.right else {
+            self.tabs_synced = None;
+            return false;
+        };
+        let viewed = right.number();
+        let on = right.machine();
+        let worktree = right.worktree();
+        let projected_revision = self.projected_revision;
+        let titles_revision = self.sidebar.view_titles_revision();
+        if let Some(synced) = &self.tabs_synced
+            && synced.viewed == viewed
+            && synced.on == *on
+            && synced.worktree == worktree
+            && synced.projected_revision == projected_revision
+            && synced.titles_revision == titles_revision
+        {
+            return false;
+        }
+        let on = on.clone();
+        let tabs = self.projected.tabs(&on, worktree);
+        let titles = self.sidebar.view_titles(&on, worktree);
+        let changed = right.tabs(tabs, titles);
+        self.tabs_synced = Some(SyncedTabs {
+            viewed,
+            on,
+            worktree,
+            projected_revision,
+            titles_revision,
+        });
+        changed
     }
 
     fn hover(&self) -> Hover {
@@ -1979,7 +2027,7 @@ impl App {
     #[must_use]
     fn settle(&mut self) -> bool {
         self.ask_picker();
-        let dirty = self.sync_aloud();
+        let dirty = self.sync_aloud() | self.sync_tabs();
         self.tell();
         dirty
     }
@@ -3673,13 +3721,11 @@ impl App {
             worktree,
             "lune shows the worktree it went to"
         );
-        let (tabs, titles) = self.projected.tabs(on, worktree);
-        let right = self.shown();
-        let _ = right.tabs(tabs, titles);
         if let Some(terminal) = terminal {
             right.focus_view(terminal);
         }
         self.seat();
+        let _ = self.sync_tabs();
     }
 
     fn shown(&mut self) -> &mut Viewed {
@@ -3774,14 +3820,7 @@ impl App {
     fn heeded(&mut self, heeded: Heeded) -> bool {
         let dirty = match heeded {
             Heeded::Quiet => return false,
-            Heeded::Changed => true,
-            Heeded::Followed => {
-                let right = self.shown();
-                let (on, worktree) = (right.machine().clone(), right.worktree());
-                let (tabs, titles) = self.projected.tabs(&on, worktree);
-                let _ = self.shown().tabs(tabs, titles);
-                true
-            }
+            Heeded::Changed | Heeded::Followed => true,
             Heeded::Edged(across) => self.cross(across),
             Heeded::Sent(worktree) => {
                 let Some(right) = self.viewed() else {
@@ -3825,7 +3864,7 @@ impl App {
             }
         };
         self.seat();
-        dirty
+        dirty | self.sync_tabs()
     }
 
     fn make_worktree(
@@ -4890,7 +4929,7 @@ mod tests {
         for step in 1..=10 {
             let offset = collapsed_at + Duration::from_millis(step * 100);
             app.handle_at(
-                Event::Daemon(Ok(busy_host(8, &format!("step {}", step + 2)))),
+                Event::Daemon(Ok(busy_host(8, "step 2"))),
                 &mut terminal,
                 at(offset),
             )
@@ -4902,6 +4941,20 @@ mod tests {
             written.borrow().is_empty(),
             "collapsed busy agent drew no frames"
         );
+
+        let renamed_at = collapsed_at + Duration::from_secs(2);
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(8, "live topic"))),
+            &mut terminal,
+            at(renamed_at),
+        )
+        .unwrap();
+        app.tick(at(renamed_at));
+        assert!(
+            drew(&mut app, &mut terminal, &written, at(renamed_at)),
+            "a live topic update on the shown worktree redraws its view tab"
+        );
+        written.borrow_mut().clear();
 
         let (mut tall, tall_written) = test_terminal(80, 20);
         app.give(Focus::on(Side::Sidebar));
@@ -5235,5 +5288,132 @@ mod tests {
         *fail_on_flush.borrow_mut() = None;
         app.draw_due(&mut terminal, retry).unwrap();
         assert_eq!(app.wait(retry), sidebar::SPIN);
+    }
+
+    #[test]
+    fn a_worktree_view_s_titles_follow_its_agy_agent_from_auto_title_to_live_topics() {
+        use luned::api::{self, Harness, NameSource, Status, agent::Status as Reported, projects};
+
+        let (mut terminal, written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |offset| Moment {
+            steady: start + offset,
+            system: system + offset,
+        };
+        let worktree_id = WorktreeId::of(100).unwrap();
+        let view_id = ViewId::of(1).unwrap();
+
+        let host_with = |topic: Option<&str>| {
+            let made_at = Some(prost_types::Timestamp::default());
+            let term = api::Terminal {
+                id: 1,
+                found: Some(api::terminal::Found::Key(api::TerminalKey {
+                    id: 1,
+                    made_at,
+                })),
+                folder: "/w/lune".to_owned(),
+                command: Some("agy".to_owned()),
+                ..api::Terminal::default()
+            };
+            let worktree = api::Worktree {
+                id: 100,
+                name: "main".to_owned(),
+                folder: "/w/lune".to_owned(),
+                seen: Some(api::worktree::Seen::Unread(())),
+                terminals: vec![term],
+                arranged: Some(api::Arrangement::Tabs.into()),
+                ..api::Worktree::default()
+            };
+            let project = api::Project {
+                id: 1,
+                name: "lune".to_owned(),
+                dir: "/w/lune".to_owned(),
+                missing: false,
+                holds: Some(api::project::Holds::Clone(api::project::Clone {
+                    worktrees: vec![worktree],
+                    listing: None,
+                })),
+            };
+            let kept = projects::Kept {
+                projects: vec![project],
+                version: None,
+            };
+            let agent = api::Agent {
+                pid: 42,
+                harness: Some(Harness::Antigravity.into()),
+                cwd: "/w/lune".to_owned(),
+                status: Some(Reported::KnownStatus(Status::Idle.into())),
+                terminal: Some(api::TerminalKey { id: 1, made_at }),
+                name: Some(api::Name {
+                    text: "Initial agy title".to_owned(),
+                    source: Some(NameSource::Auto.into()),
+                }),
+                topic: topic.map(str::to_owned),
+                ..api::Agent::default()
+            };
+            Host {
+                projects: Some(api::Projects {
+                    held: Some(projects::Held::Kept(kept)),
+                }),
+                agents: vec![agent],
+                ..Host::default()
+            }
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(host_with(None))),
+            &mut terminal,
+            at(Duration::ZERO),
+        )
+        .unwrap();
+        app.go_worktree(&Machine::Local, worktree_id, None);
+        app.give(Focus::on(Side::Collapsed));
+        assert_eq!(
+            app.sidebar
+                .view_titles(&Machine::Local, worktree_id)
+                .and_then(|titles| titles.get(&view_id))
+                .map(String::as_str),
+            Some("Initial agy title")
+        );
+        app.tick(at(Duration::ZERO));
+        assert!(drew(&mut app, &mut terminal, &written, at(Duration::ZERO)));
+        written.borrow_mut().clear();
+
+        let first = Duration::from_secs(1);
+        app.handle_at(
+            Event::Daemon(Ok(host_with(Some("Session folds")))),
+            &mut terminal,
+            at(first),
+        )
+        .unwrap();
+        assert_eq!(
+            app.sidebar
+                .view_titles(&Machine::Local, worktree_id)
+                .and_then(|titles| titles.get(&view_id))
+                .map(String::as_str),
+            Some("Session folds")
+        );
+        app.tick(at(first));
+        assert!(drew(&mut app, &mut terminal, &written, at(first)));
+        written.borrow_mut().clear();
+
+        let second = Duration::from_secs(2);
+        app.handle_at(
+            Event::Daemon(Ok(host_with(Some("View tab titles")))),
+            &mut terminal,
+            at(second),
+        )
+        .unwrap();
+        assert_eq!(
+            app.sidebar
+                .view_titles(&Machine::Local, worktree_id)
+                .and_then(|titles| titles.get(&view_id))
+                .map(String::as_str),
+            Some("View tab titles")
+        );
+        app.tick(at(second));
+        assert!(drew(&mut app, &mut terminal, &written, at(second)));
     }
 }

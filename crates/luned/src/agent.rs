@@ -28,11 +28,15 @@ pub struct SeenAgent {
     pub terminal: Option<TerminalKey>,
 }
 
+fn is_at_prompt(harness: Harness, entrypoint: Option<&Said>) -> bool {
+    let word = harness.to_api().prompt_word();
+    word.is_some_and(|word| entrypoint.map(Said::as_str) == Some(word))
+}
+
 impl SeenAgent {
     #[must_use]
     pub fn at_a_prompt(&self) -> bool {
-        let word = self.harness.to_api().prompt_word();
-        word.is_some_and(|word| self.entrypoint.as_ref().map(Said::as_str) == Some(word))
+        is_at_prompt(self.harness, self.entrypoint.as_ref())
     }
 }
 
@@ -99,8 +103,28 @@ impl Name {
     }
 
     #[must_use]
-    pub fn given(&self) -> bool {
-        self.to_api().given().is_some()
+    pub fn given(&self) -> Option<&str> {
+        let given = matches!(self.source, None | Some(Source::User | Source::Peer));
+        let text = self.text.as_str().trim();
+        let result = (given && !text.is_empty()).then_some(text);
+        if result.is_some() {
+            assert_ne!(
+                self.source,
+                Some(Source::Auto),
+                "a user-given name is not auto"
+            );
+        }
+        result
+    }
+
+    #[must_use]
+    pub fn auto(&self) -> Option<&str> {
+        let text = self.text.as_str().trim();
+        let result = (self.source == Some(Source::Auto) && !text.is_empty()).then_some(text);
+        if result.is_some() {
+            assert!(self.given().is_none(), "an auto name is not user-given");
+        }
+        result
     }
 }
 
@@ -205,6 +229,11 @@ pub fn moment(millis: u64) -> SystemTime {
 
 impl Agent {
     #[must_use]
+    pub fn at_a_prompt(&self) -> bool {
+        is_at_prompt(self.harness, self.entrypoint.as_ref())
+    }
+
+    #[must_use]
     pub fn is_working(&self) -> bool {
         matches!(self.status.status(), Some(ActiveStatus::Working))
     }
@@ -257,6 +286,40 @@ impl Unread {
         api::UnreadFile {
             pid: self.pid,
             terminal: self.terminal.map(Into::into),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_given_and_auto_agree_with_api_name_across_every_source() {
+        let sources = [
+            None,
+            Some(Source::User),
+            Some(Source::Peer),
+            Some(Source::Derived),
+            Some(Source::Collision),
+            Some(Source::Auto),
+            Some(Source::Hook),
+            Some(Source::Other),
+        ];
+        for source in sources {
+            for raw in ["  fold  ", "   "] {
+                let name = Name {
+                    text: Said::new(raw.to_owned()).unwrap(),
+                    source,
+                };
+                let wire = name.to_api();
+                assert_eq!(name.given(), wire.given(), "{source:?} {raw:?}");
+                assert_eq!(name.auto(), wire.auto(), "{source:?} {raw:?}");
+                assert!(
+                    !(name.given().is_some() && name.auto().is_some()),
+                    "{source:?} {raw:?}"
+                );
+            }
         }
     }
 }
