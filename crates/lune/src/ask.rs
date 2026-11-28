@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::{BTreeMap, VecDeque};
+use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
@@ -14,7 +16,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
-use crate::brief::{self, Asking};
+use crate::brief::{self, Asking, BoxRoom};
 use crate::cadence::Cadence;
 use crate::copied::Excerpt;
 use crate::due::Due;
@@ -25,7 +27,7 @@ use crate::moonlight;
 use crate::reach::{self, Luned};
 use crate::sidebar::{self, ACCENT};
 use crate::spots::Spots;
-use crate::sweep::{self, Continuation, CutAt, Join, Page, Sweep};
+use crate::sweep::{self, Continuation, Join, NonEmptyRect, Page, Sweep};
 
 const TITLE: &str = "Ask";
 
@@ -79,14 +81,93 @@ enum Works {
 }
 
 #[derive(Debug, Default)]
+struct Talk {
+    entries: VecDeque<Said>,
+    version: u64,
+}
+
+impl Talk {
+    fn push(&mut self, said: Said) {
+        if self.entries.len() == TALK_MAX {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(said);
+        self.version += 1;
+    }
+
+    fn mark_denied(&mut self, id: &str) {
+        let mut changed = false;
+        for said in &mut self.entries {
+            if let Said::Ran {
+                id: ran, denied, ..
+            } = said
+                && ran == id
+                && !*denied
+            {
+                *denied = true;
+                changed = true;
+            }
+        }
+        if changed {
+            self.version += 1;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn iter(&self) -> std::collections::vec_deque::Iter<'_, Said> {
+        self.entries.iter()
+    }
+
+    const fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+#[cfg(test)]
+impl Extend<Said> for Talk {
+    fn extend<T: IntoIterator<Item = Said>>(&mut self, iter: T) {
+        for said in iter {
+            self.push(said);
+        }
+    }
+}
+
+#[cfg(test)]
+impl<const N: usize> PartialEq<[Said; N]> for Talk {
+    fn eq(&self, other: &[Said; N]) -> bool {
+        self.entries == *other
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BodyVersion {
+    talk: u64,
+    turning: bool,
+}
+
+#[derive(Debug, Default)]
 enum Selecting {
     #[default]
     Still,
-    Pressed(Position),
-    Sweeping(Sweep),
+    Pressed {
+        from: Position,
+        snapshot: Box<Snapshot>,
+    },
+    Sweeping {
+        sweep: Sweep,
+        snapshot: Box<Snapshot>,
+    },
     Swept {
         sweep: Sweep,
-        snapshot: Snapshot,
+        snapshot: Box<Snapshot>,
     },
 }
 
@@ -94,65 +175,98 @@ enum Selecting {
 struct Snapshot {
     text_x: u16,
     text_y: u16,
-    text_width: u16,
+    text_width: NonZeroU16,
     first_line: usize,
-    lines: Vec<Line<'static>>,
+    first: Line<'static>,
+    rest: Vec<Line<'static>>,
+    version: BodyVersion,
 }
 
 impl Snapshot {
-    fn of(sweep: Sweep, shown: &ShownBody) -> Snapshot {
-        assert_eq!(
-            shown.page.lines.len(),
-            usize::from(shown.text.height),
-            "each shown row has a page line"
-        );
-        let (first, last) = sweep.ends();
+    fn of_range(first_y: u16, last_y: u16, shown: &ShownBody, version: BodyVersion) -> Snapshot {
+        let text = shown.text();
+        let area = text.rect();
         assert!(
-            first.y >= shown.text.y,
-            "a sweep starts inside the drawn text"
+            first_y >= area.y && last_y < area.bottom() && first_y <= last_y,
+            "snapshot rows fall inside the drawn text"
         );
-        assert!(
-            last.y < shown.text.bottom(),
-            "a sweep ends inside the drawn text"
-        );
-        let first_line = usize::from(first.y - shown.text.y);
-        let last_line = usize::from(last.y - shown.text.y);
-        assert!(
-            last_line < shown.page.lines.len(),
-            "sweep rows exist in page lines"
-        );
-        let lines = shown.page.lines[first_line..=last_line].to_vec();
-        assert!(!lines.is_empty(), "a snapshot covers at least one line");
+        let first_line = usize::from(first_y - area.y);
+        let last_line = usize::from(last_y - area.y);
+        let slice = &shown.page.lines()[first_line..=last_line];
+        let (first, tail) = slice
+            .split_first()
+            .expect("an inclusive row range covers at least one line");
         Snapshot {
-            text_x: shown.text.x,
-            text_y: shown.text.y,
-            text_width: shown.text.width,
+            text_x: text.x(),
+            text_y: text.y(),
+            text_width: text.width(),
             first_line,
-            lines,
+            first: first.clone(),
+            rest: tail.to_vec(),
+            version,
         }
     }
 
-    fn keeps(&self, shown: &ShownBody) -> bool {
-        assert!(
-            !self.lines.is_empty(),
-            "a snapshot covers at least one line"
-        );
-        assert!(self.text_width > 0, "a snapshot has positive width");
-        if (self.text_x, self.text_y, self.text_width)
-            != (shown.text.x, shown.text.y, shown.text.width)
-        {
+    fn of_row(y: u16, shown: &ShownBody, version: BodyVersion) -> Snapshot {
+        Snapshot::of_range(y, y, shown, version)
+    }
+
+    fn of(sweep: Sweep, shown: &ShownBody, version: BodyVersion) -> Snapshot {
+        let (first, last) = sweep.ends();
+        Snapshot::of_range(first.y, last.y, shown, version)
+    }
+
+    fn keeps(&self, shown: &ShownBody, version: BodyVersion) -> bool {
+        if self.version != version {
             return false;
         }
-        let end = self.first_line + self.lines.len();
-        shown.page.lines.get(self.first_line..end) == Some(self.lines.as_slice())
+        let text = shown.text();
+        if (self.text_x, self.text_y, self.text_width) != (text.x(), text.y(), text.width()) {
+            return false;
+        }
+        let end = self.first_line + 1 + self.rest.len();
+        let Some(lines) = shown.page.lines().get(self.first_line..end) else {
+            return false;
+        };
+        let Some((first, rest)) = lines.split_first() else {
+            return false;
+        };
+        first == &self.first && rest == self.rest.as_slice()
     }
 }
 
 #[derive(Debug)]
 struct ShownBody {
-    hit: Rect,
-    text: Rect,
     page: Page,
+}
+
+impl ShownBody {
+    fn new(page: Page) -> Self {
+        assert!(
+            page.area().x() >= 1,
+            "a shown ask body leaves room for its one-cell margin"
+        );
+        assert_eq!(
+            page.lines().len(),
+            usize::from(page.area().height().get()),
+            "each shown row has a page line"
+        );
+        Self { page }
+    }
+
+    const fn text(&self) -> NonEmptyRect {
+        self.page.area()
+    }
+
+    fn hit(&self) -> Rect {
+        let text = self.page.area();
+        Rect::new(
+            text.x() - 1,
+            text.y(),
+            text.width().get() + 1,
+            text.height().get(),
+        )
+    }
 }
 
 #[derive(Debug, Default)]
@@ -165,84 +279,32 @@ enum DrawnAsk {
     },
 }
 
+struct RowCut {
+    column: usize,
+    took: String,
+}
+
 struct BodyRow {
     line: Line<'static>,
     join: Option<Join>,
-}
-
-struct BodyChunk {
-    rows: Vec<BodyRow>,
-    cuts: Vec<CutAt>,
-    spinner: Option<usize>,
-}
-
-struct BodyParts {
-    lines: Vec<Line<'static>>,
-    joins: Vec<Option<Join>>,
-    cuts: Vec<CutAt>,
-}
-
-impl BodyParts {
-    fn into_page(self, text: Rect) -> Page {
-        assert_eq!(
-            self.lines.len(),
-            self.joins.len(),
-            "each line carries its join"
-        );
-        assert_eq!(
-            self.lines.len(),
-            usize::from(text.height),
-            "each body row has a line"
-        );
-        let lines: Vec<Line<'static>> = self.lines.into_iter().map(unpad).collect();
-        let joins = self
-            .joins
-            .into_iter()
-            .enumerate()
-            .filter_map(|(line, join)| {
-                Some((
-                    line,
-                    Continuation {
-                        join: join?,
-                        indent: 0,
-                    },
-                ))
-            })
-            .collect();
-        let mut cuts = Spots::default();
-        for cut in self.cuts {
-            assert!(cut.line < lines.len(), "a cut falls on a shown body line");
-            cuts.add(cut.line, cut.column..cut.column + 1, cut.took);
-        }
-        Page {
-            lines,
-            joins,
-            cuts: cuts.placed(text),
-        }
-    }
+    cut: Option<RowCut>,
+    spinner: bool,
 }
 
 struct Body {
     rows: Vec<BodyRow>,
-    cuts: Vec<CutAt>,
-    spinner: Option<usize>,
 }
 
 impl Body {
+    fn lines(&self) -> impl Iterator<Item = &Line<'static>> {
+        self.rows.iter().map(|row| &row.line)
+    }
+
     fn truncate(&mut self, rows_max: usize) -> bool {
-        let mut kept_spinner = self.spinner.is_some_and(|at| at < rows_max);
         if self.rows.len() > rows_max {
             let kept = rows_max.saturating_sub(1);
             let drained = self.rows.len() - kept;
-            kept_spinner = self.spinner.is_some_and(|at| at >= drained);
             self.rows.drain(..drained);
-            self.cuts.retain_mut(|cut| {
-                let Some(line) = cut.line.checked_sub(drained) else {
-                    return false;
-                };
-                cut.line = line + usize::from(rows_max > 0);
-                true
-            });
             if rows_max > 0 {
                 if let Some(first_kept) = self.rows.first_mut() {
                     first_kept.join = None;
@@ -252,6 +314,8 @@ impl Body {
                     BodyRow {
                         line: Line::styled(" …", Style::new().add_modifier(Modifier::DIM)),
                         join: None,
+                        cut: None,
+                        spinner: false,
                     },
                 );
             }
@@ -264,26 +328,28 @@ impl Body {
             self.rows.first().is_none_or(|row| row.join.is_none()),
             "the first visible body row never joins upward"
         );
-        assert!(
-            self.cuts.iter().all(|cut| cut.line < self.rows.len()),
-            "every retained cut falls on a visible body row"
-        );
-        kept_spinner
+        self.rows.iter().any(|row| row.spinner)
     }
 
-    fn into_parts(self) -> BodyParts {
+    fn into_page(self, text: NonEmptyRect) -> Page {
+        assert_eq!(
+            self.rows.len(),
+            usize::from(text.height().get()),
+            "each body row has a line"
+        );
         let mut lines = Vec::with_capacity(self.rows.len());
-        let mut joins = Vec::with_capacity(self.rows.len());
-        for row in self.rows {
-            lines.push(row.line);
-            joins.push(row.join);
+        let mut joins = BTreeMap::new();
+        let mut cuts = Spots::default();
+        for (line_index, row) in self.rows.into_iter().enumerate() {
+            lines.push(unpad(row.line));
+            if let Some(join) = row.join {
+                joins.insert(line_index, Continuation { join, indent: 0 });
+            }
+            if let Some(cut) = row.cut {
+                cuts.add(line_index, cut.column..cut.column + 1, cut.took);
+            }
         }
-        assert_eq!(lines.len(), joins.len(), "split body lines and joins match");
-        BodyParts {
-            lines,
-            joins,
-            cuts: self.cuts,
-        }
+        Page::new(text, lines, joins, cuts)
     }
 }
 
@@ -296,7 +362,7 @@ pub struct Ask {
     review_only: bool,
     session: Option<SessionId>,
     turned: Option<u64>,
-    talk: Vec<Said>,
+    talk: Talk,
     typed: String,
     turn: Option<Asking>,
     drawn: DrawnAsk,
@@ -322,7 +388,7 @@ impl Ask {
             review_only: false,
             session: None,
             turned: None,
-            talk: Vec::new(),
+            talk: Talk::default(),
             typed: String::new(),
             turn: None,
             drawn: DrawnAsk::Unshown,
@@ -351,7 +417,7 @@ impl Ask {
             review_only: false,
             session: None,
             turned: None,
-            talk: Vec::new(),
+            talk: Talk::default(),
             typed: String::new(),
             turn: None,
             drawn: DrawnAsk::Unshown,
@@ -399,7 +465,7 @@ impl Ask {
             review_only: true,
             session: None,
             turned: None,
-            talk: Vec::new(),
+            talk: Talk::default(),
             typed: initial.unwrap_or("").to_owned(),
             turn: None,
             drawn: DrawnAsk::Unshown,
@@ -495,10 +561,10 @@ impl Ask {
             };
             (on, asked)
         });
-        self.push_talk(Said::You(words));
+        self.talk.push(Said::You(words));
         let (on, asked) = match asked {
             Ok(asked) => asked,
-            Err(why) => return self.push_talk(Said::Wrong(format!("ask: {why}"))),
+            Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
         self.context = None;
         self.turned = Some(turn.key());
@@ -533,27 +599,17 @@ impl Ask {
         match heard {
             Heard::Step(Step::Session(session)) => self.session = Some(session),
             Heard::Step(Step::Ran { id, command }) => {
-                self.push_talk(Said::Ran {
+                self.talk.push(Said::Ran {
                     id,
                     command,
                     denied: false,
                 });
             }
-            Heard::Step(Step::Denied(id)) => {
-                for said in &mut self.talk {
-                    if let Said::Ran {
-                        id: ran, denied, ..
-                    } = said
-                        && *ran == id
-                    {
-                        *denied = true;
-                    }
-                }
-            }
-            Heard::Step(Step::Said(said)) => self.push_talk(Said::Agent(said)),
+            Heard::Step(Step::Denied(id)) => self.talk.mark_denied(&id),
+            Heard::Step(Step::Said(said)) => self.talk.push(Said::Agent(said)),
             Heard::Ended(Ok(())) => self.turn = None,
             Heard::Ended(Err(why)) => {
-                self.push_talk(Said::Wrong(why));
+                self.talk.push(Said::Wrong(why));
                 self.turn = None;
             }
         }
@@ -570,139 +626,93 @@ impl Ask {
         );
         self.clear_selection();
         if self.turn.take().is_some() {
-            self.push_talk(Said::Wrong(STOPPED.to_owned()));
+            self.talk.push(Said::Wrong(STOPPED.to_owned()));
             self.turned = None;
         }
         self.number = number;
     }
 
-    fn push_talk(&mut self, said: Said) {
-        if self.talk.len() >= TALK_MAX {
-            let drop_count = self.talk.len() + 1 - TALK_MAX;
-            self.talk.drain(..drop_count);
+    const fn body_version(&self) -> BodyVersion {
+        BodyVersion {
+            talk: self.talk.version(),
+            turning: self.turn.is_some(),
         }
-        self.talk.push(said);
-        assert!(self.talk.len() <= TALK_MAX, "ask talk stays within its cap");
-    }
-
-    fn select_from(&mut self, at: Position) -> bool {
-        let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
-            return false;
-        };
-        if body.hit.contains(at) {
-            let clamped = sweep::clamp(at, body.text);
-            assert!(
-                body.text.contains(clamped),
-                "a press inside hit clamps into text"
-            );
-            *selecting = Selecting::Pressed(clamped);
-            true
-        } else {
-            *selecting = Selecting::Still;
-            false
-        }
-    }
-
-    fn select_to(&mut self, at: Position) -> bool {
-        let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
-            return false;
-        };
-        match selecting {
-            Selecting::Pressed(from) => {
-                assert!(
-                    body.text.contains(*from),
-                    "an active press starts inside text"
-                );
-                let to = sweep::clamp(at, body.text);
-                if to != *from {
-                    *selecting = Selecting::Sweeping(Sweep::new(*from, to, body.text));
-                }
-                true
-            }
-            Selecting::Sweeping(sweep) => {
-                sweep.reach(at, body.text);
-                true
-            }
-            Selecting::Still | Selecting::Swept { .. } => false,
-        }
-    }
-
-    fn selected_at(&mut self, at: Position) -> Option<Excerpt> {
-        let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
-            return None;
-        };
-        let sweep = match std::mem::take(selecting) {
-            Selecting::Pressed(from) => {
-                assert!(
-                    body.text.contains(from),
-                    "a released press starts inside text"
-                );
-                let to = sweep::clamp(at, body.text);
-                (to != from).then(|| Sweep::new(from, to, body.text))?
-            }
-            Selecting::Sweeping(mut sweep) => {
-                sweep.reach(at, body.text);
-                let (first, last) = sweep.ends();
-                (first != last).then_some(sweep)?
-            }
-            kept @ Selecting::Swept { .. } => {
-                *selecting = kept;
-                return None;
-            }
-            Selecting::Still => return None,
-        };
-        let (first, last) = sweep.ends();
-        assert!(
-            body.text.contains(first),
-            "a completed sweep starts inside text"
-        );
-        assert!(
-            body.text.contains(last),
-            "a completed sweep ends inside text"
-        );
-        let excerpt = Excerpt::of(sweep.text(&body.page, body.text))?;
-        let snapshot = Snapshot::of(sweep, body);
-        *selecting = Selecting::Swept { sweep, snapshot };
-        Some(excerpt)
     }
 
     pub fn mouse(&mut self, mouse: MouseEvent) -> Mouse {
         let at = Position::new(mouse.column, mouse.row);
+        let version = self.body_version();
+        let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
+            return Mouse::Ignored;
+        };
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.select_from(at) {
+                if body.hit().contains(at) {
+                    let from = body.text().clamp(at);
+                    let snapshot = Box::new(Snapshot::of_row(from.y, body, version));
+                    *selecting = Selecting::Pressed { from, snapshot };
                     Mouse::Started
                 } else {
+                    *selecting = Selecting::Still;
                     Mouse::Ignored
                 }
             }
             MouseEventKind::Down(_) => {
-                self.clear_selection();
+                *selecting = Selecting::Still;
                 Mouse::Ignored
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                if self.select_to(at) {
+            MouseEventKind::Drag(MouseButton::Left) => match selecting {
+                Selecting::Pressed { from, .. } => {
+                    let from = *from;
+                    let to = body.text().clamp(at);
+                    if to != from {
+                        let sweep = Sweep::new(from, to, body.text());
+                        let snapshot = Box::new(Snapshot::of(sweep, body, version));
+                        *selecting = Selecting::Sweeping { sweep, snapshot };
+                    }
                     Mouse::Active
-                } else {
-                    Mouse::Ignored
                 }
-            }
+                Selecting::Sweeping { sweep, snapshot } => {
+                    sweep.reach(at, body.text());
+                    **snapshot = Snapshot::of(*sweep, body, version);
+                    Mouse::Active
+                }
+                Selecting::Still | Selecting::Swept { .. } => Mouse::Ignored,
+            },
             MouseEventKind::Up(MouseButton::Left) => {
-                if !self.pressed() {
-                    return Mouse::Ignored;
-                }
-                match self.selected_at(at) {
-                    Some(excerpt) => Mouse::Copied(excerpt),
-                    None => Mouse::Active,
-                }
+                let sweep = match std::mem::take(selecting) {
+                    Selecting::Pressed { from, .. } => {
+                        let to = body.text().clamp(at);
+                        (to != from).then(|| Sweep::new(from, to, body.text()))
+                    }
+                    Selecting::Sweeping { mut sweep, .. } => {
+                        sweep.reach(at, body.text());
+                        let (first, last) = sweep.ends();
+                        (first != last).then_some(sweep)
+                    }
+                    kept @ Selecting::Swept { .. } => {
+                        *selecting = kept;
+                        return Mouse::Ignored;
+                    }
+                    Selecting::Still => return Mouse::Ignored,
+                };
+                let Some(sweep) = sweep else {
+                    return Mouse::Active;
+                };
+                let Some(excerpt) = Excerpt::of(sweep.text(&body.page)) else {
+                    return Mouse::Active;
+                };
+                let snapshot = Box::new(Snapshot::of(sweep, body, version));
+                *selecting = Selecting::Swept { sweep, snapshot };
+                Mouse::Copied(excerpt)
             }
-            MouseEventKind::Up(_) | MouseEventKind::Moved => {
-                if self.let_go() {
+            MouseEventKind::Up(_) | MouseEventKind::Moved => match selecting {
+                Selecting::Pressed { .. } | Selecting::Sweeping { .. } => {
+                    *selecting = Selecting::Still;
                     Mouse::Active
-                } else {
-                    Mouse::Ignored
                 }
-            }
+                Selecting::Still | Selecting::Swept { .. } => Mouse::Ignored,
+            },
             _ => Mouse::Ignored,
         }
     }
@@ -711,7 +721,7 @@ impl Ask {
         matches!(
             self.drawn,
             DrawnAsk::Shown {
-                selecting: Selecting::Pressed(_) | Selecting::Sweeping(_),
+                selecting: Selecting::Pressed { .. } | Selecting::Sweeping { .. },
                 ..
             }
         )
@@ -749,10 +759,11 @@ impl Ask {
 
     pub fn draw(&mut self, buffer: &mut Buffer, over: Rect, wall: SystemTime) -> Cadence {
         let mut cadence = Cadence::default();
-        let Some((inner, room)) = brief::room(over) else {
+        let Some(box_room) = BoxRoom::of(over) else {
             self.unshown();
             return cadence;
         };
+        let (inner, room) = (box_room.inner(), box_room.room());
         let keys: &[(Hint, &str)] = match self.turn {
             Some(_) => &[(Hint::Esc, "Close")],
             None => &[
@@ -765,12 +776,9 @@ impl Ask {
         let body_rows_max = room.saturating_sub(footer.len());
         let mut body = self.body(inner, body_rows_max, sidebar::frame(wall));
         let kept_spinner = inner > 0 && body.truncate(body_rows_max);
-        let mut parts = body.into_parts();
-        let body_rows = parts.lines.len();
-        parts.lines.extend(footer);
         if room >= 2 {
             assert!(
-                parts.lines.len() <= room,
+                body.rows.len() + footer.len() <= room,
                 "ask overlay body and footer fit in room"
             );
         }
@@ -781,14 +789,10 @@ impl Ask {
             }
             Works::There { on, cwd: None } => format!("~ on {on}"),
         };
-        if let Some(box_area) = brief::boxed(buffer, over, TITLE, &right, &parts.lines) {
-            assert!(box_area.width >= 2, "a drawn ask box has border columns");
-            assert!(box_area.height >= 2, "a drawn ask box has border rows");
-            parts.lines.truncate(body_rows);
-            self.finish_draw(buffer, box_area, parts);
-        } else {
-            self.unshown();
-        }
+        let box_area = box_room.draw(buffer, TITLE, &right, body.lines().chain(&footer));
+        assert!(box_area.width >= 2, "a drawn ask box has border columns");
+        assert!(box_area.height >= 2, "a drawn ask box has border rows");
+        self.finish_draw(buffer, box_area, body);
         if kept_spinner {
             cadence.spin();
         }
@@ -821,68 +825,56 @@ impl Ask {
         let body_rows_max = usize::from(most.saturating_sub(3));
         let mut body = self.body(inner, body_rows_max, sidebar::frame(wall));
         let kept_spinner = body.truncate(body_rows_max);
-        let mut parts = body.into_parts();
-        let body_rows = parts.lines.len();
-        parts.lines.push(menu::keys_line(inner, hints));
-        assert_eq!(
-            parts.lines.len(),
-            body_rows + 1,
-            "docked ask adds one hint footer row"
-        );
-        let rows = u16::try_from(parts.lines.len() + 2).map_or(most, |rows| rows.min(most));
+        let footer = [menu::keys_line(inner, hints)];
+        let total_lines = body.rows.len() + footer.len();
+        let rows = u16::try_from(total_lines + 2).map_or(most, |rows| rows.min(most));
         assert!(rows <= area.height, "the prompt's box fits in the home");
         let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
-        menu::boxed(
-            buffer,
-            asked,
-            &menu::rule(TITLE, right, inner),
-            &parts.lines,
-        );
-        parts.lines.truncate(body_rows);
-        self.finish_draw(buffer, asked, parts);
+        let lines: Vec<&Line<'_>> = body.lines().chain(&footer).collect();
+        menu::boxed_lines(buffer, asked, &menu::rule(TITLE, right, inner), &lines);
+        self.finish_draw(buffer, asked, body);
         if kept_spinner {
             cadence.spin();
         }
         (rows, cadence)
     }
 
-    fn finish_draw(&mut self, buffer: &mut Buffer, box_area: Rect, parts: BodyParts) {
-        let body_rows = u16::try_from(parts.lines.len()).expect("body lines fit in box height");
+    fn finish_draw(&mut self, buffer: &mut Buffer, box_area: Rect, body: Body) {
+        let body_rows = u16::try_from(body.rows.len()).expect("body lines fit in box height");
         let inner = box_area.width.saturating_sub(2);
-        if body_rows == 0 || inner < 2 {
+        let Some(text) = NonEmptyRect::of(Rect::new(
+            box_area.x + 2,
+            box_area.y + 1,
+            inner.saturating_sub(1),
+            body_rows,
+        )) else {
             self.unshown();
             return;
-        }
+        };
         assert!(
             body_rows <= box_area.height.saturating_sub(2),
             "body rows fit inside the box borders"
         );
-        let hit = Rect::new(box_area.x + 1, box_area.y + 1, inner, body_rows);
-        let text = Rect::new(box_area.x + 2, box_area.y + 1, inner - 1, body_rows);
-        assert!(!hit.is_empty(), "a shown body has cells to hit");
-        assert!(!text.is_empty(), "a shown body has cells to read");
-        let page = parts.into_page(text);
-        let shown = ShownBody { hit, text, page };
+        let shown = ShownBody::new(body.into_page(text));
+        let version = self.body_version();
         let selecting = match std::mem::take(&mut self.drawn) {
             DrawnAsk::Unshown => Selecting::Still,
-            DrawnAsk::Shown {
-                body: previous,
-                selecting,
-            } => match selecting {
+            DrawnAsk::Shown { selecting, .. } => match selecting {
                 Selecting::Still => Selecting::Still,
-                Selecting::Pressed(_) | Selecting::Sweeping(_) if previous.text != shown.text => {
+                Selecting::Pressed { ref snapshot, .. }
+                | Selecting::Sweeping { ref snapshot, .. }
+                | Selecting::Swept { ref snapshot, .. }
+                    if !snapshot.keeps(&shown, version) =>
+                {
                     Selecting::Still
                 }
-                Selecting::Swept { ref snapshot, .. } if !snapshot.keeps(&shown) => {
-                    Selecting::Still
-                }
-                kept @ (Selecting::Pressed(_)
-                | Selecting::Sweeping(_)
+                kept @ (Selecting::Pressed { .. }
+                | Selecting::Sweeping { .. }
                 | Selecting::Swept { .. }) => kept,
             },
         };
-        if let Selecting::Sweeping(sweep) | Selecting::Swept { sweep, .. } = &selecting {
-            sweep.draw(buffer, shown.text);
+        if let Selecting::Sweeping { sweep, .. } | Selecting::Swept { sweep, .. } = &selecting {
+            sweep.draw(buffer, shown.text());
         }
         self.drawn = DrawnAsk::Shown {
             body: shown,
@@ -892,106 +884,98 @@ impl Ask {
 
     fn body(&self, inner: usize, rows_max: usize, frame: usize) -> Body {
         if rows_max == 0 {
-            return Body {
-                rows: Vec::new(),
-                cuts: Vec::new(),
-                spinner: None,
-            };
+            return Body { rows: Vec::new() };
         }
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
         let tail = if self.turn.is_some() {
-            let rows: Vec<BodyRow> =
-                menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame)
-                    .into_iter()
-                    .map(|line| BodyRow { line, join: None })
-                    .collect();
-            let spinner = (!rows.is_empty()).then_some(0);
-            BodyChunk {
-                rows,
-                cuts: Vec::new(),
-                spinner,
-            }
-        } else {
-            let mut rows = Vec::new();
-            if !self.talk.is_empty() {
-                rows.push(BodyRow {
-                    line: Line::default(),
+            menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame)
+                .into_iter()
+                .enumerate()
+                .map(|(index, line)| BodyRow {
+                    line,
                     join: None,
-                });
-            }
-            for (line, join) in menu::wrap_joined(&format!("› {}_", self.typed), inner, yours) {
-                rows.push(BodyRow { line, join });
-            }
-            let last_index = rows
-                .len()
-                .checked_sub(1)
-                .expect("wrapped prompt has at least one line");
-            let last_line = unpad(rows[last_index].line.clone());
-            let last_grapheme = last_line
-                .styled_graphemes(Style::new())
-                .last()
-                .expect("wrapped prompt line has at least one grapheme");
-            let without_cursor = last_grapheme
-                .symbol
-                .strip_suffix('_')
-                .expect("wrapped prompt ends with the input cursor");
-            let width = sweep::line_cells(&last_line);
-            let cursor_cells = sweep::cells(last_grapheme.symbol);
-            assert!(
-                width >= cursor_cells,
-                "prompt line width covers its cursor glyph"
-            );
-            BodyChunk {
-                rows,
-                cuts: vec![CutAt {
-                    line: last_index,
-                    column: width - cursor_cells,
-                    took: without_cursor.to_owned(),
-                }],
-                spinner: None,
-            }
+                    cut: None,
+                    spinner: index == 0,
+                })
+                .collect()
+        } else {
+            prompt_rows(&self.typed, !self.talk.is_empty(), inner, yours)
         };
-        let mut total_rows = tail.rows.len();
+        let mut total_rows = tail.len();
         let mut chunks = vec![tail];
-        for (at, said) in self.talk.iter().enumerate().rev().take(TALK_MAX) {
+        for (at, said) in self.talk.iter().enumerate().rev() {
             if total_rows > rows_max {
                 break;
             }
-            let chunk = said_chunk(at, said, inner, dim, yours);
-            total_rows += chunk.rows.len();
+            let chunk = said_rows(at, said, inner, dim, yours);
+            total_rows += chunk.len();
             chunks.push(chunk);
         }
         let mut rows = Vec::with_capacity(total_rows);
-        let mut cuts = Vec::new();
-        let mut spinner = None;
         for chunk in chunks.into_iter().rev() {
-            let base = rows.len();
-            if let Some(offset) = chunk.spinner {
-                assert!(spinner.is_none(), "at most one waiting spinner exists");
-                spinner = Some(base + offset);
-            }
-            for mut cut in chunk.cuts {
-                cut.line += base;
-                cuts.push(cut);
-            }
-            rows.extend(chunk.rows);
+            rows.extend(chunk);
         }
         assert_eq!(rows.len(), total_rows, "assembled rows match chunk total");
-        Body {
-            rows,
-            cuts,
-            spinner,
-        }
+        Body { rows }
     }
 }
 
-fn said_chunk(at: usize, said: &Said, inner: usize, dim: Style, yours: Style) -> BodyChunk {
+fn prompt_rows(typed: &str, after_talk: bool, inner: usize, style: Style) -> Vec<BodyRow> {
     let mut rows = Vec::new();
-    let mut cuts = Vec::new();
+    if after_talk {
+        rows.push(BodyRow {
+            line: Line::default(),
+            join: None,
+            cut: None,
+            spinner: false,
+        });
+    }
+    for (line, join) in menu::wrap_joined(&format!("› {typed}_"), inner, style) {
+        rows.push(BodyRow {
+            line,
+            join,
+            cut: None,
+            spinner: false,
+        });
+    }
+    let last_row = rows
+        .last_mut()
+        .expect("wrapped prompt has at least one line");
+    let last_grapheme = last_row
+        .line
+        .styled_graphemes(Style::new())
+        .last()
+        .expect("wrapped prompt line has at least one grapheme");
+    let without_cursor = last_grapheme
+        .symbol
+        .strip_suffix('_')
+        .expect("wrapped prompt ends with the input cursor");
+    let width = sweep::line_cells(&last_row.line)
+        .checked_sub(1)
+        .expect("wrapped prompt line includes its one-cell margin");
+    let cursor_cells = sweep::cells(last_grapheme.symbol);
+    assert!(
+        width >= cursor_cells,
+        "prompt line width covers its cursor glyph"
+    );
+    last_row.cut = Some(RowCut {
+        column: width - cursor_cells,
+        took: without_cursor.to_owned(),
+    });
+    rows
+}
+
+fn said_rows(at: usize, said: &Said, inner: usize, dim: Style, yours: Style) -> Vec<BodyRow> {
+    let mut rows = Vec::new();
     let push_joined = |rows: &mut Vec<BodyRow>, added: Vec<(Line<'static>, Option<Join>)>| {
         for (line, join) in added {
-            rows.push(BodyRow { line, join });
+            rows.push(BodyRow {
+                line,
+                join,
+                cut: None,
+                spinner: false,
+            });
         }
     };
     match said {
@@ -1000,6 +984,8 @@ fn said_chunk(at: usize, said: &Said, inner: usize, dim: Style, yours: Style) ->
                 rows.push(BodyRow {
                     line: Line::default(),
                     join: None,
+                    cut: None,
+                    spinner: false,
                 });
             }
             push_joined(
@@ -1022,16 +1008,15 @@ fn said_chunk(at: usize, said: &Said, inner: usize, dim: Style, yours: Style) ->
                 RAN_PREFIX_CELLS,
                 "command prefix width matches constant"
             );
-            if let Some(elided) = cut.elided {
-                cuts.push(CutAt {
-                    line: 0,
-                    column: RAN_PREFIX_CELLS + elided.cell_offset,
-                    took: elided.took,
-                });
-            }
+            let row_cut = cut.elided.map(|elided| RowCut {
+                column: RAN_PREFIX_CELLS + elided.cell_offset,
+                took: elided.took,
+            });
             rows.push(BodyRow {
                 line: Line::styled(format!(" {prefix}{}", cut.shown), style),
                 join: None,
+                cut: row_cut,
+                spinner: false,
             });
         }
         Said::Agent(said) => {
@@ -1047,11 +1032,7 @@ fn said_chunk(at: usize, said: &Said, inner: usize, dim: Style, yours: Style) ->
             );
         }
     }
-    BodyChunk {
-        rows,
-        cuts,
-        spinner: None,
-    }
+    rows
 }
 
 fn unpad(mut line: Line<'static>) -> Line<'static> {
@@ -1569,7 +1550,7 @@ mod tests {
         let area = Rect::new(0, 0, 36, 16);
         let mut buffer = Buffer::empty(area);
         ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
-        let (hit, text) = (drawn_body(&ask).hit, drawn_body(&ask).text);
+        let (hit, text) = (drawn_body(&ask).hit(), drawn_body(&ask).text().rect());
 
         let command_y = text.y + 1;
         assert_eq!(
@@ -1643,7 +1624,7 @@ mod tests {
         let t0 = SystemTime::UNIX_EPOCH;
         let t1 = t0 + sidebar::SPIN;
         assert_eq!(reversed_cells(&mut ask, area, t0), []);
-        let text = drawn_body(&ask).text;
+        let text = drawn_body(&ask).text().rect();
 
         assert_eq!(
             sweep(&mut ask, (text.x, text.y), (text.x + 4, text.y)).as_deref(),
@@ -1666,7 +1647,7 @@ mod tests {
             "new output shifting the box clears the kept highlight"
         );
 
-        let text = drawn_body(&ask).text;
+        let text = drawn_body(&ask).text().rect();
         let left = MouseButton::Left;
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y)),
@@ -1728,7 +1709,7 @@ mod tests {
         let area = Rect::new(0, 0, 36, 9);
         let mut buffer = Buffer::empty(area);
         ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
-        let text = drawn_body(&ask).text;
+        let text = drawn_body(&ask).text().rect();
         assert_eq!(buffer[(text.x, text.y)].symbol(), "…");
         assert_eq!(
             sweep(&mut ask, (text.x, text.y), (text.right() - 1, text.y + 1))
@@ -1764,7 +1745,7 @@ mod tests {
         let area = Rect::new(0, 0, 36, 9);
         let mut buffer = Buffer::empty(area);
         ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
-        let text = drawn_body(&ask).text;
+        let text = drawn_body(&ask).text().rect();
         let denied_y = (text.y..text.bottom())
             .find(|&y| buffer[(text.x + 2, y)].symbol() == "✗")
             .expect("denied elided command line is visible");
@@ -1777,6 +1758,100 @@ mod tests {
             .as_deref(),
             Some(long_command),
             "dragging over a denied elided command restores the uncut command"
+        );
+    }
+
+    #[test]
+    fn active_drag_survives_spinner_ticks_but_cancels_on_capped_scroll_or_in_place_denial() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.heard(Heard::Step(Step::Said("line one".to_owned())));
+        ask.heard(Heard::Step(Step::Said("line two".to_owned())));
+        ask.heard(Heard::Step(Step::Said("line three".to_owned())));
+        ask.heard(Heard::Step(Step::Ran {
+            id: "toolu_1".to_owned(),
+            command: "cargo test".to_owned(),
+        }));
+        ask.turn = Some(at_a_turn());
+
+        let area = Rect::new(0, 0, 36, 9);
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + sidebar::SPIN;
+        assert_eq!(reversed_cells(&mut ask, area, t0), []);
+        let text_before = drawn_body(&ask).text().rect();
+        let left = MouseButton::Left;
+
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Down(left),
+                text_before.x,
+                text_before.y + 1
+            )),
+            Mouse::Started
+        );
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Drag(left),
+                text_before.x + 5,
+                text_before.y + 1
+            )),
+            Mouse::Active
+        );
+        assert!(
+            !reversed_cells(&mut ask, area, t1).is_empty(),
+            "spinner tick below the drag keeps the active drag"
+        );
+        assert!(ask.pressed());
+
+        ask.heard(Heard::Step(Step::Denied("toolu_1".to_owned())));
+        assert_eq!(
+            reversed_cells(&mut ask, area, t1),
+            [],
+            "in-place command denial cancels an active drag even when box geometry is unchanged"
+        );
+        assert_eq!(drawn_body(&ask).text().rect(), text_before);
+        assert!(!ask.pressed());
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Up(left),
+                text_before.x + 5,
+                text_before.y + 1
+            )),
+            Mouse::Ignored
+        );
+
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Down(left),
+                text_before.x,
+                text_before.y + 1
+            )),
+            Mouse::Started
+        );
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Drag(left),
+                text_before.x + 5,
+                text_before.y + 1
+            )),
+            Mouse::Active
+        );
+        assert!(ask.pressed());
+
+        ask.heard(Heard::Step(Step::Said("scrolled new output".to_owned())));
+        assert_eq!(
+            reversed_cells(&mut ask, area, t1),
+            [],
+            "capped-height scrolling cancels an active drag instead of copying shifted text"
+        );
+        assert_eq!(drawn_body(&ask).text().rect(), text_before);
+        assert!(!ask.pressed());
+        assert_eq!(
+            ask.mouse(mouse(
+                MouseEventKind::Up(left),
+                text_before.x + 5,
+                text_before.y + 1
+            )),
+            Mouse::Ignored
         );
     }
 }

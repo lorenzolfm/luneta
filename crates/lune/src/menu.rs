@@ -2844,6 +2844,11 @@ pub fn draw_note(buffer: &mut Buffer, over: Rect, note: &str) {
 }
 
 pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>]) {
+    let lines: Vec<&Line<'_>> = lines.iter().collect();
+    boxed_lines(buffer, area, rule, &lines);
+}
+
+pub fn boxed_lines(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[&Line<'_>]) {
     let (Some(inner), Some(last)) = (area.width.checked_sub(2), area.bottom().checked_sub(1))
     else {
         return;
@@ -2857,7 +2862,7 @@ pub fn boxed(buffer: &mut Buffer, area: Rect, rule: &Line<'_>, lines: &[Line<'_>
     top.extend(rule.spans.iter().cloned());
     top.push(Span::styled("┐", dim));
     buffer.set_line(area.x, area.y, &Line::from(top), area.width);
-    for (line, y) in lines.iter().zip(area.y + 1..last) {
+    for (&line, y) in lines.iter().zip(area.y + 1..last) {
         buffer.set_string(area.x, y, "│", dim);
         buffer.set_line(area.x + 1, y, line, inner);
         buffer.set_string(area.right() - 1, y, "│", dim);

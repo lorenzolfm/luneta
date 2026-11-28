@@ -69,7 +69,7 @@ use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, SidebarBottom, Spots};
-use crate::sweep::{Continuation, CutAt, Join, Page, Sweep, cells};
+use crate::sweep::{Continuation, CutAt, Join, NonEmptyRect, Page, Sweep, cells};
 
 pub const COLUMNS: u16 = 32;
 
@@ -1802,7 +1802,7 @@ pub struct Sidebar {
     moving: Moving,
     revealed: Option<Spot>,
     top: usize,
-    page: Page,
+    page: Option<Page>,
     laid: Layout,
     room: usize,
     notice: Option<String>,
@@ -2178,7 +2178,7 @@ impl Sidebar {
             moving: Moving::default(),
             revealed: None,
             top: 0,
-            page: Page::default(),
+            page: None,
             laid: Layout::default(),
             room: 0,
             notice: None,
@@ -5360,11 +5360,10 @@ impl Sidebar {
                 return Asked::Nothing;
             }
             Moving::Sweeping(sweep) => {
-                let inside = inside(area);
-                if inside.is_empty() {
-                    self.moving = Moving::Still;
+                if let Some(area) = self.page.as_ref().map(Page::area) {
+                    sweep.reach(pointer, area);
                 } else {
-                    sweep.reach(pointer, inside);
+                    self.moving = Moving::Still;
                 }
                 return Asked::Nothing;
             }
@@ -5384,10 +5383,10 @@ impl Sidebar {
             });
             return Asked::Take;
         }
-        let inside = inside(area);
-        if !inside.is_empty() && (from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1)
+        if let Some(area) = self.page.as_ref().map(Page::area)
+            && (from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1)
         {
-            self.moving = Moving::Sweeping(Sweep::new(from, pointer, inside));
+            self.moving = Moving::Sweeping(Sweep::new(from, pointer, area));
         }
         Asked::Nothing
     }
@@ -5411,12 +5410,11 @@ impl Sidebar {
                 }
             }
             Moving::Sweeping(mut sweep) => {
-                let inside = inside(area);
-                if inside.is_empty() {
+                let Some(page) = &self.page else {
                     return Asked::Nothing;
-                }
-                sweep.reach(Position::new(mouse.column, mouse.row), inside);
-                let Some(excerpt) = Excerpt::of(sweep.text(&self.page, inside)) else {
+                };
+                sweep.reach(Position::new(mouse.column, mouse.row), page.area());
+                let Some(excerpt) = Excerpt::of(sweep.text(page)) else {
                     return Asked::Nothing;
                 };
                 self.moving = Moving::Swept(sweep, self.laid.clone());
@@ -5780,15 +5778,16 @@ impl Sidebar {
         if matches!(&self.moving, Moving::Swept(sweep, under) if !under.keeps(*sweep, &laid)) {
             self.moving = Moving::Still;
         }
-        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = &self.moving {
-            sweep.draw(buffer, inside);
-        }
         self.laid = laid;
-        self.page = Page {
-            lines,
-            joins,
-            cuts: cut_spots.placed(inside),
-        };
+        if let Some(page_area) = NonEmptyRect::of(inside) {
+            if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = &self.moving {
+                sweep.draw(buffer, page_area);
+            }
+            self.page = Some(Page::new(page_area, lines, joins, cut_spots));
+        } else {
+            self.moving = Moving::Still;
+            self.page = None;
+        }
         self.aloud_buttons = buttons.down(notes_from).placed(inside);
         let drawn = Drawn::Sidebar {
             numbers: spots.placed(inside),
@@ -5801,6 +5800,7 @@ impl Sidebar {
         self.drawing(now);
         self.room = 0;
         self.unsweep();
+        self.page = None;
         self.aloud_buttons = Spots::default();
         let width = usize::from(area.width.saturating_sub(1));
         let rule = if self.away.is_some() {
