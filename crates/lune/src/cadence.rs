@@ -98,7 +98,9 @@ mod tests {
             system,
         };
         let mut cadence = Cadence::default();
+        assert!(!cadence.spinning());
         cadence.every_second(start, drawn.steady);
+        assert!(!cadence.spinning());
 
         assert_eq!(cadence.wait(drawn, drawn), Some(Duration::from_millis(750)));
         assert!(!cadence.due(drawn, drawn));
@@ -127,6 +129,7 @@ mod tests {
         };
         let mut cadence = Cadence::default();
         cadence.age(system - Duration::from_secs(5), system);
+        assert!(!cadence.spinning());
 
         assert_eq!(cadence.wait(drawn, drawn), Some(Duration::from_secs(1)));
         assert!(!cadence.due(drawn, drawn));
@@ -147,7 +150,9 @@ mod tests {
             system: SystemTime::UNIX_EPOCH + Duration::from_millis(160_099),
         };
         let mut cadence = Cadence::default();
+        assert!(!cadence.spinning());
         cadence.spin();
+        assert!(cadence.spinning());
 
         assert_eq!(cadence.wait(drawn, drawn), Some(Duration::from_millis(1)));
         assert!(!cadence.due(drawn, drawn));
@@ -172,5 +177,25 @@ mod tests {
             cadence.wait(mid, same_frame),
             Some(Duration::from_millis(20))
         );
+    }
+
+    #[test]
+    fn spinning_reflects_spin_and_merge_without_leaking_from_clocks() {
+        let mut idle = Cadence::default();
+        assert!(!idle.spinning());
+
+        let mut merged = Cadence::default();
+        merged.merge(idle);
+        assert!(!merged.spinning());
+
+        let mut turning = Cadence::default();
+        turning.spin();
+        assert!(turning.spinning());
+
+        idle.merge(turning);
+        assert!(idle.spinning());
+
+        turning.merge(Cadence::default());
+        assert!(turning.spinning());
     }
 }
