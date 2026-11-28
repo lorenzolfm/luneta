@@ -1,5 +1,12 @@
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use crate::said::Said;
 use crate::v1;
+
+pub const GIT_STATUSES_MAX: usize = 2048;
+
+const _: () = assert!(GIT_STATUSES_MAX > 0);
 
 const DETACHED: &str = "(detached)";
 
@@ -274,9 +281,62 @@ impl Changes {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParsedGitStatuses<'a> {
+    pub by_dir: HashMap<&'a str, GitStatus>,
+    pub dropped_invalid: usize,
+    pub dropped_duplicate: usize,
+    pub truncated: usize,
+}
+
+impl<'a> ParsedGitStatuses<'a> {
+    #[must_use]
+    pub fn of_api(statuses: &'a [v1::GitStatus]) -> Self {
+        let mut parsed = Self {
+            truncated: statuses.len().saturating_sub(GIT_STATUSES_MAX),
+            ..Self::default()
+        };
+        for status in statuses.iter().take(GIT_STATUSES_MAX) {
+            if status.dir.is_empty() {
+                parsed.dropped_invalid += 1;
+                continue;
+            }
+            let Some(read) = GitStatus::of_api(status) else {
+                parsed.dropped_invalid += 1;
+                continue;
+            };
+            match parsed.by_dir.entry(status.dir.as_str()) {
+                Entry::Vacant(slot) => {
+                    slot.insert(read);
+                }
+                Entry::Occupied(_) => parsed.dropped_duplicate += 1,
+            }
+        }
+        parsed
+    }
+
+    #[must_use]
+    pub fn anomalies(&self) -> Option<String> {
+        let mut notes = Vec::new();
+        if self.dropped_invalid > 0 {
+            notes.push(format!("{} unreadable", self.dropped_invalid));
+        }
+        if self.dropped_duplicate > 0 {
+            notes.push(format!("{} duplicate", self.dropped_duplicate));
+        }
+        if self.truncated > 0 {
+            notes.push(format!(
+                "{} past the {GIT_STATUSES_MAX} limit",
+                self.truncated
+            ));
+        }
+        (!notes.is_empty()).then(|| format!("git statuses dropped: {}", notes.join(", ")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Changed, Changes, GitStatus, Head, Said, v1};
+    use super::{Changed, Changes, GIT_STATUSES_MAX, GitStatus, Head, ParsedGitStatuses, Said, v1};
 
     fn repo() -> Said {
         Said::new("/w/repo".to_owned()).unwrap()
@@ -432,5 +492,40 @@ mod tests {
             };
             assert_eq!(GitStatus::of_api(&status), None, "{status:?}");
         }
+    }
+
+    #[test]
+    fn parsed_git_statuses_deduplicate_validate_and_bound() {
+        let first = GitStatus::Outside;
+        let second = GitStatus::NoCheckout { repository: repo() };
+        let invalid = v1::GitStatus {
+            dir: "/w/bad".to_owned(),
+            stands: None,
+        };
+        let blank_dir = first.to_api("");
+        let items = [
+            first.to_api("/w/a"),
+            second.to_api("/w/a"),
+            invalid,
+            blank_dir,
+        ];
+        let parsed = ParsedGitStatuses::of_api(&items);
+        assert_eq!(parsed.by_dir.get("/w/a"), Some(&first));
+        assert_eq!(parsed.by_dir.len(), 1);
+        assert_eq!(parsed.dropped_duplicate, 1);
+        assert_eq!(parsed.dropped_invalid, 2);
+        assert_eq!(parsed.truncated, 0);
+        assert_eq!(
+            parsed.anomalies().as_deref(),
+            Some("git statuses dropped: 2 unreadable, 1 duplicate")
+        );
+
+        let many: Vec<v1::GitStatus> = (0..=GIT_STATUSES_MAX)
+            .map(|at| first.to_api(&format!("/w/{at}")))
+            .collect();
+        let bounded = ParsedGitStatuses::of_api(&many);
+        assert_eq!(bounded.by_dir.len(), GIT_STATUSES_MAX);
+        assert_eq!(bounded.truncated, 1);
+        assert!(bounded.anomalies().is_some());
     }
 }

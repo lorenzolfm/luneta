@@ -91,4 +91,4 @@ pub use shows::{
     AskNumber, Beside, Direction, Echoed, FocusAsked, Found, Growth, Heard, Laid, LayoutAsked,
     Rect, Show, Shows, View, Where, show,
 };
-pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE};
+pub use watch::{FolderMark, FolderNames, FolderWatch, SETTLE, Troubles};

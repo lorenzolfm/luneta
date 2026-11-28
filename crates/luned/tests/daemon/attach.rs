@@ -1115,7 +1115,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"Replaces 
 
     let mut window = Window::open(&owned.host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    seated(&window, "work/main");
+    window.seated("work/main");
     window.send(REVIEW);
     eventually("review loads the diff", || {
         (window.shows("src/lib.rs") && window.shows("new_call")).then_some(())
