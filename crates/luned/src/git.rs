@@ -1027,6 +1027,21 @@ fn place(dir: impl AsRef<OsStr>) -> PlaceOutcome {
     place_within(dir, LIMIT)
 }
 
+const NOT_IN_WORK_TREE: &str = "fatal: this operation must be run in a work tree";
+
+fn not_a_directory(stderr: &[u8]) -> bool {
+    stderr.starts_with(b"fatal: cannot change to ")
+        && stderr.trim_ascii_end().ends_with(b": Not a directory")
+}
+
+fn outside_place(stderr: &[u8]) -> bool {
+    stderr.starts_with(IN_NO_REPOSITORY.as_bytes())
+        || stderr.starts_with(NOT_IN_WORK_TREE.as_bytes())
+        || stderr.starts_with(BARE_UNREAD.as_bytes())
+        || directory_gone(stderr)
+        || not_a_directory(stderr)
+}
+
 fn place_within(dir: impl AsRef<OsStr>, limit: Duration) -> PlaceOutcome {
     assert!(!limit.is_zero() && limit <= LIMIT);
     let mut git = Git::at(dir, "rev-parse");
@@ -1041,7 +1056,11 @@ fn place_within(dir: impl AsRef<OsStr>, limit: Duration) -> PlaceOutcome {
             Some(place) => PlaceOutcome::In(place),
             None => PlaceOutcome::Unanswered,
         },
-        Ok(Ran::Ended { status, .. }) if status.code().is_some() => PlaceOutcome::Outside,
+        Ok(Ran::Ended { status, stderr, .. })
+            if status.code().is_some() && outside_place(&stderr) =>
+        {
+            PlaceOutcome::Outside
+        }
         Ok(Ran::Ended { .. } | Ran::Stuck) | Err(_) => PlaceOutcome::Unanswered,
     }
 }
@@ -3704,6 +3723,33 @@ impl RefreshKey {
     }
 }
 
+fn in_same_worktree(path: &AbsPath, top: &AbsPath) -> bool {
+    if !path.starts_with(top.as_path()) {
+        return false;
+    }
+    let mut current = path.as_path();
+    let mut depth = 0usize;
+    while current != top.as_path() {
+        if depth == PATH_ANCESTORS_MAX {
+            return false;
+        }
+        depth += 1;
+        if current.file_name() == Some(OsStr::new(".git")) {
+            return false;
+        }
+        match fs::symlink_metadata(current.join(".git")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => return false,
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        current = parent;
+    }
+    assert!(depth <= PATH_ANCESTORS_MAX);
+    true
+}
+
 enum ResolvedTarget {
     In(AbsPath),
     Outside,
@@ -3899,7 +3945,7 @@ impl Follow {
                             Some(known_top) => known_top == top,
                             None => canonical
                                 .as_ref()
-                                .is_some_and(|path| path.starts_with(top.as_path())),
+                                .is_some_and(|path| in_same_worktree(path, top)),
                         };
                         if key.matches_dir(dir, canonical.as_ref()) || in_worktree {
                             matched.push(dir.clone());
@@ -6015,5 +6061,134 @@ mod tests {
             "unacknowledged refresh reports TimedOut"
         );
         assert_eq!(woken.try_recv(), Ok(()));
+    }
+
+    #[test]
+    fn place_within_distinguishes_outside_from_git_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = AbsPath::canonical(dir.path()).unwrap();
+        let plain = root.join("plain");
+        let missing = root.join("missing");
+        let regular = root.join("file");
+        let repo = root.join("repo");
+        let bare = root.join("bare.git");
+        let broken_gitfile = root.join("broken-gitfile");
+        let invalid_gitfile = root.join("invalid-gitfile");
+        for path in [&plain, &repo, &bare, &broken_gitfile, &invalid_gitfile] {
+            fs::create_dir_all(path.as_path()).unwrap();
+        }
+        fs::write(regular.as_path(), "content\n").unwrap();
+        assert!(git(repo.as_path(), &["init", "-q", "-b", "main"]));
+        assert!(git(bare.as_path(), &["init", "--bare", "-q"]));
+        fs::write(
+            broken_gitfile.join(".git").as_path(),
+            "gitdir: /nonexistent/path/for/lune-test\n",
+        )
+        .unwrap();
+        fs::write(invalid_gitfile.join(".git").as_path(), "not a gitdir\n").unwrap();
+
+        assert!(matches!(
+            super::place_within(repo.as_path(), super::REFRESH_WAIT_MAX),
+            super::PlaceOutcome::In(_)
+        ));
+        for outside in [
+            plain.as_path(),
+            missing.as_path(),
+            regular.as_path(),
+            repo.join(".git").as_path(),
+            bare.as_path(),
+        ] {
+            assert!(
+                super::place_within(outside, super::REFRESH_WAIT_MAX)
+                    == super::PlaceOutcome::Outside,
+                "{} should classify as Outside",
+                outside.display()
+            );
+        }
+        for broken in [broken_gitfile.as_path(), invalid_gitfile.as_path()] {
+            assert!(
+                super::place_within(broken, super::REFRESH_WAIT_MAX)
+                    == super::PlaceOutcome::Unanswered,
+                "{} should classify as Unanswered",
+                broken.display()
+            );
+        }
+        assert!(!super::outside_place(
+            b"fatal: detected dubious ownership in repository at '/tmp/repo'\n"
+        ));
+        assert!(!super::outside_place(
+            b"fatal: cannot change to '/tmp/secret': Permission denied\n"
+        ));
+    }
+
+    #[test]
+    fn plan_refreshes_excludes_unqueried_nested_repo_from_parent_worktree() {
+        use lune_domain::mux::{OwnMade, TerminalKey};
+        use lune_domain::projects::ViewId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = AbsPath::canonical(dir.path()).unwrap();
+        let repo = root.join("repo");
+        let sub = repo.join("sub");
+        let nested = repo.join("nested");
+        let nested_sub = nested.join("inner");
+        let submodule = repo.join("submodule");
+        for path in [&repo, &sub, &nested, &nested_sub, &submodule] {
+            fs::create_dir_all(path.as_path()).unwrap();
+        }
+        assert!(git(repo.as_path(), &["init", "-q", "-b", "main"]));
+        assert!(git(nested.as_path(), &["init", "-q", "-b", "main"]));
+        fs::write(submodule.join(".git").as_path(), "gitdir: ../nested/.git\n").unwrap();
+
+        let (wake, _woken) = mpsc::sync_channel(1);
+        let core = crate::core::start(crate::core::Wakes {
+            git: mpsc::sync_channel(1).0,
+            github: mpsc::sync_channel(1).0,
+            projects: mpsc::sync_channel(1).0,
+        })
+        .unwrap();
+        let mut follow = super::Follow::new(wake);
+        let repo_dir = Dir::parse(repo.to_str().unwrap()).unwrap();
+        let sub_dir = Dir::parse(sub.to_str().unwrap()).unwrap();
+        let git_dir = Dir::parse(repo.join(".git").to_str().unwrap()).unwrap();
+        let nested_dir = Dir::parse(nested.to_str().unwrap()).unwrap();
+        let nested_sub_dir = Dir::parse(nested_sub.to_str().unwrap()).unwrap();
+        let submodule_dir = Dir::parse(submodule.to_str().unwrap()).unwrap();
+        let make_terminal = |id: u32, cwd: Dir| {
+            crate::core::Located::Shown(crate::core::Shown::Listed {
+                key: TerminalKey {
+                    id: NonZeroU32::new(id).unwrap(),
+                    made: OwnMade::from_nanos(u64::from(id) * 10),
+                },
+                cwd: Some(cwd),
+                titled: None,
+                program: crate::core::Program::Ended,
+            })
+        };
+        core.send(crate::core::Command::Terminals(BTreeMap::from([
+            (ViewId::of(1).unwrap(), make_terminal(1, repo_dir.clone())),
+            (ViewId::of(2).unwrap(), make_terminal(2, sub_dir.clone())),
+            (ViewId::of(3).unwrap(), make_terminal(3, git_dir)),
+            (ViewId::of(4).unwrap(), make_terminal(4, nested_dir)),
+            (ViewId::of(5).unwrap(), make_terminal(5, nested_sub_dir)),
+            (ViewId::of(6).unwrap(), make_terminal(6, submodule_dir)),
+        ])))
+        .unwrap();
+        let dirs = crate::core::ask(&core, crate::core::Command::Dirs).unwrap();
+        let (done, _waited) = mpsc::sync_channel(1);
+        let pending = [super::Refresh {
+            dir: Directory::parse(repo.to_str().unwrap().to_owned()).unwrap(),
+            done,
+        }];
+
+        let (plans, forced) = follow.plan_refreshes(&dirs, &pending);
+        assert_eq!(forced, BTreeSet::from([repo_dir.clone(), sub_dir.clone()]));
+        let [super::RefreshPlan::Matched(matched)] = plans.as_slice() else {
+            panic!("expected one matched refresh plan");
+        };
+        assert_eq!(
+            matched.iter().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([repo_dir, sub_dir])
+        );
     }
 }

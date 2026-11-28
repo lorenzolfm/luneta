@@ -116,8 +116,12 @@ pub enum Unrebased {
     InDoubt(String),
 }
 
+pub(crate) struct Attempt {
+    pub(crate) top: Option<Directory>,
+    pub(crate) outcome: Result<Rebased, Unrebased>,
+}
+
 struct Ready {
-    top: String,
     branch: Said,
     onto: Onto,
     before: String,
@@ -130,45 +134,75 @@ enum Onto {
 
 struct NamedBranch(String);
 
-pub(crate) fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
+pub(crate) fn rebase_at(dir: &Directory, expected: Option<&Said>) -> Attempt {
     let until = Instant::now() + RUNNING_MAX;
+    let top = match toplevel(dir, until) {
+        Ok(top) => top,
+        Err(why) => {
+            return Attempt {
+                top: None,
+                outcome: Err(Unrebased::Refused(why)),
+            };
+        }
+    };
+    let outcome = rebase_in(&top, expected, until);
+    Attempt {
+        top: Some(top),
+        outcome,
+    }
+}
+
+#[cfg(test)]
+fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
+    rebase_at(dir, expected).outcome
+}
+
+fn rebase_in(
+    top: &Directory,
+    expected: Option<&Said>,
+    until: Instant,
+) -> Result<Rebased, Unrebased> {
+    let top = top.as_str();
     let Ready {
-        top,
         branch,
         onto,
         before,
-    } = ready(dir, expected, until).map_err(Unrebased::Refused)?;
+    } = ready(top, expected, until).map_err(Unrebased::Refused)?;
     let reference = onto.reference();
     let onto = Said::new(onto.to_string()).expect("what a rebase goes onto names a branch");
-    let doubt = |why: String| in_doubt(&top, &why);
+    let doubt = |why: String| in_doubt(top, &why);
     let named = branch.as_str();
-    let came = match picked(&top, &reference, named, until)? {
-        Picked::Ended if tip(&top, named, until).map_err(doubt)? == before => Came::Already,
+    let came = match picked(top, &reference, named, until)? {
+        Picked::Ended if tip(top, named, until).map_err(doubt)? == before => Came::Already,
         Picked::Ended => Came::Clean {
-            ahead: ahead(&top, &reference, named, until).map_err(doubt)?,
+            ahead: ahead(top, &reference, named, until).map_err(doubt)?,
         },
         Picked::Stopped => {
-            let at = stopped_at(&top, until).map_err(doubt)?;
+            let at = stopped_at(top, until).map_err(doubt)?;
             Came::Stopped(Stopped {
                 at,
-                conflicted: conflicted(&top, until).map_err(doubt)?,
+                conflicted: conflicted(top, until).map_err(doubt)?,
             })
         }
     };
     Ok(Rebased { branch, onto, came })
 }
 
-fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {
+fn toplevel(dir: &Directory, until: Instant) -> Result<Directory, String> {
     let top = says(dir.as_str(), "rev-parse", &["--show-toplevel"], &[], until)?;
     if top.is_empty() {
         return Err(format!("{dir} is in no worktree of a repository"));
     }
-    if let Some(doing) = under_way(&top, until)? {
+    Directory::parse(top)
+}
+
+fn ready(top: &str, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {
+    if let Some(doing) = under_way(top, until)? {
         return Err(format!(
             "{top} is in the middle of {doing}: finish it, or abort it, first"
         ));
     }
-    let Some(branch) = branch(&top, until)? else {
+    let Some(branch) = branch(top, until)? else {
         return Err(format!(
             "{top} is on no branch, and a rebase moves a branch"
         ));
@@ -178,18 +212,17 @@ fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Rea
     {
         return Err(format!("{top} is on {branch} now, not {expected}"));
     }
-    if !committed(&top, until)? {
+    if !committed(top, until)? {
         return Err(format!(
             "{top} has changes not committed: commit or stash them first"
         ));
     }
-    let onto = onto(&top, branch.as_str(), until)?;
+    let onto = onto(top, branch.as_str(), until)?;
     if let Some((remote, branch)) = onto.to_fetch() {
-        sync::fetch(&top, remote, branch, left(until, FETCHING)?)?;
+        sync::fetch(top, remote, branch, left(until, FETCHING)?)?;
     }
-    let before = tip(&top, branch.as_str(), until)?;
+    let before = tip(top, branch.as_str(), until)?;
     Ok(Ready {
-        top,
         branch,
         onto,
         before,

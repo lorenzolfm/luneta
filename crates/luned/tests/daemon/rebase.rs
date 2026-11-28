@@ -575,3 +575,73 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
         (terminals() == 2).then_some(())
     });
 }
+
+#[test]
+fn a_rebase_from_a_deleted_subdirectory_still_refreshes_the_tracked_worktree() {
+    let owned = Owned::new();
+    let host = &owned.host;
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let repository = Repository::new(&scratch);
+    let (up, fix) = (&repository.up, &repository.fix);
+    let up_sub = up.join("sub");
+    fs::create_dir(&up_sub).unwrap();
+    commit(up, "sub/gone", "a\n");
+    git(fix, &["fetch", "-q", "origin"]);
+    git(fix, &["reset", "-q", "--hard", "origin/main"]);
+    commit(fix, "own", "o\n");
+    git(up, &["rm", "-q", "sub/gone"]);
+    git(up, &["commit", "-q", "-m", "drop sub"]);
+
+    let sub = fix.join("sub");
+    assert!(sub.is_dir(), "subdirectory exists before rebase");
+
+    let tracked = project(host, &scratch.join("n"), None);
+    worktree(host, tracked, fix);
+    let fix_dir = fix.to_str().unwrap();
+    let branch_of = || {
+        let status = host
+            .host()
+            .git_statuses
+            .into_iter()
+            .find(|status| status.dir == fix_dir)?;
+        match GitStatus::of_api(&status)? {
+            GitStatus::Checkout {
+                head: Head::Branch { name, .. },
+                ..
+            } => Some(name.as_str().to_owned()),
+            _ => None,
+        }
+    };
+    eventually("luned tracks the worktree branch before rebase", || {
+        (branch_of().as_deref() == Some("fix")).then_some(())
+    });
+
+    let folder = folder_in(host.runtime.path()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let refresh = runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        let sub_dir = Directory::parse(sub.to_str().unwrap().to_owned()).unwrap();
+        let fix_branch = Said::new("fix".to_owned()).unwrap();
+        let answer = daemon
+            .rebase(rebases::asked(None, &sub_dir, Some(&fix_branch)))
+            .await
+            .unwrap();
+        let answer = answer.into_inner().message().await.unwrap().unwrap();
+        let (rebased, refresh) = Rebased::of_api_with_refresh(answer, Some(&fix_branch)).unwrap();
+        assert_eq!(rebased.came, Came::Clean { ahead: 1 });
+        refresh
+    });
+    assert!(
+        !sub.exists(),
+        "rebase deleted the subdirectory it was invoked from"
+    );
+    assert!(
+        matches!(refresh, Some(StatusRefresh::Refreshed(_))),
+        "rebase from a deleted subdirectory still refreshes its tracked worktree: {refresh:?}"
+    );
+    assert_eq!(branch_of().as_deref(), Some("fix"));
+}
