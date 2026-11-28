@@ -22,6 +22,11 @@ impl ContextRef {
     }
 
     #[must_use]
+    pub const fn hunk(self) -> usize {
+        self.hunk
+    }
+
+    #[must_use]
     pub fn get(self, patch: &Patch) -> &ContextLine {
         let block = &patch.files[self.file].hunks()[self.hunk].blocks[self.block];
         match block {
@@ -46,6 +51,11 @@ impl DeletedRef {
     }
 
     #[must_use]
+    pub const fn hunk(self) -> usize {
+        self.hunk
+    }
+
+    #[must_use]
     pub fn get(self, patch: &Patch) -> &ChangedLine {
         let block = &patch.files[self.file].hunks()[self.hunk].blocks[self.block];
         match block {
@@ -67,6 +77,11 @@ impl AddedRef {
     #[must_use]
     pub const fn file(self) -> usize {
         self.file
+    }
+
+    #[must_use]
+    pub const fn hunk(self) -> usize {
+        self.hunk
     }
 
     #[must_use]
@@ -104,6 +119,16 @@ impl LeftRow {
             LeftRow::HunkHeader { file, .. } => Some(*file),
             LeftRow::Context { at, .. } => Some(at.file()),
             LeftRow::Deleted { at, .. } => Some(at.file()),
+            LeftRow::Spacer => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn hunk_index(&self) -> Option<usize> {
+        match self {
+            LeftRow::HunkHeader { hunk, .. } => Some(*hunk),
+            LeftRow::Context { at, .. } => Some(at.hunk()),
+            LeftRow::Deleted { at, .. } => Some(at.hunk()),
             LeftRow::Spacer => None,
         }
     }
@@ -152,6 +177,16 @@ impl RightRow {
             RightRow::HunkHeader { file, .. } => Some(*file),
             RightRow::Context { at, .. } => Some(at.file()),
             RightRow::Added { at, .. } => Some(at.file()),
+            RightRow::Spacer => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn hunk_index(&self) -> Option<usize> {
+        match self {
+            RightRow::HunkHeader { hunk, .. } => Some(*hunk),
+            RightRow::Context { at, .. } => Some(at.hunk()),
+            RightRow::Added { at, .. } => Some(at.hunk()),
             RightRow::Spacer => None,
         }
     }
@@ -535,6 +570,17 @@ impl UnifiedRow {
             UnifiedRow::FileHeader { .. }
             | UnifiedRow::BinaryNotice { .. }
             | UnifiedRow::HunkHeader { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn hunk_index(&self) -> Option<usize> {
+        match self {
+            UnifiedRow::HunkHeader { hunk, .. } => Some(*hunk),
+            UnifiedRow::Context { at, .. } => Some(at.hunk()),
+            UnifiedRow::Deleted { at, .. } => Some(at.hunk()),
+            UnifiedRow::Added { at, .. } => Some(at.hunk()),
+            UnifiedRow::FileHeader { .. } | UnifiedRow::BinaryNotice { .. } => None,
         }
     }
 

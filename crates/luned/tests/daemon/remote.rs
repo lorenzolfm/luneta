@@ -1221,8 +1221,19 @@ pub fn claude_that_takes_turns(host: &Host) {
         r#"cat > "{home}/words"
 {{ echo "cwd=$(pwd -P)"
 echo "turn=${{LUNE_TURN-unset}}"; echo "before=${{LUNE_TURN_BEFORE-unset}}"
-resumed=none; for arg; do [ "$after" = --resume ] && resumed=$arg; after=$arg; done
+resumed=none; tools=unset; prompt=none
+for arg; do
+    case "$after" in
+        --resume) resumed=$arg ;;
+        --tools) tools=$arg ;;
+    esac
+    case "$arg" in
+        --system-prompt|--append-system-prompt) prompt=$arg ;;
+    esac
+    after=$arg
+done
 echo "resumed=$resumed"; echo "model=$2 $3"
+echo "tools=$tools"; echo "prompt=$prompt"
 }} > "{home}/told"
 echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
 ran='{{"type":"assistant","parent_tool_use_id":null,"message":{{"content":[{{"type":"tool_use",'\
@@ -1315,9 +1326,24 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
                 "before=unset".to_owned(),
                 "resumed=none".to_owned(),
                 "model=--model sonnet".to_owned(),
+                "tools=Bash".to_owned(),
+                "prompt=--append-system-prompt".to_owned(),
             ]
         );
         assert_eq!(words, "which agents run");
+
+        let reviewed = AskRequest {
+            review_only: true,
+            ..ask("far", Some(&dir), "explain", true)
+        };
+        let (_steps, ended) = turn(&mut daemon, reviewed).await;
+        ended.unwrap();
+        let (told_review, words) = told(&far);
+        assert_eq!(
+            told_review[5..],
+            ["tools=".to_owned(), "prompt=--system-prompt".to_owned(),]
+        );
+        assert_eq!(words, "explain");
 
         let (steps, ended) = turn(&mut daemon, ask("far", None, "yes", false)).await;
         assert_eq!(steps, [session.clone(), ran.clone(), said]);

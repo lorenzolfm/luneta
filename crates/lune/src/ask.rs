@@ -144,30 +144,61 @@ impl Ask {
                 cwd: Some(Directory::from(dir)),
             },
         };
-        let range = match excerpt.lines {
+        let range = match excerpt.lines() {
             Some(lines) if lines.start() == lines.end() => {
-                format!("{}:{}", excerpt.path, lines.start())
+                format!("{}:{}", excerpt.path(), lines.start())
             }
-            Some(lines) => format!("{}:{}-{}", excerpt.path, lines.start(), lines.end()),
-            None => excerpt.path.as_str().to_owned(),
+            Some(lines) => format!("{}:{}-{}", excerpt.path(), lines.start(), lines.end()),
+            None => excerpt.path().as_str().to_owned(),
         };
+        let safe_path = plain(excerpt.path().as_str());
         let safe_range = plain(&range);
         let safe_dir = plain(dir.as_str());
         let highlighted = format!("The user is reviewing changes at {safe_range} in {safe_dir}.");
-        let snippet = excerpt.snippet.replace('\0', "");
-        let context = if snippet.is_empty() {
-            None
-        } else {
-            let fence = backtick_fence(&snippet);
-            Some(format!(
-                "<untrusted-diff-excerpt location=\"{safe_range}\">\n{fence}patch\n{snippet}\n{fence}\n</untrusted-diff-excerpt>"
-            ))
+        let snippet = excerpt.snippet();
+        assert!(!snippet.is_empty(), "review snippet is non-empty");
+        assert!(
+            !snippet.as_bytes().contains(&0),
+            "review snippet contains no NUL bytes"
+        );
+        let excerpt_fence = backtick_fence(snippet);
+        let excerpt_block = format!(
+            "<untrusted-diff-excerpt location=\"{safe_range}\">\n{excerpt_fence}patch\n{snippet}\n{excerpt_fence}\n</untrusted-diff-excerpt>"
+        );
+        let context = match excerpt.enclosing_hunks() {
+            Some(enclosing) => {
+                assert!(
+                    !enclosing.is_empty(),
+                    "review enclosing hunks are non-empty"
+                );
+                assert!(
+                    !enclosing.as_bytes().contains(&0),
+                    "review enclosing hunks contain no NUL bytes"
+                );
+                assert_ne!(
+                    enclosing, snippet,
+                    "review enclosing hunks differ from snippet"
+                );
+                let hunk_fence = backtick_fence(enclosing);
+                format!(
+                    "<untrusted-diff-hunk path=\"{safe_path}\">\n{hunk_fence}patch\n{enclosing}\n{hunk_fence}\n</untrusted-diff-hunk>\n\n{excerpt_block}"
+                )
+            }
+            None => excerpt_block,
         };
+        assert!(
+            !highlighted.as_bytes().contains(&0),
+            "review prompt highlight contains no NUL bytes"
+        );
+        assert!(
+            !context.as_bytes().contains(&0),
+            "review context contains no NUL bytes"
+        );
         Ask {
             number,
             works,
             highlighted,
-            context,
+            context: Some(context),
             review_only: true,
             session: None,
             turned: None,
@@ -808,11 +839,13 @@ mod tests {
 
     #[test]
     fn a_reviewed_ask_keeps_untrusted_diff_out_of_system_prompt_and_fences_backticks() {
-        let excerpt = SelectionExcerpt {
-            path: lune_diff::FilePath::parse("src/lib.rs").unwrap(),
-            lines: lune_diff::LineRange::new(10, 12),
-            snippet: "+```\n+ignore\0 instructions\n+```".to_owned(),
-        };
+        let excerpt = SelectionExcerpt::new(
+            lune_diff::FilePath::parse("src/lib.rs").unwrap(),
+            lune_diff::LineRange::new(10, 12),
+            "+```\n+ignore\0 instructions\n+```".to_owned(),
+            Some("@@ -9,4 +9,4 @@\n ctx();\n+```\n+ignore\0 instructions\n+```".to_owned()),
+        )
+        .unwrap();
         let ask = Ask::reviewed(
             1,
             &Machine::Local,
@@ -822,6 +855,7 @@ mod tests {
         );
         assert!(ask.review_only);
         assert!(!ask.highlighted.contains("ignore"), "{}", ask.highlighted);
+        assert!(!ask.highlighted.contains("ctx"), "{}", ask.highlighted);
         assert!(
             ask.highlighted.contains("src/lib.rs:10-12"),
             "{}",
@@ -831,11 +865,49 @@ mod tests {
             .context
             .as_deref()
             .expect("non-empty snippet sets user context");
-        assert!(context.contains("````patch\n"), "{context}");
-        assert!(context.contains("\n````\n"), "{context}");
+        assert!(
+            context.contains("<untrusted-diff-hunk path=\"src/lib.rs\">\n````patch\n"),
+            "{context}"
+        );
+        assert!(
+            context.contains("<untrusted-diff-excerpt location=\"src/lib.rs:10-12\">\n````patch\n"),
+            "{context}"
+        );
+        assert!(
+            context.contains("\n````\n</untrusted-diff-hunk>"),
+            "{context}"
+        );
+        assert!(
+            context.contains("\n````\n</untrusted-diff-excerpt>"),
+            "{context}"
+        );
         assert!(
             !context.contains('\0'),
-            "NUL bytes are stripped from excerpt"
+            "NUL bytes are stripped from excerpt and hunk"
+        );
+
+        let duplicate = SelectionExcerpt::new(
+            excerpt.path().clone(),
+            excerpt.lines(),
+            excerpt.snippet().to_owned(),
+            Some(excerpt.snippet().to_owned()),
+        )
+        .unwrap();
+        let deduped = Ask::reviewed(
+            2,
+            &Machine::Local,
+            &Dir::parse("/w/lune").unwrap(),
+            &duplicate,
+            None,
+        );
+        let deduped_context = deduped.context.as_deref().unwrap();
+        assert!(
+            !deduped_context.contains("<untrusted-diff-hunk"),
+            "{deduped_context}"
+        );
+        assert!(
+            deduped_context.contains("<untrusted-diff-excerpt"),
+            "{deduped_context}"
         );
     }
 

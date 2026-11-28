@@ -445,7 +445,7 @@ impl ReviewPane {
                     );
                 }
                 if has_footer {
-                    draw_hints(buffer, footer, false, None);
+                    draw_hints(buffer, footer, None);
                 }
                 None
             }
@@ -467,7 +467,7 @@ impl ReviewPane {
                     );
                 }
                 if has_footer {
-                    draw_hints(buffer, footer, false, None);
+                    draw_hints(buffer, footer, None);
                 }
                 None
             }
@@ -529,7 +529,7 @@ impl ReviewPane {
                     }
                 };
                 if has_footer {
-                    draw_hints(buffer, footer, viewer.is_selecting(), Some(viewer));
+                    draw_hints(buffer, footer, Some(viewer));
                 }
                 overlay
             }
@@ -641,7 +641,8 @@ fn draw_header(buffer: &mut Buffer, area: Rect, viewer: &Viewer, stale: Option<&
     buffer.set_line(area.x, area.y, &line, area.width);
 }
 
-fn draw_hints(buffer: &mut Buffer, area: Rect, selecting: bool, viewer: Option<&Viewer>) {
+fn draw_hints(buffer: &mut Buffer, area: Rect, viewer: Option<&Viewer>) {
+    assert_eq!(area.height, 1, "review hints bar occupies one row");
     let bg = moonlight::SURFACE;
     fill_row(buffer, area, Style::new().bg(bg));
     if let Some(viewer) = viewer {
@@ -676,16 +677,25 @@ fn draw_hints(buffer: &mut Buffer, area: Rect, selecting: bool, viewer: Option<&
             return;
         }
     }
-    let text = if selecting {
-        " VISUAL · j/k extend · e explain · ? ask · Esc clear"
+    let tree_focused = viewer.is_some_and(|viewer| viewer.sidebar().is_focused());
+    let selecting = viewer.is_some_and(Viewer::is_selecting);
+    let (text, fg) = if tree_focused {
+        (
+            " FILES · j/k move · Enter open/fold · m viewed · Tab diff · Esc back",
+            ACCENT,
+        )
+    } else if selecting {
+        (
+            " VISUAL · j/k extend · e explain · ? ask · Esc clear",
+            moonlight::MAUVE,
+        )
     } else {
-        " j/k move · ]/[ hunk · }/{ file · v select · e explain · ? ask · s split · f files · m viewed · / search · dd close"
+        (
+            " j/k move · ]/[ hunk · }/{ file · v select · e explain · ? ask · s split · f files · m viewed · / search · dd close",
+            moonlight::MUTE,
+        )
     };
-    let fg = if selecting {
-        moonlight::MAUVE
-    } else {
-        moonlight::MUTE
-    };
+    assert!(!text.is_empty(), "review hints text is non-empty");
     buffer.set_stringn(
         area.x,
         area.y,
@@ -1629,9 +1639,9 @@ diff --git a/src/lib.rs b/src/lib.rs
         pane.key(&KeyEvent::from(KeyCode::Char('j')));
         pane.key(&KeyEvent::from(KeyCode::Char('j')));
         let explain = pane.key(&KeyEvent::from(KeyCode::Char('e')));
-        assert!(matches!(explain, ReviewAction::Explain(ref ex) if ex.path == "src/lib.rs"));
+        assert!(matches!(explain, ReviewAction::Explain(ref ex) if ex.path() == "src/lib.rs"));
         let ask = pane.key(&KeyEvent::from(KeyCode::Char('?')));
-        assert!(matches!(ask, ReviewAction::Ask(ref ex) if ex.path == "src/lib.rs"));
+        assert!(matches!(ask, ReviewAction::Ask(ref ex) if ex.path() == "src/lib.rs"));
 
         let narrow = Rect::new(0, 0, SPLIT_HARD_MIN_WIDTH - 1, 10);
         let mut narrow_buf = Buffer::empty(narrow);
@@ -1682,6 +1692,14 @@ diff --git a/crates/a/two.rs b/crates/a/two.rs
             pane.key(&KeyEvent::from(KeyCode::Char('e'))),
             ReviewAction::None
         );
+        let mut tree_buf = Buffer::empty(area);
+        pane.draw(&mut tree_buf, area, true, None);
+        let tree_hints: String = (0..area.width)
+            .map(|x| tree_buf[(x, area.height - 1)].symbol())
+            .collect();
+        assert!(tree_hints.contains("FILES"), "{tree_hints}");
+        assert!(!tree_hints.contains("e explain"), "{tree_hints}");
+        assert!(!tree_hints.contains("? ask"), "{tree_hints}");
         pane.key(&KeyEvent::from(KeyCode::Enter));
         let mut folded_buf = Buffer::empty(area);
         pane.draw(&mut folded_buf, area, true, None);
