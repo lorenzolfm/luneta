@@ -6,9 +6,10 @@ use std::time::{Duration, Instant};
 use lune_protocol::CONFLICTED_NAMED_MAX;
 use lune_protocol::github::State;
 use lune_protocol::said::Said;
+use lune_protocol::watch::LocalVersion;
 use tonic::{Code, Status};
 
-use crate::api::rebase_response::{self, Came as Told};
+use crate::api::rebase_response::{self, Came as Told, StatusRefresh as RefreshTold};
 use crate::api::{On, RebaseRequest, RebaseResponse};
 use crate::directory::Directory;
 use crate::git::{self, Common, DefaultBranch, Git};
@@ -45,6 +46,35 @@ pub struct Rebased {
     pub branch: Said,
     pub onto: Said,
     pub came: Came,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatusRefresh {
+    Refreshed(LocalVersion),
+    Untracked,
+    Stale,
+}
+
+impl StatusRefresh {
+    #[must_use]
+    pub fn to_api(self) -> RefreshTold {
+        match self {
+            StatusRefresh::Refreshed(version) => RefreshTold::RefreshedAt(version.to_api()),
+            StatusRefresh::Untracked => RefreshTold::Untracked(()),
+            StatusRefresh::Stale => RefreshTold::Stale(()),
+        }
+    }
+
+    pub fn of_api(said: Option<RefreshTold>) -> Result<Option<Self>, String> {
+        match said {
+            None => Ok(None),
+            Some(RefreshTold::RefreshedAt(version)) => LocalVersion::of_api(version)
+                .map(|version| Some(StatusRefresh::Refreshed(version)))
+                .map_err(|why| format!("luned sent an invalid refresh version: {why}")),
+            Some(RefreshTold::Untracked(())) => Ok(Some(StatusRefresh::Untracked)),
+            Some(RefreshTold::Stale(())) => Ok(Some(StatusRefresh::Stale)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -558,6 +588,15 @@ pub fn asked(on: Option<On>, dir: &Directory, branch: Option<&Said>) -> RebaseRe
 impl Rebased {
     #[must_use]
     pub fn to_api(&self) -> RebaseResponse {
+        self.to_api_inner(None)
+    }
+
+    #[must_use]
+    pub fn to_api_with(&self, status_refresh: StatusRefresh) -> RebaseResponse {
+        self.to_api_inner(Some(status_refresh.to_api()))
+    }
+
+    fn to_api_inner(&self, status_refresh: Option<RefreshTold>) -> RebaseResponse {
         let came = match &self.came {
             Came::Already => Told::Already(()),
             Came::Clean { ahead } => Told::Clean(rebase_response::Clean { ahead: *ahead }),
@@ -579,10 +618,18 @@ impl Rebased {
             branch,
             onto,
             came: Some(came),
+            status_refresh,
         }
     }
 
     pub fn of_api(said: RebaseResponse, asked: Option<&Said>) -> Result<Rebased, String> {
+        Self::of_api_with_refresh(said, asked).map(|(rebased, _)| rebased)
+    }
+
+    pub fn of_api_with_refresh(
+        said: RebaseResponse,
+        asked: Option<&Said>,
+    ) -> Result<(Rebased, Option<StatusRefresh>), String> {
         let branch = Said::new(said.branch).ok_or("luned named no branch it rebased")?;
         let unnamed = || format!("luned named nothing it rebased {branch} onto");
         let onto = Said::new(said.onto).ok_or_else(unnamed)?;
@@ -607,7 +654,8 @@ impl Rebased {
                 Came::Stopped(Stopped { at, conflicted })
             }
         };
-        Ok(Rebased { branch, onto, came })
+        let status_refresh = StatusRefresh::of_api(said.status_refresh)?;
+        Ok((Rebased { branch, onto, came }, status_refresh))
     }
 }
 
@@ -972,12 +1020,37 @@ mod tests {
                 Rebased::of_api(rebased.to_api(), asked),
                 Ok(rebased.clone())
             );
-            assert_eq!(Rebased::of_api(rebased.to_api(), None), Ok(rebased));
+            assert_eq!(
+                Rebased::of_api_with_refresh(rebased.to_api(), None),
+                Ok((rebased.clone(), None))
+            );
+            let version = LocalVersion::new(std::num::NonZeroU32::new(7).unwrap(), 42);
+            for refresh in [
+                StatusRefresh::Refreshed(version),
+                StatusRefresh::Untracked,
+                StatusRefresh::Stale,
+            ] {
+                assert_eq!(
+                    Rebased::of_api_with_refresh(rebased.to_api_with(refresh), asked),
+                    Ok((rebased.clone(), Some(refresh)))
+                );
+            }
         }
+        let bad_version = RebaseResponse {
+            branch: "b".to_owned(),
+            onto: "main".to_owned(),
+            came: Some(Told::Already(())),
+            status_refresh: Some(RefreshTold::RefreshedAt(crate::api::LocalVersion {
+                pid: 0,
+                seq: 1,
+            })),
+        };
+        assert!(Rebased::of_api(bad_version, None).is_err());
         let unsaid = RebaseResponse {
             branch: "b".to_owned(),
             onto: "main".to_owned(),
             came: None,
+            status_refresh: None,
         };
         assert!(Rebased::of_api(unsaid, None).is_err());
     }
@@ -988,6 +1061,7 @@ mod tests {
             branch: branch.to_owned(),
             onto: onto.to_owned(),
             came: Some(Told::Already(())),
+            status_refresh: None,
         };
         let unnamed = Rebased::of_api(said("", "main"), None).unwrap_err();
         assert_eq!(unnamed, "luned named no branch it rebased");
@@ -1021,6 +1095,7 @@ mod tests {
             branch: "b".to_owned(),
             onto: "main".to_owned(),
             came: Some(Told::Stopped(stopped)),
+            status_refresh: None,
         };
         let refused = Rebased::of_api(said, None).unwrap_err();
         let starts = "luned said the rebase stopped, but it names 3 files";

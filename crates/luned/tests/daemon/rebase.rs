@@ -8,14 +8,15 @@ use lune_waits::eventually;
 use luned::Directory;
 use luned::api::daemon_client::DaemonClient;
 use luned::api::projects::Held;
+use luned::api::remote::Reached;
 use luned::api::{On, RebaseRequest};
-use luned::rebases::{self, Came, Rebased};
+use luned::rebases::{self, Came, Rebased, StatusRefresh};
 use serde_json::json;
 use tonic::Code;
 
 use crate::host::{Host, LUNE, PATIENT, answered, folder_in, script, start};
 use crate::own::Owned;
-use crate::projects::project;
+use crate::projects::{project, worktree};
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::starts::{Window, makes_shells, shown, work_in};
 use crate::worktree::{cloned_as_wt, git};
@@ -427,16 +428,79 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
                 .await
                 .unwrap();
             let answer = answer.into_inner().message().await.unwrap().unwrap();
-            let rebased = Rebased::of_api(answer, Some(&fix)).unwrap();
+            let (rebased, refresh) = Rebased::of_api_with_refresh(answer, Some(&fix)).unwrap();
             assert_eq!(
                 (rebased.branch.as_str(), rebased.onto.as_str()),
                 ("fix", "origin/main")
             );
             assert_eq!(rebased.came, came);
+            refresh
         };
-        rebase(Came::Clean { ahead: 1 }).await;
-        rebase(Came::Already).await;
+        assert_eq!(
+            rebase(Came::Clean { ahead: 1 }).await,
+            Some(StatusRefresh::Untracked)
+        );
+        assert_eq!(rebase(Came::Already).await, Some(StatusRefresh::Untracked));
     });
+
+    let tracked = project(&far, &scratch.join("n"), None);
+    worktree(&far, tracked, &repository.fix);
+    let fix_dir = repository.fix.to_str().unwrap();
+    let far_branch = |host: &luned::api::remote::Host| {
+        let status = host
+            .git_statuses
+            .iter()
+            .find(|status| status.dir == fix_dir)?;
+        match GitStatus::of_api(status)? {
+            GitStatus::Checkout {
+                head: Head::Branch { name, .. },
+                ..
+            } => Some(name.as_str().to_owned()),
+            _ => None,
+        }
+    };
+    reached(&here, "far", |host| {
+        far_branch(host).as_deref() == Some("fix")
+    });
+
+    commit(&repository.up, "more", "m\n");
+    runtime.block_on(async {
+        let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
+        let dir = Directory::parse(fix_dir.to_owned()).unwrap();
+        let fix = Said::new("fix".to_owned()).unwrap();
+        let answer = daemon
+            .rebase(rebases::asked(
+                Some(On {
+                    destination: "far".to_owned(),
+                }),
+                &dir,
+                Some(&fix),
+            ))
+            .await
+            .unwrap();
+        let answer = answer.into_inner().message().await.unwrap().unwrap();
+        let (rebased, refresh) = Rebased::of_api_with_refresh(answer, Some(&fix)).unwrap();
+        assert_eq!(rebased.came, Came::Clean { ahead: 1 });
+        assert!(
+            matches!(refresh, Some(StatusRefresh::Refreshed(_))),
+            "bridged tracked rebase reports Refreshed: {refresh:?}"
+        );
+    });
+    let far_host = here
+        .host()
+        .remotes
+        .into_iter()
+        .find(|remote| remote.destination == "far")
+        .and_then(|remote| match remote.reached {
+            Some(Reached::Host(host)) => Some(host),
+            _ => None,
+        })
+        .expect("far remote host is present immediately after bridged rebase");
+    assert_eq!(
+        far_branch(&far_host).as_deref(),
+        Some("fix"),
+        "local KnownRemotes reflects the post-rebase branch before bridged RebaseResponse returns"
+    );
 }
 
 #[test]

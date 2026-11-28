@@ -246,14 +246,7 @@ pub async fn serve(
         owns,
         SWEEP,
     )?;
-    let (git_refresher, refresh_requests) = git::Refresher::pair(wake_git.clone());
-    git::follow(
-        core.clone(),
-        wake_git,
-        git_woken,
-        refresh_requests,
-        GIT_STATUS_SWEEP,
-    )?;
+    let git_refresher = git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests {
         pending: PENDING_CHECKS_SWEEP,
@@ -1046,33 +1039,52 @@ impl Daemon for Host {
         let branch = branch
             .map(|branch| Said::new(branch).ok_or_else(unnamed))
             .transpose()?;
-        if let Some(mut daemon) = self.bridged(on).await? {
+        if let Some((destination, bridging)) = self.bridge(on).await? {
+            let mut daemon = bridging.daemon;
             let asked = rebases::asked(None, &dir, branch.as_ref());
             let answer = daemon.rebase(asked).await?.into_inner();
-            return Ok(Response::new(Box::pin(answer)));
+            let synced = sync_bridged_rebase(
+                Arc::clone(&self.bridges),
+                Arc::clone(&self.watchers),
+                destination,
+                answer,
+            );
+            return Ok(Response::new(Box::pin(synced)));
         }
         let git_refresher = self.git_refresher.clone();
         let answer = late(move || {
             let rebased = rebases::rebase(&dir, branch.as_ref());
-            match git_refresher.refresh(&dir) {
-                git::RefreshOutcome::Done => {}
+            let refresh = match git_refresher.refresh(&dir) {
+                git::RefreshOutcome::Refreshed(version) => {
+                    rebases::StatusRefresh::Refreshed(version)
+                }
+                git::RefreshOutcome::Untracked => rebases::StatusRefresh::Untracked,
+                git::RefreshOutcome::Failed => {
+                    log::say(&format!(
+                        "git refresh of {dir} failed, leaving it to the next sweep"
+                    ));
+                    rebases::StatusRefresh::Stale
+                }
                 git::RefreshOutcome::Full => {
                     log::say(&format!(
                         "git refresh queue is full, leaving {dir} to the next sweep"
                     ));
+                    rebases::StatusRefresh::Stale
                 }
                 git::RefreshOutcome::TimedOut => {
                     log::say(&format!(
                         "git refresh of {dir} did not finish within {:?}",
                         git::REFRESH_WAIT_MAX
                     ));
+                    rebases::StatusRefresh::Stale
                 }
                 git::RefreshOutcome::Disconnected => {
                     log::say(&format!("git watcher ended before refreshing {dir}"));
+                    rebases::StatusRefresh::Stale
                 }
-            }
+            };
             let rebased = rebased.map_err(rebases::Unrebased::status)?;
-            Ok(rebased.to_api())
+            Ok(rebased.to_api_with(refresh))
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -1533,6 +1545,55 @@ fn ended_by(
 ) -> Pin<Box<dyn Stream<Item = Result<ToViewer, Status>> + Send>> {
     let refusal = tokio_stream::once(()).filter_map(move |()| refused.try_recv().ok().map(Err));
     Box::pin(answer.chain(refusal))
+}
+
+fn sync_bridged_rebase(
+    bridges: Arc<Bridges>,
+    watchers: Arc<Watchers>,
+    destination: Destination,
+    mut answer: Streaming<RebaseResponse>,
+) -> ReceiverStream<Result<RebaseResponse, Status>> {
+    let (sent, received) = tokio::sync::mpsc::channel(1);
+    task::spawn(async move {
+        while let Some(item) = answer.next().await {
+            let item = match item {
+                Ok(mut response) => {
+                    if let Some(api::rebase_response::StatusRefresh::RefreshedAt(raw)) =
+                        response.status_refresh
+                    {
+                        match LocalVersion::of_api(raw) {
+                            Ok(target) => {
+                                let _waits = watchers.waits(Waiter::Client(ClientWaiter::Client));
+                                if !bridges
+                                    .wait_synced(&destination, target, git::REFRESH_WAIT_MAX)
+                                    .await
+                                {
+                                    log::say(&format!(
+                                        "{destination}: local remote cache did not reach \
+                                         {target} within {:?}",
+                                        git::REFRESH_WAIT_MAX
+                                    ));
+                                    response.status_refresh =
+                                        Some(api::rebase_response::StatusRefresh::Stale(()));
+                                }
+                                Ok(response)
+                            }
+                            Err(why) => Err(Status::internal(format!(
+                                "{destination}: invalid rebase refresh version: {why}"
+                            ))),
+                        }
+                    } else {
+                        Ok(response)
+                    }
+                }
+                Err(status) => Err(status),
+            };
+            if sent.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    ReceiverStream::new(received)
 }
 
 fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>
@@ -2111,7 +2172,7 @@ mod tests {
     fn a_watch_timeout_answers_unchanged_only_after_the_core_parked_it() {
         let host_with = |core| {
             let (layouts, _laid) = mpsc::sync_channel(1);
-            let (git_refresher, _refreshes) = crate::git::Refresher::pair(mpsc::sync_channel(1).0);
+            let git_refresher = crate::git::Refresher::disconnected();
             Host {
                 started: SystemTime::now(),
                 claude_folder: None,

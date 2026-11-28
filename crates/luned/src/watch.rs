@@ -17,7 +17,7 @@ use crate::{log, process};
 
 pub const SETTLE: Duration = Duration::from_millis(25);
 
-const SETTLE_MAX: Duration = Duration::from_millis(250);
+pub(crate) const SETTLE_MAX: Duration = Duration::from_millis(250);
 
 const _: () = assert!(SETTLE.as_millis() < SETTLE_MAX.as_millis());
 
