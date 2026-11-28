@@ -214,7 +214,9 @@ impl Owned {
     pub fn stall_mux(&self) -> StalledMux {
         let pid = self.mux_pid().expect("lune-mux listens");
         rustix::process::kill_process(pid, rustix::process::Signal::STOP).unwrap();
-        StalledMux(pid)
+        let stalled = StalledMux(pid);
+        eventually("lune-mux stops", || stopped(pid).then_some(()));
+        stalled
     }
 
     fn mux_pid(&self) -> Option<rustix::process::Pid> {
@@ -343,6 +345,57 @@ impl Drop for StalledMux {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn stopped(pid: rustix::process::Pid) -> bool {
+    const TASKS_MAX: usize = 256;
+    let raw = pid.as_raw_nonzero().get();
+    let Ok(tasks) = fs::read_dir(format!("/proc/{raw}/task")) else {
+        return false;
+    };
+    let mut seen = 0;
+    for entry in tasks {
+        assert!(
+            seen < TASKS_MAX,
+            "lune-mux runs at most {TASKS_MAX} threads"
+        );
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Ok(stat) = fs::read(entry.path().join("stat")) else {
+            return false;
+        };
+        let Some(close) = stat.iter().rposition(|byte| *byte == b')') else {
+            return false;
+        };
+        let Some(rest) = stat
+            .get(close + 1..)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        else {
+            return false;
+        };
+        if !matches!(rest.split_ascii_whitespace().next(), Some("T" | "t")) {
+            return false;
+        }
+        seen += 1;
+    }
+    seen > 0
+}
+
+#[cfg(target_os = "macos")]
+fn stopped(pid: rustix::process::Pid) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, System};
+    let Ok(raw) = u32::try_from(pid.as_raw_nonzero().get()) else {
+        return false;
+    };
+    let mut system = System::new();
+    let pid = Pid::from_u32(raw);
+    let basics = ProcessRefreshKind::nothing();
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, basics);
+    system
+        .process(pid)
+        .is_some_and(|process| process.status() == ProcessStatus::Stop)
+}
+
 async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
     let channel = Endpoint::from_static("http://lune-mux")
         .connect_with_connector(tower::service_fn(move |_: Uri| {
@@ -359,6 +412,7 @@ async fn mux_client(socket: PathBuf) -> MuxClient<Channel> {
 
 impl Drop for Owned {
     fn drop(&mut self) {
+        self.daemon = None;
         self.kill_mux();
     }
 }
