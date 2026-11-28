@@ -8,17 +8,17 @@ use std::path::PathBuf;
 use std::str::SplitWhitespace;
 use std::time::{Duration, Instant, SystemTime};
 
-use rustix::event::{poll, PollFd, PollFlags, Timespec};
-use rustix::io::{retry_on_intr, Errno};
-use rustix::process::{pidfd_open, pidfd_send_signal, Pid, PidfdFlags, Signal};
-use rustix::time::{clock_gettime, ClockId};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::io::{Errno, retry_on_intr};
+use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
+use rustix::time::{ClockId, clock_gettime};
 
-use lune_protocol::process::{arguments, entries, EXEC_STRINGS_BYTES_MAX};
+use lune_protocol::process::{EXEC_STRINGS_BYTES_MAX, arguments, entries};
 use lune_protocol::program_resume::{ARGV_BYTES_MAX, ProcessArgv};
 
 use super::{
-    program_named, readable_fd, Found, Id, Mine, ProcessMeta, Start, Unended, Unread, Unreadable,
-    SPURIOUS_WAKES_MAX,
+    Found, Id, Mine, ProcessMeta, SPURIOUS_WAKES_MAX, Start, Unended, Unread, Unreadable,
+    program_named, readable_fd,
 };
 
 const META_ARGV_BYTES_MAX: usize = ARGV_BYTES_MAX;
@@ -47,7 +47,9 @@ fn exiting_in(stat: &str) -> bool {
     let Some(mut fields) = after_name(stat) else {
         return false;
     };
-    let ended = fields.next().is_some_and(|state| matches!(state, "Z" | "X"));
+    let ended = fields
+        .next()
+        .is_some_and(|state| matches!(state, "Z" | "X"));
     let flags = fields.nth(5).and_then(|flags| flags.parse::<u64>().ok());
     ended || flags.is_some_and(|flags| flags & PF_EXITING != 0)
 }
@@ -89,18 +91,26 @@ impl Exit {
         for _ in 0..SPURIOUS_WAKES_MAX {
             let mut guard = ready.readable().await?;
             let mut fds = [PollFd::new(ready.get_ref(), PollFlags::IN)];
-            let zero = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let zero = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             match retry_on_intr(|| poll(&mut fds, Some(&zero))) {
                 Ok(0) => guard.clear_ready(),
                 Ok(count) => {
                     assert_eq!(count, 1, "poll checked one pidfd");
-                    assert!(!fds[0].revents().is_empty(), "a ready pidfd reported an event");
+                    assert!(
+                        !fds[0].revents().is_empty(),
+                        "a ready pidfd reported an event"
+                    );
                     return Ok(());
-                },
+                }
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(io::Error::other("pidfd woke too many times without becoming readable"))
+        Err(io::Error::other(
+            "pidfd woke too many times without becoming readable",
+        ))
     }
 }
 
@@ -152,7 +162,15 @@ pub fn meta(pid: u32) -> Option<ProcessMeta> {
         .and_then(|path| path.into_os_string().into_string().ok())
         .map(|path| path.strip_suffix(" (deleted)").unwrap_or(&path).to_owned());
     let argv = read_meta_argv(pid);
-    Some(ProcessMeta { pid, parent, uid, euid, name, exe, argv })
+    Some(ProcessMeta {
+        pid,
+        parent,
+        uid,
+        euid,
+        name,
+        exe,
+        argv,
+    })
 }
 
 fn stat_summary(pid: u32) -> Option<(String, u32)> {
@@ -192,8 +210,10 @@ fn read_meta_argv(pid: u32) -> Option<ProcessArgv> {
     let mut raw = Vec::with_capacity(META_ARGV_BYTES_MAX);
     file.take(most).read_to_end(&mut raw).ok()?;
     let args = arguments(&raw)?;
-    let words: Vec<String> =
-        args.into_iter().map(|arg| String::from_utf8_lossy(arg).into_owned()).collect();
+    let words: Vec<String> = args
+        .into_iter()
+        .map(|arg| String::from_utf8_lossy(arg).into_owned())
+        .collect();
     Some(ProcessArgv::bounded(words))
 }
 
@@ -213,7 +233,9 @@ fn exec_strings(pid: u32, leaf: &str) -> Result<Vec<u8>, Unread> {
     let most = u64::try_from(EXEC_STRINGS_BYTES_MAX).expect("6 MiB fit a u64");
     let mut read = Vec::new();
     let file = File::open(proc(pid, leaf)).map_err(|error| unread(pid, &error))?;
-    file.take(most + 1).read_to_end(&mut read).map_err(|error| unread(pid, &error))?;
+    file.take(most + 1)
+        .read_to_end(&mut read)
+        .map_err(|error| unread(pid, &error))?;
     if read.len() > EXEC_STRINGS_BYTES_MAX {
         let most = EXEC_STRINGS_BYTES_MAX;
         let why = format!("/proc/{pid}/{leaf} runs past the {most} bytes exec lays out");
@@ -244,7 +266,11 @@ pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
     let uid = rustix::process::getuid().as_raw();
     let mut seen = Mine::default();
     for entry in listed.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
             continue;
         };
         if !entry.metadata().is_ok_and(|it| it.uid() == uid) {
@@ -270,13 +296,21 @@ pub(super) fn listed<P: Copy>(programs: &[(P, &str)]) -> Mine<P> {
             Err(Unread::Failed(why)) => {
                 seen.unreadable.push(Unreadable { id, program, why });
                 continue;
-            },
+            }
         };
         let Some(argv) = arguments(&cmdline) else {
             continue;
         };
-        let argv = argv.into_iter().map(|arg| OsString::from_vec(arg.to_vec())).collect();
-        seen.found.push(Found { id, program, argv, environ });
+        let argv = argv
+            .into_iter()
+            .map(|arg| OsString::from_vec(arg.to_vec()))
+            .collect();
+        seen.found.push(Found {
+            id,
+            program,
+            argv,
+            environ,
+        });
     }
     seen
 }
@@ -296,14 +330,14 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
             Err(error) => {
                 left.push((id.clone(), Unended::Unsignalled(error)));
                 continue;
-            },
+            }
         };
         if start(id.pid).as_ref() != Some(&id.start) {
             continue;
         }
         match pidfd_send_signal(&held, signal) {
             Ok(()) => waiting.push((id, held)),
-            Err(Errno::SRCH) => {},
+            Err(Errno::SRCH) => {}
             Err(error) => left.push((id.clone(), Unended::Unsignalled(error))),
         }
     }
@@ -313,25 +347,34 @@ pub fn signalled(ids: &[Id], signal: Signal, wait: Duration) -> Vec<(Id, Unended
             break;
         };
         let until = Timespec::try_from(until).expect("a wait of seconds is a timespec");
-        let mut ready: Vec<PollFd<'_>> =
-            waiting.iter().map(|(_, held)| PollFd::new(held, PollFlags::IN)).collect();
+        let mut ready: Vec<PollFd<'_>> = waiting
+            .iter()
+            .map(|(_, held)| PollFd::new(held, PollFlags::IN))
+            .collect();
         match poll(&mut ready, Some(&until)) {
             Ok(0) => break,
-            Ok(_) => {},
+            Ok(_) => {}
             Err(Errno::INTR) => continue,
             Err(error) => {
                 drop(ready);
                 let unwatched = Unended::Unwatched(error);
                 left.extend(waiting.drain(..).map(|(id, _)| (id.clone(), unwatched)));
                 break;
-            },
+            }
         }
-        let ended: Vec<bool> = ready.iter().map(|ready| !ready.revents().is_empty()).collect();
+        let ended: Vec<bool> = ready
+            .iter()
+            .map(|ready| !ready.revents().is_empty())
+            .collect();
         drop(ready);
         let mut ended = ended.into_iter();
         waiting.retain(|_| !ended.next().unwrap_or(false));
     }
-    left.extend(waiting.into_iter().map(|(id, _)| (id.clone(), Unended::Outlived)));
+    left.extend(
+        waiting
+            .into_iter()
+            .map(|(id, _)| (id.clone(), Unended::Outlived)),
+    );
     left
 }
 
@@ -348,7 +391,10 @@ impl Domain {
             .map(|id| id.trim().to_owned())
             .filter(|id| !id.is_empty());
         let namespace = fs::read_link("/proc/self/ns/pid").ok();
-        Domain { machine, namespace: namespace.map(|link| link.to_string_lossy().into_owned()) }
+        Domain {
+            machine,
+            namespace: namespace.map(|link| link.to_string_lossy().into_owned()),
+        }
     }
 
     #[must_use]
@@ -357,9 +403,8 @@ impl Domain {
             return false;
         };
         let (machine, namespace) = rest.split_once(':').unwrap_or((rest, ""));
-        let agrees = |ours: &Option<String>, theirs: &str| {
-            ours.as_ref().is_none_or(|ours| ours == theirs)
-        };
+        let agrees =
+            |ours: &Option<String>, theirs: &str| ours.as_ref().is_none_or(|ours| ours == theirs);
         agrees(&self.machine, machine) && agrees(&self.namespace, namespace)
     }
 }
@@ -370,7 +415,7 @@ mod tests {
 
     use rustix::io::Errno;
 
-    use super::{exiting_in, forked_in, start_in, unread, Unread};
+    use super::{Unread, exiting_in, forked_in, start_in, unread};
 
     fn stat(state: &str, threads: u32) -> String {
         let before = "1 7 7 0 -1 4194304 0 0 0 0 0 0 0 0 20 0";
@@ -385,9 +430,16 @@ mod tests {
         let ended = unread(me, &io::Error::from(Errno::SRCH));
         assert_eq!(ended, Unread::Gone, "one that ended as it was read");
         let refused = unread(me, &io::Error::from(Errno::ACCESS));
-        assert_eq!(refused, Unread::Failed(io::Error::from(Errno::ACCESS).to_string()));
+        assert_eq!(
+            refused,
+            Unread::Failed(io::Error::from(Errno::ACCESS).to_string())
+        );
         let ending = unread(u32::MAX, &io::Error::from(Errno::ACCESS));
-        assert_eq!(ending, Unread::Gone, "an ending process refuses its environment");
+        assert_eq!(
+            ending,
+            Unread::Gone,
+            "an ending process refuses its environment"
+        );
     }
 
     #[test]
@@ -414,8 +466,16 @@ mod tests {
     fn a_process_is_forked_until_it_execs_by_its_flags() {
         let flagged = |flags: u64| format!("7 (a) b) S 1 7 7 0 -1 {flags} 0 0 0 0 0 0 0 0 20 0");
         assert_eq!(forked_in(&flagged(0x40_0040)), Some(true), "PF_FORKNOEXEC");
-        assert_eq!(forked_in(&flagged(0x40_0000)), Some(false), "PF_RANDOMIZE alone");
-        assert_eq!(forked_in(&stat("S", 1)), Some(false), "past a name holding ') '");
+        assert_eq!(
+            forked_in(&flagged(0x40_0000)),
+            Some(false),
+            "PF_RANDOMIZE alone"
+        );
+        assert_eq!(
+            forked_in(&stat("S", 1)),
+            Some(false),
+            "past a name holding ') '"
+        );
         assert_eq!(forked_in("7 (a) b) S 1 7 7 0 -1"), None, "no flags to read");
     }
 }

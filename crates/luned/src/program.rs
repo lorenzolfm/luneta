@@ -50,8 +50,14 @@ pub struct Watching(Option<(Arc<Mutex<Waiters>>, u64)>);
 
 #[must_use]
 pub fn cancel() -> (Cancel, Wanted) {
-    let waiters = Arc::new(Mutex::new(Waiters::Wanted { next: 0, hooks: Vec::new() }));
-    (Cancel(Arc::clone(&waiters)), Wanted(WantedInner::Cancellable(waiters)))
+    let waiters = Arc::new(Mutex::new(Waiters::Wanted {
+        next: 0,
+        hooks: Vec::new(),
+    }));
+    (
+        Cancel(Arc::clone(&waiters)),
+        Wanted(WantedInner::Cancellable(waiters)),
+    )
 }
 
 impl Cancel {
@@ -63,7 +69,10 @@ impl Cancel {
                 Waiters::GivenUp => return,
             }
         };
-        assert!(hooks.len() <= WATCHERS_MAX, "waiters never exceed their bound");
+        assert!(
+            hooks.len() <= WATCHERS_MAX,
+            "waiters never exceed their bound"
+        );
         for (_, wake) in hooks {
             wake();
         }
@@ -119,12 +128,12 @@ impl Wanted {
                 hooks.push((id, Box::new(wake)));
                 drop(waiters);
                 Watching(Some((Arc::clone(shared), id)))
-            },
+            }
             Waiters::GivenUp => {
                 drop(waiters);
                 wake();
                 Watching(None)
-            },
+            }
         }
     }
 
@@ -139,10 +148,10 @@ impl Wanted {
         }
         let (wake, heard) = mpsc::sync_channel(1);
         let _watching = self.on_give_up(move || match wake.try_send(()) {
-            Ok(()) | Err(TrySendError::Disconnected(())) => {},
+            Ok(()) | Err(TrySendError::Disconnected(())) => {}
             Err(TrySendError::Full(())) => {
                 unreachable!("wait_for sends at most one cancellation wake");
-            },
+            }
         });
         match heard.recv_timeout(span) {
             Ok(()) | Err(RecvTimeoutError::Disconnected) => false,
@@ -182,7 +191,11 @@ impl Drop for Watching {
 }
 
 pub enum Ran {
-    Ended { status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8> },
+    Ended {
+        status: ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
     Stuck,
 }
 
@@ -192,17 +205,21 @@ impl Ran {
             Ran::Ended { status, stdout, .. } if status.success() => Ok(stdout),
             Ran::Ended { status, stderr, .. } => {
                 Err(first_line(&stderr).unwrap_or_else(|| status.to_string()))
-            },
+            }
             Ran::Stuck => Err("it did not answer in time".to_owned()),
         }
     }
 
     pub fn answer_why_on_either(self) -> Result<Vec<u8>, String> {
         match self {
-            Ran::Ended { status, stdout, stderr } if !status.success() => {
+            Ran::Ended {
+                status,
+                stdout,
+                stderr,
+            } if !status.success() => {
                 let why = first_line(&stdout).or_else(|| first_line(&stderr));
                 Err(why.unwrap_or_else(|| status.to_string()))
-            },
+            }
             ran => ran.answer(),
         }
     }
@@ -210,7 +227,10 @@ impl Ran {
 
 fn first_line(said: &[u8]) -> Option<String> {
     let said = String::from_utf8_lossy(said);
-    said.lines().map(str::trim).find(|line| !line.is_empty()).map(str::to_owned)
+    said.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 pub fn luned() -> Result<PathBuf, String> {
@@ -248,7 +268,10 @@ pub fn saying(words: &str) -> io::Result<Stdio> {
 
 pub fn run_up_to(command: &mut Command, limit: Duration, most: u64) -> io::Result<Ran> {
     let kills = Kills::Program;
-    let keeps = Keeps::First { most, over: io::ErrorKind::FileTooLarge };
+    let keeps = Keeps::First {
+        most,
+        over: io::ErrorKind::FileTooLarge,
+    };
     let (ran, _) = running_always(command, limit, kills, Stdio::null(), keeps)?;
     Ok(ran)
 }
@@ -317,7 +340,10 @@ enum Keeps {
 
 type Said = (Vec<u8>, u64);
 
-const FIRST: Keeps = Keeps::First { most: SAID_MAX, over: io::ErrorKind::FileTooLarge };
+const FIRST: Keeps = Keeps::First {
+    most: SAID_MAX,
+    over: io::ErrorKind::FileTooLarge,
+};
 
 fn running(
     command: &mut Command,
@@ -331,17 +357,28 @@ fn running(
         return Ok(None);
     }
     let deadline = Instant::now() + limit;
-    let mut child =
-        command.stdin(stdin).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child = command
+        .stdin(stdin)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     let heard = hear(&mut child, deadline, wanted, keeps);
     if !matches!(heard, Ok(Heard::Ended { .. })) {
         kill(&mut child, kills)?;
     }
     let status = child.wait()?;
     Ok(match heard? {
-        Heard::Ended { stdout: (stdout, before), stderr } => {
-            Some((Ran::Ended { status, stdout, stderr }, before))
-        },
+        Heard::Ended {
+            stdout: (stdout, before),
+            stderr,
+        } => Some((
+            Ran::Ended {
+                status,
+                stdout,
+                stderr,
+            },
+            before,
+        )),
         Heard::Stuck => Some((Ran::Stuck, 0)),
         Heard::Unwanted => None,
     })
@@ -362,10 +399,10 @@ enum Wait {
 
 fn send_wait(told: &SyncSender<Wait>, wait: Wait) {
     match told.try_send(wait) {
-        Ok(()) | Err(TrySendError::Disconnected(_)) => {},
+        Ok(()) | Err(TrySendError::Disconnected(_)) => {}
         Err(TrySendError::Full(_)) => {
             unreachable!("hear channel holds one message per sender");
-        },
+        }
     }
 }
 
@@ -385,7 +422,15 @@ fn hear(
     let stdout = child.stdout.take().expect("its stdout is piped");
     read(stdout, keeps, told.clone(), Wait::Stdout)?;
     let stderr = child.stderr.take().expect("its stderr is piped");
-    read(stderr, Keeps::First { most: SAID_MAX, over: io::ErrorKind::Other }, told.clone(), Wait::Stderr)?;
+    read(
+        stderr,
+        Keeps::First {
+            most: SAID_MAX,
+            over: io::ErrorKind::Other,
+        },
+        told.clone(),
+        Wait::Stderr,
+    )?;
     ends(child, told)?;
     let (mut ended, mut out, mut err) = (false, None, None);
     for _ in 0..3 {
@@ -395,20 +440,20 @@ fn hear(
                 assert!(!ended, "a program ends once");
                 end?;
                 ended = true;
-            },
+            }
             Ok(Wait::Stdout(said)) => {
                 assert!(out.is_none(), "a program's stdout ends once");
                 out = Some(said);
-            },
+            }
             Ok(Wait::Stderr(said)) => {
                 assert!(err.is_none(), "a program's stderr ends once");
                 err = Some(said);
-            },
+            }
             Ok(Wait::Unwanted) => return Ok(Heard::Unwanted),
             Err(RecvTimeoutError::Timeout) => return Ok(Heard::Stuck),
             Err(RecvTimeoutError::Disconnected) => {
                 unreachable!("the threads that read and wait for a program say how that went")
-            },
+            }
         }
     }
     assert!(ended, "the program ended");
@@ -458,24 +503,26 @@ fn an_end(status: &WaitIdStatus) -> bool {
 fn ends(child: &Child, told: SyncSender<Wait>) -> io::Result<()> {
     let pid = Pid::from_child(child);
     let ended = WaitIdOptions::EXITED | WaitIdOptions::NOWAIT;
-    thread::Builder::new().name("program".to_owned()).spawn(move || {
-        let mut end = Err(io::Error::other("waitid did not observe process exit"));
-        for _ in 0..WAITID_RETRIES_MAX {
-            match process::waitid(WaitId::Pid(pid), ended) {
-                Ok(Some(status)) if an_end(&status) => {
-                    end = Ok(());
-                    break;
-                },
-                Err(Errno::INTR) => {},
-                Err(error) => {
-                    end = Err(error.into());
-                    break;
-                },
-                Ok(_) => thread::sleep(LOOK),
+    thread::Builder::new()
+        .name("program".to_owned())
+        .spawn(move || {
+            let mut end = Err(io::Error::other("waitid did not observe process exit"));
+            for _ in 0..WAITID_RETRIES_MAX {
+                match process::waitid(WaitId::Pid(pid), ended) {
+                    Ok(Some(status)) if an_end(&status) => {
+                        end = Ok(());
+                        break;
+                    }
+                    Err(Errno::INTR) => {}
+                    Err(error) => {
+                        end = Err(error.into());
+                        break;
+                    }
+                    Ok(_) => thread::sleep(LOOK),
+                }
             }
-        }
-        send_wait(&told, Wait::Ended(end));
-    })?;
+            send_wait(&told, Wait::Ended(end));
+        })?;
     Ok(())
 }
 
@@ -485,14 +532,16 @@ fn read(
     told: SyncSender<Wait>,
     wrap: fn(io::Result<Said>) -> Wait,
 ) -> io::Result<()> {
-    thread::Builder::new().name("program".to_owned()).spawn(move || {
-        let said = match keeps {
-            Keeps::First { most, over } => first_bytes(&mut pipe, most, Some(over)),
-            Keeps::Prefix { most } => first_bytes(&mut pipe, most, None),
-            Keeps::Last { most } => last_lines(&mut pipe, most),
-        };
-        send_wait(&told, wrap(said));
-    })?;
+    thread::Builder::new()
+        .name("program".to_owned())
+        .spawn(move || {
+            let said = match keeps {
+                Keeps::First { most, over } => first_bytes(&mut pipe, most, Some(over)),
+                Keeps::Prefix { most } => first_bytes(&mut pipe, most, None),
+                Keeps::Last { most } => last_lines(&mut pipe, most),
+            };
+            send_wait(&told, wrap(said));
+        })?;
     Ok(())
 }
 
@@ -506,7 +555,7 @@ fn first_bytes(pipe: &mut impl Read, most: u64, over: Option<io::ErrorKind>) -> 
         (Ok(_), Some(over)) => {
             let more = format!("it said more than {most} bytes");
             Err(io::Error::new(over, more))
-        },
+        }
         (Err(error), _) => Err(error),
     }
 }
@@ -519,7 +568,7 @@ fn last_lines(pipe: &mut impl Read, most: u64) -> io::Result<Said> {
         match pipe.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => kept.extend_from_slice(&chunk[..read]),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
         if kept.len() > most.saturating_mul(2) {
@@ -536,16 +585,19 @@ fn let_go(kept: &mut Vec<u8>, most: usize) -> u64 {
     let cut = kept.len().saturating_sub(most);
     let start = kept[cut..].iter().position(|&byte| byte == b'\n');
     let start = start.map_or(kept.len(), |at| cut + at + 1);
-    kept.drain(..start).fold(0, |lines, byte| lines + u64::from(byte == b'\n'))
+    kept.drain(..start)
+        .fold(0, |lines, byte| lines + u64::from(byte == b'\n'))
 }
 
 fn in_thread<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> io::Result<Receiver<T>> {
     let (said, heard) = mpsc::sync_channel(1);
-    thread::Builder::new().name("program".to_owned()).spawn(move || {
-        let _ = said.send(work());
-    })?;
+    thread::Builder::new()
+        .name("program".to_owned())
+        .spawn(move || {
+            let _ = said.send(work());
+        })?;
     Ok(heard)
 }
 
@@ -567,7 +619,10 @@ pub(crate) mod tests {
         run_while, run_while_reading, saying,
     };
 
-    const _: () = assert!(OUTLASTING.subsec_nanos() == 0, "sleep is told whole seconds");
+    const _: () = assert!(
+        OUTLASTING.subsec_nanos() == 0,
+        "sleep is told whole seconds"
+    );
 
     pub(crate) fn outlasting_patience(ready: &Path) -> Command {
         let mut sleeps = Command::new("sh");
@@ -594,7 +649,9 @@ pub(crate) mod tests {
             let ran = run(&started, &wanted);
             ended.send(ran).unwrap();
         });
-        eventually("the program is running before it is given up", || ready.exists().then_some(()));
+        eventually("the program is running before it is given up", || {
+            ready.exists().then_some(())
+        });
         cancel.give_up();
         lune_waits::heard(what, &heard)
     }
@@ -616,13 +673,25 @@ pub(crate) mod tests {
             run(sh.args(["-c", script]), Duration::from_secs(10)).unwrap()
         };
         let logged_out = "echo; echo 'Not logged in'; exit 1";
-        assert_eq!(ran(logged_out).answer_why_on_either(), Err("Not logged in".to_owned()));
+        assert_eq!(
+            ran(logged_out).answer_why_on_either(),
+            Err("Not logged in".to_owned())
+        );
         assert_eq!(ran(logged_out).answer(), Err("exit status: 1".to_owned()));
         let both = "echo out; echo err >&2; exit 1";
         assert_eq!(ran(both).answer_why_on_either(), Err("out".to_owned()));
-        assert_eq!(ran("echo err >&2; exit 1").answer_why_on_either(), Err("err".to_owned()));
-        assert_eq!(ran("exit 3").answer_why_on_either(), Err("exit status: 3".to_owned()));
-        assert_eq!(ran("echo fine").answer_why_on_either(), Ok(b"fine\n".to_vec()));
+        assert_eq!(
+            ran("echo err >&2; exit 1").answer_why_on_either(),
+            Err("err".to_owned())
+        );
+        assert_eq!(
+            ran("exit 3").answer_why_on_either(),
+            Err("exit status: 3".to_owned())
+        );
+        assert_eq!(
+            ran("echo fine").answer_why_on_either(),
+            Ok(b"fine\n".to_vec())
+        );
     }
 
     #[test]
@@ -633,12 +702,19 @@ pub(crate) mod tests {
         lock.lock().unwrap();
         let mut sh = Command::new("sh");
         sh.args(["-c", "exec 3<&0; sleep 0.5 >/dev/null 2>&1 &"]);
-        let ran = run_while_reading(&mut sh, Duration::from_secs(5), &Wanted::always(), Stdio::from(lock));
+        let ran = run_while_reading(
+            &mut sh,
+            Duration::from_secs(5),
+            &Wanted::always(),
+            Stdio::from(lock),
+        );
         assert!(matches!(ran, Ok(Some(Ran::Ended { status, .. })) if status.success()));
         drop(sh);
         let other = File::open(&path).unwrap();
         assert!(matches!(other.try_lock(), Err(TryLockError::WouldBlock)));
-        eventually("the lock frees as the program ends", || other.try_lock().ok());
+        eventually("the lock frees as the program ends", || {
+            other.try_lock().ok()
+        });
     }
 
     #[test]
@@ -700,7 +776,10 @@ pub(crate) mod tests {
             .collect();
         behind.sort();
         let least = behind[behind.len() / 5];
-        assert!(least.is_under(Duration::from_millis(1)), "{least:?} behind, of {behind:?}");
+        assert!(
+            least.is_under(Duration::from_millis(1)),
+            "{least:?} behind, of {behind:?}"
+        );
     }
 
     #[test]
@@ -721,9 +800,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_program_no_longer_wanted_is_killed() {
-        let ran = given_up("a program that ends only if killed ends", |ready, wanted| {
-            run_while(&mut outlasting_patience(ready), OUTLASTING, wanted)
-        });
+        let ran = given_up(
+            "a program that ends only if killed ends",
+            |ready, wanted| run_while(&mut outlasting_patience(ready), OUTLASTING, wanted),
+        );
         assert!(ran.unwrap().is_none());
     }
 
@@ -748,7 +828,10 @@ pub(crate) mod tests {
 
     #[test]
     fn a_program_run_alone_that_is_stuck_is_killed_with_what_it_started() {
-        for script in [r#"sleep 30 & echo $! > "$0"; wait"#, r#"sleep 30 & echo $! > "$0""#] {
+        for script in [
+            r#"sleep 30 & echo $! > "$0"; wait"#,
+            r#"sleep 30 & echo $! > "$0""#,
+        ] {
             let dir = tempfile::tempdir().expect("a folder");
             let started = dir.path().join("started");
             let mut sh = Command::new("sh");
@@ -775,7 +858,10 @@ pub(crate) mod tests {
         };
         process::kill_process(pid(&started), Signal::KILL).expect("what sh started runs on");
         assert!(matches!(ran, Ok(Ran::Stuck)), "{:?}", ran.err());
-        assert!(process::test_kill_process(pid(&ran_as)).is_err(), "sh was not waited for");
+        assert!(
+            process::test_kill_process(pid(&ran_as)).is_err(),
+            "sh was not waited for"
+        );
     }
 
     #[test]
@@ -803,7 +889,9 @@ pub(crate) mod tests {
             let still = waiting.wait_for(OUTLASTING);
             done.send(still).unwrap();
         });
-        lune_waits::never("wait_for stays parked while wanted", || heard.try_recv().ok());
+        lune_waits::never("wait_for stays parked while wanted", || {
+            heard.try_recv().ok()
+        });
 
         control.give_up();
         control.give_up();
@@ -822,7 +910,10 @@ pub(crate) mod tests {
         assert!(!wanted.wait_for(OUTLASTING));
 
         let (drop_cancel, drop_wanted) = cancel();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         assert!(drop_wanted.wait_for(Duration::from_millis(1)));
         drop(drop_cancel);
         assert!(!drop_wanted.still());
@@ -832,7 +923,9 @@ pub(crate) mod tests {
         ));
 
         let always = Wanted::always();
-        let many: Vec<_> = (0..=super::WATCHERS_MAX).map(|_| always.on_give_up(|| {})).collect();
+        let many: Vec<_> = (0..=super::WATCHERS_MAX)
+            .map(|_| always.on_give_up(|| {}))
+            .collect();
         assert!(always.still());
         assert!(always.wait_for(Duration::from_millis(1)));
         drop(many);

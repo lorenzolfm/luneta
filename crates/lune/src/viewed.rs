@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::vte::ansi::CursorShape;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{
-    Arranged, BrowserUrl, Opens, ProjectId, Size, ViewId, WorktreeId, LAYOUT_VIEWS_MAX,
+    Arranged, BrowserUrl, LAYOUT_VIEWS_MAX, Opens, ProjectId, Size, ViewId, WorktreeId,
 };
 use luned::folder;
 use luned::log;
@@ -18,7 +18,7 @@ use luned::mux::own::frames::{self, Frame};
 use luned::mux::own::viewer::{self, Greeting, Reach, Seen, Viewer};
 use luned::{
     AskNumber, Beside, Direction, Echoed, FocusAsked, Found, Growth, Heard, Laid, LayoutAsked,
-    View, Rect as Placed, Show, Shows, Where,
+    Rect as Placed, Show, Shows, View, Where,
 };
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
@@ -28,9 +28,9 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::answers::{CellPixels, Colours};
 use crate::attached::{
-    below_bar, border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views,
-    screen_rect, selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped,
-    text, within, Applied, Clean, Pointer, Screen, Selection, Spot, TabSpan, TAB_BAR_ROWS, TAB_PAD,
+    Applied, Clean, Pointer, Screen, Selection, Spot, TAB_BAR_ROWS, TAB_PAD, TabSpan, below_bar,
+    border, draw_screen, draw_tab_spans, key_said, link, mouse_said, on_views, screen_rect,
+    selects, span_under, spot_in, tab_columns_max, tab_spans, tab_spans_capped, text, within,
 };
 use crate::copied::Excerpt;
 use crate::desktop;
@@ -57,8 +57,12 @@ const WELCOME_TAB: &str = "welcome";
 
 const BROWSER_TAB: &str = "browser";
 
-const WELCOME: [&str; 4] =
-    ["Welcome", "", "This view runs no terminal.", "d d  close it   Ctrl hjkl  another view"];
+const WELCOME: [&str; 4] = [
+    "Welcome",
+    "",
+    "This view runs no terminal.",
+    "d d  close it   Ctrl hjkl  another view",
+];
 
 const BROWSER_UNSUPPORTED_TERMINAL: &str = "This terminal does not support Kitty graphics.";
 
@@ -106,7 +110,12 @@ enum Moused {
     Go(WorktreeId),
     Focus(ViewId),
     Sent(TerminalKey, api::Mouse),
-    Browser { view: ViewId, mouse: MouseEvent, column: u16, row: u16 },
+    Browser {
+        view: ViewId,
+        mouse: MouseEvent,
+        column: u16,
+        row: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,10 +208,10 @@ impl Aim {
             ) => true,
             (AimFocus::View(before), AimFocus::View(now) | AimFocus::Terminal(now, _)) => {
                 before == now
-            },
+            }
             (AimFocus::Terminal(before, had), AimFocus::Terminal(now, has)) => {
                 before == now && had == has
-            },
+            }
             (
                 AimFocus::View(_) | AimFocus::Terminal(..),
                 AimFocus::Awaiting(_) | AimFocus::Unlaid,
@@ -231,7 +240,10 @@ struct Kept {
 
 impl Unsent {
     fn new(aim: Aim) -> Unsent {
-        Unsent { aim, held: Held::Nothing }
+        Unsent {
+            aim,
+            held: Held::Nothing,
+        }
     }
 
     fn aim_at(&mut self, aim: Aim, now: Instant) {
@@ -241,7 +253,9 @@ impl Unsent {
             if let Held::Kept(kept) = std::mem::replace(&mut self.held, Held::Nothing) {
                 let count = kept.events.len();
                 let dropped = format!("lune drops {count} events kept for a terminal yet to come");
-                log::say(&format!("{dropped}: typed for a terminal no longer focused"));
+                log::say(&format!(
+                    "{dropped}: typed for a terminal no longer focused"
+                ));
             }
             return;
         }
@@ -255,7 +269,9 @@ impl Unsent {
         self.held = Held::Dropping;
         let dropped = format!("lune drops {count} events kept for a terminal yet to come");
         let after = "and what is typed after them till a terminal takes it";
-        log::say(&format!("{dropped}: typed over {UNSENT_FOR:?} ago, {after}"));
+        log::say(&format!(
+            "{dropped}: typed over {UNSENT_FOR:?} ago, {after}"
+        ));
     }
 
     fn keep(&mut self, aim: Aim, event: typed::Event, now: Instant) {
@@ -263,9 +279,13 @@ impl Unsent {
         let kept = match &mut self.held {
             Held::Nothing => {
                 let events = VecDeque::from([event]);
-                self.held = Held::Kept(Kept { since: now, events, dropped: false });
+                self.held = Held::Kept(Kept {
+                    since: now,
+                    events,
+                    dropped: false,
+                });
                 return;
-            },
+            }
             Held::Kept(kept) => kept,
             Held::Dropping => return,
         };
@@ -289,7 +309,10 @@ impl Unsent {
         }
         self.aim_at(aim, now);
         assert_eq!(self.aim, aim, "dropped wait aims at the current layout");
-        assert!(matches!(self.held, Held::Nothing), "dropped wait keeps no events");
+        assert!(
+            matches!(self.held, Held::Nothing),
+            "dropped wait keeps no events"
+        );
     }
 
     fn clear(&mut self) {
@@ -339,7 +362,10 @@ impl Layout {
             worktree_tabs: None,
             titles: BTreeMap::new(),
             closing: Closing::Unarmed,
-            unsent: Unsent::new(Aim { worktree, focus: AimFocus::Unlaid }),
+            unsent: Unsent::new(Aim {
+                worktree,
+                focus: AimFocus::Unlaid,
+            }),
         }
     }
 
@@ -362,7 +388,10 @@ impl Layout {
 
     fn welcomes(&self) -> bool {
         self.awaiting.is_none()
-            && self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Welcome)
+            && self
+                .laid()
+                .and_then(Laid::focused)
+                .is_some_and(|view| view.found == Found::Welcome)
     }
 
     fn browses(&self) -> bool {
@@ -387,7 +416,10 @@ impl Layout {
 
     fn reviews(&self) -> bool {
         self.awaiting.is_none()
-            && self.laid().and_then(Laid::focused).is_some_and(|view| view.found == Found::Review)
+            && self
+                .laid()
+                .and_then(Laid::focused)
+                .is_some_and(|view| view.found == Found::Review)
     }
 
     fn has_review(&self) -> bool {
@@ -403,19 +435,25 @@ impl Layout {
             self.welcomes() || self.browses() || self.reviews(),
             "only a welcome, browser, or review view is closed by its keys"
         );
-        let focused = self.focused().expect("a welcome, browser, or review view is focused");
+        let focused = self
+            .focused()
+            .expect("a welcome, browser, or review view is focused");
         let closing = std::mem::replace(&mut self.closing, Closing::Unarmed);
         let pressed = key.kind == KeyEventKind::Press && key.modifiers.is_empty();
         if !pressed || key.code != KeyCode::Char(CLOSE) {
             return None;
         }
         let next = |armed: u64| armed.checked_add(1) == Some(input);
-        let twice = matches!(closing, Closing::Armed { view, input } if view == focused && next(input));
+        let twice =
+            matches!(closing, Closing::Armed { view, input } if view == focused && next(input));
         if twice {
             self.closing = Closing::Closed;
             return Some(focused);
         }
-        self.closing = Closing::Armed { view: focused, input };
+        self.closing = Closing::Armed {
+            view: focused,
+            input,
+        };
         None
     }
 
@@ -469,19 +507,31 @@ impl Layout {
                 },
             },
         };
-        Aim { worktree: self.worktree, focus }
+        Aim {
+            worktree: self.worktree,
+            focus,
+        }
     }
 
     fn await_focus(&mut self, waiting: WaitingFor, now: Instant) {
         let asked = waiting.ask();
-        assert!(asked > AskNumber::HELLO, "awaited focus asks come after hello");
+        assert!(
+            asked > AskNumber::HELLO,
+            "awaited focus asks come after hello"
+        );
         if let Some(before) = self.awaiting {
-            assert!(asked > before.ask(), "awaited focus asks climb strictly on one stream");
+            assert!(
+                asked > before.ask(),
+                "awaited focus asks climb strictly on one stream"
+            );
         }
         self.awaiting = Some(waiting);
         let aim = self.aim();
         self.unsent.aim_at(aim, now);
-        assert_eq!(self.unsent.aim, aim, "unsent input aims at the awaited focus");
+        assert_eq!(
+            self.unsent.aim, aim,
+            "unsent input aims at the awaited focus"
+        );
     }
 
     fn heard_laid(&mut self, heard: Echoed, now: Instant) {
@@ -555,7 +605,10 @@ impl Layout {
     }
 
     fn drop_awaiting(&mut self, why: &str, now: Instant) {
-        assert!(self.awaiting.is_none(), "only a finished wait drops kept events");
+        assert!(
+            self.awaiting.is_none(),
+            "only a finished wait drops kept events"
+        );
         let aim = self.aim();
         self.unsent.drop_kept(aim, why, now);
     }
@@ -578,9 +631,13 @@ impl Layout {
             Typing::Never => {
                 self.unsent.clear();
                 return None;
-            },
+            }
         };
-        assert_ne!(Some(key), self.runs_in, "lune types nothing into its own terminal");
+        assert_ne!(
+            Some(key),
+            self.runs_in,
+            "lune types nothing into its own terminal"
+        );
         let viewer = viewer?;
         Some((viewer, key, self.unsent.take()))
     }
@@ -592,7 +649,8 @@ impl Layout {
         self.screens.clear();
         self.reviews.clear();
         self.pointer = Pointer::Free;
-        self.unsent.drop_kept(self.aim(), "lune left the worktree it typed into", now);
+        self.unsent
+            .drop_kept(self.aim(), "lune left the worktree it typed into", now);
     }
 
     fn left(&mut self, worktree: WorktreeId, now: Instant) -> bool {
@@ -600,7 +658,10 @@ impl Layout {
             return false;
         }
         self.go(worktree, now);
-        assert!(self.wanted().is_empty(), "a worktree gone shows no terminal");
+        assert!(
+            self.wanted().is_empty(),
+            "a worktree gone shows no terminal"
+        );
         true
     }
 
@@ -643,7 +704,11 @@ impl Layout {
         self.laid = Some(laid);
         let wanted = self.wanted();
         self.screens.retain(|key, _| wanted.contains(key));
-        if empty { LaidOut::Emptied } else { LaidOut::Shown }
+        if empty {
+            LaidOut::Emptied
+        } else {
+            LaidOut::Shown
+        }
     }
 
     fn wanted(&self) -> BTreeSet<TerminalKey> {
@@ -704,13 +769,18 @@ impl Layout {
         if width == 0 {
             return Vec::new();
         }
-        let focused = laid.focused().expect("a layout shown as tabs focuses one").id;
+        let focused = laid
+            .focused()
+            .expect("a layout shown as tabs focuses one")
+            .id;
         let named: Vec<(ViewId, String)> = laid
             .in_order()
             .map(|view| (view.id, self.view_title(view, browsers)))
             .collect();
-        let named_refs: Vec<(ViewId, &str)> =
-            named.iter().map(|(id, name)| (*id, name.as_str())).collect();
+        let named_refs: Vec<(ViewId, &str)> = named
+            .iter()
+            .map(|(id, name)| (*id, name.as_str()))
+            .collect();
         let from_each = (0..named_refs.len()).map(|hidden| {
             let shown = &named_refs[hidden..];
             tab_spans_capped(shown.iter().copied(), width, tab_columns_max(shown, width))
@@ -817,16 +887,20 @@ impl Layout {
             let inside = inner.contains(at);
             let sends = match mouse.kind {
                 MouseEventKind::Down(_) => {
-                    self.pointer = if inside { Pointer::Sending } else { Pointer::Free };
+                    self.pointer = if inside {
+                        Pointer::Sending
+                    } else {
+                        Pointer::Free
+                    };
                     inside
-                },
+                }
                 MouseEventKind::Drag(_) => sending,
                 MouseEventKind::Up(_) => {
                     if sending {
                         self.pointer = Pointer::Free;
                     }
                     sending
-                },
+                }
                 MouseEventKind::Moved
                 | MouseEventKind::ScrollUp
                 | MouseEventKind::ScrollDown
@@ -835,7 +909,12 @@ impl Layout {
             };
             if sends {
                 let spot = spot_in(inner, at);
-                return Moused::Browser { view, mouse, column: spot.column, row: spot.row };
+                return Moused::Browser {
+                    view,
+                    mouse,
+                    column: spot.column,
+                    row: spot.row,
+                };
             }
             return Moused::Nothing;
         }
@@ -848,23 +927,29 @@ impl Layout {
         let inside = inner.contains(at);
         let sends = match mouse.kind {
             MouseEventKind::Down(_) => {
-                self.pointer = if inside { Pointer::Sending } else { Pointer::Free };
+                self.pointer = if inside {
+                    Pointer::Sending
+                } else {
+                    Pointer::Free
+                };
                 inside
-            },
+            }
             MouseEventKind::Drag(_) => sending,
             MouseEventKind::Up(_) => {
                 if sending {
                     self.pointer = Pointer::Free;
                 }
                 sending
-            },
+            }
             MouseEventKind::Moved
             | MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => inside,
         };
-        let said = sends.then(|| mouse_said(mouse, spot_in(inner, at))).flatten();
+        let said = sends
+            .then(|| mouse_said(mouse, spot_in(inner, at)))
+            .flatten();
         said.map_or(Moused::Nothing, |said| Moused::Sent(key, said))
     }
 
@@ -886,7 +971,10 @@ impl Layout {
         self.pointer = if held == at {
             Pointer::Pressed(at)
         } else {
-            Pointer::Selecting(Selection { from: held, to: held })
+            Pointer::Selecting(Selection {
+                from: held,
+                to: held,
+            })
         };
     }
 
@@ -897,10 +985,13 @@ impl Layout {
         let at = within(spot_in(inner, below_bar(at)), screen.size());
         self.pointer = match self.pointer {
             Pointer::Pressed(from) if from != at => Pointer::Selecting(Selection { from, to: at }),
-            Pointer::Selecting(selection) => Pointer::Selecting(Selection { to: at, ..selection }),
+            Pointer::Selecting(selection) => Pointer::Selecting(Selection {
+                to: at,
+                ..selection
+            }),
             Pointer::Free | Pointer::Sending | Pointer::Pressed(_) | Pointer::Shown(_) => {
                 return;
-            },
+            }
         };
     }
 
@@ -908,12 +999,15 @@ impl Layout {
         let screen = self.focused_screen().map(|(_, _, screen)| screen);
         let chosen = match self.pointer {
             Pointer::Pressed(at) => screen.and_then(|screen| link(screen, at)),
-            Pointer::Selecting(selection) if selection.from != selection.to => screen
-                .and_then(|screen| Some((selection, Excerpt::of(text(screen, selection))?))),
+            Pointer::Selecting(selection) if selection.from != selection.to => {
+                screen.and_then(|screen| Some((selection, Excerpt::of(text(screen, selection))?)))
+            }
             Pointer::Selecting(_) => None,
             Pointer::Free | Pointer::Sending | Pointer::Shown(_) => return None,
         };
-        self.pointer = chosen.as_ref().map_or(Pointer::Free, |(lit, _)| Pointer::Shown(*lit));
+        self.pointer = chosen
+            .as_ref()
+            .map_or(Pointer::Free, |(lit, _)| Pointer::Shown(*lit));
         chosen.map(|(_, text)| text)
     }
 
@@ -941,8 +1035,15 @@ impl Layout {
         if area.is_empty() {
             return (None, Vec::new());
         }
-        let bar = Rect { height: area.height.min(TAB_BAR_ROWS), ..area };
-        let views = Rect { y: area.y + bar.height, height: area.height - bar.height, ..area };
+        let bar = Rect {
+            height: area.height.min(TAB_BAR_ROWS),
+            ..area
+        };
+        let views = Rect {
+            y: area.y + bar.height,
+            height: area.height - bar.height,
+            ..area
+        };
         let spans = tab_spans(self.named_tabs(), bar.width);
         let worktree_tabs = self.worktree_tabs.as_ref();
         let colour = worktree_tabs.map_or(moonlight::GREEN, |it| colour_of(it.project));
@@ -965,9 +1066,15 @@ impl Layout {
         for (view_id, view_found, placed) in drawn_views {
             let mine = Some(view_id) == focused;
             let outer = view_rect(views, placed);
-            let edge = if mine { moonlight::MUTE } else { moonlight::LIFTED };
+            let edge = if mine {
+                moonlight::MUTE
+            } else {
+                moonlight::LIFTED
+            };
             let named = if mine {
-                Style::new().fg(moonlight::TEXT).add_modifier(Modifier::BOLD)
+                Style::new()
+                    .fg(moonlight::TEXT)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::new().fg(moonlight::MUTE)
             };
@@ -1008,7 +1115,7 @@ impl Layout {
                         }
                     }
                     continue;
-                },
+                }
                 Found::Lost => LOST,
                 Found::Looking => LOOKING,
                 Found::Welcome => {
@@ -1017,11 +1124,11 @@ impl Layout {
                         buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
                     }
                     continue;
-                },
+                }
                 Found::Browser { url } => {
                     draw_browser(buffer, seen, view_id, url.as_ref(), mine, colour, browsers);
                     continue;
-                },
+                }
                 Found::Review => {
                     let kitty = kitty_cell_px.map(|cell_px| {
                         let image_id = review::KITTY_BASE_ID
@@ -1036,13 +1143,16 @@ impl Layout {
                         overlays.push(overlay);
                     }
                     continue;
-                },
+                }
             };
             let style = Style::new().fg(moonlight::MUTE);
             buffer.set_stringn(seen.x, seen.y, said, usize::from(seen.width), style);
         }
         if let Some(at) = cursor {
-            assert!(views.contains(at), "a drawn cursor lies inside the layout's views");
+            assert!(
+                views.contains(at),
+                "a drawn cursor lies inside the layout's views"
+            );
         }
         (cursor, overlays)
     }
@@ -1070,7 +1180,10 @@ fn draw_view_tabs(
     focused: ViewId,
     colour: Color,
 ) {
-    let start = outer.x.checked_add(1).expect("a view's border is a terminal column");
+    let start = outer
+        .x
+        .checked_add(1)
+        .expect("a view's border is a terminal column");
     for span in tabs {
         let x = start + span.column;
         if !views.contains(Position::new(x, outer.y)) {
@@ -1082,7 +1195,9 @@ fn draw_view_tabs(
         let said = if span.id == focused {
             let edge = " ".repeat(usize::from(TAB_PAD - 1));
             let lead = format!("{edge}{VIEW_DOT} ");
-            let named = Style::new().fg(moonlight::TEXT).add_modifier(Modifier::BOLD);
+            let named = Style::new()
+                .fg(moonlight::TEXT)
+                .add_modifier(Modifier::BOLD);
             Line::from(vec![
                 Span::raw(edge),
                 Span::styled(VIEW_DOT, Style::new().fg(colour)),
@@ -1092,17 +1207,27 @@ fn draw_view_tabs(
             ])
         } else {
             let pad = " ".repeat(usize::from(TAB_PAD));
-            Line::styled(format!("{pad}{name}{}", rest(&pad)), Style::new().fg(moonlight::MUTE))
+            Line::styled(
+                format!("{pad}{name}{}", rest(&pad)),
+                Style::new().fg(moonlight::MUTE),
+            )
         };
         if columns >= 2 * usize::from(TAB_PAD) {
-            assert_eq!(said.width(), columns, "a tab paints the columns it was given");
+            assert_eq!(
+                said.width(),
+                columns,
+                "a tab paints the columns it was given"
+            );
         }
         buffer.set_line(x, outer.y, &said, lit.width);
     }
 }
 
 fn paint_lines(buffer: &mut Buffer, seen: Rect, lines: &[(&str, Style)]) {
-    assert!((1..=8).contains(&lines.len()), "browser status panel paints 1 to 8 lines");
+    assert!(
+        (1..=8).contains(&lines.len()),
+        "browser status panel paints 1 to 8 lines"
+    );
     for (&(line, style), y) in lines.iter().zip(seen.top()..seen.bottom()) {
         buffer.set_stringn(seen.x, y, line, usize::from(seen.width), style);
     }
@@ -1128,37 +1253,49 @@ fn draw_browser(
         match browsers.draw(view, buffer, seen) {
             Shown::Live => return,
             Shown::Starting => {
-                paint_lines(buffer, seen, &[
-                    ("Starting browser…", accent),
-                    ("", dim),
-                    (url_line, text_style),
-                ]);
+                paint_lines(
+                    buffer,
+                    seen,
+                    &[
+                        ("Starting browser…", accent),
+                        ("", dim),
+                        (url_line, text_style),
+                    ],
+                );
                 return;
-            },
+            }
             Shown::AtLimit => {
-                paint_lines(buffer, seen, &[
-                    ("Browser", accent),
-                    ("", dim),
-                    (url_line, text_style),
-                    ("", dim),
-                    (BROWSER_LIMIT_REACHED, dim),
-                    ("", dim),
-                    (BROWSER_FALLBACK_HELP, dim),
-                ]);
+                paint_lines(
+                    buffer,
+                    seen,
+                    &[
+                        ("Browser", accent),
+                        ("", dim),
+                        (url_line, text_style),
+                        ("", dim),
+                        (BROWSER_LIMIT_REACHED, dim),
+                        ("", dim),
+                        (BROWSER_FALLBACK_HELP, dim),
+                    ],
+                );
                 return;
-            },
+            }
             Shown::Failed(why) => {
-                paint_lines(buffer, seen, &[
-                    ("Browser", accent),
-                    ("", dim),
-                    (url_line, text_style),
-                    ("", dim),
-                    (why, dim),
-                    ("", dim),
-                    (BROWSER_RETRY_HELP, dim),
-                ]);
+                paint_lines(
+                    buffer,
+                    seen,
+                    &[
+                        ("Browser", accent),
+                        ("", dim),
+                        (url_line, text_style),
+                        ("", dim),
+                        (why, dim),
+                        ("", dim),
+                        (BROWSER_RETRY_HELP, dim),
+                    ],
+                );
                 return;
-            },
+            }
         }
     }
     let why = if desktop::elsewhere() {
@@ -1166,20 +1303,30 @@ fn draw_browser(
     } else {
         BROWSER_UNSUPPORTED_TERMINAL
     };
-    paint_lines(buffer, seen, &[
-        ("Browser", accent),
-        ("", dim),
-        (url_line, text_style),
-        ("", dim),
-        (why, dim),
-        ("", dim),
-        (BROWSER_FALLBACK_HELP, dim),
-    ]);
+    paint_lines(
+        buffer,
+        seen,
+        &[
+            ("Browser", accent),
+            ("", dim),
+            (url_line, text_style),
+            ("", dim),
+            (why, dim),
+            ("", dim),
+            (BROWSER_FALLBACK_HELP, dim),
+        ],
+    );
 }
 
 fn view_rect(views: Rect, rect: Placed) -> Rect {
-    let column = views.x.checked_add(rect.column).expect("a view's column is a terminal column");
-    let row = views.y.checked_add(rect.row).expect("a view's row is a terminal row");
+    let column = views
+        .x
+        .checked_add(rect.column)
+        .expect("a view's column is a terminal column");
+    let row = views
+        .y
+        .checked_add(rect.row)
+        .expect("a view's row is a terminal row");
     Rect::new(column, row, rect.columns, rect.rows)
 }
 
@@ -1191,7 +1338,9 @@ struct Watcher {
 
 fn where_on(machine: &Machine, runs_in_here: Option<TerminalKey>) -> Where {
     match machine {
-        Machine::Local => Where::Here { runs_in: runs_in_here },
+        Machine::Local => Where::Here {
+            runs_in: runs_in_here,
+        },
         Machine::Remote(destination) => Where::On(destination.clone()),
     }
 }
@@ -1320,7 +1469,10 @@ impl Viewed {
         self.show = ShowStream::Connecting(show);
         if self.machine == Machine::Local {
             for (view, tty) in self.browsers.active_ttys() {
-                self.ask(LayoutAsked::BrowserTty { view, tty: Some(tty) });
+                self.ask(LayoutAsked::BrowserTty {
+                    view,
+                    tty: Some(tty),
+                });
             }
         }
     }
@@ -1362,7 +1514,10 @@ impl Viewed {
 
     #[must_use]
     pub fn arranged(&self) -> Option<(Arranged, Option<luned::api::Version>)> {
-        self.show.is_live().then(|| self.layout.arranged()).flatten()
+        self.show
+            .is_live()
+            .then(|| self.layout.arranged())
+            .flatten()
     }
 
     pub fn welcomes(&self) -> bool {
@@ -1384,18 +1539,22 @@ impl Viewed {
             Some(Outcome::Navigated { view, url }) => {
                 self.ask(LayoutAsked::Navigate { view, url });
                 Heeded::Quiet
-            },
+            }
             Some(Outcome::Close(view)) => {
                 self.ask_focus(FocusAsked::Close(view));
                 Heeded::Changed
-            },
+            }
             None => {
                 let changed = failed
                     || self.browsers.has_pending_graphics()
                     || self.browsers.title(view) != title_before.as_deref()
                     || self.browsers.pointer(view) != pointer_before.as_ref();
-                if changed { Heeded::Changed } else { Heeded::Quiet }
-            },
+                if changed {
+                    Heeded::Changed
+                } else {
+                    Heeded::Quiet
+                }
+            }
         }
     }
 
@@ -1445,8 +1604,11 @@ impl Viewed {
             self.flush_browser_ttys();
             return;
         };
-        let drawn: BTreeMap<ViewId, Placed> =
-            laid.drawn().into_iter().map(|(view, placed)| (view.id, placed)).collect();
+        let drawn: BTreeMap<ViewId, Placed> = laid
+            .drawn()
+            .into_iter()
+            .map(|(view, placed)| (view.id, placed))
+            .collect();
         let desired: Vec<Desired<'_>> = laid
             .in_order()
             .filter_map(|view| {
@@ -1458,7 +1620,12 @@ impl Viewed {
                     None => (view.rect, false),
                 };
                 let inner = screen_rect(view_rect(Rect::default(), placed));
-                Some(Desired { view: view.id, url: url.as_ref(), inner, visible })
+                Some(Desired {
+                    view: view.id,
+                    url: url.as_ref(),
+                    inner,
+                    visible,
+                })
             })
             .collect();
         assert!(
@@ -1498,37 +1665,40 @@ impl Viewed {
                 self.laid_in = Some(laid.worktree());
                 let followed = self.layout.followed(&laid, now);
                 if followed {
-                    self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
+                    self.opened
+                        .insert(self.layout.worktree, WorktreeOpen::Ready);
                 }
                 let was_live = self.show.is_live();
                 let laid_changed = laid.worktree() == self.layout.worktree
                     && self.layout.laid.as_ref() != Some(&laid);
                 let mut emptied = false;
                 match self.layout.laid_out(laid) {
-                    LaidOut::Ignored => {},
+                    LaidOut::Ignored => {}
                     LaidOut::Shown => {
                         self.show.mark_live();
                         if self.opened.get(&self.layout.worktree) == Some(&WorktreeOpen::Requested)
                         {
-                            self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
+                            self.opened
+                                .insert(self.layout.worktree, WorktreeOpen::Ready);
                         }
                         self.layout.heard_laid(heard, now);
-                    },
+                    }
                     LaidOut::Emptied => {
                         self.show.mark_live();
                         self.layout.heard_laid(heard, now);
                         match self.opened.get(&self.layout.worktree) {
                             None => {
-                                self.opened.insert(self.layout.worktree, WorktreeOpen::Ready);
+                                self.opened
+                                    .insert(self.layout.worktree, WorktreeOpen::Ready);
                                 self.ask_focus(FocusAsked::Open {
                                     beside: Beside::Alone,
                                     opens: Opens::Shell,
                                 });
-                            },
-                            Some(WorktreeOpen::Requested) => {},
+                            }
+                            Some(WorktreeOpen::Requested) => {}
                             Some(WorktreeOpen::Ready) => emptied = true,
                         }
-                    },
+                    }
                 }
                 self.watch();
                 self.sync_browsers();
@@ -1540,17 +1710,25 @@ impl Viewed {
                     (false, false, true) => Heeded::Changed,
                     (false, false, false) => Heeded::Quiet,
                 }
-            },
-            Heard::Edged { worktree, direction, step, heard } => {
-                match self.layout.heard_edged(worktree, direction, step, heard, Instant::now()) {
+            }
+            Heard::Edged {
+                worktree,
+                direction,
+                step,
+                heard,
+            } => {
+                match self
+                    .layout
+                    .heard_edged(worktree, direction, step, heard, Instant::now())
+                {
                     EdgeHeard::Crosses(across) => Heeded::Edged(across),
                     EdgeHeard::Stayed => {
                         self.send_unsent();
                         Heeded::Quiet
-                    },
+                    }
                     EdgeHeard::Ignored => Heeded::Quiet,
                 }
-            },
+            }
             Heard::Sent(worktree) => Heeded::Sent(worktree),
             Heard::Left(worktree) => {
                 self.opened.remove(&worktree);
@@ -1560,32 +1738,32 @@ impl Viewed {
                 self.watch();
                 self.sync_browsers();
                 Heeded::Emptied
-            },
+            }
             Heard::Refused { why, heard } => {
                 self.layout.heard_refused(heard, Instant::now());
                 Heeded::Note(format!("luned refused: {why}"))
-            },
+            }
             Heard::Forgotten(why) => {
                 self.lose_stream(Instant::now());
                 Heeded::Forgotten(why)
-            },
+            }
             Heard::Lost(why) => {
                 self.lose_stream(Instant::now());
                 Heeded::Lost(why)
-            },
+            }
         }
     }
 
     fn watch(&mut self) {
         let wanted = self.layout.wanted();
         match &mut self.watcher {
-            Some(watcher) if watcher.showing == wanted => {},
+            Some(watcher) if watcher.showing == wanted => {}
             Some(watcher) => {
                 watcher.viewer.show(wanted.clone());
                 watcher.showing = wanted;
-            },
-            None if wanted.is_empty() => {},
-            None if self.watched_at.is_some_and(|at| at.elapsed() < AGAIN) => {},
+            }
+            None if wanted.is_empty() => {}
+            None if self.watched_at.is_some_and(|at| at.elapsed() < AGAIN) => {}
             None => {
                 self.watchers += 1;
                 self.watched_at = Some(Instant::now());
@@ -1593,16 +1771,30 @@ impl Viewed {
                 let reach = match self.reach() {
                     Ok(reach) => reach,
                     Err(why) => {
-                        let _ = events.send(Event::Seen { number, watcher, seen: Seen::Lost(why) });
+                        let _ = events.send(Event::Seen {
+                            number,
+                            watcher,
+                            seen: Seen::Lost(why),
+                        });
                         return;
-                    },
+                    }
                 };
                 let greeting = self.greeting;
-                let told = move |seen| drop(events.send(Event::Seen { number, watcher, seen }));
+                let told = move |seen| {
+                    drop(events.send(Event::Seen {
+                        number,
+                        watcher,
+                        seen,
+                    }));
+                };
                 let viewer = viewer::start(reach, greeting, told);
                 viewer.show(wanted.clone());
-                self.watcher = Some(Watcher { number: watcher, viewer, showing: wanted });
-            },
+                self.watcher = Some(Watcher {
+                    number: watcher,
+                    viewer,
+                    showing: wanted,
+                });
+            }
         }
     }
 
@@ -1612,7 +1804,7 @@ impl Viewed {
                 let socket = luned::mux::own::server::socket();
                 let socket = socket.map_err(|failure| failure.to_string())?;
                 return Ok(Reach::Mux { socket, runs_in });
-            },
+            }
             Where::On(destination) => destination,
         };
         match folder::open(&self.folder) {
@@ -1632,7 +1824,7 @@ impl Viewed {
             Seen::Lost(why) => {
                 self.unwatch();
                 return Heeded::Note(format!("lune's viewer: {why}"));
-            },
+            }
         };
         if !watching.showing.contains(&framed.frame().terminal()) {
             return Heeded::Quiet;
@@ -1643,7 +1835,7 @@ impl Viewed {
             Err(why) => {
                 self.unwatch();
                 Heeded::Note(format!("lune-mux said what lune cannot follow: {why}"))
-            },
+            }
         })
     }
 
@@ -1794,7 +1986,10 @@ impl Viewed {
 
     pub fn open_beside_focused(&mut self, opens: Opens) {
         self.mark_opening();
-        self.ask_focus(FocusAsked::Open { beside: Beside::Focused, opens });
+        self.ask_focus(FocusAsked::Open {
+            beside: Beside::Focused,
+            opens,
+        });
     }
 
     #[must_use]
@@ -1836,7 +2031,10 @@ impl Viewed {
         let Some((watcher, key, events)) = self.layout.take_unsent(watcher, Instant::now()) else {
             return;
         };
-        assert!(watcher.showing.contains(&key), "a watcher shows each terminal laid out");
+        assert!(
+            watcher.showing.contains(&key),
+            "a watcher shows each terminal laid out"
+        );
         for event in events {
             watcher.viewer.typed(key, event);
         }
@@ -1845,7 +2043,11 @@ impl Viewed {
     #[must_use]
     pub fn key(&mut self, key: &KeyEvent, input: u64) -> (Heeded, ReviewAction) {
         let unselected = self.unselect();
-        let plain = if unselected { Heeded::Changed } else { Heeded::Quiet };
+        let plain = if unselected {
+            Heeded::Changed
+        } else {
+            Heeded::Quiet
+        };
         if self.layout.held_after_close(key) {
             return (plain, ReviewAction::None);
         }
@@ -1873,12 +2075,12 @@ impl Viewed {
                         if let Some(url) = url {
                             return (Heeded::OpenOsBrowser(url), ReviewAction::None);
                         }
-                    },
+                    }
                     KeyCode::Char('y') => {
                         if let Some(url) = url {
                             return (Heeded::Copy(url.as_str().to_owned()), ReviewAction::None);
                         }
-                    },
+                    }
                     KeyCode::Char('r') if self.browsers.supported() => {
                         self.browsers.retry(
                             view,
@@ -1889,8 +2091,8 @@ impl Viewed {
                         );
                         self.flush_browser_ttys();
                         return (Heeded::Changed, ReviewAction::None);
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 }
             }
             return (plain, ReviewAction::None);
@@ -1936,7 +2138,9 @@ impl Viewed {
             self.flush_browser_ttys();
             return unselected;
         }
-        self.type_focused(typed::Event::Paste(api::Paste { text: text.to_owned() }));
+        self.type_focused(typed::Event::Paste(api::Paste {
+            text: text.to_owned(),
+        }));
         unselected
     }
 
@@ -1953,16 +2157,21 @@ impl Viewed {
             Moused::Focus(terminal) => {
                 self.focus_view(terminal);
                 None
-            },
+            }
             Moused::Sent(key, said) => {
                 self.type_in(key, typed::Event::Mouse(said));
                 None
-            },
-            Moused::Browser { view, mouse, column, row } => {
+            }
+            Moused::Browser {
+                view,
+                mouse,
+                column,
+                row,
+            } => {
                 let _ = self.browsers.mouse(view, mouse, column, row);
                 self.flush_browser_ttys();
                 None
-            },
+            }
         }
     }
 
@@ -2002,7 +2211,8 @@ impl Viewed {
         hover: Option<Spot>,
         kitty_cell_px: Option<(NonZeroU16, NonZeroU16)>,
     ) -> (Option<Position>, Vec<RibbonOverlay>) {
-        self.layout.draw(clean, hover, Some(&self.browsers), kitty_cell_px)
+        self.layout
+            .draw(clean, hover, Some(&self.browsers), kitty_cell_px)
     }
 
     #[must_use]
@@ -2017,8 +2227,8 @@ mod tests {
 
     use crossterm::event::{KeyModifiers, MouseButton};
     use luned::api::{show_request, show_response};
-    use luned::mux::own::frames::{Cursor, Ending, Glyph, Grapheme, Line, Rows, Shows, Side};
     use luned::mux::own::OwnMade;
+    use luned::mux::own::frames::{Cursor, Ending, Glyph, Grapheme, Line, Rows, Shows, Side};
     use ratatui::style::Modifier;
 
     use super::*;
@@ -2030,25 +2240,39 @@ mod tests {
 
     fn narrow(it: &str) -> Glyph {
         let shows = Shows::Narrow(Grapheme::new(it.to_owned()).unwrap());
-        Glyph { shows, style: frames::Style::PLAIN }
+        Glyph {
+            shows,
+            style: frames::Style::PLAIN,
+        }
     }
 
     fn lines(rows: &[&str]) -> Vec<Line> {
         let line = |row: &str| {
             let glyphs: Vec<Glyph> = row.chars().map(|it| narrow(&it.to_string())).collect();
-            Line::new(glyphs, Ending::Here, side(u16::try_from(row.len()).unwrap())).unwrap()
+            Line::new(
+                glyphs,
+                Ending::Here,
+                side(u16::try_from(row.len()).unwrap()),
+            )
+            .unwrap()
         };
         rows.iter().map(|row| line(row)).collect()
     }
 
     fn key(id: u32) -> TerminalKey {
-        TerminalKey { id: NonZeroU32::new(id).unwrap(), made: OwnMade::from_nanos(0) }
+        TerminalKey {
+            id: NonZeroU32::new(id).unwrap(),
+            made: OwnMade::from_nanos(0),
+        }
     }
 
     fn whole(id: u32, rows: &[&str], cursor: Option<Cursor>) -> Frame {
         let lines = lines(rows);
         let columns = side(u16::try_from(rows[0].len()).unwrap());
-        let size = frames::Size { columns, rows: side(u16::try_from(lines.len()).unwrap()) };
+        let size = frames::Size {
+            columns,
+            rows: side(u16::try_from(lines.len()).unwrap()),
+        };
         Frame::new(key(id), size, Rows::Whole(lines), cursor, false).unwrap()
     }
 
@@ -2069,7 +2293,12 @@ mod tests {
         };
         show_response::View {
             id: terminal,
-            rect: Some(show_response::Rect { column, row, columns, rows }),
+            rect: Some(show_response::Rect {
+                column,
+                row,
+                columns,
+                rows,
+            }),
             found: Some(found),
         }
     }
@@ -2082,38 +2311,71 @@ mod tests {
         use show_response::laid::Shown as Said;
         Laid::heard(show_response::Laid {
             worktree: 1,
-            size: Some(show_request::Size { columns: 20, rows: 4 }),
+            size: Some(show_request::Size {
+                columns: 20,
+                rows: 4,
+            }),
             views,
-            shown: Some(if full { Said::Full(focused) } else { Said::Tiled(focused) }),
+            shown: Some(if full {
+                Said::Full(focused)
+            } else {
+                Said::Tiled(focused)
+            }),
             version: None,
         })
         .unwrap()
     }
 
     fn halves() -> Vec<show_response::View> {
-        vec![view(11, (0, 0, 10, 4), Some(1)), view(12, (10, 0, 10, 4), Some(2))]
+        vec![
+            view(11, (0, 0, 10, 4), Some(1)),
+            view(12, (10, 0, 10, 4), Some(2)),
+        ]
     }
 
     fn split_layout() -> Layout {
         let mut layout = Layout::new(worktree(1), None);
         let tabs = vec![
-            Tab { worktree: worktree(1), name: "one".to_owned() },
-            Tab { worktree: worktree(2), name: "two".to_owned() },
+            Tab {
+                worktree: worktree(1),
+                name: "one".to_owned(),
+            },
+            Tab {
+                worktree: worktree(2),
+                name: "two".to_owned(),
+            },
         ];
         let project = ProjectId::of(2).unwrap();
         assert_eq!(colour_of(project), moonlight::MAUVE);
         layout.worktree_tabs = Some(WorktreeTabs { project, tabs });
-        layout.titles = [(terminal(11), "p1".to_owned()), (terminal(12), "p2".to_owned())].into();
+        layout.titles = [
+            (terminal(11), "p1".to_owned()),
+            (terminal(12), "p2".to_owned()),
+        ]
+        .into();
         assert_eq!(layout.laid_out(laid(halves(), 11, false)), LaidOut::Shown);
-        let cursor =
-            Cursor { row: 1, column: 2, shape: frames::CursorShape::Block, blinking: false };
-        layout.framed(whole(1, &["abcdefgh", "ijklmnop"], Some(cursor))).unwrap();
-        layout.framed(whole(2, &["qrstuvwx", "yz012345"], None)).unwrap();
+        let cursor = Cursor {
+            row: 1,
+            column: 2,
+            shape: frames::CursorShape::Block,
+            blinking: false,
+        };
+        layout
+            .framed(whole(1, &["abcdefgh", "ijklmnop"], Some(cursor)))
+            .unwrap();
+        layout
+            .framed(whole(2, &["qrstuvwx", "yz012345"], None))
+            .unwrap();
         layout
     }
 
     fn mouse(kind: MouseEventKind) -> MouseEvent {
-        MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE }
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     fn spot(row: u16, column: u16) -> Spot {
@@ -2128,22 +2390,45 @@ mod tests {
     fn each_terminal_draws_in_its_frame_under_the_worktrees_and_a_larger_area_keeps_a_margin() {
         let mut layout = split_layout();
         let mut buffer = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let (cursor, _) =
-            layout.draw(Clean::of_empty(&mut buffer, Rect::new(2, 0, 22, 6)), None, None, None);
+        let (cursor, _) = layout.draw(
+            Clean::of_empty(&mut buffer, Rect::new(2, 0, 22, 6)),
+            None,
+            None,
+            None,
+        );
         assert_eq!(row(&buffer, 0, 2, 17), "\u{e0b6} one \u{e0b4}   two  ");
-        assert_eq!((buffer[(3, 0)].fg, buffer[(3, 0)].bg), (moonlight::INK, moonlight::MAUVE));
-        assert_eq!((buffer[(2, 0)].fg, buffer[(2, 0)].bg), (moonlight::MAUVE, Color::Reset));
-        assert_eq!((buffer[(12, 0)].fg, buffer[(12, 0)].bg), (moonlight::MUTE, Color::Reset));
+        assert_eq!(
+            (buffer[(3, 0)].fg, buffer[(3, 0)].bg),
+            (moonlight::INK, moonlight::MAUVE)
+        );
+        assert_eq!(
+            (buffer[(2, 0)].fg, buffer[(2, 0)].bg),
+            (moonlight::MAUVE, Color::Reset)
+        );
+        assert_eq!(
+            (buffer[(12, 0)].fg, buffer[(12, 0)].bg),
+            (moonlight::MUTE, Color::Reset)
+        );
         assert_eq!(row(&buffer, 1, 2, 22), "╭ p1 ────╮╭ p2 ────╮");
         assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
         assert_eq!(row(&buffer, 3, 12, 22), "│yz012345│");
         assert_eq!(row(&buffer, 4, 2, 22), "╰────────╯╰────────╯");
-        assert_eq!((buffer[(2, 1)].fg, buffer[(12, 1)].fg), (moonlight::MUTE, moonlight::LIFTED));
+        assert_eq!(
+            (buffer[(2, 1)].fg, buffer[(12, 1)].fg),
+            (moonlight::MUTE, moonlight::LIFTED)
+        );
         assert_eq!(row(&buffer, 5, 2, 24), " ".repeat(22));
         assert_eq!(cursor, Some(Position::new(5, 3)));
         let mut small = Buffer::empty(Rect::new(0, 0, 14, 3));
         assert_eq!(
-            layout.draw(Clean::of_empty(&mut small, Rect::new(0, 0, 14, 3)), None, None, None).0,
+            layout
+                .draw(
+                    Clean::of_empty(&mut small, Rect::new(0, 0, 14, 3)),
+                    None,
+                    None,
+                    None
+                )
+                .0,
             None
         );
         assert_eq!(row(&small, 1, 0, 14), "╭ p1 ────╮╭ p2");
@@ -2163,10 +2448,20 @@ mod tests {
     #[test]
     fn an_edge_is_heeded_only_from_the_worktree_the_view_is_on() {
         let mut layout = split_layout();
-        assert_eq!(layout.edged(worktree(1), Direction::Right), Some(Across::After));
+        assert_eq!(
+            layout.edged(worktree(1), Direction::Right),
+            Some(Across::After)
+        );
         layout.go(worktree(2), Instant::now());
-        assert_eq!(layout.edged(worktree(1), Direction::Right), None, "an edge of the one left");
-        assert_eq!(layout.edged(worktree(2), Direction::Left), Some(Across::Before));
+        assert_eq!(
+            layout.edged(worktree(1), Direction::Right),
+            None,
+            "an edge of the one left"
+        );
+        assert_eq!(
+            layout.edged(worktree(2), Direction::Left),
+            Some(Across::Before)
+        );
     }
 
     #[test]
@@ -2174,15 +2469,32 @@ mod tests {
         let mut layout = split_layout();
         layout.laid_out(laid(halves(), 12, true));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
+        layout.draw(
+            Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)),
+            None,
+            None,
+            None,
+        );
         assert_eq!(row(&buffer, 1, 0, 20), "╭ p2 ──────────────╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
         let mut here = Layout::new(worktree(1), Some(key(2)));
-        let lost = vec![view(11, (0, 0, 10, 4), None), view(12, (10, 0, 10, 4), Some(2))];
+        let lost = vec![
+            view(11, (0, 0, 10, 4), None),
+            view(12, (10, 0, 10, 4), Some(2)),
+        ];
         here.laid_out(laid(lost, 11, false));
-        assert_eq!(here.wanted(), BTreeSet::new(), "lune never shows the terminal it runs in");
+        assert_eq!(
+            here.wanted(),
+            BTreeSet::new(),
+            "lune never shows the terminal it runs in"
+        );
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        here.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
+        here.draw(
+            Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)),
+            None,
+            None,
+            None,
+        );
         assert_eq!(row(&buffer, 2, 1, 9), "lost: lu");
         assert_eq!(row(&buffer, 2, 11, 19), "lune run");
     }
@@ -2195,7 +2507,10 @@ mod tests {
         let tabs = |focused| {
             Laid::heard(show_response::Laid {
                 worktree: 1,
-                size: Some(show_request::Size { columns: 20, rows: 4 }),
+                size: Some(show_request::Size {
+                    columns: 20,
+                    rows: 4,
+                }),
                 views: vec![tab(11, Some(1)), tab(12, Some(2)), tab(13, None)],
                 shown: Some(Said::Tabbed(focused)),
                 version: None,
@@ -2204,19 +2519,40 @@ mod tests {
         };
         layout.laid_out(tabs(12));
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
+        layout.draw(
+            Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)),
+            None,
+            None,
+            None,
+        );
         assert_eq!(row(&buffer, 1, 0, 20), "╭  p  ─ ● p ─  t  ─╮");
         assert_eq!(row(&buffer, 2, 0, 10), "│qrstuvwx ");
-        assert_eq!((buffer[(8, 1)].symbol(), buffer[(8, 1)].fg), (VIEW_DOT, moonlight::MAUVE));
+        assert_eq!(
+            (buffer[(8, 1)].symbol(), buffer[(8, 1)].fg),
+            (VIEW_DOT, moonlight::MAUVE)
+        );
         assert_eq!(buffer[(10, 1)].fg, moonlight::TEXT);
         assert!(buffer[(10, 1)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buffer[(3, 1)].fg, moonlight::MUTE, "a tab not focused is dim");
+        assert_eq!(
+            buffer[(3, 1)].fg,
+            moonlight::MUTE,
+            "a tab not focused is dim"
+        );
         let down = mouse(MouseEventKind::Down(MouseButton::Left));
-        assert_eq!(layout.moused(down, spot(1, 2), 20, None), Moused::Focus(terminal(11)));
-        assert_eq!(layout.moused(down, spot(1, 14), 20, None), Moused::Focus(terminal(13)));
+        assert_eq!(
+            layout.moused(down, spot(1, 2), 20, None),
+            Moused::Focus(terminal(11))
+        );
+        assert_eq!(
+            layout.moused(down, spot(1, 14), 20, None),
+            Moused::Focus(terminal(13))
+        );
         let on_the_focused = layout.moused(down, spot(1, 7), 20, None);
         assert_eq!(on_the_focused, Moused::Nothing, "the focused tab is there");
-        assert!(!matches!(layout.moused(down, spot(2, 3), 20, None), Moused::Focus(_)));
+        assert!(!matches!(
+            layout.moused(down, spot(2, 3), 20, None),
+            Moused::Focus(_)
+        ));
     }
 
     #[test]
@@ -2224,28 +2560,49 @@ mod tests {
         use show_response::laid::Shown as Said;
         let mut layout = split_layout();
         let long = |title: &str| title.to_owned();
-        layout.titles =
-            [(terminal(11), long("a very long title")), (terminal(12), long("another long one"))]
-                .into();
+        layout.titles = [
+            (terminal(11), long("a very long title")),
+            (terminal(12), long("another long one")),
+        ]
+        .into();
         let tab = |id, key| view(id, (0, 0, 20, 4), key);
         let tabs = Laid::heard(show_response::Laid {
             worktree: 1,
-            size: Some(show_request::Size { columns: 20, rows: 4 }),
+            size: Some(show_request::Size {
+                columns: 20,
+                rows: 4,
+            }),
             views: vec![tab(11, Some(1)), tab(12, Some(2)), tab(13, None)],
             shown: Some(Said::Tabbed(13)),
             version: None,
         });
         layout.laid_out(tabs.unwrap());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
+        layout.draw(
+            Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)),
+            None,
+            None,
+            None,
+        );
         assert_eq!(row(&buffer, 1, 0, 20), "╭  a  ─  a  ─ ● t ─╮");
         let drawn = |columns| {
             let spans = layout.view_tabs(Rect::new(0, 0, columns, 4), None);
-            spans.iter().map(|span| (span.id, span.column, span.columns)).collect::<Vec<_>>()
+            spans
+                .iter()
+                .map(|span| (span.id, span.column, span.columns))
+                .collect::<Vec<_>>()
         };
         let (one, two, three) = (terminal(11), terminal(12), terminal(13));
-        assert_eq!(drawn(7), [(one, 0, 1), (two, 2, 1), (three, 4, 1)], "a column each");
-        assert_eq!(drawn(6), [(two, 0, 1), (three, 2, 1)], "the tabs before it go first");
+        assert_eq!(
+            drawn(7),
+            [(one, 0, 1), (two, 2, 1), (three, 4, 1)],
+            "a column each"
+        );
+        assert_eq!(
+            drawn(6),
+            [(two, 0, 1), (three, 2, 1)],
+            "the tabs before it go first"
+        );
         assert_eq!(drawn(3), [(three, 0, 1)], "the focused tab alone");
         assert!(drawn(2).is_empty(), "a border with no room draws no tab");
     }
@@ -2260,13 +2617,28 @@ mod tests {
             Moused::Sent(key, said) => Some((key.id.get(), said.row, said.column)),
             Moused::Nothing | Moused::Go(_) | Moused::Focus(_) | Moused::Browser { .. } => None,
         };
-        assert_eq!(layout.moused(down, spot(2, 14), 22, None), Moused::Focus(terminal(12)));
-        assert_eq!(layout.moused(down, spot(0, 9), 22, None), Moused::Go(worktree(2)));
+        assert_eq!(
+            layout.moused(down, spot(2, 14), 22, None),
+            Moused::Focus(terminal(12))
+        );
+        assert_eq!(
+            layout.moused(down, spot(0, 9), 22, None),
+            Moused::Go(worktree(2))
+        );
         assert_eq!(layout.moused(down, spot(0, 1), 22, None), Moused::Nothing);
         assert_eq!(layout.moused(down, spot(1, 0), 22, None), Moused::Nothing);
-        assert_eq!(at(layout.moused(down, spot(2, 3), 22, None)), Some((1, 0, 2)));
-        assert_eq!(at(layout.moused(drag, spot(0, 15), 22, None)), Some((1, 0, 7)));
-        assert_eq!(at(layout.moused(up, spot(4, 15), 22, None)), Some((1, 1, 7)));
+        assert_eq!(
+            at(layout.moused(down, spot(2, 3), 22, None)),
+            Some((1, 0, 2))
+        );
+        assert_eq!(
+            at(layout.moused(drag, spot(0, 15), 22, None)),
+            Some((1, 0, 7))
+        );
+        assert_eq!(
+            at(layout.moused(up, spot(4, 15), 22, None)),
+            Some((1, 1, 7))
+        );
         assert_eq!(layout.moused(up, spot(2, 3), 22, None), Moused::Nothing);
     }
 
@@ -2289,18 +2661,31 @@ mod tests {
     #[test]
     fn a_click_on_a_link_copies_it_and_the_pointer_over_one_underlines_it() {
         let mut layout = split_layout();
-        layout.framed(whole(1, &["a/b.rs x", "ijklmnop"], None)).unwrap();
+        layout
+            .framed(whole(1, &["a/b.rs x", "ijklmnop"], None))
+            .unwrap();
         layout.select_from(spot(2, 3));
         assert_eq!(layout.selected().as_deref(), Some("a/b.rs"));
-        let lit = Selection { from: At { row: 0, column: 0 }, to: At { row: 0, column: 5 } };
+        let lit = Selection {
+            from: At { row: 0, column: 0 },
+            to: At { row: 0, column: 5 },
+        };
         assert_eq!(layout.pointer, Pointer::Shown(lit));
         layout.select_from(spot(2, 3));
         layout.select_to(spot(2, 3));
-        assert_eq!(layout.selected().as_deref(), Some("a/b.rs"), "a press that stays is a click");
+        assert_eq!(
+            layout.selected().as_deref(),
+            Some("a/b.rs"),
+            "a press that stays is a click"
+        );
         layout.select_from(spot(2, 3));
         layout.select_to(spot(2, 6));
         layout.select_to(spot(2, 3));
-        assert_eq!(layout.selected(), None, "a drag that comes back is no click");
+        assert_eq!(
+            layout.selected(),
+            None,
+            "a drag that comes back is no click"
+        );
         assert_eq!(layout.pointer, Pointer::Free);
         layout.select_from(spot(2, 8));
         assert_eq!(layout.selected(), None, "a click on a word copies nothing");
@@ -2313,12 +2698,23 @@ mod tests {
             None,
         );
         let underlined = |x| buffer[(x, 2)].modifier.contains(Modifier::UNDERLINED);
-        let line: String = (1..9).map(|x| if underlined(x) { '_' } else { ' ' }).collect();
+        let line: String = (1..9)
+            .map(|x| if underlined(x) { '_' } else { ' ' })
+            .collect();
         assert_eq!(line, "______  ");
-        assert_eq!(layout.pointed(spot(2, 13)), None, "only in the focused terminal");
-        let size = frames::Size { columns: side(8), rows: side(2) };
+        assert_eq!(
+            layout.pointed(spot(2, 13)),
+            None,
+            "only in the focused terminal"
+        );
+        let size = frames::Size {
+            columns: side(8),
+            rows: side(2),
+        };
         let rows = Rows::Whole(lines(&["a/b.rs x", "ijklmnop"]));
-        layout.framed(Frame::new(key(1), size, rows, None, true).unwrap()).unwrap();
+        layout
+            .framed(Frame::new(key(1), size, rows, None, true).unwrap())
+            .unwrap();
         let taken = "where the program takes the mouse, none shows";
         assert_eq!(layout.pointed(spot(2, 2)), None, "{taken}");
         layout.framed(whole(1, &["x a/b.rs"], None)).unwrap();
@@ -2329,14 +2725,21 @@ mod tests {
         assert_eq!(layout.pointer, Pointer::Free);
         layout.select_from(spot(3, 8));
         layout.select_to(spot(2, 3));
-        assert_eq!(layout.selected().as_deref(), Some("a/b.rs"), "a drag from there still selects");
+        assert_eq!(
+            layout.selected().as_deref(),
+            Some("a/b.rs"),
+            "a drag from there still selects"
+        );
     }
 
     #[test]
     fn changed_rows_follow_only_a_frame_of_their_size_and_a_terminal_laid_out_no_more_drops() {
         let mut layout = split_layout();
         let changed = Rows::Changed(vec![(0, lines(&["c"]).remove(0))]);
-        let size = frames::Size { columns: side(1), rows: side(1) };
+        let size = frames::Size {
+            columns: side(1),
+            rows: side(1),
+        };
         let frame = Frame::new(key(1), size, changed, None, false).unwrap();
         let why = layout.framed(frame).unwrap_err();
         assert_eq!(why, "a frame of 1x1 changes the rows of 8x2");
@@ -2346,7 +2749,11 @@ mod tests {
         let lacked = "a terminal its layout lacks gets no screen";
         assert!(!layout.screens.contains_key(&key(1)), "{lacked}");
         layout.go(worktree(2), Instant::now());
-        assert_eq!(layout.focused(), None, "a layout of another worktree lays out nothing here");
+        assert_eq!(
+            layout.focused(),
+            None,
+            "a layout of another worktree lays out nothing here"
+        );
     }
 
     #[test]
@@ -2358,7 +2765,9 @@ mod tests {
         let mut layout = Layout::new(worktree(1), None);
         assert_eq!(layout.laid_out(laid(halves(), 11, false)), LaidOut::Shown);
         let first = whole(1, &["abcdefgh", "ijklmnop"], None);
-        let Rows::Whole(initial) = first.rows() else { unreachable!() };
+        let Rows::Whole(initial) = first.rows() else {
+            unreachable!()
+        };
         let row0_ptr = ptr_of(&initial[0].glyphs()[0].shows);
         let row1_ptr = ptr_of(&initial[1].glyphs()[0].shows);
         layout.framed(first).unwrap();
@@ -2368,19 +2777,44 @@ mod tests {
 
         let updated = lines(&["QRSTUVWX"]).remove(0);
         let updated_ptr = ptr_of(&updated.glyphs()[0].shows);
-        let cursor =
-            Some(Cursor { row: 1, column: 3, shape: frames::CursorShape::Bar, blinking: true });
-        let size = frames::Size { columns: side(8), rows: side(2) };
-        let changed = Frame::new(key(1), size, Rows::Changed(vec![(1, updated)]), cursor, true);
+        let cursor = Some(Cursor {
+            row: 1,
+            column: 3,
+            shape: frames::CursorShape::Bar,
+            blinking: true,
+        });
+        let size = frames::Size {
+            columns: side(8),
+            rows: side(2),
+        };
+        let changed = Frame::new(
+            key(1),
+            size,
+            Rows::Changed(vec![(1, updated)]),
+            cursor,
+            true,
+        );
         layout.framed(changed.unwrap()).unwrap();
         let screen = &layout.screens[&key(1)];
-        assert_eq!(ptr_of(&screen.lines()[0].glyphs()[0].shows), row0_ptr, "row 0 stayed in place");
-        assert_eq!(ptr_of(&screen.lines()[1].glyphs()[0].shows), updated_ptr, "row 1 moved in");
+        assert_eq!(
+            ptr_of(&screen.lines()[0].glyphs()[0].shows),
+            row0_ptr,
+            "row 0 stayed in place"
+        );
+        assert_eq!(
+            ptr_of(&screen.lines()[1].glyphs()[0].shows),
+            updated_ptr,
+            "row 1 moved in"
+        );
         assert_eq!(screen.cursor(), cursor);
         assert!(screen.tracks_mouse());
         let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 5));
-        let (cursor_at, _) =
-            layout.draw(Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)), None, None, None);
+        let (cursor_at, _) = layout.draw(
+            Clean::of_empty(&mut buffer, Rect::new(0, 0, 20, 5)),
+            None,
+            None,
+            None,
+        );
         assert_eq!(row(&buffer, 2, 1, 9), "abcdefgh");
         assert_eq!(row(&buffer, 3, 1, 9), "QRSTUVWX");
         assert_eq!(cursor_at, Some(Position::new(4, 3)));
@@ -2393,10 +2827,18 @@ mod tests {
         for spot in [(2, 5), (22, 2), (19, 0)] {
             buffer[spot].set_symbol("x");
         }
-        let _ =
-            layout.draw(Clean::unchecked(&mut buffer, Rect::new(2, 0, 22, 6)), None, None, None);
+        let _ = layout.draw(
+            Clean::unchecked(&mut buffer, Rect::new(2, 0, 22, 6)),
+            None,
+            None,
+            None,
+        );
         for spot in [(2, 5), (22, 2), (19, 0)] {
-            assert_eq!(buffer[spot].symbol(), "x", "layout draw does not reset untouched cells");
+            assert_eq!(
+                buffer[spot].symbol(),
+                "x",
+                "layout draw does not reset untouched cells"
+            );
         }
         assert_eq!(row(&buffer, 2, 2, 12), "│abcdefgh│");
     }
@@ -2404,9 +2846,21 @@ mod tests {
     fn laid_in(id: u64, views: Vec<show_response::View>) -> Heard {
         use show_response::laid::Shown as Said;
         let shown = views.first().map(|view| Said::Tiled(view.id));
-        let size = Some(show_request::Size { columns: 20, rows: 4 });
-        let said = show_response::Laid { worktree: id, size, views, shown, version: None };
-        Heard::Laid { laid: Laid::heard(said).unwrap(), heard: Echoed::Through(AskNumber::HELLO) }
+        let size = Some(show_request::Size {
+            columns: 20,
+            rows: 4,
+        });
+        let said = show_response::Laid {
+            worktree: id,
+            size,
+            views,
+            shown,
+            version: None,
+        };
+        Heard::Laid {
+            laid: Laid::heard(said).unwrap(),
+            heard: Echoed::Through(AskNumber::HELLO),
+        }
     }
 
     #[test]
@@ -2427,13 +2881,21 @@ mod tests {
         assert_eq!(layout.closes(&d, 2), welcome, "d d closes it, by its id");
         assert_eq!(layout.closes(&d, 3), None);
         assert_eq!(layout.closes(&typed(KeyCode::Char('x')), 4), None);
-        assert_eq!(layout.closes(&d, 5), None, "another key between the two starts over");
+        assert_eq!(
+            layout.closes(&d, 5),
+            None,
+            "another key between the two starts over"
+        );
         let ctrl_d = KeyEvent::new(KeyCode::Char(CLOSE), KeyModifiers::CONTROL);
         assert_eq!(layout.closes(&ctrl_d, 6), None);
         assert_eq!(layout.closes(&d, 7), None, "Ctrl d is no d");
         assert_eq!(layout.laid_out(laid(views(), 11, false)), LaidOut::Shown);
         assert_eq!(layout.laid_out(laid(views(), 12, false)), LaidOut::Shown);
-        assert_eq!(layout.closes(&d, 8), None, "a focus gone elsewhere and back starts over");
+        assert_eq!(
+            layout.closes(&d, 8),
+            None,
+            "a focus gone elsewhere and back starts over"
+        );
         assert_eq!(layout.closes(&d, 9), welcome);
         assert_eq!(layout.closes(&d, 10), None);
         let elsewhere = "an input lune takes itself between the two starts over";
@@ -2462,9 +2924,15 @@ mod tests {
             layout.laid_out(laid(vec![view(11, (0, 0, 20, 4), Some(1))], 11, false)),
             LaidOut::Shown,
         );
-        assert!(layout.held_after_close(&held), "the d held after the close is dropped");
+        assert!(
+            layout.held_after_close(&held),
+            "the d held after the close is dropped"
+        );
         assert!(layout.held_after_close(&held));
-        assert!(!layout.held_after_close(&d), "a d pressed again reaches the terminal");
+        assert!(
+            !layout.held_after_close(&d),
+            "a d pressed again reaches the terminal"
+        );
         assert!(!layout.held_after_close(&held));
     }
 
@@ -2473,7 +2941,10 @@ mod tests {
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
         let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
-        let greeting = Greeting { foreground: None, background: None };
+        let greeting = Greeting {
+            foreground: None,
+            background: None,
+        };
         let folder = unserved.path().to_owned();
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
@@ -2495,19 +2966,31 @@ mod tests {
             &events,
         );
         let one = || vec![view(11, (0, 0, 20, 4), Some(1))];
-        assert!(matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Changed), "first, it opens");
+        assert!(
+            matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Changed),
+            "first, it opens"
+        );
         assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Changed));
         let emptied = viewed.heard(laid_in(1, Vec::new()));
-        assert!(matches!(emptied, Heeded::Emptied), "its last terminal closed, lune leaves it");
+        assert!(
+            matches!(emptied, Heeded::Emptied),
+            "its last terminal closed, lune leaves it"
+        );
         viewed.go(&Machine::Local, worktree(2));
         let two = vec![view(21, (0, 0, 20, 4), Some(2))];
         assert!(matches!(viewed.heard(laid_in(2, two)), Heeded::Changed));
         viewed.go(&Machine::Local, worktree(1));
         let back = viewed.heard(laid_in(1, Vec::new()));
-        assert!(matches!(back, Heeded::Changed), "gone back to, it opens as it did first");
+        assert!(
+            matches!(back, Heeded::Changed),
+            "gone back to, it opens as it did first"
+        );
         assert!(matches!(viewed.heard(laid_in(1, one())), Heeded::Changed));
         let again = viewed.heard(laid_in(1, Vec::new()));
-        assert!(matches!(again, Heeded::Emptied), "emptied again, lune leaves it again");
+        assert!(
+            matches!(again, Heeded::Emptied),
+            "emptied again, lune leaves it again"
+        );
     }
 
     #[test]
@@ -2516,7 +2999,10 @@ mod tests {
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
         let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
-        let greeting = Greeting { foreground: None, background: None };
+        let greeting = Greeting {
+            foreground: None,
+            background: None,
+        };
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
             cell: CellPixels {
@@ -2543,10 +3029,18 @@ mod tests {
         );
         let browser_view = show_response::View {
             id: 31,
-            rect: Some(show_response::Rect { column: 0, row: 0, columns: 20, rows: 4 }),
+            rect: Some(show_response::Rect {
+                column: 0,
+                row: 0,
+                columns: 20,
+                rows: 4,
+            }),
             found: Some(Said::Browser(Browser { url: None })),
         };
-        assert!(matches!(viewed.heard(laid_in(1, vec![browser_view])), Heeded::Changed));
+        assert!(matches!(
+            viewed.heard(laid_in(1, vec![browser_view])),
+            Heeded::Changed
+        ));
         assert!(
             matches!(viewed.heard(laid_in(1, Vec::new())), Heeded::Emptied),
             "closing the browser later leaves the emptied worktree"
@@ -2554,7 +3048,9 @@ mod tests {
     }
 
     fn pasted(text: &str) -> typed::Event {
-        typed::Event::Paste(api::Paste { text: text.to_owned() })
+        typed::Event::Paste(api::Paste {
+            text: text.to_owned(),
+        })
     }
 
     fn found(terminal: u64, said: show_response::view::Found) -> show_response::View {
@@ -2564,12 +3060,16 @@ mod tests {
     }
 
     fn laid_on(id: u64, focused: show_response::View) -> Laid {
-        let Heard::Laid { laid, .. } = laid_in(id, vec![focused]) else { unreachable!() };
+        let Heard::Laid { laid, .. } = laid_in(id, vec![focused]) else {
+            unreachable!()
+        };
         laid
     }
 
     fn sent(layout: &mut Layout, now: Instant) -> Option<(TerminalKey, VecDeque<typed::Event>)> {
-        layout.take_unsent(Some(()), now).map(|((), key, events)| (key, events))
+        layout
+            .take_unsent(Some(()), now)
+            .map(|((), key, events)| (key, events))
     }
 
     #[test]
@@ -2580,12 +3080,25 @@ mod tests {
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), now);
         assert_eq!(sent(&mut layout, now), None, "no layout yet");
-        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Looking(())))), LaidOut::Shown);
-        assert_eq!(sent(&mut layout, now), None, "its terminal is yet to be found");
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, found(11, Said::Looking(())))),
+            LaidOut::Shown
+        );
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "its terminal is yet to be found"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         assert_eq!(layout.take_unsent(None::<()>, now), None, "no viewer yet");
         let sent_now = sent(&mut layout, now);
-        assert_eq!(sent_now, Some((key(1), VecDeque::from([pasted("a"), pasted("b")]))));
+        assert_eq!(
+            sent_now,
+            Some((key(1), VecDeque::from([pasted("a"), pasted("b")])))
+        );
         assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::new())));
     }
 
@@ -2614,11 +3127,25 @@ mod tests {
     fn events_kept_for_a_terminal_never_reach_the_one_put_in_its_view_in_its_place() {
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.keep_unsent(pasted("a"), now);
-        assert_eq!(layout.take_unsent(None::<()>, now), None, "its viewer is lost");
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
-        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "remade");
+        assert_eq!(
+            layout.take_unsent(None::<()>, now),
+            None,
+            "its viewer is lost"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::new())),
+            "remade"
+        );
     }
 
     #[test]
@@ -2628,15 +3155,29 @@ mod tests {
         let mut layout = Layout::new(worktree(1), None);
         layout.keep_unsent(pasted("a"), now);
         layout.go(worktree(2), now);
-        assert_eq!(layout.laid_out(laid_on(2, view(21, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
-        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "gone to");
+        assert_eq!(
+            layout.laid_out(laid_on(2, view(21, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::new())),
+            "gone to"
+        );
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Looking(())))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, found(11, Said::Looking(())))),
+            LaidOut::Shown
+        );
         layout.keep_unsent(pasted("a"), now);
         let followed = laid_on(2, view(21, (0, 0, 20, 4), Some(2)));
         assert!(layout.followed(&followed, now));
         assert_eq!(layout.laid_out(followed), LaidOut::Shown);
-        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())), "followed");
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::new())),
+            "followed"
+        );
     }
 
     #[test]
@@ -2644,17 +3185,32 @@ mod tests {
         use show_response::view::Found as Said;
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Looking(())))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, found(11, Said::Looking(())))),
+            LaidOut::Shown
+        );
         layout.keep_unsent(pasted("a"), now);
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())));
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.keep_unsent(pasted("a"), now);
         assert_eq!(layout.take_unsent(None::<()>, now), None, "no viewer yet");
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         layout.keep_unsent(pasted("b"), now);
-        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::from([pasted("b")]))));
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::from([pasted("b")])))
+        );
     }
 
     #[test]
@@ -2662,9 +3218,15 @@ mod tests {
         let now = Instant::now();
         let later = now + UNSENT_FOR;
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.keep_unsent(pasted("a"), now);
-        assert_eq!(sent(&mut layout, later), Some((key(1), VecDeque::from([pasted("a")]))));
+        assert_eq!(
+            sent(&mut layout, later),
+            Some((key(1), VecDeque::from([pasted("a")])))
+        );
         let too_late = later + Duration::from_millis(1);
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), later);
@@ -2672,16 +3234,27 @@ mod tests {
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), too_late);
         layout.keep_unsent(pasted("c"), too_late);
-        assert_eq!(sent(&mut layout, too_late), Some((key(1), VecDeque::new())), "no tail");
+        assert_eq!(
+            sent(&mut layout, too_late),
+            Some((key(1), VecDeque::new())),
+            "no tail"
+        );
         layout.keep_unsent(pasted("d"), too_late);
         let taken = Some((key(1), VecDeque::from([pasted("d")])));
-        assert_eq!(sent(&mut layout, too_late), taken, "a terminal took input, so on it goes");
+        assert_eq!(
+            sent(&mut layout, too_late),
+            taken,
+            "a terminal took input, so on it goes"
+        );
     }
 
     #[test]
     fn events_past_the_most_kept_are_dropped_and_those_kept_stay_in_order() {
         let now = Instant::now();
-        let aim = Aim { worktree: worktree(1), focus: AimFocus::Unlaid };
+        let aim = Aim {
+            worktree: worktree(1),
+            focus: AimFocus::Unlaid,
+        };
         let mut unsent = Unsent::new(aim);
         for index in 0..=UNSENT_MAX {
             unsent.keep(aim, pasted(&index.to_string()), now);
@@ -2690,7 +3263,10 @@ mod tests {
         let kept: Vec<typed::Event> = unsent.take().into();
         let first = (0..UNSENT_MAX).map(|index| pasted(&index.to_string()));
         assert_eq!(kept, first.collect::<Vec<typed::Event>>());
-        assert!(matches!(unsent.held, Held::Nothing), "a batch sent starts the count over");
+        assert!(
+            matches!(unsent.held, Held::Nothing),
+            "a batch sent starts the count over"
+        );
     }
 
     #[test]
@@ -2699,14 +3275,22 @@ mod tests {
         let mut layout = Layout::new(worktree(1), None);
         let browser = show_response::View {
             id: 31,
-            rect: Some(show_response::Rect { column: 0, row: 0, columns: 48, rows: 10 }),
+            rect: Some(show_response::Rect {
+                column: 0,
+                row: 0,
+                columns: 48,
+                rows: 10,
+            }),
             found: Some(Said::Browser(Browser {
                 url: Some("https://example.com/pull/809".to_owned()),
             })),
         };
         let laid_browser = Laid::heard(show_response::Laid {
             worktree: 1,
-            size: Some(show_request::Size { columns: 48, rows: 10 }),
+            size: Some(show_request::Size {
+                columns: 48,
+                rows: 10,
+            }),
             views: vec![browser],
             shown: Some(show_response::laid::Shown::Tiled(31)),
             version: None,
@@ -2714,7 +3298,10 @@ mod tests {
         .unwrap();
         assert_eq!(layout.laid_out(laid_browser), LaidOut::Shown);
         let (_, url, _) = layout.focused_browser().unwrap();
-        assert_eq!(url.map(BrowserUrl::as_str), Some("https://example.com/pull/809"));
+        assert_eq!(
+            url.map(BrowserUrl::as_str),
+            Some("https://example.com/pull/809")
+        );
 
         let area = Rect::new(0, 0, 48, 12);
         let mut buffer = Buffer::empty(area);
@@ -2728,12 +3315,20 @@ mod tests {
             colours: crate::answers::Colours::default(),
         };
         let browsers = embedded::Browsers::new(1, config, events);
-        let _ = layout.draw(Clean::of_empty(&mut buffer, area), None, Some(&browsers), None);
+        let _ = layout.draw(
+            Clean::of_empty(&mut buffer, area),
+            None,
+            Some(&browsers),
+            None,
+        );
         let rendered: String = (0..area.height)
             .map(|y| row(&buffer, y, 0, area.width))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(rendered.contains("https://example.com/pull/809"), "{rendered}");
+        assert!(
+            rendered.contains("https://example.com/pull/809"),
+            "{rendered}"
+        );
         assert!(rendered.contains("o  open in OS browser"), "{rendered}");
         assert!(rendered.contains("y  copy URL"), "{rendered}");
     }
@@ -2746,7 +3341,10 @@ mod tests {
         review_view.found = Some(Said::Review(()));
         let laid = Laid::heard(show_response::Laid {
             worktree: 1,
-            size: Some(show_request::Size { columns: 112, rows: 14 }),
+            size: Some(show_request::Size {
+                columns: 112,
+                rows: 14,
+            }),
             views: vec![review_view],
             shown: Some(show_response::laid::Shown::Tiled(12)),
             version: None,
@@ -2784,8 +3382,7 @@ diff --git a/src/lib.rs b/src/lib.rs
 
         let area = Rect::new(0, 0, 112, 15);
         let mut buf = Buffer::empty(area);
-        let (_, overlays_unicode) =
-            layout.draw(Clean::of_empty(&mut buf, area), None, None, None);
+        let (_, overlays_unicode) = layout.draw(Clean::of_empty(&mut buf, area), None, None, None);
         assert!(overlays_unicode.is_empty());
 
         let mut buf_kitty = Buffer::empty(area);
@@ -2807,19 +3404,36 @@ diff --git a/src/lib.rs b/src/lib.rs
         let kind = |kind| KeyEvent::new_with_kind(KeyCode::Char(CLOSE), KeyModifiers::NONE, kind);
         let (d, held) = (kind(KeyEventKind::Press), kind(KeyEventKind::Repeat));
         assert_eq!(layout.closes(&d, 1), None);
-        assert_eq!(layout.closes(&held, 2), None, "holding d does not close a review pane");
+        assert_eq!(
+            layout.closes(&held, 2),
+            None,
+            "holding d does not close a review pane"
+        );
         assert_eq!(layout.closes(&d, 3), None);
-        assert_eq!(layout.closes(&d, 4), Some(terminal(12)), "d d closes the review pane");
-        assert!(layout.held_after_close(&held), "trailing repeat d is swallowed after close");
+        assert_eq!(
+            layout.closes(&d, 4),
+            Some(terminal(12)),
+            "d d closes the review pane"
+        );
+        assert!(
+            layout.held_after_close(&held),
+            "trailing repeat d is swallowed after close"
+        );
     }
 
     #[test]
     fn framed_reports_whether_the_screen_changed() {
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         assert_eq!(layout.framed(whole(1, &["ab"], None)), Ok(true));
         assert_eq!(layout.framed(whole(1, &["ab"], None)), Ok(false));
-        let size = frames::Size { columns: side(2), rows: side(1) };
+        let size = frames::Size {
+            columns: side(2),
+            rows: side(1),
+        };
         let same_row = Frame::new(
             key(1),
             size,
@@ -2838,8 +3452,12 @@ diff --git a/src/lib.rs b/src/lib.rs
         )
         .unwrap();
         assert_eq!(layout.framed(different_row), Ok(true));
-        let cursor =
-            Some(Cursor { row: 0, column: 1, shape: frames::CursorShape::Bar, blinking: false });
+        let cursor = Some(Cursor {
+            row: 0,
+            column: 1,
+            shape: frames::CursorShape::Bar,
+            blinking: false,
+        });
         let moved_cursor =
             Frame::new(key(1), size, Rows::Changed(Vec::new()), cursor, false).unwrap();
         assert_eq!(layout.framed(moved_cursor), Ok(true));
@@ -2854,21 +3472,49 @@ diff --git a/src/lib.rs b/src/lib.rs
         let now = Instant::now();
         let at = |n| AskNumber::of(n).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.await_focus(WaitingFor::Focus(at(2)), now);
         layout.keep_unsent(pasted("a"), now);
         layout.keep_unsent(pasted("b"), now);
-        assert_eq!(sent(&mut layout, now), None, "held while awaiting the new view");
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "held while awaiting the new view"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Through(at(1)), now);
-        assert_eq!(sent(&mut layout, now), None, "an earlier layout leaves them held");
-        assert_eq!(layout.laid_out(laid_on(1, found(12, Said::Looking(())))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "an earlier layout leaves them held"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, found(12, Said::Looking(())))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Through(at(2)), now);
-        assert_eq!(sent(&mut layout, now), None, "still waits for the new terminal's key");
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "still waits for the new terminal's key"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Through(at(2)), now);
         let expected = Some((key(2), VecDeque::from([pasted("a"), pasted("b")])));
-        assert_eq!(sent(&mut layout, now), expected, "flushes in order into the new view");
+        assert_eq!(
+            sent(&mut layout, now),
+            expected,
+            "flushes in order into the new view"
+        );
     }
 
     #[test]
@@ -2876,31 +3522,62 @@ diff --git a/src/lib.rs b/src/lib.rs
         let now = Instant::now();
         let at = |n| AskNumber::of(n).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.await_focus(WaitingFor::Focus(at(2)), now);
         layout.keep_unsent(pasted("for-new"), now);
         layout.heard_refused(Echoed::Through(at(1)), now);
-        assert_eq!(sent(&mut layout, now), None, "an earlier refusal leaves the wait standing");
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "an earlier refusal leaves the wait standing"
+        );
         layout.heard_refused(Echoed::Through(at(2)), now);
-        assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::new())), "not leaked to old");
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(1), VecDeque::new())),
+            "not leaked to old"
+        );
         layout.keep_unsent(pasted("after"), now);
-        assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::from([pasted("after")]))));
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(1), VecDeque::from([pasted("after")])))
+        );
 
         layout.await_focus(WaitingFor::Focus(at(3)), now);
         layout.keep_unsent(pasted("first"), now);
         layout.await_focus(WaitingFor::Focus(at(4)), now);
         layout.keep_unsent(pasted("second"), now);
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Through(at(3)), now);
-        assert_eq!(sent(&mut layout, now), None, "superseded reply leaves newer wait standing");
-        assert_eq!(layout.laid_out(laid_on(1, view(13, (0, 0, 20, 4), Some(3)))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "superseded reply leaves newer wait standing"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(13, (0, 0, 20, 4), Some(3)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Through(at(4)), now);
-        assert_eq!(sent(&mut layout, now), Some((key(3), VecDeque::from([pasted("second")]))));
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(3), VecDeque::from([pasted("second")])))
+        );
 
         layout.await_focus(WaitingFor::Focus(at(5)), now);
         layout.keep_unsent(pasted("lost-stream"), now);
         layout.stream_lost(now);
-        assert_eq!(sent(&mut layout, now), Some((key(3), VecDeque::new())), "dropped on stream loss");
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(3), VecDeque::new())),
+            "dropped on stream loss"
+        );
     }
 
     #[test]
@@ -2908,12 +3585,21 @@ diff --git a/src/lib.rs b/src/lib.rs
         let now = Instant::now();
         let at = AskNumber::of(2).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.await_focus(WaitingFor::Focus(at), now);
         layout.keep_unsent(pasted("a"), now);
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Unnumbered, now);
-        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::from([pasted("a")]))));
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::from([pasted("a")])))
+        );
     }
 
     #[test]
@@ -2921,10 +3607,16 @@ diff --git a/src/lib.rs b/src/lib.rs
         use show_response::view::Found as Said;
         let now = Instant::now();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, found(11, Said::Welcome(())))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, found(11, Said::Welcome(())))),
+            LaidOut::Shown
+        );
         assert!(layout.welcomes());
         layout.await_focus(WaitingFor::Focus(AskNumber::of(2).unwrap()), now);
-        assert!(!layout.welcomes(), "keys typed after leaving welcome wait for the next view");
+        assert!(
+            !layout.welcomes(),
+            "keys typed after leaving welcome wait for the next view"
+        );
         layout.heard_refused(Echoed::Through(AskNumber::of(2).unwrap()), now);
         assert!(layout.welcomes());
     }
@@ -2935,24 +3627,62 @@ diff --git a/src/lib.rs b/src/lib.rs
         let at = |n| AskNumber::of(n).unwrap();
         let step = |n| NonZeroU64::new(n).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
 
-        layout.await_focus(WaitingFor::Step { ask: at(2), step: step(1) }, now);
+        layout.await_focus(
+            WaitingFor::Step {
+                ask: at(2),
+                step: step(1),
+            },
+            now,
+        );
         layout.keep_unsent(pasted("crossing"), now);
-        let earlier =
-            layout.heard_edged(worktree(1), Direction::Left, step(1), Echoed::Through(at(1)), now);
-        assert_eq!(earlier, EdgeHeard::Ignored, "an earlier heard leaves the wait standing");
+        let earlier = layout.heard_edged(
+            worktree(1),
+            Direction::Left,
+            step(1),
+            Echoed::Through(at(1)),
+            now,
+        );
+        assert_eq!(
+            earlier,
+            EdgeHeard::Ignored,
+            "an earlier heard leaves the wait standing"
+        );
         assert_eq!(sent(&mut layout, now), None);
-        let crosses =
-            layout.heard_edged(worktree(1), Direction::Left, step(1), Echoed::Through(at(2)), now);
+        let crosses = layout.heard_edged(
+            worktree(1),
+            Direction::Left,
+            step(1),
+            Echoed::Through(at(2)),
+            now,
+        );
         assert_eq!(crosses, EdgeHeard::Crosses(Across::Before));
         layout.crossed_edge(now);
-        assert_eq!(sent(&mut layout, now), Some((key(1), VecDeque::new())), "dropped on cross");
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(1), VecDeque::new())),
+            "dropped on cross"
+        );
 
-        layout.await_focus(WaitingFor::Step { ask: at(3), step: step(2) }, now);
+        layout.await_focus(
+            WaitingFor::Step {
+                ask: at(3),
+                step: step(2),
+            },
+            now,
+        );
         layout.keep_unsent(pasted("staying-right"), now);
-        let right =
-            layout.heard_edged(worktree(1), Direction::Right, step(2), Echoed::Through(at(3)), now);
+        let right = layout.heard_edged(
+            worktree(1),
+            Direction::Right,
+            step(2),
+            Echoed::Through(at(3)),
+            now,
+        );
         assert_eq!(right, EdgeHeard::Crosses(Across::After));
         layout.stayed_at_edge(now);
         assert_eq!(
@@ -2961,10 +3691,21 @@ diff --git a/src/lib.rs b/src/lib.rs
             "flushed when a right edge has no worktree tab after it",
         );
 
-        layout.await_focus(WaitingFor::Step { ask: at(4), step: step(3) }, now);
+        layout.await_focus(
+            WaitingFor::Step {
+                ask: at(4),
+                step: step(3),
+            },
+            now,
+        );
         layout.keep_unsent(pasted("staying-up"), now);
-        let up =
-            layout.heard_edged(worktree(1), Direction::Up, step(3), Echoed::Through(at(4)), now);
+        let up = layout.heard_edged(
+            worktree(1),
+            Direction::Up,
+            step(3),
+            Echoed::Through(at(4)),
+            now,
+        );
         assert_eq!(up, EdgeHeard::Stayed);
         assert_eq!(
             sent(&mut layout, now),
@@ -2979,13 +3720,21 @@ diff --git a/src/lib.rs b/src/lib.rs
         let at = |n| AskNumber::of(n).unwrap();
         let step = NonZeroU64::new(1).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
 
         layout.await_focus(WaitingFor::Step { ask: at(2), step }, now);
         layout.keep_unsent(pasted("abandoned"), now);
         layout.forget_step(now);
-        let edged =
-            layout.heard_edged(worktree(1), Direction::Left, step, Echoed::Through(at(2)), now);
+        let edged = layout.heard_edged(
+            worktree(1),
+            Direction::Left,
+            step,
+            Echoed::Through(at(2)),
+            now,
+        );
         assert_eq!(edged, EdgeHeard::Ignored);
         assert_eq!(
             sent(&mut layout, now),
@@ -3000,18 +3749,30 @@ diff --git a/src/lib.rs b/src/lib.rs
         let at = |n| AskNumber::of(n).unwrap();
         let step = NonZeroU64::new(1).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
 
         layout.await_focus(WaitingFor::Step { ask: at(2), step }, now);
         layout.await_focus(WaitingFor::Focus(at(3)), now);
         layout.keep_unsent(pasted("for-new"), now);
-        let stale =
-            layout.heard_edged(worktree(1), Direction::Left, step, Echoed::Unnumbered, now);
+        let stale = layout.heard_edged(worktree(1), Direction::Left, step, Echoed::Unnumbered, now);
         assert_eq!(stale, EdgeHeard::Ignored);
-        assert_eq!(sent(&mut layout, now), None, "stale unnumbered edge never leaks into old tab");
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "stale unnumbered edge never leaks into old tab"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Unnumbered, now);
-        assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::from([pasted("for-new")]))));
+        assert_eq!(
+            sent(&mut layout, now),
+            Some((key(2), VecDeque::from([pasted("for-new")])))
+        );
     }
 
     #[test]
@@ -3020,17 +3781,31 @@ diff --git a/src/lib.rs b/src/lib.rs
         let at = |n| AskNumber::of(n).unwrap();
         let step = NonZeroU64::new(1).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.await_focus(WaitingFor::Focus(at(2)), now);
         layout.keep_unsent(pasted("before-rehome"), now);
         let rehomed = laid_on(2, view(11, (0, 0, 20, 4), Some(1)));
         assert!(layout.followed(&rehomed, now));
         assert_eq!(layout.laid_out(rehomed), LaidOut::Shown);
         layout.heard_laid(Echoed::Through(at(1)), now);
-        assert_eq!(layout.awaiting, Some(WaitingFor::Focus(at(2))), "unreached ask stays awaited");
+        assert_eq!(
+            layout.awaiting,
+            Some(WaitingFor::Focus(at(2))),
+            "unreached ask stays awaited"
+        );
         layout.keep_unsent(pasted("after-rehome"), now);
-        assert_eq!(sent(&mut layout, now), None, "does not leak into rehomed terminal before ask");
-        assert_eq!(layout.laid_out(laid_on(2, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            sent(&mut layout, now),
+            None,
+            "does not leak into rehomed terminal before ask"
+        );
+        assert_eq!(
+            layout.laid_out(laid_on(2, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         layout.heard_laid(Echoed::Through(at(2)), now);
         assert_eq!(
             sent(&mut layout, now),
@@ -3044,9 +3819,18 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(layout.followed(&rehomed, now));
         assert_eq!(layout.laid_out(rehomed), LaidOut::Shown);
         layout.heard_laid(Echoed::Through(at(2)), now);
-        let edged =
-            layout.heard_edged(worktree(3), Direction::Left, step, Echoed::Through(at(3)), now);
-        assert_eq!(edged, EdgeHeard::Crosses(Across::Before), "pending step still resolves");
+        let edged = layout.heard_edged(
+            worktree(3),
+            Direction::Left,
+            step,
+            Echoed::Through(at(3)),
+            now,
+        );
+        assert_eq!(
+            edged,
+            EdgeHeard::Crosses(Across::Before),
+            "pending step still resolves"
+        );
         layout.crossed_edge(now);
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())));
 
@@ -3056,7 +3840,10 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(layout.followed(&rehomed, now));
         assert_eq!(layout.laid_out(rehomed), LaidOut::Shown);
         layout.heard_laid(Echoed::Through(at(4)), now);
-        assert!(layout.awaiting.is_none(), "reached rehome layout clears focus wait");
+        assert!(
+            layout.awaiting.is_none(),
+            "reached rehome layout clears focus wait"
+        );
         assert_eq!(sent(&mut layout, now), Some((key(2), VecDeque::new())));
     }
 
@@ -3067,7 +3854,10 @@ diff --git a/src/lib.rs b/src/lib.rs
         luned::folder::make(&served).unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
         let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
-        let greeting = Greeting { foreground: None, background: None };
+        let greeting = Greeting {
+            foreground: None,
+            background: None,
+        };
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
             cell: CellPixels {
@@ -3090,14 +3880,28 @@ diff --git a/src/lib.rs b/src/lib.rs
         viewed.watched_at = Some(Instant::now());
         let at = |n| Echoed::Through(AskNumber::of(n).unwrap());
         let empty = |id, heard| {
-            let size = Some(show_request::Size { columns: 20, rows: 4 });
-            let said =
-                show_response::Laid { worktree: id, size, views: Vec::new(), shown: None, version: None };
-            Heard::Laid { laid: Laid::heard(said).unwrap(), heard }
+            let size = Some(show_request::Size {
+                columns: 20,
+                rows: 4,
+            });
+            let said = show_response::Laid {
+                worktree: id,
+                size,
+                views: Vec::new(),
+                shown: None,
+                version: None,
+            };
+            Heard::Laid {
+                laid: Laid::heard(said).unwrap(),
+                heard,
+            }
         };
         let shown = |id, v, k, heard| {
             use show_response::laid::Shown as Said;
-            let size = Some(show_request::Size { columns: 20, rows: 4 });
+            let size = Some(show_request::Size {
+                columns: 20,
+                rows: 4,
+            });
             let views = vec![view(v, (0, 0, 20, 4), Some(k))];
             let said = show_response::Laid {
                 worktree: id,
@@ -3106,16 +3910,25 @@ diff --git a/src/lib.rs b/src/lib.rs
                 shown: Some(Said::Tiled(v)),
                 version: None,
             };
-            Heard::Laid { laid: Laid::heard(said).unwrap(), heard }
+            Heard::Laid {
+                laid: Laid::heard(said).unwrap(),
+                heard,
+            }
         };
 
         assert!(!viewed.paste("start-a"));
         assert!(matches!(viewed.heard(empty(1, at(1))), Heeded::Changed));
         assert!(!viewed.paste("start-b"));
-        assert!(matches!(viewed.heard(shown(1, 11, 1, at(2))), Heeded::Changed));
+        assert!(matches!(
+            viewed.heard(shown(1, 11, 1, at(2))),
+            Heeded::Changed
+        ));
         assert_eq!(
             sent(&mut viewed.layout, Instant::now()),
-            Some((key(1), VecDeque::from([pasted("start-a"), pasted("start-b")]))),
+            Some((
+                key(1),
+                VecDeque::from([pasted("start-a"), pasted("start-b")])
+            )),
             "startup typeahead survives auto-opening Beside::Alone",
         );
 
@@ -3123,7 +3936,10 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(!viewed.paste("go-a"));
         assert!(matches!(viewed.heard(empty(2, at(3))), Heeded::Changed));
         assert!(!viewed.paste("go-b"));
-        assert!(matches!(viewed.heard(shown(2, 21, 2, at(4))), Heeded::Changed));
+        assert!(matches!(
+            viewed.heard(shown(2, 21, 2, at(4))),
+            Heeded::Changed
+        ));
         assert_eq!(
             sent(&mut viewed.layout, Instant::now()),
             Some((key(2), VecDeque::from([pasted("go-a"), pasted("go-b")]))),
@@ -3139,7 +3955,10 @@ diff --git a/src/lib.rs b/src/lib.rs
         luned::folder::make(&served).unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
         let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
-        let greeting = Greeting { foreground: None, background: None };
+        let greeting = Greeting {
+            foreground: None,
+            background: None,
+        };
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
             cell: CellPixels {
@@ -3164,23 +3983,39 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(viewed.arranged(), None);
 
         let one = vec![view(11, (0, 0, 20, 4), Some(1))];
-        assert!(matches!(viewed.heard(laid_in(1, one.clone())), Heeded::Changed));
+        assert!(matches!(
+            viewed.heard(laid_in(1, one.clone())),
+            Heeded::Changed
+        ));
         assert!(viewed.live());
         assert_eq!(viewed.arranged(), Some((Arranged::Panes, None)));
 
-        assert!(matches!(viewed.heard(Heard::Lost("gone".to_owned())), Heeded::Lost(_)));
+        assert!(matches!(
+            viewed.heard(Heard::Lost("gone".to_owned())),
+            Heeded::Lost(_)
+        ));
         assert!(!viewed.live());
         assert_eq!(viewed.arranged(), None);
         assert_eq!(viewed.focused(), Some(terminal(11)));
 
         viewed.shown();
-        assert!(!viewed.live(), "reconnecting show stays not live until fresh Laid");
-        assert_eq!(viewed.arranged(), None, "stale pre-disconnect arrangement stays hidden");
+        assert!(
+            !viewed.live(),
+            "reconnecting show stays not live until fresh Laid"
+        );
+        assert_eq!(
+            viewed.arranged(),
+            None,
+            "stale pre-disconnect arrangement stays hidden"
+        );
         assert_eq!(viewed.focused(), Some(terminal(11)));
 
         let tabs = show_response::Laid {
             worktree: 1,
-            size: Some(show_request::Size { columns: 20, rows: 4 }),
+            size: Some(show_request::Size {
+                columns: 20,
+                rows: 4,
+            }),
             views: one,
             shown: Some(Said::Tabbed(11)),
             version: None,
@@ -3199,11 +4034,17 @@ diff --git a/src/lib.rs b/src/lib.rs
         let now = Instant::now();
         let at = |n| AskNumber::of(n).unwrap();
         let mut layout = Layout::new(worktree(1), None);
-        assert_eq!(layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(11, (0, 0, 20, 4), Some(1)))),
+            LaidOut::Shown
+        );
         layout.await_focus(WaitingFor::Focus(at(2)), now);
         layout.keep_unsent(pasted("before-left"), now);
         assert!(layout.left(worktree(1), now));
-        assert_eq!(layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))), LaidOut::Shown);
+        assert_eq!(
+            layout.laid_out(laid_on(1, view(12, (0, 0, 20, 4), Some(2)))),
+            LaidOut::Shown
+        );
         assert_eq!(
             sent(&mut layout, now),
             Some((key(2), VecDeque::new())),
@@ -3212,11 +4053,15 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[test]
-    fn opening_a_view_after_stepping_cancels_the_pending_step_edge_and_disconnect_hides_arrangement() {
+    fn opening_a_view_after_stepping_cancels_the_pending_step_edge_and_disconnect_hides_arrangement()
+     {
         let unserved = tempfile::tempdir().unwrap();
         let (events, _heard) = std::sync::mpsc::channel();
         let size = layout_size(NonZeroU16::new(20).unwrap(), NonZeroU16::new(6).unwrap());
-        let greeting = Greeting { foreground: None, background: None };
+        let greeting = Greeting {
+            foreground: None,
+            background: None,
+        };
         let folder = unserved.path().to_owned();
         let browser_config = embedded::Config {
             mode: embedded::Mode::Unsupported,
@@ -3239,12 +4084,24 @@ diff --git a/src/lib.rs b/src/lib.rs
         );
         let one = vec![view(11, (0, 0, 20, 4), Some(1))];
         assert!(matches!(viewed.heard(laid_in(1, one)), Heeded::Changed));
-        assert_eq!(viewed.arranged(), None, "disconnected show claims no live arrangement");
+        assert_eq!(
+            viewed.arranged(),
+            None,
+            "disconnected show claims no live arrangement"
+        );
         assert_eq!(viewed.focused(), Some(terminal(11)));
         let now = Instant::now();
         let step = NonZeroU64::new(1).unwrap();
-        viewed.layout.await_focus(WaitingFor::Step { ask: AskNumber::of(2).unwrap(), step }, now);
-        viewed.layout.await_focus(WaitingFor::Focus(AskNumber::of(3).unwrap()), now);
+        viewed.layout.await_focus(
+            WaitingFor::Step {
+                ask: AskNumber::of(2).unwrap(),
+                step,
+            },
+            now,
+        );
+        viewed
+            .layout
+            .await_focus(WaitingFor::Focus(AskNumber::of(3).unwrap()), now);
         let edged = Heard::Edged {
             worktree: worktree(1),
             direction: Direction::Left,
@@ -3255,7 +4112,13 @@ diff --git a/src/lib.rs b/src/lib.rs
             matches!(viewed.heard(edged), Heeded::Quiet),
             "a newer focus ask cancels an earlier step's edge",
         );
-        assert!(matches!(viewed.heard(Heard::Lost("gone".to_owned())), Heeded::Lost(_)));
-        assert!(viewed.layout.awaiting.is_none(), "losing the stream clears any pending wait");
+        assert!(matches!(
+            viewed.heard(Heard::Lost("gone".to_owned())),
+            Heeded::Lost(_)
+        ));
+        assert!(
+            viewed.layout.awaiting.is_none(),
+            "losing the stream clears any pending wait"
+        );
     }
 }

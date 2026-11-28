@@ -4,15 +4,15 @@ use std::process::Output;
 
 use lune_protocol::said::Said;
 use lune_waits::eventually;
-use tonic::Code;
+use luned::Directory;
 use luned::api::daemon_client::DaemonClient;
 use luned::api::projects::Held;
 use luned::api::{On, RebaseRequest};
 use luned::rebases::{self, Came, Rebased};
-use luned::Directory;
 use serde_json::json;
+use tonic::Code;
 
-use crate::host::{Host, LUNE, answered, folder_in, script, start, PATIENT};
+use crate::host::{Host, LUNE, PATIENT, answered, folder_in, script, start};
 use crate::own::Owned;
 use crate::projects::project;
 use crate::remote::{FakeSsh, hosts, reached};
@@ -37,17 +37,41 @@ impl Repository {
         let (up, clone) = (scratch.join("up"), scratch.join("n"));
         cloned_as_wt(scratch, &up, &clone);
         tracking(&clone);
-        git(&clone.join(".bare"), &["worktree", "add", "-q", "-b", "fix", "../fix", "main"]);
-        Repository { up, fix: clone.join("fix") }
+        git(
+            &clone.join(".bare"),
+            &["worktree", "add", "-q", "-b", "fix", "../fix", "main"],
+        );
+        Repository {
+            up,
+            fix: clone.join("fix"),
+        }
     }
 }
 
 fn tracking(clone: &Path) {
     let bare = clone.join(".bare");
-    git(&bare, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    git(
+        &bare,
+        &[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
     git(&bare, &["fetch", "-q", "origin"]);
-    git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
-    for (key, value) in [("user.name", "t"), ("user.email", "t@t"), ("core.hooksPath", "/dev/null")] {
+    git(
+        &bare,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    for (key, value) in [
+        ("user.name", "t"),
+        ("user.email", "t@t"),
+        ("core.hooksPath", "/dev/null"),
+    ] {
         git(&bare, &["config", key, value]);
     }
 }
@@ -58,7 +82,15 @@ fn forked_on_github(clone: &Path, up: &Path) {
     git(&bare, &["config", "remote.origin.url", fork]);
     git(&bare, &["remote", "add", "upstream", parent]);
     for github in [fork, parent] {
-        git(&bare, &["config", "--add", &format!("url.{}.insteadOf", up.display()), github]);
+        git(
+            &bare,
+            &[
+                "config",
+                "--add",
+                &format!("url.{}.insteadOf", up.display()),
+                github,
+            ],
+        );
     }
 }
 
@@ -68,7 +100,10 @@ fn pull(state: &str, url: &str, base: &str) -> serde_json::Value {
 
 fn tip(dir: &Path) -> String {
     let mut git = std::process::Command::new("git");
-    luned::local_git(&mut git).arg("-C").arg(dir).args(["rev-parse", "HEAD"]);
+    luned::local_git(&mut git)
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"]);
     String::from_utf8(git.output().unwrap().stdout).unwrap()
 }
 
@@ -94,8 +129,12 @@ fn terminals_in(host: &Host, folder: &Path) -> usize {
         panic!("luned keeps no projects");
     };
     let folder = folder.display().to_string();
-    let mut held = kept.projects.iter().flat_map(|it| it.worktrees().unwrap_or_default());
-    held.find(|it| it.folder == folder).map_or(0, |it| it.terminals.len())
+    let mut held = kept
+        .projects
+        .iter()
+        .flat_map(|it| it.worktrees().unwrap_or_default());
+    held.find(|it| it.folder == folder)
+        .map_or(0, |it| it.terminals.len())
 }
 
 #[test]
@@ -107,7 +146,10 @@ fn lune_rebase_moves_a_branch_onto_upstream_and_hands_its_conflicts_to_an_agent(
     let repository = Repository::new(&scratch);
     let fix = &repository.fix;
     let asked = host.home.path().join("claude-asked");
-    let claude = format!("printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n", asked.display());
+    let claude = format!(
+        "printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n",
+        asked.display()
+    );
     script(&host.bin().join("claude"), &claude);
 
     commit(fix, "own", "o\n");
@@ -131,12 +173,30 @@ fn lune_rebase_moves_a_branch_onto_upstream_and_hands_its_conflicts_to_an_agent(
     assert_eq!(stopped.status.code(), Some(UNFINISHED), "{why}");
     let conflicts = "lune: the rebase of fix onto origin/main stopped on conflicts in a file\n";
     assert!(why.starts_with(conflicts), "{why}");
-    assert!(why.ends_with("lune: an agent resolves it, in a view of the worktree\n"), "{why}");
-    let agent = eventually("an agent starts on the conflicts", || fs::read_to_string(&asked).ok());
-    assert!(agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "), "{agent}");
-    assert!(agent.contains(" theirs, on conflicts in theirs. Resolve it: "), "{agent}");
-    assert!(scratch.join("n/.bare/worktrees/fix/rebase-merge").is_dir(), "the rebase waits");
-    assert_eq!(terminals_in(host, fix), 1, "the worktree opens with the agent alone");
+    assert!(
+        why.ends_with("lune: an agent resolves it, in a view of the worktree\n"),
+        "{why}"
+    );
+    let agent = eventually("an agent starts on the conflicts", || {
+        fs::read_to_string(&asked).ok()
+    });
+    assert!(
+        agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "),
+        "{agent}"
+    );
+    assert!(
+        agent.contains(" theirs, on conflicts in theirs. Resolve it: "),
+        "{agent}"
+    );
+    assert!(
+        scratch.join("n/.bare/worktrees/fix/rebase-merge").is_dir(),
+        "the rebase waits"
+    );
+    assert_eq!(
+        terminals_in(host, fix),
+        1,
+        "the worktree opens with the agent alone"
+    );
 
     git(fix, &["rebase", "--abort"]);
     fs::remove_file(&asked).unwrap();
@@ -170,8 +230,15 @@ fn lune_rebase_moves_a_stacked_branch_onto_its_open_pull_request_s_base() {
     let stacked = rebased(host, fix);
     assert!(stacked.status.success(), "{}", stderr(&stacked));
     let said = String::from_utf8_lossy(&stacked.stdout);
-    assert_eq!(said, "fix is rebased onto upstream/base, one commit on top\n");
-    assert_eq!(fs::read_to_string(fix.join("beneath")).unwrap(), "moved on\n", "as fetched now");
+    assert_eq!(
+        said,
+        "fix is rebased onto upstream/base, one commit on top\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fix.join("beneath")).unwrap(),
+        "moved on\n",
+        "as fetched now"
+    );
     assert!(!fix.join("theirs").exists(), "and not onto main");
 
     let refused = |why: &str| {
@@ -181,26 +248,53 @@ fn lune_rebase_moves_a_stacked_branch_onto_its_open_pull_request_s_base() {
         assert!(stderr(&refused).ends_with(why), "{}", stderr(&refused));
         assert_eq!(tip(fix), before, "a refusal rebases nothing");
     };
-    host.gh.open("fix", &pull("OPEN", "https://github.com/elsewhere/n/pull/7", "base"));
-    refused(&format!("which no remote of {} fetches: add one that does\n", fix.display()));
-    host.gh.open("fix", &pull("OPEN", "https://github.com/o/n/pull/7", "base:refs/heads/main"));
+    host.gh.open(
+        "fix",
+        &pull("OPEN", "https://github.com/elsewhere/n/pull/7", "base"),
+    );
+    refused(&format!(
+        "which no remote of {} fetches: add one that does\n",
+        fix.display()
+    ));
+    host.gh.open(
+        "fix",
+        &pull(
+            "OPEN",
+            "https://github.com/o/n/pull/7",
+            "base:refs/heads/main",
+        ),
+    );
     refused("no branch\n");
     host.gh.fail("fix");
     refused("HTTP 401: Requires authentication (https://api.github.com/graphql)\n");
     host.gh.mend("fix");
 
-    host.gh.open("fix", &pull("MERGED", "https://github.com/o/n/pull/7", "base"));
+    host.gh.open(
+        "fix",
+        &pull("MERGED", "https://github.com/o/n/pull/7", "base"),
+    );
     let merged = rebased(host, fix);
     assert!(merged.status.success(), "{}", stderr(&merged));
     let said = String::from_utf8_lossy(&merged.stdout);
     assert_eq!(said, "fix is rebased onto origin/main, 3 commits on top\n");
-    assert!(fix.join("theirs").exists(), "a merged pull request's branch goes onto main");
+    assert!(
+        fix.join("theirs").exists(),
+        "a merged pull request's branch goes onto main"
+    );
 
     git(fix, &["branch", "-q", "--unset-upstream"]);
-    host.gh.open("fix", &pull("OPEN", "https://github.com/o/n/pull/7", "base"));
+    host.gh.open(
+        "fix",
+        &pull("OPEN", "https://github.com/o/n/pull/7", "base"),
+    );
     let unpushed = rebased(host, fix);
     let said = String::from_utf8_lossy(&unpushed.stdout);
-    assert_eq!(said, "fix is on origin/main already\n", "{}", stderr(&unpushed));
+    assert_eq!(
+        said,
+        "fix is on origin/main already\n",
+        "{}",
+        stderr(&unpushed)
+    );
 }
 
 #[test]
@@ -216,7 +310,10 @@ fn lune_rebase_with_no_luned_moves_nothing() {
     let refused = rebased(&host, fix);
     let why = stderr(&refused);
     assert_eq!(refused.status.code(), Some(1), "{why}");
-    assert!(why.starts_with("lune: no rebase: no luned runs in "), "{why}");
+    assert!(
+        why.starts_with("lune: no rebase: no luned runs in "),
+        "{why}"
+    );
     assert_eq!(tip(fix), before, "the branch stays where it was");
 }
 
@@ -228,9 +325,16 @@ fn a_rebase_asked_of_luned_for_a_branch_with_no_name_is_refused() {
     let repository = Repository::new(&scratch);
     let _luned = start(host.vars()).unwrap();
     let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let dir = repository.fix.display().to_string();
-    let request = RebaseRequest { on: None, dir, branch: Some(String::new()) };
+    let request = RebaseRequest {
+        on: None,
+        dir,
+        branch: Some(String::new()),
+    };
     let refused = runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         daemon.rebase(request).await.map(drop).unwrap_err()
@@ -248,13 +352,28 @@ fn a_rebase_in_a_repository_a_folder_s_project_holds_starts_no_agent_in_the_fold
     let repository = Repository::new(&scratch);
     let notes = scratch.join("notes");
     let plain = notes.join("foo");
-    git(&scratch, &["clone", "-q", &repository.up.display().to_string(), &plain.display().to_string()]);
-    for (key, value) in [("user.name", "t"), ("user.email", "t@t"), ("core.hooksPath", "/dev/null")] {
+    git(
+        &scratch,
+        &[
+            "clone",
+            "-q",
+            &repository.up.display().to_string(),
+            &plain.display().to_string(),
+        ],
+    );
+    for (key, value) in [
+        ("user.name", "t"),
+        ("user.email", "t@t"),
+        ("core.hooksPath", "/dev/null"),
+    ] {
         git(&plain, &["config", key, value]);
     }
     project(host, &notes, None);
     let asked = host.home.path().join("claude-asked");
-    script(&host.bin().join("claude"), &format!("touch {}\nexec sleep 600\n", asked.display()));
+    script(
+        &host.bin().join("claude"),
+        &format!("touch {}\nexec sleep 600\n", asked.display()),
+    );
 
     commit(&plain, "theirs", "mine\n");
     commit(&repository.up, "theirs", "yours\n");
@@ -268,7 +387,11 @@ fn a_rebase_in_a_repository_a_folder_s_project_holds_starts_no_agent_in_the_fold
     assert!(why.ends_with(&waits), "{why}");
     assert!(plain.join(".git/rebase-merge").is_dir(), "the rebase waits");
     assert!(!asked.exists(), "no agent starts in the folder");
-    assert_eq!(terminals_in(host, &notes), 0, "nor does the folder's worktree open");
+    assert_eq!(
+        terminals_in(host, &notes),
+        0,
+        "nor does the folder's worktree open"
+    );
 }
 
 #[test]
@@ -286,17 +409,30 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
     reached(&here, "far", |_| true);
 
     let folder = folder_in(here.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
-        let on = || Some(On { destination: "far".to_owned() });
+        let on = || {
+            Some(On {
+                destination: "far".to_owned(),
+            })
+        };
         let dir = Directory::parse(repository.fix.display().to_string()).unwrap();
         let fix = Said::new("fix".to_owned()).unwrap();
         let mut rebase = async |came: Came| {
-            let answer = daemon.rebase(rebases::asked(on(), &dir, Some(&fix))).await.unwrap();
+            let answer = daemon
+                .rebase(rebases::asked(on(), &dir, Some(&fix)))
+                .await
+                .unwrap();
             let answer = answer.into_inner().message().await.unwrap().unwrap();
             let rebased = Rebased::of_api(answer, Some(&fix)).unwrap();
-            assert_eq!((rebased.branch.as_str(), rebased.onto.as_str()), ("fix", "origin/main"));
+            assert_eq!(
+                (rebased.branch.as_str(), rebased.onto.as_str()),
+                ("fix", "origin/main")
+            );
             assert_eq!(rebased.came, came);
         };
         rebase(Came::Clean { ahead: 1 }).await;
@@ -307,12 +443,16 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
 fn rebase_offered(window: &mut Window) {
     eventually("lune offers the rebase of the view's branch", || {
         window.send(MENU);
-        eventually("lune's menu opens", || window.shows(MENU_CLOSES).then_some(()));
+        eventually("lune's menu opens", || {
+            window.shows(MENU_CLOSES).then_some(())
+        });
         if window.shows("g  Git") {
             return Some(());
         }
         window.send("\x1b");
-        eventually("lune's menu closes", || (!window.shows(MENU_CLOSES)).then_some(()));
+        eventually("lune's menu closes", || {
+            (!window.shows(MENU_CLOSES)).then_some(())
+        });
         None
     });
     window.send("gr");
@@ -331,26 +471,46 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
     tracking(&clone);
     git(&dir.path, &["switch", "-q", "-c", "fix"]);
     let asked = host.home.path().join("claude-asked");
-    let claude = format!("printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n", asked.display());
+    let claude = format!(
+        "printf '%s\\n' \"$@\" > {0}.part && mv {0}.part {0}\nexec sleep 600\n",
+        asked.display()
+    );
     script(&host.bin().join("claude"), &claude);
     commit(&dir.path, "own", "o\n");
     commit(&up, "theirs", "t\n");
 
     let mut window = Window::open(host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
-    eventually("the view has the keys", || window.cursor().is_some().then_some(()));
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
+    });
     window.send(SAYS_WHERE);
     rebase_offered(&mut window);
     let clean = "fix is rebased onto origin/main, one commit on top";
-    eventually("a note says it is rebased", || window.shows(clean).then_some(()));
+    eventually("a note says it is rebased", || {
+        window.shows(clean).then_some(())
+    });
     assert!(!asked.exists(), "a clean rebase starts no agent");
 
     commit(&dir.path, "theirs", "mine\n");
     commit(&up, "theirs", "yours\n");
+    eventually("the view's row sees the commit on fix", || {
+        window.shows(" fix +2 -1").then_some(())
+    });
     rebase_offered(&mut window);
-    let agent = eventually("an agent starts on the conflicts", || fs::read_to_string(&asked).ok());
-    assert!(agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "), "{agent}");
-    assert!(agent.contains(", on conflicts in theirs. Resolve it: "), "{agent}");
+    let agent = eventually("an agent starts on the conflicts", || {
+        fs::read_to_string(&asked).ok()
+    });
+    assert!(
+        agent.starts_with("--\nThe rebase of fix onto origin/main stopped at "),
+        "{agent}"
+    );
+    assert!(
+        agent.contains(", on conflicts in theirs. Resolve it: "),
+        "{agent}"
+    );
     let terminals = || shown(&owned, &dir.path).map_or(0, |it| it.terminals.len());
-    eventually("the agent opens beside the view", || (terminals() == 2).then_some(()));
+    eventually("the agent opens beside the view", || {
+        (terminals() == 2).then_some(())
+    });
 }

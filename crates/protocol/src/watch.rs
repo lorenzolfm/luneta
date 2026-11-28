@@ -28,12 +28,18 @@ impl HostVersion {
 
     pub fn of_api(version: v1::Version) -> Result<Self, &'static str> {
         let pid = NonZeroU32::new(version.pid).ok_or("a version with pid 0")?;
-        Ok(Self { pid, seq: version.seq })
+        Ok(Self {
+            pid,
+            seq: version.seq,
+        })
     }
 
     #[must_use]
     pub const fn to_api(self) -> v1::Version {
-        v1::Version { pid: self.pid.get(), seq: self.seq }
+        v1::Version {
+            pid: self.pid.get(),
+            seq: self.seq,
+        }
     }
 }
 
@@ -47,7 +53,9 @@ impl FromStr for HostVersion {
     type Err = String;
 
     fn from_str(spelled: &str) -> Result<Self, Self::Err> {
-        let (pid, seq) = spelled.split_once(':').ok_or_else(|| "not <pid>:<seq>".to_owned())?;
+        let (pid, seq) = spelled
+            .split_once(':')
+            .ok_or_else(|| "not <pid>:<seq>".to_owned())?;
         let pid: NonZeroU32 = pid.parse().map_err(|error| format!("the pid: {error}"))?;
         let seq: u64 = seq.parse().map_err(|error| format!("the seq: {error}"))?;
         Ok(Self { pid, seq })
@@ -78,22 +86,34 @@ impl LocalVersion {
 
     pub fn of_api(version: v1::LocalVersion) -> Result<Self, &'static str> {
         let pid = NonZeroU32::new(version.pid).ok_or("a version with pid 0")?;
-        Ok(Self { pid, seq: version.seq })
+        Ok(Self {
+            pid,
+            seq: version.seq,
+        })
     }
 
     pub fn of_legacy_api(version: v1::Version) -> Result<Self, &'static str> {
         let pid = NonZeroU32::new(version.pid).ok_or("a version with pid 0")?;
-        Ok(Self { pid, seq: version.seq })
+        Ok(Self {
+            pid,
+            seq: version.seq,
+        })
     }
 
     #[must_use]
     pub const fn to_api(self) -> v1::LocalVersion {
-        v1::LocalVersion { pid: self.pid.get(), seq: self.seq }
+        v1::LocalVersion {
+            pid: self.pid.get(),
+            seq: self.seq,
+        }
     }
 
     #[must_use]
     pub const fn to_legacy_api(self) -> v1::Version {
-        v1::Version { pid: self.pid.get(), seq: self.seq }
+        v1::Version {
+            pid: self.pid.get(),
+            seq: self.seq,
+        }
     }
 }
 
@@ -138,7 +158,9 @@ impl VersionedHost {
 
     #[must_use]
     pub fn into_response(self) -> v1::WatchResponse {
-        v1::WatchResponse { answer: Some(watch_response::Answer::Host(self.host)) }
+        v1::WatchResponse {
+            answer: Some(watch_response::Answer::Host(self.host)),
+        }
     }
 }
 
@@ -170,7 +192,10 @@ impl VersionedLocalHost {
         let raw = version.ok_or("an answer with no version")?;
         let version = LocalVersion::of_api(raw).map_err(|_| "an answer with pid 0")?;
         let host = host.ok_or("an answer with no host")?;
-        Ok(Self { version, host: Box::new(host) })
+        Ok(Self {
+            version,
+            host: Box::new(host),
+        })
     }
 
     #[must_use]
@@ -199,12 +224,16 @@ impl v1::WatchResponse {
     #[must_use]
     pub fn host(version: HostVersion, mut host: v1::Host) -> Self {
         host.version = Some(version.to_api());
-        v1::WatchResponse { answer: Some(watch_response::Answer::Host(Box::new(host))) }
+        v1::WatchResponse {
+            answer: Some(watch_response::Answer::Host(Box::new(host))),
+        }
     }
 
     #[must_use]
     pub fn unchanged(version: HostVersion) -> Self {
-        v1::WatchResponse { answer: Some(watch_response::Answer::Unchanged(version.to_api())) }
+        v1::WatchResponse {
+            answer: Some(watch_response::Answer::Unchanged(version.to_api())),
+        }
     }
 
     pub fn read_host(self) -> Result<VersionedHost, &'static str> {
@@ -212,7 +241,7 @@ impl v1::WatchResponse {
             Some(watch_response::Answer::Host(host)) => VersionedHost::of_api(host),
             Some(watch_response::Answer::Unchanged(_)) => {
                 Err("an unchanged answer for another version")
-            },
+            }
             None => Err("an empty watch answer"),
         }
     }
@@ -221,7 +250,7 @@ impl v1::WatchResponse {
         match self.answer {
             Some(watch_response::Answer::Host(host)) => {
                 VersionedHost::of_api(host).map(WatchedAfter::Host)
-            },
+            }
             Some(watch_response::Answer::Unchanged(raw)) => {
                 let version =
                     HostVersion::of_api(raw).map_err(|_| "an unchanged answer with pid 0")?;
@@ -230,7 +259,7 @@ impl v1::WatchResponse {
                 } else {
                     Err("an unchanged answer for another version")
                 }
-            },
+            }
             None => Err("an empty watch answer"),
         }
     }
@@ -239,7 +268,10 @@ impl v1::WatchResponse {
 impl v1::WatchLocalResponse {
     #[must_use]
     pub fn host(version: LocalVersion, host: v1::remote::Host) -> Self {
-        let local = v1::LocalHost { version: Some(version.to_api()), host: Some(host) };
+        let local = v1::LocalHost {
+            version: Some(version.to_api()),
+            host: Some(host),
+        };
         v1::WatchLocalResponse {
             answer: Some(watch_local_response::Answer::Host(Box::new(local))),
         }
@@ -257,7 +289,7 @@ impl v1::WatchLocalResponse {
             Some(watch_local_response::Answer::Host(local)) => VersionedLocalHost::of_api(*local),
             Some(watch_local_response::Answer::Unchanged(_)) => {
                 Err("an unchanged answer for another version")
-            },
+            }
             None => Err("an empty watch answer"),
         }
     }
@@ -266,7 +298,7 @@ impl v1::WatchLocalResponse {
         match self.answer {
             Some(watch_local_response::Answer::Host(local)) => {
                 VersionedLocalHost::of_api(*local).map(WatchedLocalAfter::Host)
-            },
+            }
             Some(watch_local_response::Answer::Unchanged(raw)) => {
                 let version =
                     LocalVersion::of_api(raw).map_err(|_| "an unchanged answer with pid 0")?;
@@ -275,7 +307,7 @@ impl v1::WatchLocalResponse {
                 } else {
                     Err("an unchanged answer for another version")
                 }
-            },
+            }
             None => Err("an empty watch answer"),
         }
     }
@@ -294,7 +326,10 @@ mod tests {
     }
 
     fn host(version: Option<v1::Version>) -> v1::Host {
-        v1::Host { version, ..v1::Host::default() }
+        v1::Host {
+            version,
+            ..v1::Host::default()
+        }
     }
 
     #[test]
@@ -304,7 +339,10 @@ mod tests {
         assert_eq!(parsed.to_string(), "7:42");
         assert!("0:0".parse::<HostVersion>().is_err());
         assert!("7".parse::<HostVersion>().is_err());
-        assert_eq!(HostVersion::of_api(v1::Version { pid: 0, seq: 1 }), Err("a version with pid 0"));
+        assert_eq!(
+            HostVersion::of_api(v1::Version { pid: 0, seq: 1 }),
+            Err("a version with pid 0")
+        );
         assert_eq!(
             LocalVersion::of_api(v1::LocalVersion { pid: 0, seq: 1 }),
             Err("a version with pid 0")
@@ -323,14 +361,22 @@ mod tests {
         assert_eq!(parsed.host().version, Some(first.to_api()));
         assert_eq!(
             answered.clone().read_after(next),
-            Ok(WatchedAfter::Host(VersionedHost::of_api(Box::new(host(Some(first.to_api())))).unwrap()))
+            Ok(WatchedAfter::Host(
+                VersionedHost::of_api(Box::new(host(Some(first.to_api())))).unwrap()
+            ))
         );
         assert_eq!(parsed.into_response(), answered);
 
         let same = v1::WatchResponse::unchanged(first);
         assert_eq!(same.clone().read_after(first), Ok(WatchedAfter::Unchanged));
-        assert_eq!(same.clone().read_after(next), Err("an unchanged answer for another version"));
-        assert_eq!(same.read_host(), Err("an unchanged answer for another version"));
+        assert_eq!(
+            same.clone().read_after(next),
+            Err("an unchanged answer for another version")
+        );
+        assert_eq!(
+            same.read_host(),
+            Err("an unchanged answer for another version")
+        );
         assert_eq!(
             WatchedAfter::Unchanged.into_response(first),
             v1::WatchResponse::unchanged(first)
@@ -339,8 +385,14 @@ mod tests {
         let unversioned = v1::WatchResponse {
             answer: Some(watch_response::Answer::Host(Box::new(host(None)))),
         };
-        assert_eq!(unversioned.clone().read_host(), Err("an answer with no version"));
-        assert_eq!(unversioned.read_after(first), Err("an answer with no version"));
+        assert_eq!(
+            unversioned.clone().read_host(),
+            Err("an answer with no version")
+        );
+        assert_eq!(
+            unversioned.read_after(first),
+            Err("an answer with no version")
+        );
 
         let zero_host = v1::WatchResponse {
             answer: Some(watch_response::Answer::Host(Box::new(host(Some(zero))))),
@@ -348,8 +400,13 @@ mod tests {
         assert_eq!(zero_host.clone().read_host(), Err("an answer with pid 0"));
         assert_eq!(zero_host.read_after(first), Err("an answer with pid 0"));
 
-        let zero_same = v1::WatchResponse { answer: Some(watch_response::Answer::Unchanged(zero)) };
-        assert_eq!(zero_same.read_after(first), Err("an unchanged answer with pid 0"));
+        let zero_same = v1::WatchResponse {
+            answer: Some(watch_response::Answer::Unchanged(zero)),
+        };
+        assert_eq!(
+            zero_same.read_after(first),
+            Err("an unchanged answer with pid 0")
+        );
 
         let empty = v1::WatchResponse { answer: None };
         assert_eq!(empty.clone().read_host(), Err("an empty watch answer"));
@@ -361,31 +418,51 @@ mod tests {
         let first = local_version(7, 1);
         let next = local_version(7, 2);
         let zero = v1::LocalVersion { pid: 0, seq: 1 };
-        let body = v1::remote::Host { unread: 3, ..v1::remote::Host::default() };
+        let body = v1::remote::Host {
+            unread: 3,
+            ..v1::remote::Host::default()
+        };
 
         let answered = v1::WatchLocalResponse::host(first, body.clone());
         let parsed = answered.clone().read_host().unwrap();
         assert_eq!(parsed.version(), first);
         assert_eq!(parsed.host(), &body);
-        assert_eq!(answered.read_after(next), Ok(WatchedLocalAfter::Host(parsed)));
+        assert_eq!(
+            answered.read_after(next),
+            Ok(WatchedLocalAfter::Host(parsed))
+        );
 
         let same = v1::WatchLocalResponse::unchanged(first);
-        assert_eq!(same.clone().read_after(first), Ok(WatchedLocalAfter::Unchanged));
-        assert_eq!(same.clone().read_after(next), Err("an unchanged answer for another version"));
-        assert_eq!(same.read_host(), Err("an unchanged answer for another version"));
+        assert_eq!(
+            same.clone().read_after(first),
+            Ok(WatchedLocalAfter::Unchanged)
+        );
+        assert_eq!(
+            same.clone().read_after(next),
+            Err("an unchanged answer for another version")
+        );
+        assert_eq!(
+            same.read_host(),
+            Err("an unchanged answer for another version")
+        );
 
         let no_host = v1::WatchLocalResponse {
-            answer: Some(watch_local_response::Answer::Host(Box::new(v1::LocalHost {
-                version: Some(first.to_api()),
-                host: None,
-            }))),
+            answer: Some(watch_local_response::Answer::Host(Box::new(
+                v1::LocalHost {
+                    version: Some(first.to_api()),
+                    host: None,
+                },
+            ))),
         };
         assert_eq!(no_host.read_host(), Err("an answer with no host"));
 
         let zero_same = v1::WatchLocalResponse {
             answer: Some(watch_local_response::Answer::Unchanged(zero)),
         };
-        assert_eq!(zero_same.read_after(first), Err("an unchanged answer with pid 0"));
+        assert_eq!(
+            zero_same.read_after(first),
+            Err("an unchanged answer with pid 0")
+        );
 
         let empty = v1::WatchLocalResponse { answer: None };
         assert_eq!(empty.read_host(), Err("an empty watch answer"));

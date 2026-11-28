@@ -44,7 +44,9 @@ impl Shell {
             return Err(Unopened::Relative);
         }
         let named = Path::new(&path).file_name().ok_or(Unopened::Unnamed)?;
-        let named = named.to_str().expect("a file name in a UTF-8 path is UTF-8");
+        let named = named
+            .to_str()
+            .expect("a file name in a UTF-8 path is UTF-8");
         if LOGIN_REFUSERS.contains(&named) {
             return Err(Unopened::RefusesLogins);
         }
@@ -68,7 +70,9 @@ impl Shell {
 
     #[must_use]
     pub fn name(&self) -> &str {
-        let named = Path::new(&self.0).file_name().and_then(|name| name.to_str());
+        let named = Path::new(&self.0)
+            .file_name()
+            .and_then(|name| name.to_str());
         named.expect("a shell's path ends in its name, in UTF-8")
     }
 
@@ -90,15 +94,24 @@ struct Chosen {
 
 #[must_use]
 pub fn your_shell() -> Shell {
-    let chosen = shell(Named { login: login_shell(), variable: env::var_os(SHELL_VAR) });
+    let chosen = shell(Named {
+        login: login_shell(),
+        variable: env::var_os(SHELL_VAR),
+    });
     for passed in &chosen.passed {
-        log::say(&format!("{passed}, so terminals open {}", chosen.shell.as_str()));
+        log::say(&format!(
+            "{passed}, so terminals open {}",
+            chosen.shell.as_str()
+        ));
     }
     chosen.shell
 }
 
 fn shell(named: Named) -> Chosen {
-    let sources = [("the user database's shell", named.login), ("$SHELL", named.variable)];
+    let sources = [
+        ("the user database's shell", named.login),
+        ("$SHELL", named.variable),
+    ];
     let sources_count = sources.len();
     let mut passed = Vec::with_capacity(sources_count);
     for (source, path) in sources {
@@ -112,7 +125,10 @@ fn shell(named: Named) -> Chosen {
         }
     }
     assert!(passed.len() <= sources_count);
-    Chosen { shell: Shell::none(), passed }
+    Chosen {
+        shell: Shell::none(),
+        passed,
+    }
 }
 
 fn login_shell() -> Option<OsString> {
@@ -136,7 +152,10 @@ mod tests {
     }
 
     fn named(login: Option<&OsString>, variable: Option<&OsString>) -> Named {
-        Named { login: login.cloned(), variable: variable.cloned() }
+        Named {
+            login: login.cloned(),
+            variable: variable.cloned(),
+        }
     }
 
     fn chosen(login: Option<&OsString>, variable: Option<&OsString>) -> String {
@@ -171,7 +190,10 @@ mod tests {
         let bash = made(folder.path(), "bash");
         let nologin = made(folder.path(), "sbin/nologin");
         let gone = folder.path().join("fish").into_os_string();
-        let refuses = format!("the user database's shell {} refuses logins", text(&nologin));
+        let refuses = format!(
+            "the user database's shell {} refuses logins",
+            text(&nologin)
+        );
         assert_eq!(passed(Some(&nologin), Some(&bash)), [refuses]);
         let no_file = format!("the user database's shell {} is no file", text(&gone));
         let variable = format!("$SHELL {} refuses logins", text(&nologin));
@@ -203,8 +225,16 @@ mod tests {
         fs::set_permissions(&unrunnable, fs::Permissions::from_mode(0o644)).unwrap();
         for relative in ["fish", "bin/fish", "./fish"] {
             let relative = OsString::from(relative);
-            assert_eq!(Shell::of(relative.clone()), Err(Unopened::Relative), "{relative:?}");
-            assert_eq!(chosen(Some(&relative), Some(&bash)), text(&bash), "{relative:?}");
+            assert_eq!(
+                Shell::of(relative.clone()),
+                Err(Unopened::Relative),
+                "{relative:?}"
+            );
+            assert_eq!(
+                chosen(Some(&relative), Some(&bash)),
+                text(&bash),
+                "{relative:?}"
+            );
         }
         assert_eq!(Shell::of(unrunnable.clone()), Err(Unopened::Unrunnable));
         assert_eq!(chosen(Some(&unrunnable), Some(&bash)), text(&bash));
@@ -216,12 +246,25 @@ mod tests {
     fn a_login_shell_that_refuses_logins_is_no_shell() {
         let folder = tempfile::tempdir().unwrap();
         let bash = made(folder.path(), "bash");
-        for refusing in ["sbin/nologin", "usr/sbin/nologin", "usr/bin/false", "bin/false"] {
+        for refusing in [
+            "sbin/nologin",
+            "usr/sbin/nologin",
+            "usr/bin/false",
+            "bin/false",
+        ] {
             let refusing = made(folder.path(), refusing);
-            assert_eq!(chosen(Some(&refusing), Some(&bash)), text(&bash), "{refusing:?}");
+            assert_eq!(
+                chosen(Some(&refusing), Some(&bash)),
+                text(&bash),
+                "{refusing:?}"
+            );
             assert_eq!(chosen(Some(&refusing), None), "/bin/sh", "{refusing:?}");
             assert_eq!(chosen(None, Some(&refusing)), "/bin/sh", "{refusing:?}");
-            assert_eq!(chosen(Some(&refusing), Some(&refusing)), "/bin/sh", "{refusing:?}");
+            assert_eq!(
+                chosen(Some(&refusing), Some(&refusing)),
+                "/bin/sh",
+                "{refusing:?}"
+            );
         }
         let fish = made(folder.path(), "nologin-not/fish");
         assert_eq!(chosen(Some(&fish), Some(&bash)), text(&fish));

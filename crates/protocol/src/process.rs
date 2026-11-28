@@ -22,11 +22,16 @@ pub struct Laid<'a> {
 
 impl Laid<'_> {
     pub fn environ(&self) -> Result<Vec<OsString>, &'static str> {
-        let start = self.after.iter().position(|byte| *byte != 0).unwrap_or(self.after.len());
+        let start = self
+            .after
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(self.after.len());
         let mut environ = Vec::new();
         for entry in self.after[start..].split_inclusive(|byte| *byte == 0) {
-            let entry =
-                entry.strip_suffix(&[0]).ok_or("KERN_PROCARGS2's environment does not end")?;
+            let entry = entry
+                .strip_suffix(&[0])
+                .ok_or("KERN_PROCARGS2's environment does not end")?;
             if entry.is_empty() {
                 break;
             }
@@ -47,8 +52,12 @@ pub fn arguments(cmdline: &[u8]) -> Option<Vec<&[u8]>> {
 
 #[must_use]
 pub fn entries(environ: &[u8]) -> Vec<OsString> {
-    let entries = environ.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
-    entries.map(|entry| OsString::from_vec(entry.to_vec())).collect()
+    let entries = environ
+        .split(|byte| *byte == 0)
+        .filter(|entry| !entry.is_empty());
+    entries
+        .map(|entry| OsString::from_vec(entry.to_vec()))
+        .collect()
 }
 
 pub fn laid_in_procargs(procargs: &[u8]) -> Result<Laid<'_>, &'static str> {
@@ -92,7 +101,10 @@ mod tests {
     fn a_cmdline_reads_as_its_arguments_empty_ones_too_and_none_before_it_is_laid_out() {
         let read = |cmdline: &[u8]| {
             let read = arguments(cmdline)?.into_iter();
-            Some(read.map(|arg| String::from_utf8(arg.to_vec()).unwrap()).collect::<Vec<_>>())
+            Some(
+                read.map(|arg| String::from_utf8(arg.to_vec()).unwrap())
+                    .collect::<Vec<_>>(),
+            )
         };
         let read_as = |args: &[&str]| Some(args.iter().map(|it| (*it).to_owned()).collect());
         assert_eq!(read(b"sh\0-c\0\0\0"), read_as(&["sh", "-c", "", ""]));
@@ -126,19 +138,36 @@ mod tests {
     fn an_environment_starts_after_as_many_arguments_as_argc() {
         let read = |argument_count, path, strings: &[&str]| {
             let procargs = procargs(argument_count, path, strings);
-            laid_in_procargs(&procargs).and_then(|laid| laid.environ()).map(|environ| {
-                environ.into_iter().map(|it| it.into_string().unwrap()).collect::<Vec<_>>()
-            })
+            laid_in_procargs(&procargs)
+                .and_then(|laid| laid.environ())
+                .map(|environ| {
+                    environ
+                        .into_iter()
+                        .map(|it| it.into_string().unwrap())
+                        .collect::<Vec<_>>()
+                })
         };
         let given = |entries: &[&str]| Ok(entries.iter().map(|it| (*it).to_owned()).collect());
         let laid = ["sleep", "60", "A=b", "PATH=/bin", "", "", "ptr_munge="];
         assert_eq!(read(2, "/bin/sleep", &laid), given(&["A=b", "PATH=/bin"]));
         let empty_argument = ["echo", "", "x", "A=b", "", "main_stack="];
-        assert_eq!(read(3, "/bin/echo", &empty_argument), given(&["A=b"]), "an empty argument");
+        assert_eq!(
+            read(3, "/bin/echo", &empty_argument),
+            given(&["A=b"]),
+            "an empty argument"
+        );
         let empty_first = ["", "60", "A=b", "B=c", ""];
-        assert_eq!(read(2, "/bin/sleep", &empty_first), given(&["A=b", "B=c"]), "an empty first");
+        assert_eq!(
+            read(2, "/bin/sleep", &empty_first),
+            given(&["A=b", "B=c"]),
+            "an empty first"
+        );
         let unpadded = ["", "A=b", ""];
-        assert_eq!(read(1, "/bin/sh", &unpadded), given(&["A=b"]), "a path its alignment fits");
+        assert_eq!(
+            read(1, "/bin/sh", &unpadded),
+            given(&["A=b"]),
+            "a path its alignment fits"
+        );
         let titled = [&["claude"][..], &[""; 17], &["A=b", ""]].concat();
         let why = "a title leaves zeros where its arguments were";
         assert_eq!(read(3, "/usr/bin/node", &titled), given(&["A=b"]), "{why}");
@@ -146,13 +175,23 @@ mod tests {
 
         let fewer = Err("KERN_PROCARGS2 holds fewer arguments than its argc");
         assert_eq!(read(5, "/bin/sleep", &["sleep", "60"]), fewer);
-        assert_eq!(read(3, "/bin/sleep", &["sleep", "60"]), fewer, "its end ends no argument");
-        assert_eq!(read(-1, "/bin/sleep", &[]), Err("KERN_PROCARGS2 holds a negative argc"));
+        assert_eq!(
+            read(3, "/bin/sleep", &["sleep", "60"]),
+            fewer,
+            "its end ends no argument"
+        );
+        assert_eq!(
+            read(-1, "/bin/sleep", &[]),
+            Err("KERN_PROCARGS2 holds a negative argc")
+        );
         let raw = |argument_count: i32, strings: &[u8]| {
             laid_in_procargs(&[&argument_count.to_ne_bytes()[..], strings].concat())
                 .and_then(|laid| laid.environ())
         };
-        assert_eq!(laid_in_procargs(&[1, 0]), Err("KERN_PROCARGS2 holds no argc"));
+        assert_eq!(
+            laid_in_procargs(&[1, 0]),
+            Err("KERN_PROCARGS2 holds no argc")
+        );
         let unended = Err("KERN_PROCARGS2's exec path does not end");
         assert_eq!(raw(0, b"/bin/true"), unended);
         let unpadded = Err("KERN_PROCARGS2 ends in its exec path's padding");
@@ -161,7 +200,10 @@ mod tests {
         assert_eq!(raw(1, b"/bin/x\0y\0A=b\0"), misaligned);
         let cut = [&procargs(1, "/bin/sh", &["sh", "A=b"])[..], b"B="].concat();
         let cut_entry = Err("KERN_PROCARGS2's environment does not end");
-        assert_eq!(laid_in_procargs(&cut).and_then(|laid| laid.environ()), cut_entry);
+        assert_eq!(
+            laid_in_procargs(&cut).and_then(|laid| laid.environ()),
+            cut_entry
+        );
     }
 
     #[test]
@@ -169,7 +211,10 @@ mod tests {
         let cut = [&procargs(2, "/bin/sh", &["sh", "", "A=b"])[..], b"B="].concat();
         let laid = laid_in_procargs(&cut).expect("its arguments end before the cut");
         assert_eq!(laid.argv, [OsString::from("sh"), OsString::new()]);
-        assert_eq!(laid.environ(), Err("KERN_PROCARGS2's environment does not end"));
+        assert_eq!(
+            laid.environ(),
+            Err("KERN_PROCARGS2's environment does not end")
+        );
     }
 
     #[test]
@@ -177,7 +222,10 @@ mod tests {
         let read = |argument_count, path, strings: &[&str]| {
             let procargs = procargs(argument_count, path, strings);
             let laid = laid_in_procargs(&procargs).unwrap();
-            laid.argv.into_iter().map(|it| it.into_string().unwrap()).collect::<Vec<_>>()
+            laid.argv
+                .into_iter()
+                .map(|it| it.into_string().unwrap())
+                .collect::<Vec<_>>()
         };
         let empty_argument = ["echo", "", "x", "A=b", "", "main_stack="];
         assert_eq!(read(3, "/bin/echo", &empty_argument), ["echo", "", "x"]);

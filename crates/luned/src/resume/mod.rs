@@ -42,7 +42,9 @@ pub fn allows_legacy_agent(
         return false;
     }
     if let Some(dirs) = &rule.dirs {
-        return dirs.iter().any(|base| trust::dir_allowed(folder, base, true));
+        return dirs
+            .iter()
+            .any(|base| trust::dir_allowed(folder, base, true));
     }
     true
 }
@@ -59,10 +61,16 @@ pub fn reload(current: &mut ConfigState) -> api::ReloadResumeResponse {
             api::ReloadResumeResponse {
                 config_path,
                 warnings,
-                outcome: Some(api::reload_resume_response::Outcome::ReloadedRules(active_rules)),
+                outcome: Some(api::reload_resume_response::Outcome::ReloadedRules(
+                    active_rules,
+                )),
             }
-        },
-        ConfigState::Incomplete { path, error, warnings } => {
+        }
+        ConfigState::Incomplete {
+            path,
+            error,
+            warnings,
+        } => {
             let kept_previous_rules = current
                 .loaded()
                 .map(|cfg| u32::try_from(cfg.rules.len()).unwrap_or(u32::MAX));
@@ -77,17 +85,24 @@ pub fn reload(current: &mut ConfigState) -> api::ReloadResumeResponse {
                 config_path: path.map(|p| p.display().to_string()),
                 warnings,
                 outcome: Some(api::reload_resume_response::Outcome::Failed(
-                    api::reload_resume_response::Failed { error, kept_previous_rules },
+                    api::reload_resume_response::Failed {
+                        error,
+                        kept_previous_rules,
+                    },
                 )),
             }
-        },
+        }
     }
 }
 
 #[must_use]
 pub fn config_to_api(
     config_state: &ConfigState,
-) -> (Option<String>, Vec<String>, api::list_resume_response::Config) {
+) -> (
+    Option<String>,
+    Vec<String>,
+    api::list_resume_response::Config,
+) {
     match config_state {
         ConfigState::Loaded(config) => (
             config.path.as_ref().map(|p| p.display().to_string()),
@@ -104,7 +119,11 @@ pub fn config_to_api(
                     .collect(),
             }),
         ),
-        ConfigState::Incomplete { path, error, warnings } => (
+        ConfigState::Incomplete {
+            path,
+            error,
+            warnings,
+        } => (
             path.as_ref().map(|p| p.display().to_string()),
             warnings.clone(),
             api::list_resume_response::Config::Error(error.clone()),
@@ -127,10 +146,10 @@ pub fn record_to_api(
     let cwd = record.cwd().map(|source| match source {
         ResumeCwdSource::Explicit(dir) => {
             api::resume_record_info::Cwd::ExplicitCwd(dir.as_str().to_owned())
-        },
+        }
         ResumeCwdSource::Inferred(dir) => {
             api::resume_record_info::Cwd::InferredCwd(dir.as_str().to_owned())
-        },
+        }
     });
     let placement = match record.placement() {
         ProcessPlacement::Root => api::ResumePlacement::Root,
@@ -140,14 +159,14 @@ pub fn record_to_api(
     let verdict = match verdict {
         TrustVerdict::Trusted { rule } => {
             api::resume_record_info::Verdict::TrustedRule(rule.clone())
-        },
-        TrustVerdict::UntrustedGlobal(reason) => api::resume_record_info::Verdict::Untrusted(
-            api::resume_record_info::Untrusted {
+        }
+        TrustVerdict::UntrustedGlobal(reason) => {
+            api::resume_record_info::Verdict::Untrusted(api::resume_record_info::Untrusted {
                 detail: Some(api::resume_record_info::untrusted::Detail::Global(
                     global_reason_to_api(*reason).into(),
                 )),
-            },
-        ),
+            })
+        }
         TrustVerdict::UntrustedRule { rule, reason } => {
             api::resume_record_info::Verdict::Untrusted(api::resume_record_info::Untrusted {
                 detail: Some(api::resume_record_info::untrusted::Detail::ByRule(
@@ -157,7 +176,7 @@ pub fn record_to_api(
                     },
                 )),
             })
-        },
+        }
     };
     api::ResumeRecordInfo {
         source: source.into(),
@@ -222,15 +241,39 @@ mod tests {
     fn legacy_agent_enforces_command_shape_and_custom_rule_constraints() {
         let uuid = "015d3962-6f9e-45c3-92bc-c7cef5068215";
         let default_cfg = parse_config_toml("", None, Some(Path::new("/home/u")));
-        assert!(allows_legacy_agent(&default_cfg, Harness::ClaudeCode, uuid, "/tmp", false));
-        assert!(!allows_legacy_agent(&default_cfg, Harness::ClaudeCode, "not-a-uuid", "/tmp", false));
-        assert!(!allows_legacy_agent(&default_cfg, Harness::ClaudeCode, uuid, "/tmp", true));
+        assert!(allows_legacy_agent(
+            &default_cfg,
+            Harness::ClaudeCode,
+            uuid,
+            "/tmp",
+            false
+        ));
+        assert!(!allows_legacy_agent(
+            &default_cfg,
+            Harness::ClaudeCode,
+            "not-a-uuid",
+            "/tmp",
+            false
+        ));
+        assert!(!allows_legacy_agent(
+            &default_cfg,
+            Harness::ClaudeCode,
+            uuid,
+            "/tmp",
+            true
+        ));
 
         let pinned_cfg = parse_config_toml(
             "[resume.trust.claude]\ncommand = [\"/opt/claude\", \"--resume\", { match = \"uuid\" }]\n",
             None,
             Some(Path::new("/home/u")),
         );
-        assert!(!allows_legacy_agent(&pinned_cfg, Harness::ClaudeCode, uuid, "/tmp", false));
+        assert!(!allows_legacy_agent(
+            &pinned_cfg,
+            Harness::ClaudeCode,
+            uuid,
+            "/tmp",
+            false
+        ));
     }
 }

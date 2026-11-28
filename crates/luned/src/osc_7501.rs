@@ -15,23 +15,35 @@ pub(crate) fn phase(phase: &ProgramPhase) -> ActiveStatus {
     match phase {
         ProgramPhase::Idle => ActiveStatus::Stopped,
         ProgramPhase::Working { .. } => ActiveStatus::Working,
-        ProgramPhase::Done { message } => ActiveStatus::Done { message: message.clone() },
-        ProgramPhase::Blocked { kind, message } => {
-            ActiveStatus::Blocked { reason: reason(*kind), message: message.clone() }
+        ProgramPhase::Done { message } => ActiveStatus::Done {
+            message: message.clone(),
         },
-        ProgramPhase::Error { message } => ActiveStatus::Error { message: message.clone() },
+        ProgramPhase::Blocked { kind, message } => ActiveStatus::Blocked {
+            reason: reason(*kind),
+            message: message.clone(),
+        },
+        ProgramPhase::Error { message } => ActiveStatus::Error {
+            message: message.clone(),
+        },
     }
 }
 
 fn subagent_phase(phase: &ProgramPhase) -> SubagentPhase {
     match phase {
         ProgramPhase::Idle => SubagentPhase::Stopped,
-        ProgramPhase::Working { progress } => SubagentPhase::Working { progress: *progress },
-        ProgramPhase::Done { message } => SubagentPhase::Done { message: message.clone() },
-        ProgramPhase::Blocked { kind, message } => {
-            SubagentPhase::Blocked { reason: reason(*kind), message: message.clone() }
+        ProgramPhase::Working { progress } => SubagentPhase::Working {
+            progress: *progress,
         },
-        ProgramPhase::Error { message } => SubagentPhase::Error { message: message.clone() },
+        ProgramPhase::Done { message } => SubagentPhase::Done {
+            message: message.clone(),
+        },
+        ProgramPhase::Blocked { kind, message } => SubagentPhase::Blocked {
+            reason: reason(*kind),
+            message: message.clone(),
+        },
+        ProgramPhase::Error { message } => SubagentPhase::Error {
+            message: message.clone(),
+        },
     }
 }
 

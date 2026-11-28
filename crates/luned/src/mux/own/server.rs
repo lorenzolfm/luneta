@@ -3,7 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::io::{self, ErrorKind, IoSlice};
 use std::path::{Path, PathBuf};
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -22,7 +22,7 @@ use lune_protocol::shell::Doing;
 use rustix::process::{Pid, Signal};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::UnixStream;
-use tokio::sync::{watch as tokio_watch, Semaphore, SemaphorePermit};
+use tokio::sync::{Semaphore, SemaphorePermit, watch as tokio_watch};
 use tokio_stream::Stream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tonic::{Code, Response, Status, Streaming};
@@ -36,7 +36,7 @@ use crate::client::Within;
 use crate::mux::{Failure, Runs};
 use crate::process::{self, AgentPid, Exit, ReadyLine, ReadyPrefix};
 use crate::watch::{FolderNames, FolderWatch};
-use crate::{folder, log, release, tasks, Directory};
+use crate::{Directory, folder, log, release, tasks};
 
 pub const SOCKET: &str = "mux.sock";
 
@@ -92,7 +92,10 @@ const _: () = assert!(
     "an answer presses at once at most the moves from a menu's first choice to its last"
 );
 
-const _: () = assert!(PRESSES_MAX >= 2, "a text answer's paste and Enter go at once");
+const _: () = assert!(
+    PRESSES_MAX >= 2,
+    "a text answer's paste and Enter go at once"
+);
 
 const KEPT_MAX: usize = 16;
 
@@ -151,9 +154,12 @@ impl fmt::Display for Unmatched {
         match &self.build {
             Some(build) if build.is_newer() => {
                 write!(f, "lune-mux {build}{pid} is newer than {own}")
-            },
+            }
             Some(build) => write!(f, "lune-mux {build}{pid} is another build than {own}"),
-            None => write!(f, "lune-mux{pid} says no build, as one older than {own} does"),
+            None => write!(
+                f,
+                "lune-mux{pid} says no build, as one older than {own} does"
+            ),
         }
     }
 }
@@ -180,7 +186,10 @@ struct Gone {
 impl Default for Gone {
     fn default() -> Gone {
         let (state, heard) = tokio_watch::channel(Connection::Open);
-        Gone { state: Arc::new(state), heard }
+        Gone {
+            state: Arc::new(state),
+            heard,
+        }
     }
 }
 
@@ -190,7 +199,7 @@ impl Gone {
             Connection::Open => {
                 *state = Connection::Unavailable;
                 true
-            },
+            }
             Connection::Unavailable | Connection::Closed => false,
         });
     }
@@ -231,7 +240,10 @@ impl Matched {
 fn kept(socket: &Path) -> Option<Matched> {
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     kept.retain(|_, matched| !matched.gone.is());
-    assert!(kept.len() <= KEPT_MAX, "luned keeps at most {KEPT_MAX} channels to lune-mux");
+    assert!(
+        kept.len() <= KEPT_MAX,
+        "luned keeps at most {KEPT_MAX} channels to lune-mux"
+    );
     kept.get(socket).cloned()
 }
 
@@ -242,7 +254,10 @@ fn keep(socket: &Path, matched: &Matched) {
         kept.pop_first();
     }
     kept.insert(socket.to_owned(), matched.clone());
-    assert!(kept.len() <= KEPT_MAX, "luned keeps at most {KEPT_MAX} channels to lune-mux");
+    assert!(
+        kept.len() <= KEPT_MAX,
+        "luned keeps at most {KEPT_MAX} channels to lune-mux"
+    );
 }
 
 pub(super) struct Room {
@@ -261,7 +276,9 @@ impl Room {
     }
 
     fn taken(budget: &'static Semaphore, most: impl FnOnce() -> String) -> Result<Room, Status> {
-        let held = budget.try_acquire().map_err(|_| Status::resource_exhausted(most()))?;
+        let held = budget
+            .try_acquire()
+            .map_err(|_| Status::resource_exhausted(most()))?;
         Ok(Room { _held: held })
     }
 }
@@ -430,7 +447,7 @@ impl Server {
             Reached::Unmatched(unmatched) => {
                 stop(&unmatched).await?;
                 Ok(None)
-            },
+            }
         }
     }
 
@@ -455,7 +472,9 @@ impl Server {
         words: impl tonic::IntoStreamingRequest<Message = api::FromViewer>,
     ) -> Result<Roomed<Streaming<api::ToViewer>>, Status> {
         let room = Room::asked()?;
-        let heard = self.went(self.client.clone().show(words).await)?.into_inner();
+        let heard = self
+            .went(self.client.clone().show(words).await)?
+            .into_inner();
         Ok(Roomed { heard, _room: room })
     }
 
@@ -499,7 +518,7 @@ fn watch_exit(pid: Pid) -> WatchedExit {
         Err(error) => {
             log::say(&format!("lune-mux (pid {pid}) exit watch failed: {error}"));
             WatchedExit::Unavailable
-        },
+        }
     }
 }
 
@@ -520,17 +539,27 @@ async fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
     {
         let from = program();
         let from = from.display();
-        return Err(Failure::Own(format!("{unmatched}, though luned started it from {from}")));
+        return Err(Failure::Own(format!(
+            "{unmatched}, though luned started it from {from}"
+        )));
     }
     if unmatched.is_newer() {
         return Err(Failure::Own(unmatched.left_be()));
     }
-    let pid = unmatched.pid.ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
+    let pid = unmatched
+        .pid
+        .ok_or_else(|| unstopped("the kernel names no pid for it".to_owned()))?;
     if pid == rustix::process::getpid() {
-        return Err(unstopped("its socket leads back to luned itself".to_owned()));
+        return Err(unstopped(
+            "its socket leads back to luned itself".to_owned(),
+        ));
     }
     let socket = socket()?;
-    let folder_watch = || socket.parent().and_then(|folder| FolderWatch::on(folder, FOLDER_NAMES));
+    let folder_watch = || {
+        socket
+            .parent()
+            .and_then(|folder| FolderWatch::on(folder, FOLDER_NAMES))
+    };
     let mut wait = match watch_exit(pid) {
         WatchedExit::Watching(exit) => match exit.signal(Signal::TERM) {
             Ok(()) => StopWait::Exit(Box::pin(exit.wait())),
@@ -545,7 +574,7 @@ async fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
                 Err(rustix::io::Errno::SRCH) => StopWait::Poll,
                 Err(error) => return Err(unstopped(error.to_string())),
             }
-        },
+        }
     };
     log::say(&format!("{unmatched}, and is stopped"));
     let stopped = Instant::now();
@@ -558,10 +587,10 @@ async fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
                     Ok(Err(error)) => {
                         log::say(&format!("lune-mux (pid {pid}) exit wait failed: {error}"));
                         folder_watch().map_or(StopWait::Poll, StopWait::Folder)
-                    },
+                    }
                     Ok(Ok(())) | Err(_) => StopWait::Poll,
                 }
-            },
+            }
             other => other,
         };
         let mark = match &mut wait {
@@ -572,10 +601,10 @@ async fn stop(unmatched: &Unmatched) -> Result<(), Failure> {
         match tokio::time::timeout_at(check_until.into(), connect(&socket)).await {
             Ok(Ok(Reached::Unmatched(still))) if still.pid == unmatched.pid => {
                 "it still answers".clone_into(&mut answered);
-            },
+            }
             Ok(Ok(Reached::Unreached | Reached::Matched(_) | Reached::Unmatched(_))) => {
                 return Ok(());
-            },
+            }
             Ok(Err(error)) => answered = format!("its socket says {error}"),
             Err(_) => "it neither answers nor goes".clone_into(&mut answered),
         }
@@ -603,7 +632,10 @@ pub(super) fn refused(status: &Status) -> Failure {
 }
 
 pub(super) fn unreached_at(socket: &Path, error: &io::Error) -> String {
-    assert!(socket.is_absolute(), "lune-mux's socket is found in an absolute folder");
+    assert!(
+        socket.is_absolute(),
+        "lune-mux's socket is found in an absolute folder"
+    );
     format!("lune-mux at {}: {error}", socket.display())
 }
 
@@ -619,7 +651,10 @@ impl Reply {
             "" => status.code().description().to_owned(),
             said => said.to_owned(),
         };
-        Reply { code: status.code(), said }
+        Reply {
+            code: status.code(),
+            said,
+        }
     }
 
     #[must_use]
@@ -673,14 +708,20 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
     let (first, pid) = match UnixStream::connect(socket).await {
         Ok(stream) => mine(stream)?,
         Err(error)
-            if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
+            if matches!(
+                error.kind(),
+                ErrorKind::NotFound | ErrorKind::ConnectionRefused
+            ) =>
         {
             return Ok(Reached::Unreached);
-        },
+        }
         Err(error) => return Err(error),
     };
     let gone = Gone::default();
-    let first = Tracked { stream: first, gone: gone.clone() };
+    let first = Tracked {
+        stream: first,
+        gone: gone.clone(),
+    };
     let first = Arc::new(Mutex::new(Some(first)));
     let channel = Endpoint::from_static("http://lune-mux")
         .connect_timeout(CONNECT)
@@ -713,10 +754,10 @@ pub(super) async fn connect(socket: &Path) -> io::Result<Reached> {
                         MATCHED.store(pid.as_raw_pid(), Ordering::Relaxed);
                     }
                     return Ok(Reached::Matched(Matched { channel, gone, pid }));
-                },
+                }
                 release::Of::Other(other) => Some(other),
             }
-        },
+        }
         Err(status) if status.code() == Code::Unimplemented => None,
         Err(status) => return Err(io::Error::other(Reply::of(&status).to_string())),
     };
@@ -737,26 +778,32 @@ fn opens(cwd: &Directory, runs: Runs<'_>) -> api::Opens {
     match runs {
         Runs::Shell(shell) => api::Opens {
             cwd,
-            program: Some(api::Program { argv: vec![shell.as_str().to_owned()] }),
+            program: Some(api::Program {
+                argv: vec![shell.as_str().to_owned()],
+            }),
             ends: api::Ends::Closes.into(),
             resume_in_shell: None,
         },
         Runs::Command { program, args } => {
-            let argv = std::iter::once(program.to_owned()).chain(args.iter().cloned()).collect();
+            let argv = std::iter::once(program.to_owned())
+                .chain(args.iter().cloned())
+                .collect();
             api::Opens {
                 cwd,
                 program: Some(api::Program { argv }),
                 ends: api::Ends::Holds.into(),
                 resume_in_shell: None,
             }
-        },
+        }
         Runs::ResumeInShell { shell, argv, .. } => api::Opens {
             cwd,
             program: None,
             ends: api::Ends::Unspecified.into(),
             resume_in_shell: Some(api::opens::ResumeInShell {
                 shell: shell.as_str().to_owned(),
-                argv: Some(api::Program { argv: argv.words().to_vec() }),
+                argv: Some(api::Program {
+                    argv: argv.words().to_vec(),
+                }),
             }),
         },
     }
@@ -780,7 +827,9 @@ enum Heard {
 fn heard(watched: Option<api::Watched>, since: Instant) -> Result<Heard, Failure> {
     use api::watched::ended::Why;
     let Some(watched) = watched else {
-        return Err(Failure::Own("lune-mux's watch ended with no word why".to_owned()));
+        return Err(Failure::Own(
+            "lune-mux's watch ended with no word why".to_owned(),
+        ));
     };
     let ended = match watched.is {
         Some(api::watched::Is::Listing(listing)) => return Ok(Heard::Listing(listing)),
@@ -793,7 +842,7 @@ fn heard(watched: Option<api::Watched>, since: Instant) -> Result<Heard, Failure
         None => {
             let unread = "lune-mux's watch ended, and why is unread".to_owned();
             return Err(Failure::Unread(unread));
-        },
+        }
     };
     Ok(Heard::Ended(followed))
 }
@@ -808,11 +857,11 @@ pub fn followed(
         Reached::Unreached => return Ok(Followed::Unreached { at }),
         Reached::Unmatched(unmatched) if unmatched.is_newer() => {
             return Ok(Followed::Newer(unmatched.left_be()));
-        },
+        }
         Reached::Unmatched(unmatched) => {
             stop_blocking(&unmatched)?;
             return Ok(Followed::Unmatched);
-        },
+        }
     };
     let streams = matched.streams(Room::asked().map_err(|status| refused(&status))?);
     let since = Instant::now();
@@ -827,7 +876,14 @@ pub fn followed(
         let (terminals, mut unread, unsaid) = terminals(listing.terminals);
         let whole = unread.is_empty();
         unread.extend(unsaid);
-        if !told(unread, TerminalsListed { terminals, whole, since }) {
+        if !told(
+            unread,
+            TerminalsListed {
+                terminals,
+                whole,
+                since,
+            },
+        ) {
             return Ok(Followed::LetGo);
         }
     }
@@ -886,11 +942,14 @@ fn terminals(
         match terminal_of(terminal) {
             Ok((key, _, _)) if !ids.insert(key.id) => {
                 unread.push(format!("terminal {} is listed twice", key.id));
-            },
+            }
             Ok((key, read, warnings)) => {
                 unsaid.extend(warnings);
-                assert!(terminals.insert(key, read).is_none(), "unique id implies unique key");
-            },
+                assert!(
+                    terminals.insert(key, read).is_none(),
+                    "unique id implies unique key"
+                );
+            }
             Err(why) => unread.push(why),
         }
     }
@@ -901,14 +960,16 @@ fn terminals(
 fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<String>), String> {
     let key = TerminalKey::read(terminal.key)?;
     let size = terminal.size.map(|size| Size::of(size.columns, size.rows));
-    let size = size.transpose().map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
+    let size = size
+        .transpose()
+        .map_err(|why| format!("terminal {}'s size: {why}", key.id))?;
     let mut warnings = Vec::new();
     let cwd = match Directory::parse(terminal.cwd) {
         Ok(cwd) => Some(cwd),
         Err(why) => {
             warnings.push(format!("terminal {}'s cwd: {why}", key.id));
             None
-        },
+        }
     };
     let is = match terminal.program {
         None => return Err(format!("terminal {} runs nothing it says", key.id)),
@@ -923,7 +984,10 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
                             warnings.push(format!("terminal {}'s foreground has no argv", key.id));
                             None
                         } else {
-                            Some(Foreground { pid, argv: front.argv })
+                            Some(Foreground {
+                                pid,
+                                argv: front.argv,
+                            })
                         }
                     } else {
                         warnings.push(format!(
@@ -932,7 +996,7 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
                         ));
                         None
                     }
-                },
+                }
                 None => None,
             };
             let doing = match runs.ran.as_ref().map(Doing::of_mux).transpose() {
@@ -940,12 +1004,17 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
                 Err(why) => {
                     warnings.push(format!("terminal {}'s shell: {why}", key.id));
                     None
-                },
+                }
             };
             let (resumes, resume_warnings) = TerminalResumes::of_mux(runs.resumes, key.id.get());
             warnings.extend(resume_warnings);
-            Is::Running { root, front, doing, resumes: resumes.map(Box::new) }
-        },
+            Is::Running {
+                root,
+                front,
+                doing,
+                resumes: resumes.map(Box::new),
+            }
+        }
     };
     let ended = matches!(is, Is::Ended);
     let (statuses, status_warnings) =
@@ -953,7 +1022,19 @@ fn terminal_of(terminal: api::Terminal) -> Result<(TerminalKey, Terminal, Vec<St
     warnings.extend(status_warnings);
     assert!(statuses.children.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
     let (tag, title, tty) = (terminal.tag, terminal.title, terminal.tty);
-    Ok((key, Terminal { tag, size, cwd, title, tty, is, statuses }, warnings))
+    Ok((
+        key,
+        Terminal {
+            tag,
+            size,
+            cwd,
+            title,
+            tty,
+            is,
+            statuses,
+        },
+        warnings,
+    ))
 }
 
 pub struct Terminals;
@@ -968,8 +1049,15 @@ impl Terminals {
     ) -> Result<TerminalKey, Failure> {
         let opens = opens(cwd, runs);
         let (columns, rows) = size.get();
-        let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
-        let request = api::NewTerminalRequest { opens: Some(opens), tag, size };
+        let size = Some(api::Size {
+            columns: columns.into(),
+            rows: rows.into(),
+        });
+        let request = api::NewTerminalRequest {
+            opens: Some(opens),
+            tag,
+            size,
+        };
         let (_, made) = on_started(|server| {
             let request = request.clone();
             server.ask(|mut client| async move { client.new_terminal(request).await })
@@ -996,19 +1084,34 @@ impl Terminals {
         assert!(!pastes.is_empty(), "a paste is asked for");
         assert!(pastes.len() <= VIEWS_MAX, "no more pastes than terminals");
         let said = |event| api::FromViewer { event: Some(event) };
-        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
+        let hello = api::Greeting {
+            colours: Some(colours(None, None)),
+            runs_in: None,
+        };
         let terminals = pastes.iter().map(|(key, _)| key.said()).collect();
         let mut words = vec![
             said(Event::Hello(hello)),
             said(Event::Showing(api::Showing { terminals })),
         ];
         for (key, line) in pastes {
-            assert!(!line.as_str().contains('\n'), "a pasted line holds no newline to run it");
-            let paste = api::typed::Event::Paste(api::Paste { text: line.as_str().to_owned() });
-            let typed = api::Typed { terminal: Some(key.said()), event: Some(paste) };
+            assert!(
+                !line.as_str().contains('\n'),
+                "a pasted line holds no newline to run it"
+            );
+            let paste = api::typed::Event::Paste(api::Paste {
+                text: line.as_str().to_owned(),
+            });
+            let typed = api::Typed {
+                terminal: Some(key.said()),
+                event: Some(paste),
+            };
             words.push(said(Event::Typed(typed)));
         }
-        assert_eq!(words.len(), pastes.len() + 2, "a hello, a showing and one word per paste");
+        assert_eq!(
+            words.len(),
+            pastes.len() + 2,
+            "a hello, a showing and one word per paste"
+        );
         let refusals_max = 2 * pastes.len();
         let server = server().await?;
         let deadline = tokio::time::Instant::now() + ANSWER;
@@ -1027,13 +1130,21 @@ impl Terminals {
             Ok::<_, Status>(reasons)
         };
         let kept = || Failure::Own("lune-mux kept showing the pastes too long".to_owned());
-        let reasons = tokio::time::timeout_at(deadline, drained).await.map_err(|_| kept())?;
+        let reasons = tokio::time::timeout_at(deadline, drained)
+            .await
+            .map_err(|_| kept())?;
         let reasons = reasons.map_err(|status| refused(&status))?;
-        assert!(reasons.len() <= refusals_max, "the drain stops at its most refusals");
+        assert!(
+            reasons.len() <= refusals_max,
+            "the drain stops at its most refusals"
+        );
         if reasons.is_empty() {
             Ok(())
         } else {
-            Err(Failure::Called(Reply { code: Code::Unknown, said: reasons.join("; ") }))
+            Err(Failure::Called(Reply {
+                code: Code::Unknown,
+                said: reasons.join("; "),
+            }))
         }
     }
 
@@ -1042,12 +1153,22 @@ impl Terminals {
         const MESSAGES_MAX: usize = 64;
         assert_ne!(text, "", "a paste carries text");
         let said = |event| api::FromViewer { event: Some(event) };
-        let hello = api::Greeting { colours: Some(colours(None, None)), runs_in: None };
-        let paste = api::typed::Event::Paste(api::Paste { text: text.to_owned() });
-        let typed = api::Typed { terminal: Some(key.said()), event: Some(paste) };
+        let hello = api::Greeting {
+            colours: Some(colours(None, None)),
+            runs_in: None,
+        };
+        let paste = api::typed::Event::Paste(api::Paste {
+            text: text.to_owned(),
+        });
+        let typed = api::Typed {
+            terminal: Some(key.said()),
+            event: Some(paste),
+        };
         let words = vec![
             said(Event::Hello(hello)),
-            said(Event::Showing(api::Showing { terminals: vec![key.said()] })),
+            said(Event::Showing(api::Showing {
+                terminals: vec![key.said()],
+            })),
             said(Event::Typed(typed)),
         ];
         assert_eq!(words.len(), 3, "a hello, a showing and one paste");
@@ -1066,7 +1187,10 @@ impl Terminals {
                     return Ok::<_, Status>(Some(refusal.reason));
                 }
             }
-            assert!(seen <= MESSAGES_MAX, "the paste drain stays within its message bound");
+            assert!(
+                seen <= MESSAGES_MAX,
+                "the paste drain stays within its message bound"
+            );
             Ok(None)
         };
         let kept = || Failure::Own("lune-mux kept showing the paste too long".to_owned());
@@ -1076,30 +1200,47 @@ impl Terminals {
             .map_err(|status| refused(&status))?;
         match refused_reason {
             None => Ok(()),
-            Some(said) => Err(Failure::Called(Reply { code: Code::Unknown, said })),
+            Some(said) => Err(Failure::Called(Reply {
+                code: Code::Unknown,
+                said,
+            })),
         }
     }
 
     pub async fn sized(&self, key: TerminalKey, size: Size) -> Result<(), Failure> {
         let (columns, rows) = size.get();
-        let size = Some(api::Size { columns: columns.into(), rows: rows.into() });
-        let request = api::SizeTerminalRequest { terminal: Some(key.said()), size };
+        let size = Some(api::Size {
+            columns: columns.into(),
+            rows: rows.into(),
+        });
+        let request = api::SizeTerminalRequest {
+            terminal: Some(key.said()),
+            size,
+        };
         let server = server().await?;
         let asked = server.asked(|mut client| async move { client.size_terminal(request).await });
         asked.await.map(drop).map_err(|status| refused(&status))
     }
 
     pub fn dumped(&self, key: TerminalKey, dumped: api::Dumped) -> Result<String, Failure> {
-        let request = api::DumpRequest { dumped: dumped.into(), terminal: Some(key.said()) };
+        let request = api::DumpRequest {
+            dumped: dumped.into(),
+            terminal: Some(key.said()),
+        };
         let asked = server_blocking()?.ask(|mut client| async move { client.dump(request).await });
         Ok(asked.map_err(|status| refused(&status))?.text)
     }
 
     pub fn looked(&self, key: TerminalKey) -> Result<Looked, Failure> {
-        let request = api::LookRequest { terminal: Some(key.said()) };
+        let request = api::LookRequest {
+            terminal: Some(key.said()),
+        };
         let asked = server_blocking()?.ask(|mut client| async move { client.look(request).await });
         let api::Looked { text, shown } = asked.map_err(|status| refused(&status))?;
-        Ok(Looked { text, shown: Shown(shown) })
+        Ok(Looked {
+            text,
+            shown: Shown(shown),
+        })
     }
 
     pub fn pressed(
@@ -1109,8 +1250,13 @@ impl Terminals {
         pressed: Vec<api::pressed::Event>,
     ) -> Result<Pressed, Failure> {
         assert!(!pressed.is_empty(), "something is pressed");
-        assert!(pressed.len() <= PRESSES_MAX, "no more presses than an answer takes");
-        let pressed = pressed.into_iter().map(|event| api::Pressed { event: Some(event) });
+        assert!(
+            pressed.len() <= PRESSES_MAX,
+            "no more presses than an answer takes"
+        );
+        let pressed = pressed
+            .into_iter()
+            .map(|event| api::Pressed { event: Some(event) });
         let request = api::PressRequest {
             terminal: Some(key.said()),
             shown: Some(shown.0),
@@ -1124,7 +1270,9 @@ impl Terminals {
     }
 
     pub fn closed(&self, key: TerminalKey) -> Result<(), Failure> {
-        let request = api::CloseTerminalRequest { terminal: Some(key.said()) };
+        let request = api::CloseTerminalRequest {
+            terminal: Some(key.said()),
+        };
         let server = server_blocking()?;
         match server.ask(|mut client| async move { client.close_terminal(request).await }) {
             Ok(_) => Ok(()),
@@ -1136,10 +1284,12 @@ impl Terminals {
                     Unchanged::InDoubt(_) => {
                         let id = key.id;
                         let called = Failure::Called(said);
-                        Err(Failure::Own(format!("{called}, and terminal {id} may close still")))
-                    },
+                        Err(Failure::Own(format!(
+                            "{called}, and terminal {id} may close still"
+                        )))
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -1209,17 +1359,21 @@ fn gone_by(server: &Server, deadline: Instant) -> Result<(), Failure> {
                     Ok(()) => return Poll::Ready(true),
                     Err(error) => {
                         log::say(&format!("lune-mux exit wait failed: {error}"));
-                    },
+                    }
                 }
             }
             Poll::Pending
         });
-        tokio::time::timeout_at(deadline.into(), wait).await.unwrap_or(false)
+        tokio::time::timeout_at(deadline.into(), wait)
+            .await
+            .unwrap_or(false)
     });
     if went {
         Ok(())
     } else {
-        Err(Failure::Own("the lune-mux that ends did not go in time".to_owned()))
+        Err(Failure::Own(
+            "the lune-mux that ends did not go in time".to_owned(),
+        ))
     }
 }
 
@@ -1235,7 +1389,7 @@ fn lock_held(folder: &Path) -> Result<bool, Failure> {
         Err(fs::TryLockError::WouldBlock) => Ok(true),
         Err(fs::TryLockError::Error(error)) => {
             Err(Failure::Own(format!("{}: {error}", path.display())))
-        },
+        }
     }
 }
 
@@ -1249,7 +1403,7 @@ fn started(deadline: Instant) -> Result<Server, Failure> {
                 Ok(Some(server)) => {
                     started.reaped();
                     return Ok(server);
-                },
+                }
                 Ok(None) => started.reaped(),
                 Err(why) => return Err(started.given_up(why)),
             }
@@ -1266,7 +1420,10 @@ fn started(deadline: Instant) -> Result<Server, Failure> {
                     break;
                 }
                 if let Some(mark) = mark {
-                    if tokio::time::timeout_at(again.into(), mark.changed()).await.is_err() {
+                    if tokio::time::timeout_at(again.into(), mark.changed())
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 } else {
@@ -1275,10 +1432,14 @@ fn started(deadline: Instant) -> Result<Server, Failure> {
                 }
             }
             if Instant::now() >= deadline {
-                return Err(Failure::Own("another lune-mux held its folder too long".to_owned()));
+                return Err(Failure::Own(
+                    "another lune-mux held its folder too long".to_owned(),
+                ));
             }
         }
-        Err(Failure::Own("another lune-mux held its folder too long".to_owned()))
+        Err(Failure::Own(
+            "another lune-mux held its folder too long".to_owned(),
+        ))
     })
 }
 
@@ -1303,7 +1464,10 @@ async fn listened(
     deadline: Instant,
 ) -> Result<Option<Server>, Failure> {
     let socket = folder.join(SOCKET);
-    let mut ready_wait = Some(Box::pin(process::read_ready_line(child_watch.stdout, LISTENING)));
+    let mut ready_wait = Some(Box::pin(process::read_ready_line(
+        child_watch.stdout,
+        LISTENING,
+    )));
     let mut exit_wait = match child_watch.exit {
         WatchedExit::Watching(exit) => ExitWait::Watching(Box::pin(exit.wait())),
         WatchedExit::Gone => ExitWait::Exited,
@@ -1314,20 +1478,22 @@ async fn listened(
         let mark = watch.as_deref_mut().map(FolderWatch::mark);
         match reached_here().await? {
             Reached::Matched(matched) => return Ok(Some(Server::matched(matched))),
-            Reached::Unreached => {},
+            Reached::Unreached => {}
             Reached::Unmatched(unmatched) => {
                 stop(&unmatched).await?;
                 continue;
-            },
+            }
         }
         let unread = |error| Failure::Own(format!("the lune-mux started is unread: {error}"));
         let ended = started.child.try_wait().map_err(unread)?;
         match ended {
-            None => {},
+            None => {}
             Some(status) if status.code() == Some(i32::from(ANOTHER_RUNS)) => return Ok(None),
             Some(status) => {
-                return Err(Failure::Own(format!("lune-mux ended as it started, with {status}")));
-            },
+                return Err(Failure::Own(format!(
+                    "lune-mux ended as it started, with {status}"
+                )));
+            }
         }
         if Instant::now() >= deadline {
             return Err(Failure::Own("lune-mux did not listen in time".to_owned()));
@@ -1357,13 +1523,13 @@ async fn listened(
             {
                 ready_wait = None;
                 match outcome {
-                    Ok(ReadyLine::Matched | ReadyLine::Ended) => {},
+                    Ok(ReadyLine::Matched | ReadyLine::Ended) => {}
                     Ok(ReadyLine::Overflow) => {
                         log::say("lune-mux stdout passed its readiness byte limit");
-                    },
+                    }
                     Err(error) => {
                         log::say(&format!("lune-mux stdout readiness read failed: {error}"));
-                    },
+                    }
                 }
                 return Poll::Ready(Woke::Process);
             }
@@ -1375,7 +1541,7 @@ async fn listened(
                     Err(error) => {
                         log::say(&format!("lune-mux exit wait failed: {error}"));
                         ExitWait::Unavailable
-                    },
+                    }
                 };
                 return Poll::Ready(Woke::Process);
             }
@@ -1384,7 +1550,9 @@ async fn listened(
             }
             Poll::Pending
         });
-        let woke = tokio::time::timeout_at(until.into(), wait).await.unwrap_or(Woke::TimedOut);
+        let woke = tokio::time::timeout_at(until.into(), wait)
+            .await
+            .unwrap_or(Woke::TimedOut);
         if matches!(woke, Woke::Folder) {
             bind_retries = 0;
         }
@@ -1412,13 +1580,18 @@ impl Started {
                 log::say(&format!("lune-mux was not reaped: {error}"));
             }
         };
-        let thread = thread::Builder::new().name("lune-mux".to_owned()).spawn(reaping);
+        let thread = thread::Builder::new()
+            .name("lune-mux".to_owned())
+            .spawn(reaping);
         thread.map_err(|error| Failure::Own(format!("no thread to reap lune-mux: {error}")))?;
         let program = program();
         let mut command = Command::new(&program);
         command.arg(folder);
         in_no_terminal(&mut command);
-        command.current_dir("/").stdin(Stdio::null()).stdout(Stdio::piped());
+        command
+            .current_dir("/")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
         let spawned = command.spawn();
         let unstarted = |error| Failure::Own(format!("{}: {error}", program.display()));
         let mut child = spawned.map_err(unstarted)?;
@@ -1430,12 +1603,16 @@ impl Started {
     }
 
     fn reaped(self) {
-        self.reaper.send(self.child).expect("the thread waits for the server to reap");
+        self.reaper
+            .send(self.child)
+            .expect("the thread waits for the server to reap");
     }
 
     fn given_up(mut self, why: Failure) -> Failure {
         if let Err(error) = self.child.kill() {
-            log::say(&format!("luned gave up, as {why}, and did not kill it: {error}"));
+            log::say(&format!(
+                "luned gave up, as {why}, and did not kill it: {error}"
+            ));
         }
         self.reaped();
         why
@@ -1461,12 +1638,18 @@ mod tests {
 
     #[test]
     fn luned_refuses_to_stop_a_lune_mux_whose_socket_leads_back_to_it() {
-        let itself = Unmatched { pid: Some(rustix::process::getpid()), build: None };
+        let itself = Unmatched {
+            pid: Some(rustix::process::getpid()),
+            build: None,
+        };
         let refused = stop_blocking(&itself);
         let Err(Failure::Own(why)) = refused else {
             panic!("luned stops itself: {refused:?}");
         };
-        assert!(why.ends_with("its socket leads back to luned itself"), "{why}");
+        assert!(
+            why.ends_with("its socket leads back to luned itself"),
+            "{why}"
+        );
     }
 
     #[test]
@@ -1489,7 +1672,9 @@ mod tests {
         let taken = listener.accept();
         assert!(taken.is_err(), "a channel kept takes no connection more");
         drop(accepted);
-        lune_waits::eventually("luned sees its connection go", || first.gone.is().then_some(()));
+        lune_waits::eventually("luned sees its connection go", || {
+            first.gone.is().then_some(())
+        });
         let _fresh = matched();
         lune_waits::eventually("luned connects again", || listener.accept().ok());
     }
@@ -1501,7 +1686,10 @@ mod tests {
         ours.set_nonblocking(true).unwrap();
         let gone = Gone::default();
         let stream = UnixStream::from_std(ours).unwrap();
-        let tracked = Tracked { stream, gone: gone.clone() };
+        let tracked = Tracked {
+            stream,
+            gone: gone.clone(),
+        };
         assert!(!gone.is(), "a connection held is not gone");
         drop(tracked);
         assert!(gone.is(), "a connection let go of without a word is gone");
@@ -1518,7 +1706,9 @@ mod tests {
             panic!("lune-mux is not matched");
         };
         let server = Server::matched(matched);
-        let held = ASKED.try_acquire_many(u32::try_from(ASKED_MAX).unwrap()).unwrap();
+        let held = ASKED
+            .try_acquire_many(u32::try_from(ASKED_MAX).unwrap())
+            .unwrap();
         let asked = server.ask(|mut client| async move { client.list(api::ListRequest {}).await });
         let Err(refused) = asked else {
             panic!("a question past the most is asked");
@@ -1526,7 +1716,10 @@ mod tests {
         assert_eq!(refused.code(), Code::ResourceExhausted, "{refused:?}");
         let said = format!("at most {ASKED_MAX} questions");
         assert!(refused.message().contains(&said), "{}", refused.message());
-        assert!(!server.gone.is(), "a question refused here leaves the channel");
+        assert!(
+            !server.gone.is(),
+            "a question refused here leaves the channel"
+        );
         drop(held);
     }
 
@@ -1534,13 +1727,25 @@ mod tests {
     fn only_a_watch_that_says_it_emptied_is_heard_as_emptied() {
         use api::watched::{Emptied, Ended, Is, Unreached, ended::Why};
         let since = Instant::now();
-        let ended = |why| Some(api::Watched { is: Some(Is::Ended(Ended { why })) });
+        let ended = |why| {
+            Some(api::Watched {
+                is: Some(Is::Ended(Ended { why })),
+            })
+        };
         let emptied = heard(ended(Some(Why::Emptied(Emptied {}))), since);
-        assert!(matches!(emptied, Ok(Heard::Ended(Followed::Emptied { since: at })) if at == since));
+        assert!(
+            matches!(emptied, Ok(Heard::Ended(Followed::Emptied { since: at })) if at == since)
+        );
         let why = "/run/lune/mux.sock is gone".to_owned();
-        let lost = heard(ended(Some(Why::Unreached(Unreached { why: why.clone() }))), since);
+        let lost = heard(
+            ended(Some(Why::Unreached(Unreached { why: why.clone() }))),
+            since,
+        );
         assert!(matches!(lost, Ok(Heard::Ended(Followed::Lost(said))) if said == why));
-        assert!(matches!(heard(None, since), Err(Failure::Own(_))), "a watch that just ends");
+        assert!(
+            matches!(heard(None, since), Err(Failure::Own(_))),
+            "a watch that just ends"
+        );
         assert!(matches!(heard(ended(None), since), Err(Failure::Unread(_))));
         let silent = heard(Some(api::Watched { is: None }), since);
         assert!(matches!(silent, Err(Failure::Unread(_))));
@@ -1549,20 +1754,39 @@ mod tests {
     #[test]
     fn a_shell_listed_that_does_not_read_is_left_out_alone() {
         use api::ran::{Going, Is as Said, Ready, Stopped};
-        let since = Some(prost_types::Timestamp { seconds: 90, nanos: 0 });
+        let since = Some(prost_types::Timestamp {
+            seconds: 90,
+            nanos: 0,
+        });
         let working = api::Front::Working.into();
-        let unsaid = Going { command: None, since, front: working };
+        let unsaid = Going {
+            command: None,
+            since,
+            front: working,
+        };
         let said = |is| Some(api::Ran { is: Some(is) });
         let shells = [
             said(Said::Ready(Ready {})),
             None,
-            said(Said::Going(Going { front: api::Front::Unspecified.into(), ..unsaid.clone() })),
-            said(Said::Going(Going { command: Some(String::new()), ..unsaid.clone() })),
-            said(Said::Stopped(Stopped { command: Some("vim".to_owned()), at: None })),
+            said(Said::Going(Going {
+                front: api::Front::Unspecified.into(),
+                ..unsaid.clone()
+            })),
+            said(Said::Going(Going {
+                command: Some(String::new()),
+                ..unsaid.clone()
+            })),
+            said(Said::Stopped(Stopped {
+                command: Some("vim".to_owned()),
+                at: None,
+            })),
             Some(api::Ran { is: None }),
             said(Said::Going(unsaid)),
         ];
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let listed = (1..).zip(shells).map(|(id, ran)| api::Terminal {
             key: Some(api::TerminalKey { id, made_at }),
             cwd: "/w".to_owned(),
@@ -1575,7 +1799,11 @@ mod tests {
             ..api::Terminal::default()
         });
         let (terminals, unread, unsaid) = super::terminals(listed.collect());
-        assert_eq!((terminals.len(), unread.len(), unsaid.len()), (7, 0, 4), "{unsaid:?}");
+        assert_eq!(
+            (terminals.len(), unread.len(), unsaid.len()),
+            (7, 0, 4),
+            "{unsaid:?}"
+        );
         let doings: Vec<(u32, Option<&Doing>)> = terminals
             .iter()
             .map(|(key, terminal)| match &terminal.is {
@@ -1590,12 +1818,18 @@ mod tests {
         };
         let unread = [(3, None), (4, None), (5, None), (6, None)];
         let read = [(1, Some(&Doing::Ready)), (2, None)];
-        assert_eq!(doings, [&read[..], &unread[..], &[(7, Some(&going))]].concat());
+        assert_eq!(
+            doings,
+            [&read[..], &unread[..], &[(7, Some(&going))]].concat()
+        );
     }
 
     #[test]
     fn a_terminal_listed_twice_or_with_no_key_is_left_out() {
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let ended = Some(api::terminal::Program::Ended(api::Exit::default()));
         let terminal = |id| api::Terminal {
             key: Some(api::TerminalKey { id, made_at }),
@@ -1606,8 +1840,14 @@ mod tests {
         let listed = vec![
             terminal(1),
             terminal(1),
-            api::Terminal { key: None, ..terminal(2) },
-            api::Terminal { program: None, ..terminal(3) },
+            api::Terminal {
+                key: None,
+                ..terminal(2)
+            },
+            api::Terminal {
+                program: None,
+                ..terminal(3)
+            },
             terminal(4),
         ];
         let (terminals, unread, unsaid) = super::terminals(listed);
@@ -1618,7 +1858,10 @@ mod tests {
 
     #[test]
     fn malformed_cwd_warns_and_parses_to_none() {
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let ended = Some(api::terminal::Program::Ended(api::Exit::default()));
         let terminal = |id, cwd: &str| api::Terminal {
             key: Some(api::TerminalKey { id, made_at }),
@@ -1645,7 +1888,10 @@ mod tests {
     fn malformed_duplicate_and_excess_program_statuses_are_reported() {
         use api::program_status::Phase;
 
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let running = Some(api::terminal::Program::Runs(api::Running {
             pid: 70,
             foreground: None,
@@ -1702,7 +1948,10 @@ mod tests {
             key: Some(api::TerminalKey { id: 2, made_at }),
             cwd: "/w".to_owned(),
             program: running,
-            statuses: Some(api::ProgramStatuses { root: None, children: excess_children }),
+            statuses: Some(api::ProgramStatuses {
+                root: None,
+                children: excess_children,
+            }),
             ..api::Terminal::default()
         };
         let ended_non_terminal = api::Terminal {
@@ -1729,7 +1978,10 @@ mod tests {
 
     #[test]
     fn malformed_terminal_resumes_warns_without_dropping_terminal() {
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let missing_chosen = api::Terminal {
             key: Some(api::TerminalKey { id: 1, made_at }),
             cwd: "/w".to_owned(),
@@ -1737,7 +1989,10 @@ mod tests {
                 pid: 70,
                 foreground: None,
                 ran: None,
-                resumes: Some(api::TerminalResumes { chosen: None, others: Vec::new() }),
+                resumes: Some(api::TerminalResumes {
+                    chosen: None,
+                    others: Vec::new(),
+                }),
             })),
             ..api::Terminal::default()
         };
@@ -1754,12 +2009,39 @@ mod tests {
 
     #[test]
     fn a_foreground_with_invalid_pid_or_empty_argv_is_left_out_with_a_warning() {
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let listed = [
-            (1, Some(api::Foreground { pid: 0, argv: vec!["sh".to_owned()] })),
-            (2, Some(api::Foreground { pid: 1, argv: vec!["sh".to_owned()] })),
-            (3, Some(api::Foreground { pid: 42, argv: Vec::new() })),
-            (4, Some(api::Foreground { pid: 42, argv: vec!["sh".to_owned()] })),
+            (
+                1,
+                Some(api::Foreground {
+                    pid: 0,
+                    argv: vec!["sh".to_owned()],
+                }),
+            ),
+            (
+                2,
+                Some(api::Foreground {
+                    pid: 1,
+                    argv: vec!["sh".to_owned()],
+                }),
+            ),
+            (
+                3,
+                Some(api::Foreground {
+                    pid: 42,
+                    argv: Vec::new(),
+                }),
+            ),
+            (
+                4,
+                Some(api::Foreground {
+                    pid: 42,
+                    argv: vec!["sh".to_owned()],
+                }),
+            ),
         ]
         .into_iter()
         .map(|(id, foreground)| api::Terminal {
@@ -1774,7 +2056,11 @@ mod tests {
             ..api::Terminal::default()
         });
         let (terminals, unread, unsaid) = super::terminals(listed.collect());
-        assert_eq!((terminals.len(), unread.len(), unsaid.len()), (4, 0, 3), "{unsaid:?}");
+        assert_eq!(
+            (terminals.len(), unread.len(), unsaid.len()),
+            (4, 0, 3),
+            "{unsaid:?}"
+        );
         let fronts: Vec<Option<u32>> = terminals
             .iter()
             .map(|(key, terminal)| match &terminal.is {

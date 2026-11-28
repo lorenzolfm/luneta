@@ -62,7 +62,11 @@ impl Sayings {
         };
         self.numbered += 1;
         let say = Some(api::Say { does: Some(does) });
-        let saying = api::Saying { pid: std::process::id(), number: self.numbered, say };
+        let saying = api::Saying {
+            pid: std::process::id(),
+            number: self.numbered,
+            say,
+        };
         self.kept.push_back((at, saying));
         if self.kept.len() > KEPT {
             self.kept.pop_front();
@@ -108,7 +112,9 @@ mod tests {
     use super::*;
 
     fn does(text: &str) -> Does {
-        Does::InTurn(api::Utterance { text: text.to_owned() })
+        Does::InTurn(api::Utterance {
+            text: text.to_owned(),
+        })
     }
 
     fn said(text: &str) -> ToSay {
@@ -116,7 +122,9 @@ mod tests {
     }
 
     fn texts(sayings: &[api::Saying]) -> Vec<&str> {
-        let does = sayings.iter().filter_map(|saying| saying.say.as_ref()?.does.as_ref());
+        let does = sayings
+            .iter()
+            .filter_map(|saying| saying.say.as_ref()?.does.as_ref());
         does.map(|does| match does {
             Does::InTurn(utterance) | Does::Now(utterance) => utterance.text.as_str(),
             Does::Stop(()) => "stop",
@@ -145,9 +153,15 @@ mod tests {
         sayings.take(said("early"), at);
         sayings.take(said("late"), at + Duration::from_mins(1));
         assert_eq!(texts(&sayings.fresh(at + STALE)), ["early", "late"]);
-        assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
+        assert_eq!(
+            texts(&sayings.fresh(at + STALE + Duration::from_secs(1))),
+            ["late"]
+        );
         assert_eq!(texts(&sayings.fresh(at + Duration::from_hours(2))), [""; 0]);
-        assert_eq!(texts(&sayings.fresh(SystemTime::UNIX_EPOCH)), ["early", "late"]);
+        assert_eq!(
+            texts(&sayings.fresh(SystemTime::UNIX_EPOCH)),
+            ["early", "late"]
+        );
 
         sayings.prune(SystemTime::UNIX_EPOCH);
         assert!(!sayings.is_empty());
@@ -155,7 +169,10 @@ mod tests {
 
         sayings.prune(at + STALE + Duration::from_secs(1));
         assert!(!sayings.is_empty());
-        assert_eq!(texts(&sayings.fresh(at + STALE + Duration::from_secs(1))), ["late"]);
+        assert_eq!(
+            texts(&sayings.fresh(at + STALE + Duration::from_secs(1))),
+            ["late"]
+        );
 
         sayings.prune(at + Duration::from_hours(2));
         assert!(sayings.is_empty());

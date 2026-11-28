@@ -57,7 +57,11 @@ impl Pin {
         let data = set(data)
             .or_else(|| set(home).map(|home| home.join(".local").join("share")))
             .ok_or("neither XDG_DATA_HOME nor HOME is set to an absolute path")?;
-        Ok(data.join("lune").join("models").join(self.sha256).join(self.file))
+        Ok(data
+            .join("lune")
+            .join("models")
+            .join(self.sha256)
+            .join(self.file))
     }
 
     fn whole(&self, path: &Path) -> bool {
@@ -66,7 +70,8 @@ impl Pin {
 }
 
 pub fn fetched(pins: &[Pin]) -> bool {
-    pins.iter().all(|pin| pin.path().is_ok_and(|path| pin.whole(&path)))
+    pins.iter()
+        .all(|pin| pin.path().is_ok_and(|path| pin.whole(&path)))
 }
 
 pub const fn bytes(pins: &[Pin]) -> u64 {
@@ -88,7 +93,10 @@ pub fn fetch(
     let events = Mutex::new(events.clone());
     Asking::on_thread(move |wanted| {
         let tell = |got: u64| {
-            let _ = events.lock().unwrap_or_else(PoisonError::into_inner).send(event(Fetched::Got(got)));
+            let _ = events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send(event(Fetched::Got(got)));
         };
         due.pay(useful().and_then(|()| all(pins, wanted, &tell)));
     })
@@ -126,7 +134,7 @@ fn fetching(pin: &Pin, wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(
             Ok(()) => {
                 locked = true;
                 break;
-            },
+            }
             Err(TryLockError::WouldBlock) => {
                 report();
                 if Instant::now() >= lock_deadline {
@@ -135,10 +143,10 @@ fn fetching(pin: &Pin, wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(
                 if !wanted.wait_for(PROGRESS) {
                     return Err("given up".to_owned());
                 }
-            },
+            }
             Err(TryLockError::Error(error)) => {
                 return Err(format!("the model takes no lock: {error}"));
-            },
+            }
         }
     }
     if !locked {
@@ -151,9 +159,18 @@ fn fetching(pin: &Pin, wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(
         Ok(())
     } else {
         let mut curl = Command::new("curl");
-        curl.args(["--fail", "--location", "--silent", "--show-error", "--retry", "3"]);
+        curl.args([
+            "--fail",
+            "--location",
+            "--silent",
+            "--show-error",
+            "--retry",
+            "3",
+        ]);
         curl.arg("--output").arg(&part).arg(pin.url);
-        let held = lock.try_clone().map_err(|error| format!("the model takes no lock: {error}"))?;
+        let held = lock
+            .try_clone()
+            .map_err(|error| format!("the model takes no lock: {error}"))?;
         let ran = thread::scope(|scope| {
             let (done, finished) = mpsc::sync_channel(1);
             let _progress = thread::Builder::new()
@@ -168,10 +185,10 @@ fn fetching(pin: &Pin, wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(
                 })?;
             let ran = program::run_while_reading(&mut curl, FETCH, wanted, Stdio::from(held));
             match done.try_send(()) {
-                Ok(()) | Err(TrySendError::Disconnected(())) => {},
+                Ok(()) | Err(TrySendError::Disconnected(())) => {}
                 Err(TrySendError::Full(())) => {
                     unreachable!("fetch progress channel takes one done message");
-                },
+                }
             }
             ran
         });
@@ -192,9 +209,14 @@ fn fetching(pin: &Pin, wanted: &Wanted, tell: &(dyn Fn(u64) + Sync)) -> Result<(
 }
 
 fn check(pin: &Pin, file: &Path, wanted: &Wanted) -> Result<(), String> {
-    let bytes = fs::metadata(file).map_err(|error| format!("the model is gone: {error}"))?.len();
+    let bytes = fs::metadata(file)
+        .map_err(|error| format!("the model is gone: {error}"))?
+        .len();
     if bytes != pin.bytes {
-        return Err(format!("{} came {bytes} bytes long, and not {}", pin.file, pin.bytes));
+        return Err(format!(
+            "{} came {bytes} bytes long, and not {}",
+            pin.file, pin.bytes
+        ));
     }
     let mut sum = Command::new(SUM[0]);
     sum.args(&SUM[1..]).arg(file);
@@ -205,7 +227,10 @@ fn check(pin: &Pin, file: &Path, wanted: &Wanted) -> Result<(), String> {
         .map_err(|why| format!("{}: {why}", SUM[0]))?;
     match String::from_utf8_lossy(&said).split_whitespace().next() {
         Some(sum) if sum == pin.sha256 => Ok(()),
-        _ => Err(format!("the {} that came is not lune's pin: its SHA-256 differs", pin.file)),
+        _ => Err(format!(
+            "the {} that came is not lune's pin: its SHA-256 differs",
+            pin.file
+        )),
     }
 }
 
@@ -213,7 +238,12 @@ fn check(pin: &Pin, file: &Path, wanted: &Wanted) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const PIN: Pin = Pin { file: "model.gguf", url: "", bytes: 1024, sha256: "abc" };
+    const PIN: Pin = Pin {
+        file: "model.gguf",
+        url: "",
+        bytes: 1024,
+        sha256: "abc",
+    };
 
     #[test]
     fn a_file_is_kept_where_xdg_data_home_says_or_under_home() {

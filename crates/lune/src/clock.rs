@@ -9,7 +9,10 @@ pub struct Moment {
 impl Moment {
     #[must_use]
     pub fn now() -> Moment {
-        Moment { system: SystemTime::now(), steady: Instant::now() }
+        Moment {
+            system: SystemTime::now(),
+            steady: Instant::now(),
+        }
     }
 }
 
@@ -24,7 +27,10 @@ mod arithmetic {
         type Output = Moment;
 
         fn add(self, by: Duration) -> Moment {
-            Moment { system: self.system + by, steady: self.steady + by }
+            Moment {
+                system: self.system + by,
+                steady: self.steady + by,
+            }
         }
     }
 
@@ -33,8 +39,14 @@ mod arithmetic {
 
         fn sub(self, by: Duration) -> Moment {
             Moment {
-                system: self.system.checked_sub(by).expect("system time does not underflow"),
-                steady: self.steady.checked_sub(by).expect("steady time does not underflow"),
+                system: self
+                    .system
+                    .checked_sub(by)
+                    .expect("system time does not underflow"),
+                steady: self
+                    .steady
+                    .checked_sub(by)
+                    .expect("steady time does not underflow"),
             }
         }
     }

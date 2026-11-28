@@ -32,35 +32,53 @@ pub fn run(action: Action, folder: &Path) -> ExitCode {
         Err(unreached) => {
             eprintln!("lune: {unreached}");
             return unreached.exit_code();
-        },
+        }
     };
     match action {
         Action::Rules => unreachable!("handled above"),
         Action::Reload => {
             let response = tasks.block_on(async {
-                daemon.reload_resume(luned::ANSWER, ReloadResumeRequest { on: None }).await
+                daemon
+                    .reload_resume(luned::ANSWER, ReloadResumeRequest { on: None })
+                    .await
             });
             match response {
                 Ok(reply) => print_reload(&reply),
                 Err(error) => {
-                    eprintln!("lune: {}: {}", folder.join(SOCKET).display(), causes(&error));
+                    eprintln!(
+                        "lune: {}: {}",
+                        folder.join(SOCKET).display(),
+                        causes(&error)
+                    );
                     ExitCode::FAILURE
-                },
+                }
             }
-        },
+        }
         Action::List { terminal } => {
             let terminal_id = terminal.map(NonZeroU32::get);
             let response = tasks.block_on(async {
-                daemon.list_resume(luned::ANSWER, ListResumeRequest { on: None, terminal_id }).await
+                daemon
+                    .list_resume(
+                        luned::ANSWER,
+                        ListResumeRequest {
+                            on: None,
+                            terminal_id,
+                        },
+                    )
+                    .await
             });
             match response {
                 Ok(reply) => print_list(&reply, terminal),
                 Err(error) => {
-                    eprintln!("lune: {}: {}", folder.join(SOCKET).display(), causes(&error));
+                    eprintln!(
+                        "lune: {}: {}",
+                        folder.join(SOCKET).display(),
+                        causes(&error)
+                    );
                     ExitCode::FAILURE
-                },
+                }
             }
-        },
+        }
     }
 }
 
@@ -87,19 +105,22 @@ fn print_reload(response: &ReloadResumeResponse) -> ExitCode {
         Some(api::reload_resume_response::Outcome::ReloadedRules(active_rules)) => {
             println!("reloaded resume rules ({active_rules} active)");
             ExitCode::SUCCESS
-        },
+        }
         Some(api::reload_resume_response::Outcome::Failed(failed)) => {
             let note = match failed.kept_previous_rules {
                 Some(kept) => format!(" (kept {kept} previous active rule(s))"),
                 None => " (program resume disabled)".to_owned(),
             };
-            eprintln!("lune: reload failed: {}{note}", escape_for_display(&failed.error));
+            eprintln!(
+                "lune: reload failed: {}{note}",
+                escape_for_display(&failed.error)
+            );
             ExitCode::FAILURE
-        },
+        }
         None => {
             eprintln!("lune: luned returned a reload_resume response without an outcome");
             ExitCode::FAILURE
-        },
+        }
     }
 }
 
@@ -111,11 +132,11 @@ fn print_list(response: &ListResumeResponse, terminal: Option<NonZeroU32>) -> Ex
                 return ExitCode::FAILURE;
             }
             ExitCode::SUCCESS
-        },
+        }
         Err(why) => {
             eprintln!("lune: luned returned a malformed resume listing: {why}");
             ExitCode::FAILURE
-        },
+        }
     }
 }
 
@@ -131,12 +152,15 @@ fn format_rules(
     let (rules, disabled): (&[ResumeRuleInfo], &[DisabledRuleInfo]) = match config {
         api::list_resume_response::Config::Loaded(loaded) => {
             (loaded.rules.as_slice(), loaded.disabled_rules.as_slice())
-        },
+        }
         api::list_resume_response::Config::Error(error) => {
-            let _ =
-                writeln!(out, "error: {} (program resume disabled)", escape_for_display(error));
+            let _ = writeln!(
+                out,
+                "error: {} (program resume disabled)",
+                escape_for_display(error)
+            );
             (&[], &[])
-        },
+        }
     };
     for warning in warnings {
         let _ = writeln!(out, "warning: {}", escape_for_display(warning));
@@ -151,7 +175,11 @@ fn format_rules(
             let cmd = escape_for_display(&rule.command);
             let _ = write!(out, "  {name} [{origin}]: {cmd}");
             if let Some(flags) = &rule.flags {
-                let _ = write!(out, "  (flags: {} kept, {} dropped)", flags.kept, flags.dropped);
+                let _ = write!(
+                    out,
+                    "  (flags: {} kept, {} dropped)",
+                    flags.kept, flags.dropped
+                );
             }
             out.push('\n');
             if !rule.dirs.is_empty() {
@@ -159,8 +187,11 @@ fn format_rules(
                 let _ = writeln!(out, "    dirs: {}", dirs.join(", "));
             }
             if !rule.overrides.is_empty() {
-                let overrides: Vec<String> =
-                    rule.overrides.iter().map(|o| escape_for_display(o)).collect();
+                let overrides: Vec<String> = rule
+                    .overrides
+                    .iter()
+                    .map(|o| escape_for_display(o))
+                    .collect();
                 let _ = writeln!(out, "    overrides: {}", overrides.join(", "));
             }
         }
@@ -194,10 +225,13 @@ fn format_list(
     let active_rules = match config {
         api::list_resume_response::Config::Loaded(loaded) => loaded.rules.len(),
         api::list_resume_response::Config::Error(error) => {
-            let _ =
-                writeln!(out, "error: {} (program resume disabled)", escape_for_display(error));
+            let _ = writeln!(
+                out,
+                "error: {} (program resume disabled)",
+                escape_for_display(error)
+            );
             0
-        },
+        }
     };
     for warning in &response.config_warnings {
         let _ = writeln!(out, "warning: {}", escape_for_display(warning));
@@ -220,7 +254,11 @@ fn format_list(
 }
 
 fn format_terminal(out: &mut String, entry: &TerminalResumeRecords) -> Result<(), String> {
-    let label = match entry.owner.as_ref().ok_or_else(|| "terminal entry missing owner".to_owned())? {
+    let label = match entry
+        .owner
+        .as_ref()
+        .ok_or_else(|| "terminal entry missing owner".to_owned())?
+    {
         api::terminal_resume_records::Owner::Layout(layout) => match &layout.terminal {
             Some(key) => format!("terminal {}", key.id),
             None => format!("view {}", layout.view_id),
@@ -245,7 +283,7 @@ fn format_record(out: &mut String, record: &ResumeRecordInfo) -> Result<(), Stri
         Ok(ResumeRecordSource::Synthesized) => "synthesized",
         Ok(ResumeRecordSource::Unspecified) | Err(_) => {
             return Err("resume record has unspecified source".to_owned());
-        },
+        }
     };
     let placement = match ResumePlacement::try_from(record.placement) {
         Ok(ResumePlacement::Root) => ResumePlacement::Root,
@@ -253,7 +291,7 @@ fn format_record(out: &mut String, record: &ResumeRecordInfo) -> Result<(), Stri
         Ok(ResumePlacement::Wrapped) => ResumePlacement::Wrapped,
         Ok(ResumePlacement::Unspecified) | Err(_) => {
             return Err("resume record has unspecified placement".to_owned());
-        },
+        }
     };
     let persistence = match ResumePersistence::try_from(record.persistence) {
         Ok(ResumePersistence::Unsaved) => ResumePersistence::Unsaved,
@@ -261,7 +299,7 @@ fn format_record(out: &mut String, record: &ResumeRecordInfo) -> Result<(), Stri
         Ok(ResumePersistence::Tried) => ResumePersistence::Tried,
         Ok(ResumePersistence::Unspecified) | Err(_) => {
             return Err("resume record has unspecified persistence".to_owned());
-        },
+        }
     };
     let trust = format_verdict(record.verdict.as_ref())?;
     let mut tags = Vec::new();
@@ -269,17 +307,17 @@ fn format_record(out: &mut String, record: &ResumeRecordInfo) -> Result<(), Stri
         tags.push("chosen");
     }
     match persistence {
-        ResumePersistence::Unsaved => {},
+        ResumePersistence::Unsaved => {}
         ResumePersistence::Saved => tags.push("saved"),
         ResumePersistence::Tried => {
             tags.push("saved");
             tags.push("tried");
-        },
+        }
         ResumePersistence::Unspecified => unreachable!("validated above"),
     }
     match placement {
         ResumePlacement::Root => tags.push("root"),
-        ResumePlacement::ShellHosted => {},
+        ResumePlacement::ShellHosted => {}
         ResumePlacement::Wrapped => tags.push("wrapped"),
         ResumePlacement::Unspecified => unreachable!("validated above"),
     }
@@ -313,7 +351,7 @@ fn format_verdict(verdict: Option<&api::resume_record_info::Verdict>) -> Result<
                 return Err("trusted resume record has empty rule name".to_owned());
             }
             Ok(format!("trusted (rule {})", escape_for_display(rule)))
-        },
+        }
         api::resume_record_info::Verdict::Untrusted(untrusted) => match untrusted
             .detail
             .as_ref()
@@ -322,7 +360,7 @@ fn format_verdict(verdict: Option<&api::resume_record_info::Verdict>) -> Result<
             api::resume_record_info::untrusted::Detail::Global(raw) => {
                 let reason = format_global_reason(*raw)?;
                 Ok(format!("untrusted ({reason})"))
-            },
+            }
             api::resume_record_info::untrusted::Detail::ByRule(rejected) => {
                 if rejected.rule.is_empty() {
                     return Err("rule-rejected resume record has empty rule name".to_owned());
@@ -332,7 +370,7 @@ fn format_verdict(verdict: Option<&api::resume_record_info::Verdict>) -> Result<
                     "untrusted ({reason}, rule {})",
                     escape_for_display(&rejected.rule)
                 ))
-            },
+            }
         },
     }
 }
@@ -358,7 +396,7 @@ fn format_global_reason(raw: i32) -> Result<&'static str, String> {
         Ok(GlobalTrustReason::NoRule) => Ok("no_rule"),
         Ok(GlobalTrustReason::Unspecified) | Err(_) => {
             Err("resume record has unspecified global trust reason".to_owned())
-        },
+        }
     }
 }
 
@@ -373,7 +411,7 @@ fn format_rule_reason(raw: i32) -> Result<&'static str, String> {
         Ok(RuleTrustReason::DirNotAllowed) => Ok("dir_not_allowed"),
         Ok(RuleTrustReason::Unspecified) | Err(_) => {
             Err("resume record has unspecified rule trust reason".to_owned())
-        },
+        }
     }
 }
 
@@ -387,15 +425,20 @@ mod tests {
         let response = ListResumeResponse {
             config_path: Some("/home/u/.config/lune/config.toml".to_owned()),
             config_warnings: vec!["bad\x1b[31mwarn".to_owned()],
-            config: Some(api::list_resume_response::Config::Loaded(LoadedResumeConfig {
-                rules: Vec::new(),
-                disabled_rules: Vec::new(),
-            })),
+            config: Some(api::list_resume_response::Config::Loaded(
+                LoadedResumeConfig {
+                    rules: Vec::new(),
+                    disabled_rules: Vec::new(),
+                },
+            )),
             terminals: vec![TerminalResumeRecords {
                 owner: Some(api::terminal_resume_records::Owner::Layout(
                     api::terminal_resume_records::LayoutTerminal {
                         view_id: 7,
-                        terminal: Some(TerminalKey { id: 3, made_at: None }),
+                        terminal: Some(TerminalKey {
+                            id: 3,
+                            made_at: None,
+                        }),
                     },
                 )),
                 folder: "/tmp/dir\u{202e}spoof".to_owned(),
@@ -433,10 +476,16 @@ mod tests {
         assert!(!rendered.contains('\x1b'), "raw ESC leaked: {rendered:?}");
         assert!(!rendered.contains('\x07'), "raw BEL leaked: {rendered:?}");
         assert!(!rendered.contains('\r'), "raw CR leaked: {rendered:?}");
-        assert!(!rendered.contains('\u{202e}'), "raw RLO bidi override leaked: {rendered:?}");
+        assert!(
+            !rendered.contains('\u{202e}'),
+            "raw RLO bidi override leaked: {rendered:?}"
+        );
         assert!(rendered.contains("\\x1b"), "{rendered}");
         assert!(rendered.contains("\\u{202e}"), "{rendered}");
-        assert!(rendered.contains("untrusted (dir_not_allowed, rule nvim)"), "{rendered}");
+        assert!(
+            rendered.contains("untrusted (dir_not_allowed, rule nvim)"),
+            "{rendered}"
+        );
         assert!(rendered.contains("[chosen, saved]"), "{rendered}");
     }
 
@@ -453,12 +502,16 @@ mod tests {
         let unspecified_source = ListResumeResponse {
             config_path: None,
             config_warnings: Vec::new(),
-            config: Some(api::list_resume_response::Config::Loaded(LoadedResumeConfig::default())),
+            config: Some(api::list_resume_response::Config::Loaded(
+                LoadedResumeConfig::default(),
+            )),
             terminals: vec![TerminalResumeRecords {
-                owner: Some(api::terminal_resume_records::Owner::Untracked(TerminalKey {
-                    id: 1,
-                    made_at: None,
-                })),
+                owner: Some(api::terminal_resume_records::Owner::Untracked(
+                    TerminalKey {
+                        id: 1,
+                        made_at: None,
+                    },
+                )),
                 folder: "/tmp".to_owned(),
                 records: vec![ResumeRecordInfo {
                     source: ResumeRecordSource::Unspecified.into(),
@@ -470,7 +523,9 @@ mod tests {
                     chosen: true,
                     persistence: ResumePersistence::Unsaved.into(),
                     reported_at: None,
-                    verdict: Some(api::resume_record_info::Verdict::TrustedRule("x".to_owned())),
+                    verdict: Some(api::resume_record_info::Verdict::TrustedRule(
+                        "x".to_owned(),
+                    )),
                 }],
             }],
         };

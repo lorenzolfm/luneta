@@ -80,7 +80,12 @@ struct Move {
 
 impl Move {
     fn to(inputs: Vec<Input>, until: Want, records: Option<Step>, settle: Duration) -> Move {
-        Move { inputs, until, records, settle }
+        Move {
+            inputs,
+            until,
+            records,
+            settle,
+        }
     }
 }
 
@@ -142,7 +147,11 @@ fn pi_extension() -> Result<Vec<String>, String> {
     let text = luned::pi_extension(&lune_folder()?).map_err(|error| error.to_string())?;
     fs::write(&file, text).map_err(|error| format!("{}: {error}", file.display()))?;
     let path = file.to_str().ok_or("the cache folder is not UTF-8")?;
-    Ok(vec!["--no-extensions".to_owned(), "--extension".to_owned(), path.to_owned()])
+    Ok(vec![
+        "--no-extensions".to_owned(),
+        "--extension".to_owned(),
+        path.to_owned(),
+    ])
 }
 
 fn lune_folder() -> Result<PathBuf, String> {
@@ -159,7 +168,12 @@ fn started() -> Move {
 
 fn prompted() -> Vec<Move> {
     vec![
-        Move::to(vec![Input::Line(STORY)], Want::Working, Some(Step::Prompt), seconds(1)),
+        Move::to(
+            vec![Input::Line(STORY)],
+            Want::Working,
+            Some(Step::Prompt),
+            seconds(1),
+        ),
         Move::to(vec![], Want::Done, Some(Step::Finish), seconds(5)),
     ]
 }
@@ -172,7 +186,12 @@ fn asked_and_rejected() -> Vec<Move> {
             Some(Step::Permission),
             seconds(2),
         ),
-        Move::to(vec![Input::Keys(ESC)], Want::Resting, Some(Step::Reject), seconds(2)),
+        Move::to(
+            vec![Input::Keys(ESC)],
+            Want::Resting,
+            Some(Step::Reject),
+            seconds(2),
+        ),
     ]
 }
 
@@ -191,12 +210,22 @@ fn asked(question: &'static str) -> Vec<Move> {
 fn interrupted() -> Vec<Move> {
     vec![
         Move::to(vec![Input::Line(COUNT)], Want::Working, None, seconds(3)),
-        Move::to(vec![Input::Keys(ESC)], Want::Resting, Some(Step::Interrupt), seconds(2)),
+        Move::to(
+            vec![Input::Keys(ESC)],
+            Want::Resting,
+            Some(Step::Interrupt),
+            seconds(2),
+        ),
     ]
 }
 
 fn exited(command: &'static str, records: bool) -> Move {
-    Move::to(vec![Input::Line(command)], Want::Ended, records.then_some(Step::Exit), seconds(1))
+    Move::to(
+        vec![Input::Line(command)],
+        Want::Ended,
+        records.then_some(Step::Exit),
+        seconds(1),
+    )
 }
 
 fn failed(
@@ -212,7 +241,12 @@ fn failed(
         env,
         moves: vec![
             Move::to(vec![], Want::Resting, None, seconds(2)),
-            Move::to(vec![Input::Line("Say hi.")], Want::Error, Some(Step::Error), seconds(3)),
+            Move::to(
+                vec![Input::Line("Say hi.")],
+                Want::Error,
+                Some(Step::Error),
+                seconds(3),
+            ),
             exited(exit, false),
         ],
     }
@@ -255,11 +289,22 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                         .join("sessions"),
                 )],
                 runs: vec![
-                    Run { reaches_model: true, model, args: asks.to_vec(), env: vec![], moves },
-                    failed(&[], vec!["--model", "claude-no-such-model-0"], vec![], "/exit"),
+                    Run {
+                        reaches_model: true,
+                        model,
+                        args: asks.to_vec(),
+                        env: vec![],
+                        moves,
+                    },
+                    failed(
+                        &[],
+                        vec!["--model", "claude-no-such-model-0"],
+                        vec![],
+                        "/exit",
+                    ),
                 ],
             }
-        },
+        }
         Harness::Pi => {
             let mut moves = vec![started()];
             moves.extend(prompted());
@@ -287,11 +332,17 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                 ],
                 files: vec![(Rung::Extension, lune_folder()?.join("pi"))],
                 runs: vec![
-                    Run { reaches_model: true, model, args: vec![], env: vec![], moves },
+                    Run {
+                        reaches_model: true,
+                        model,
+                        args: vec![],
+                        env: vec![],
+                        moves,
+                    },
                     failed(model, vec![], OFFLINE.to_vec(), "/quit"),
                 ],
             }
-        },
+        }
         Harness::Antigravity => {
             let mut moves = vec![started()];
             moves.extend(prompted());
@@ -319,11 +370,17 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                 ],
                 files: vec![(Rung::Hook, lune_folder()?.join("agy"))],
                 runs: vec![
-                    Run { reaches_model: true, model, args: asks.to_vec(), env: vec![], moves },
+                    Run {
+                        reaches_model: true,
+                        model,
+                        args: asks.to_vec(),
+                        env: vec![],
+                        moves,
+                    },
                     failed(model, asks.to_vec(), OFFLINE.to_vec(), "/quit"),
                 ],
             }
-        },
+        }
     })
 }
 
@@ -381,7 +438,7 @@ impl Sequences {
             0x07 => {
                 open.push(byte);
                 self.close();
-            },
+            }
             0x1b => self.escaped = true,
             _ if open.len() >= SEQUENCE_BYTES_MAX => self.open = None,
             _ => open.push(byte),
@@ -484,12 +541,23 @@ fn opened() -> io::Result<Pty> {
     rustix::pty::unlockpt(&near)?;
     let path = rustix::pty::ptsname(&near, Vec::new())?;
     let path = Path::new(OsStr::from_bytes(path.as_bytes()));
-    let far =
-        rustix::fs::open(path, OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty())?;
+    let far = rustix::fs::open(
+        path,
+        OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
     rustix::io::fcntl_setfd(&near, rustix::io::FdFlags::CLOEXEC)?;
-    let size = Winsize { ws_row: ROWS, ws_col: COLUMNS, ws_xpixel: 0, ws_ypixel: 0 };
+    let size = Winsize {
+        ws_row: ROWS,
+        ws_col: COLUMNS,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     termios::tcsetwinsize(&far, size)?;
-    Ok(Pty { near: File::from(near), far })
+    Ok(Pty {
+        near: File::from(near),
+        far,
+    })
 }
 
 #[expect(
@@ -556,14 +624,22 @@ impl Session {
                 continue;
             };
             let an_agents = name.starts_with("CLAUDE") && name != "CLAUDE_CONFIG_DIR";
-            let a_terminals = ["LUNE_MUX_", "TERM_PROGRAM", "TMUX", "ZELLIJ", "PI_PROGRAM_STATUS"]
-                .iter()
-                .any(|prefix| name.starts_with(prefix));
+            let a_terminals = [
+                "LUNE_MUX_",
+                "TERM_PROGRAM",
+                "TMUX",
+                "ZELLIJ",
+                "PI_PROGRAM_STATUS",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix));
             if an_agents || a_terminals {
                 command.env_remove(name);
             }
         }
-        command.env("TERM", "xterm-256color").env("COLORTERM", "truecolor");
+        command
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor");
         command.envs(run.env.iter().copied());
         let child = (|| {
             command.stdin(stdio()?).stdout(stdio()?).stderr(stdio()?);
@@ -583,21 +659,27 @@ impl Session {
                         if tell.send(buffer[..read].to_vec()).is_err() {
                             return;
                         }
-                    },
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                     Err(error) if error.raw_os_error() == Some(Errno::IO.raw_os_error()) => {
                         return;
-                    },
+                    }
                     Err(error) => {
                         eprintln!("{RECORDER}: reading the agent's terminal: {error}");
                         return;
-                    },
+                    }
                 }
             }
         });
         let side = |count| NonZeroU16::new(count).expect("the recorder's sides are not 0");
-        let screen = Screen::new(Size { columns: side(COLUMNS), rows: side(ROWS) }, 0)
-            .map_err(|error| format!("a screen: {error:?}"))?;
+        let screen = Screen::new(
+            Size {
+                columns: side(COLUMNS),
+                rows: side(ROWS),
+            },
+            0,
+        )
+        .map_err(|error| format!("a screen: {error:?}"))?;
         Ok(Session {
             agent: Running(child),
             near,
@@ -617,7 +699,9 @@ impl Session {
     }
 
     fn send(&mut self, bytes: &[u8]) -> Result<(), String> {
-        self.near.write_all(bytes).map_err(|error| format!("typing: {error}"))
+        self.near
+            .write_all(bytes)
+            .map_err(|error| format!("typing: {error}"))
     }
 
     fn pump(&mut self, until: Instant) -> Result<(), String> {
@@ -635,14 +719,14 @@ impl Session {
                         self.show(&bytes[from..end])?;
                         from = end;
                     }
-                },
+                }
                 Err(RecvTimeoutError::Disconnected) => self.ended = true,
                 Err(RecvTimeoutError::Timeout) => {
                     if self.answering {
                         self.answer_dialogs()?;
                     }
                     return Ok(());
-                },
+                }
             }
         }
     }
@@ -651,7 +735,10 @@ impl Session {
         if bytes.is_empty() {
             return Ok(());
         }
-        let written = self.screen.write(bytes).map_err(|error| format!("{error:?}"))?;
+        let written = self
+            .screen
+            .write(bytes)
+            .map_err(|error| format!("{error:?}"))?;
         if !written.answers.is_empty() {
             self.send(written.answers.bytes())?;
         }
@@ -668,7 +755,10 @@ impl Session {
     }
 
     fn answer_dialogs(&mut self) -> Result<(), String> {
-        let text = self.screen.dumped_text().map_err(|error| format!("the screen: {error:?}"))?;
+        let text = self
+            .screen
+            .dumped_text()
+            .map_err(|error| format!("the screen: {error:?}"))?;
         for (index, (shown, keys)) in self.dialogs.iter().enumerate() {
             if !self.answered[index] && text.contains(shown) {
                 self.answered[index] = true;
@@ -692,7 +782,9 @@ impl Session {
         while Instant::now() < until {
             let met = match want {
                 Want::Ended => self.has_ended(),
-                _ => self.phases[from..].iter().any(|phase| wanted(want, phase.as_ref())),
+                _ => self.phases[from..]
+                    .iter()
+                    .any(|phase| wanted(want, phase.as_ref())),
             };
             if met {
                 return Ok(true);
@@ -709,7 +801,7 @@ impl Session {
                     self.send(line.as_bytes())?;
                     self.pump(Instant::now() + TYPED_GAP)?;
                     self.send(b"\r")?;
-                },
+                }
                 Input::Keys(keys) => self.send(keys)?,
             }
         }
@@ -744,7 +836,10 @@ fn file_pid(folder: &Path, agent: u32) -> Result<Option<u32>, String> {
     for entry in entries {
         let entry = entry.map_err(|error| format!("{}: {error}", folder.display()))?;
         let path = entry.path();
-        let Some(pid) = path.file_stem().and_then(OsStr::to_str).and_then(|stem| stem.parse().ok())
+        let Some(pid) = path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .and_then(|stem| stem.parse().ok())
         else {
             continue;
         };
@@ -764,7 +859,10 @@ fn descends(pid: u32, from: u32) -> bool {
         let Ok(stat) = fs::read_to_string(format!("/proc/{at}/stat")) else {
             return false;
         };
-        let Some(parent) = stat.rsplit(')').next().and_then(|rest| rest.split_whitespace().nth(1))
+        let Some(parent) = stat
+            .rsplit(')')
+            .next()
+            .and_then(|rest| rest.split_whitespace().nth(1))
         else {
             return false;
         };
@@ -816,12 +914,17 @@ fn kept(value: &Value, keeps: &[(&str, Kept)]) -> Value {
                 .entry((*name).to_owned())
                 .or_insert_with(|| Value::Object(serde_json::Map::new()));
         }
-        at.as_object_mut().expect("a kept path ends in an object").insert((*last).to_owned(), said);
+        at.as_object_mut()
+            .expect("a kept path ends in an object")
+            .insert((*last).to_owned(), said);
     }
     for (path, keep) in keeps {
         if let Kept::As(with) = keep {
             let found = path.split('.').try_fold(&kept, |at, name| at.get(name));
-            assert!(found.is_none_or(|found| found.as_str() == Some(*with)), "{path} is replaced");
+            assert!(
+                found.is_none_or(|found| found.as_str() == Some(*with)),
+                "{path} is replaced"
+            );
         }
     }
     kept
@@ -851,17 +954,26 @@ struct Launch {
 impl Launch {
     fn of(harness: Harness, launcher: &[String]) -> Launch {
         match launcher {
-            [] => Launch { program: harness.program().to_owned(), args: vec![], picks_model: false },
-            [program, args @ ..] => {
-                Launch { program: program.clone(), args: args.to_vec(), picks_model: true }
+            [] => Launch {
+                program: harness.program().to_owned(),
+                args: vec![],
+                picks_model: false,
+            },
+            [program, args @ ..] => Launch {
+                program: program.clone(),
+                args: args.to_vec(),
+                picks_model: true,
             },
         }
     }
 
     fn command(&self, harness: Harness, run: &Run) -> Command {
         let launched = run.reaches_model && self.picks_model;
-        let mut command =
-            Command::new(if launched { self.program.as_str() } else { harness.program() });
+        let mut command = Command::new(if launched {
+            self.program.as_str()
+        } else {
+            harness.program()
+        });
         if launched {
             command.args(&self.args);
         } else {
@@ -910,7 +1022,10 @@ fn record(harness: Harness, launch: &Launch, cwd: &Path) -> Result<Recordings, S
         let until = Instant::now() + PATIENCE;
         let mut answered = None;
         while Instant::now() < until
-            && !session.phases.iter().any(|phase| wanted(first.until, phase.as_ref()))
+            && !session
+                .phases
+                .iter()
+                .any(|phase| wanted(first.until, phase.as_ref()))
         {
             session.pump(Instant::now() + TICK)?;
             if answered.is_none() && session.answered.iter().any(|answered| *answered) {
@@ -955,9 +1070,15 @@ fn record(harness: Harness, launch: &Launch, cwd: &Path) -> Result<Recordings, S
             let Some(records) = planned.records else {
                 continue;
             };
-            eprintln!("{RECORDER}: recorded {} at {:?}", records.name(), session.phase());
+            eprintln!(
+                "{RECORDER}: recorded {} at {:?}",
+                records.name(),
+                session.phase()
+            );
             if harness.osc_7501_app().is_some() {
-                recordings.osc_7501.insert(records.name().to_owned(), Value::String(sequences));
+                recordings
+                    .osc_7501
+                    .insert(records.name().to_owned(), Value::String(sequences));
             }
             for ((rung, folder, steps), pid) in recordings.files.iter_mut().zip(&pids) {
                 let Some(pid) = *pid else {
@@ -1007,7 +1128,10 @@ fn identifiers() -> Result<Vec<String>, String> {
 }
 
 fn refuse_identifiers(rung: Rung, text: &str, identifiers: &[String]) -> Result<(), String> {
-    match identifiers.iter().find(|identifier| text.contains(identifier.as_str())) {
+    match identifiers
+        .iter()
+        .find(|identifier| text.contains(identifier.as_str()))
+    {
         Some(found) => Err(format!(
             "the {} fixture holds {found:?}, which names this machine or its user, so nothing is written",
             rung.name()
@@ -1028,9 +1152,18 @@ fn write(harness: Harness, rung: Rung, text: &str) -> Result<(), String> {
 }
 
 fn run(named: &str, launcher: &[String]) -> Result<(), String> {
-    let Some(harness) = Harness::ALL.into_iter().find(|harness| harness.program() == named) else {
-        let known: Vec<&str> = Harness::ALL.iter().map(|harness| harness.program()).collect();
-        return Err(format!("{named:?} is no harness; say one of {}", known.join(", ")));
+    let Some(harness) = Harness::ALL
+        .into_iter()
+        .find(|harness| harness.program() == named)
+    else {
+        let known: Vec<&str> = Harness::ALL
+            .iter()
+            .map(|harness| harness.program())
+            .collect();
+        return Err(format!(
+            "{named:?} is no harness; say one of {}",
+            known.join(", ")
+        ));
     };
     let launch = Launch::of(harness, launcher);
     let agent = format!("{} {}", harness.program(), launch.version()?);
@@ -1053,7 +1186,10 @@ fn run(named: &str, launcher: &[String]) -> Result<(), String> {
     removed?;
     let mut fixtures = Vec::with_capacity(recordings.files.len() + 1);
     if harness.osc_7501_app().is_some() {
-        fixtures.push((Rung::Osc7501, fixture_text(&agent, &on, &recordings.osc_7501)?));
+        fixtures.push((
+            Rung::Osc7501,
+            fixture_text(&agent, &on, &recordings.osc_7501)?,
+        ));
     }
     for (rung, _, steps) in &recordings.files {
         fixtures.push((*rung, fixture_text(&agent, &on, steps)?));
@@ -1073,17 +1209,17 @@ fn main() -> ExitCode {
         [named] => (named, &[][..]),
         [named, dashes, launcher @ ..] if dashes == "--" && !launcher.is_empty() => {
             (named, launcher)
-        },
+        }
         _ => {
             eprintln!("usage: {RECORDER} <harness> [-- <launcher> [args...]]");
             return ExitCode::from(2);
-        },
+        }
     };
     match run(named, launcher) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             eprintln!("{RECORDER}: {why}");
             ExitCode::FAILURE
-        },
+        }
     }
 }

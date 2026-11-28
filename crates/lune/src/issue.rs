@@ -4,8 +4,8 @@ use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use luned::issues::{self, Filed, Filing, OnGitHub, Remote, Unfiled};
 use luned::Directory;
+use luned::issues::{self, Filed, Filing, OnGitHub, Remote, Unfiled};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -66,7 +66,11 @@ pub enum Keyed {
 enum Stage {
     Listing,
     Nowhere(String),
-    Found { remotes: Vec<Remote>, at: usize, picking: bool },
+    Found {
+        remotes: Vec<Remote>,
+        at: usize,
+        picking: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -81,9 +85,13 @@ pub struct Issue {
 
 impl Issue {
     pub fn open(number: u64, repository: Repository, kept: &Kept, events: &Sender<Event>) -> Self {
-        let due = Due::new(events, move |remotes: Result<Result<Vec<Remote>, String>, String>| {
-            Event::Remotes { number, remotes: remotes.and_then(|remotes| remotes) }
-        });
+        let due = Due::new(
+            events,
+            move |remotes: Result<Result<Vec<Remote>, String>, String>| Event::Remotes {
+                number,
+                remotes: remotes.and_then(|remotes| remotes),
+            },
+        );
         let (on, dir) = (repository.on.clone(), repository.dir.clone());
         thread::spawn(move || {
             let remotes =
@@ -98,7 +106,14 @@ impl Issue {
             Some((number, to, words)) => (Some(number), Some(to), words),
             None => (None, None, String::new()),
         };
-        Issue { number, repository, typed, kept, sent_to, stage: Stage::Listing }
+        Issue {
+            number,
+            repository,
+            typed,
+            kept,
+            sent_to,
+            stage: Stage::Listing,
+        }
     }
 
     #[must_use]
@@ -118,20 +133,28 @@ impl Issue {
             Err(why) => Stage::Nowhere(why),
             Ok(remotes) if remotes.is_empty() => {
                 Stage::Nowhere(format!("{} has no remote on GitHub.", self.repository.name))
-            },
+            }
             Ok(remotes) => {
                 let sent_to = self.sent_to.as_ref();
                 let sent = |remote: &Remote| sent_to.is_some_and(|to| to.is(&remote.on));
                 let at = remotes.iter().position(sent).unwrap_or(0);
                 let picking = remotes.len() > 1;
-                Stage::Found { remotes, at, picking }
-            },
+                Stage::Found {
+                    remotes,
+                    at,
+                    picking,
+                }
+            }
         };
     }
 
     fn picked(&self) -> Option<&OnGitHub> {
         match &self.stage {
-            Stage::Found { remotes, at, picking: false } => Some(&remotes[*at].on),
+            Stage::Found {
+                remotes,
+                at,
+                picking: false,
+            } => Some(&remotes[*at].on),
             Stage::Found { .. } | Stage::Listing | Stage::Nowhere(_) => None,
         }
     }
@@ -149,8 +172,8 @@ impl Issue {
             Some((_, _, words)) if !typed.is_empty() => typed.clone_into(words),
             Some(_) => {
                 kept.0.remove(&number);
-            },
-            None => {},
+            }
+            None => {}
         }
     }
 
@@ -161,7 +184,12 @@ impl Issue {
             return Keyed::Close;
         }
         let ready = self.ready();
-        let Stage::Found { remotes, at, picking } = &mut self.stage else {
+        let Stage::Found {
+            remotes,
+            at,
+            picking,
+        } = &mut self.stage
+        else {
             return Keyed::Nothing;
         };
         if *picking {
@@ -173,12 +201,14 @@ impl Issue {
                 KeyCode::Char('n') if control => *at = (*at + 1).min(last),
                 KeyCode::Enter if bare => *picking = false,
                 KeyCode::Char(digit @ '1'..='9') if bare => {
-                    let number = digit.to_digit(10).and_then(|digit| usize::try_from(digit).ok());
+                    let number = digit
+                        .to_digit(10)
+                        .and_then(|digit| usize::try_from(digit).ok());
                     if let Some(number) = number.filter(|number| *number <= remotes.len()) {
                         (*at, *picking) = (number - 1, false);
                     }
-                },
-                _ => {},
+                }
+                _ => {}
             }
             return Keyed::Nothing;
         }
@@ -187,10 +217,10 @@ impl Issue {
             KeyCode::Tab if bare && remotes.len() > 1 => *picking = true,
             KeyCode::Backspace if bare => {
                 self.typed.pop();
-            },
+            }
             KeyCode::Char('u') if control => self.typed.clear(),
             KeyCode::Char(c) if bare => self.typed.push(c),
-            _ => {},
+            _ => {}
         }
         Keyed::Nothing
     }
@@ -224,13 +254,24 @@ impl Issue {
         if let Some(number) = self.kept {
             kept.0.remove(&number);
         }
-        let Issue { number, repository, .. } = self;
+        let Issue {
+            number, repository, ..
+        } = self;
         let on = repository.on.clone();
         let sent_to = to.clone();
-        let due = Due::new(events, move |filed: Result<Result<Filed, Unfiled>, String>| {
-            let filed = filed.unwrap_or_else(|why| Err(Unfiled::InDoubt(why)));
-            Event::Filed { number, repository, to: sent_to, words, filed }
-        });
+        let due = Due::new(
+            events,
+            move |filed: Result<Result<Filed, Unfiled>, String>| {
+                let filed = filed.unwrap_or_else(|why| Err(Unfiled::InDoubt(why)));
+                Event::Filed {
+                    number,
+                    repository,
+                    to: sent_to,
+                    words,
+                    filed,
+                }
+            },
+        );
         let filing = thread::spawn(move || {
             let filed = match Luned::on(&on, reach::ANSWER) {
                 Ok(mut luned) => luned.file_issue(&filing),
@@ -257,11 +298,17 @@ impl Issue {
                     lines.extend(typed(dim));
                 }
                 (lines, vec![(Hint::Esc, "Close")], spinner)
-            },
-            Stage::Nowhere(why) => {
-                (brief::paragraphs(why, inner, Style::new()), vec![(Hint::Esc, "Close")], None)
-            },
-            Stage::Found { remotes, at, picking: true } => {
+            }
+            Stage::Nowhere(why) => (
+                brief::paragraphs(why, inner, Style::new()),
+                vec![(Hint::Esc, "Close")],
+                None,
+            ),
+            Stage::Found {
+                remotes,
+                at,
+                picking: true,
+            } => {
                 let mut lines = brief::paragraphs(WHICH, inner, dim);
                 for (number, remote) in remotes.iter().enumerate() {
                     let named = format!("{} {}  {}", number + 1, remote.on, remote.name);
@@ -275,11 +322,19 @@ impl Issue {
                 }
                 (
                     lines,
-                    vec![(Hint::Moves, "Move"), (Hint::Enter, "Pick"), (Hint::Esc, "Close")],
+                    vec![
+                        (Hint::Moves, "Move"),
+                        (Hint::Enter, "Pick"),
+                        (Hint::Esc, "Close"),
+                    ],
                     None,
                 )
-            },
-            Stage::Found { remotes, at, picking: false } => {
+            }
+            Stage::Found {
+                remotes,
+                at,
+                picking: false,
+            } => {
                 let says = format!(
                     "{} writes it as {} does, and gh files it there.",
                     issues::MODEL,
@@ -295,7 +350,7 @@ impl Issue {
                 }
                 keys.push((Hint::Esc, "Close"));
                 (lines, keys, None)
-            },
+            }
         };
         let footer = [Line::default(), menu::keys_line(inner, &keys)];
         let lines_room = room.saturating_sub(footer.len());
@@ -304,7 +359,9 @@ impl Issue {
             lines.drain(..drained);
         }
         lines.extend(footer);
-        let named = self.picked().map_or_else(|| self.repository.name.clone(), ToString::to_string);
+        let named = self
+            .picked()
+            .map_or_else(|| self.repository.name.clone(), ToString::to_string);
         let right = match &self.repository.on {
             Machine::Local => named,
             Machine::Remote(on) => format!("{named} on {on}"),
@@ -322,19 +379,22 @@ pub fn on_quit(to: &OnGitHub, words: &str, filed: &Result<Filed, Unfiled>) -> St
         Ok(filed) => {
             let (number, title, url) = (filed.number(), filed.title(), filed.link().url());
             format!("lune: filed #{number} in {to}: {title}\n{url}")
-        },
+        }
         Err(Unfiled::Refused(why)) => {
             format!("lune: the issue in {to} is not filed: {why}. Its words:\n{words}")
-        },
+        }
         Err(Unfiled::InDoubt(why)) => {
             let doubt = format!("lune: the issue in {to} may be filed: {why}");
             format!("{doubt}. Look first. Its words:\n{words}")
-        },
+        }
     }
 }
 
 fn plain(text: &str) -> String {
-    let spaced: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let spaced: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
     spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -351,11 +411,19 @@ mod tests {
 
     fn in_worktree(on: Machine, subfolder: &str) -> Repository {
         let dir = Directory::parse(format!("/w/lune/{subfolder}")).unwrap();
-        Repository { on, dir, home: "/w/lune".to_owned(), name: "lune".to_owned() }
+        Repository {
+            on,
+            dir,
+            home: "/w/lune".to_owned(),
+            name: "lune".to_owned(),
+        }
     }
 
     fn remote(name: &str, on: &str) -> Remote {
-        Remote { name: name.to_owned(), on: github(on) }
+        Remote {
+            name: name.to_owned(),
+            on: github(on),
+        }
     }
 
     fn github(on: &str) -> OnGitHub {
@@ -363,7 +431,10 @@ mod tests {
     }
 
     fn fork() -> Vec<Remote> {
-        vec![remote("upstream", "cashubtc/lune"), remote("origin", "me/lune")]
+        vec![
+            remote("upstream", "cashubtc/lune"),
+            remote("origin", "me/lune"),
+        ]
     }
 
     fn open(number: u64, repository: &Repository, kept: &Kept, remotes: Vec<Remote>) -> Issue {
@@ -390,17 +461,31 @@ mod tests {
         }
         issue.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
         for cell in buffer.content().iter().filter(|cell| cell.symbol() != "z") {
-            assert!(moonlight::ALL.contains(&cell.fg), "{:?} in {:?}", cell.symbol(), cell.fg);
+            assert!(
+                moonlight::ALL.contains(&cell.fg),
+                "{:?} in {:?}",
+                cell.symbol(),
+                cell.fg
+            );
         }
         (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect()
     }
 
     #[test]
     fn the_box_takes_what_you_type_and_files_it_on_enter() {
         let only = vec![remote("origin", "o/lune")];
-        let mut issue = open(1, &repository(Machine::Local), &Kept::default(), only.clone());
+        let mut issue = open(
+            1,
+            &repository(Machine::Local),
+            &Kept::default(),
+            only.clone(),
+        );
         assert_eq!(issue.key(&key(KeyCode::Enter)), Keyed::Nothing);
         typed(&mut issue, "a red button x");
         assert_eq!(issue.key(&key(KeyCode::Backspace)), Keyed::Nothing);
@@ -431,11 +516,22 @@ mod tests {
 
         let far = Machine::Remote("nixos".parse().unwrap());
         let mut kept = Kept::default();
-        kept.keep(1, repository(far.clone()), github("o/lune"), "kept words".to_owned());
+        kept.keep(
+            1,
+            repository(far.clone()),
+            github("o/lune"),
+            "kept words".to_owned(),
+        );
         let there = open(2, &repository(far), &kept, only);
         let lines = shown(&there, 50, 9);
-        assert_eq!(lines[0], "┌─ File issue ───────────────── o/lune on nixos ─┐");
-        assert_eq!(lines[4], "│ › kept words_                                  │");
+        assert_eq!(
+            lines[0],
+            "┌─ File issue ───────────────── o/lune on nixos ─┐"
+        );
+        assert_eq!(
+            lines[4],
+            "│ › kept words_                                  │"
+        );
     }
 
     #[test]
@@ -488,12 +584,24 @@ mod tests {
         assert_eq!(issue.key(&key(KeyCode::Enter)), Keyed::Nothing);
         issue.paste("a red button");
         let lines = shown(&issue, 50, 7);
-        assert_eq!(lines[1], "│ ⠋ Finding the remotes on GitHub…               │");
-        assert_eq!(lines[3], "│ › a red button                                 │");
-        assert_eq!(lines[5], "│ <ESC> - Close                                  │");
+        assert_eq!(
+            lines[1],
+            "│ ⠋ Finding the remotes on GitHub…               │"
+        );
+        assert_eq!(
+            lines[3],
+            "│ › a red button                                 │"
+        );
+        assert_eq!(
+            lines[5],
+            "│ <ESC> - Close                                  │"
+        );
         issue.listed(Ok(Vec::new()));
         assert!(!issue.turning());
-        assert_eq!(shown(&issue, 50, 5)[1], "│ lune has no remote on GitHub.                  │");
+        assert_eq!(
+            shown(&issue, 50, 5)[1],
+            "│ lune has no remote on GitHub.                  │"
+        );
         typed(&mut issue, "x");
         assert_eq!(issue.key(&key(KeyCode::Enter)), Keyed::Nothing);
         assert_eq!(issue.key(&key(KeyCode::Esc)), Keyed::Close);
@@ -502,7 +610,10 @@ mod tests {
 
         let mut unsaid = Issue::new(2, repository(Machine::Local), &Kept::default());
         unsaid.listed(Err("git did not say".to_owned()));
-        assert_eq!(shown(&unsaid, 50, 5)[1], "│ git did not say                                │");
+        assert_eq!(
+            shown(&unsaid, 50, 5)[1],
+            "│ git did not say                                │"
+        );
     }
 
     #[test]
@@ -530,7 +641,12 @@ mod tests {
     #[test]
     fn nothing_typed_sends_nothing() {
         let (events, heard) = mpsc::channel();
-        let issue = open(1, &repository(Machine::Local), &Kept::default(), fork()[..1].to_vec());
+        let issue = open(
+            1,
+            &repository(Machine::Local),
+            &Kept::default(),
+            fork()[..1].to_vec(),
+        );
         assert!(issue.send(&events, &mut Kept::default()).is_none());
         let mut unpicked = open(2, &repository(Machine::Local), &Kept::default(), fork());
         unpicked.paste("a red button");
@@ -547,7 +663,10 @@ mod tests {
     fn the_words_of_an_issue_not_filed_stay_with_its_repository_until_sent() {
         let (events, _heard) = mpsc::channel();
         let here = repository(Machine::Local);
-        let elsewhere = Repository { home: "/w/zed".to_owned(), ..repository(Machine::Local) };
+        let elsewhere = Repository {
+            home: "/w/zed".to_owned(),
+            ..repository(Machine::Local)
+        };
         let far = repository(Machine::Remote("vps".parse().unwrap()));
         let mut kept = Kept::default();
         let picked = |number, repository: &Repository, kept: &Kept| {
@@ -558,7 +677,12 @@ mod tests {
 
         let blank = picked(3, &here, &kept);
         kept.keep(1, here.clone(), github("me/lune"), "first".to_owned());
-        kept.keep(2, here.clone(), github("cashubtc/lune"), "second".to_owned());
+        kept.keep(
+            2,
+            here.clone(),
+            github("cashubtc/lune"),
+            "second".to_owned(),
+        );
         assert!(blank.send(&events, &mut kept).is_none());
         for other in [&elsewhere, &far] {
             assert_eq!(typed_in(&open(4, other, &kept, fork())), "");
@@ -571,7 +695,9 @@ mod tests {
         edited.close(&mut kept);
         let mut early = picked(6, &here, &Kept::default());
         typed(&mut early, "sent while they were kept");
-        let sent = early.send(&events, &mut kept).map(|(number, to, _)| (number, to));
+        let sent = early
+            .send(&events, &mut kept)
+            .map(|(number, to, _)| (number, to));
         assert_eq!(sent, Some((6, github("cashubtc/lune"))));
         assert_eq!(typed_in(&open(7, &here, &kept, fork())), "first again");
 

@@ -28,16 +28,22 @@ impl Fold<'_> {
             Fold::Machine(Machine::Local) => (Kept::Machines, LOCAL.to_owned()),
             Fold::Machine(Machine::Remote(destination)) => {
                 let name = spelled(destination);
-                assert!(!name.contains(':'), "a machine's file is apart from its projects'");
-                assert_ne!(name, LOCAL, "another machine's file is apart from this one's");
+                assert!(
+                    !name.contains(':'),
+                    "a machine's file is apart from its projects'"
+                );
+                assert_ne!(
+                    name, LOCAL,
+                    "another machine's file is apart from this one's"
+                );
                 (Kept::Machines, name)
-            },
+            }
             Fold::Project(machine, project) => {
                 kept_on(machine, format!("project-{:016x}", project.get()))
-            },
+            }
             Fold::Worktree(machine, worktree) => {
                 kept_on(machine, format!("worktree-{:016x}", worktree.get()))
-            },
+            }
         }
     }
 }
@@ -47,7 +53,7 @@ fn kept_on(machine: &Machine, name: String) -> (Kept, String) {
         Machine::Local => (Kept::Sessions, name),
         Machine::Remote(destination) => {
             (Kept::Machines, format!("{}:{name}", spelled(destination)))
-        },
+        }
     }
 }
 
@@ -79,7 +85,10 @@ pub struct Folds {
 
 #[derive(Default)]
 enum Sharing {
-    Folders { sessions: PathBuf, machines: PathBuf },
+    Folders {
+        sessions: PathBuf,
+        machines: PathBuf,
+    },
     #[default]
     Alone,
     Lost(String),
@@ -87,12 +96,15 @@ enum Sharing {
 
 impl Folds {
     pub fn shared(state_folder: &state::Folder) -> Self {
-        let dirs = state_folder.path("folded").and_then(|sessions| {
-            Ok((sessions, state_folder.path("folded-machines")?))
-        });
+        let dirs = state_folder
+            .path("folded")
+            .and_then(|sessions| Ok((sessions, state_folder.path("folded-machines")?)));
         match dirs {
             Ok((sessions, machines)) => Folds::within(sessions, machines),
-            Err(unset) => Folds { sharing: Sharing::Lost(unset.to_string()), ..Folds::default() },
+            Err(unset) => Folds {
+                sharing: Sharing::Lost(unset.to_string()),
+                ..Folds::default()
+            },
         }
     }
 
@@ -104,7 +116,10 @@ impl Folds {
             Ok(()) => Sharing::Folders { sessions, machines },
             Err((dir, error)) => Sharing::Lost(format!("{}: {error}", dir.display())),
         };
-        let mut folds = Folds { sharing, ..Folds::default() };
+        let mut folds = Folds {
+            sharing,
+            ..Folds::default()
+        };
         folds.reload();
         folds
     }
@@ -135,7 +150,10 @@ impl Folds {
 
     pub fn listed(&mut self, machine: &Machine, live: &[Fold<'_>]) -> bool {
         let named: BTreeSet<(Kept, String)> = live.iter().map(|fold| fold.file()).collect();
-        let heard = self.heard.insert(machine.clone(), named.clone()).unwrap_or_default();
+        let heard = self
+            .heard
+            .insert(machine.clone(), named.clone())
+            .unwrap_or_default();
         let folded = |(kept, name): &&(Kept, String)| self.names(*kept).contains(name);
         let gone: Vec<(Kept, String)> = heard.difference(&named).filter(folded).cloned().collect();
         for (kept, name) in &gone {
@@ -167,7 +185,11 @@ impl Folds {
             Kept::Sessions => &mut self.sessions,
             Kept::Machines => &mut self.machines,
         };
-        if folded { names.insert(name) } else { names.remove(&name) }
+        if folded {
+            names.insert(name)
+        } else {
+            names.remove(&name)
+        }
     }
 
     fn names(&self, kept: Kept) -> &BTreeSet<String> {
@@ -183,9 +205,16 @@ impl Folds {
         };
         let read = |dir: &Path| -> Option<BTreeSet<String>> {
             let entries = fs::read_dir(dir).ok()?;
-            Some(entries.filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect())
+            Some(
+                entries
+                    .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                    .collect(),
+            )
         };
-        let read = [(&mut self.sessions, read(sessions)), (&mut self.machines, read(machines))];
+        let read = [
+            (&mut self.sessions, read(sessions)),
+            (&mut self.machines, read(machines)),
+        ];
         let mut changed = false;
         for (names, read) in read {
             if let Some(read) = read.filter(|read| read != names) {
@@ -292,10 +321,16 @@ mod tests {
             here.set(fold, true);
         }
         assert!(!here.listed(&Machine::Local, &[project(1), worktree(2)]));
-        assert!(here.contains(project(3)), "a fold this lune never heard of stays");
+        assert!(
+            here.contains(project(3)),
+            "a fold this lune never heard of stays"
+        );
         assert!(here.listed(&Machine::Local, &[project(1)]));
         assert!(!here.contains(worktree(2)));
-        assert!(!within(scratch.path()).contains(worktree(2)), "its file goes too");
+        assert!(
+            !within(scratch.path()).contains(worktree(2)),
+            "its file goes too"
+        );
         assert!(here.contains(project(1)) && here.contains(far));
         assert!(!here.listed(&Machine::Local, &[project(1)]));
     }
@@ -306,7 +341,11 @@ mod tests {
         let file = scratch.path().join("not a folder");
         fs::write(&file, "").unwrap();
         let mut folds = within(&file);
-        assert!(folds.lost().is_some_and(|lost| lost.contains("not a folder")));
+        assert!(
+            folds
+                .lost()
+                .is_some_and(|lost| lost.contains("not a folder"))
+        );
         assert!(folds.set(project(1), true));
         assert!(folds.contains(project(1)));
     }
@@ -321,10 +360,15 @@ mod tests {
         let settles = || eventually("the watch goes quiet", || quiet().then_some(()));
         settles();
         here.reload();
-        never("a reload here is heard as a change", || heard.try_recv().ok().map(drop));
+        never("a reload here is heard as a change", || {
+            heard.try_recv().ok().map(drop)
+        });
 
         within(scratch.path()).set(project(1), true);
-        assert!(matches!(lune_waits::heard("a fold made elsewhere", &heard), Event::Folds));
+        assert!(matches!(
+            lune_waits::heard("a fold made elsewhere", &heard),
+            Event::Folds
+        ));
         assert!(here.reload() && here.contains(project(1)));
         settles();
         let vps = Machine::Remote("vps".parse().unwrap());

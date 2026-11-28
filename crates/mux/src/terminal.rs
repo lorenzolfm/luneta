@@ -200,7 +200,7 @@ impl Wake {
             Ok(written) => {
                 assert_eq!(written, 1);
                 Ok(())
-            },
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -208,7 +208,7 @@ impl Wake {
                 ) =>
             {
                 Ok(())
-            },
+            }
             Err(error) => Err(error),
         }
     }
@@ -224,7 +224,9 @@ pub struct Placing(SyncSender<()>);
 
 impl Placing {
     pub fn placed(self) {
-        self.0.send(()).expect("the terminal's thread waits to be placed");
+        self.0
+            .send(())
+            .expect("the terminal's thread waits to be placed");
     }
 }
 
@@ -245,73 +247,89 @@ pub fn start(
     woken.set_nonblocking(true)?;
     let wake = Wake(Arc::new(wake));
     let closed = Arc::new(AtomicBool::new(false));
-    let (wanted, wants) = watch::channel(Wanted { size, viewers: Arc::from(Vec::new()) });
+    let (wanted, wants) = watch::channel(Wanted {
+        size,
+        viewers: Arc::from(Vec::new()),
+    });
     let wanted = Arc::new(wanted);
-    let handle = Handle { to, closed: Arc::clone(&closed), wake: wake.clone(), wanted };
+    let handle = Handle {
+        to,
+        closed: Arc::clone(&closed),
+        wake: wake.clone(),
+        wanted,
+    };
     let waking = wake.clone();
     let (leader, exits) = Leader::waited(terminal, child, mux.leaders(), move || waking.wake())?;
     let pid = leader.pid();
     let pty_device = Some(pty.device().raw());
     let waking = wake.clone();
     let looker = Looker::started(terminal, move || waking.wake())?;
-    thread::Builder::new().name(format!("terminal {terminal}")).spawn(move || {
-        let _resume_guard = resume_guard;
-        if placed.recv().is_err() {
-            return;
-        }
-        let screen = match Screen::new(size, SCROLLBACK_BYTES) {
-            Ok(screen) => screen,
-            Err(error) => {
-                eprintln!("lune-mux: terminal {terminal}'s screen could not be made: {error}");
-                drop(pty);
-                drop(looker);
-                mux.lost(terminal);
-                leader.end();
+    thread::Builder::new()
+        .name(format!("terminal {terminal}"))
+        .spawn(move || {
+            let _resume_guard = resume_guard;
+            if placed.recv().is_err() {
                 return;
-            },
-        };
-        {
-            let mut thread = Thread {
-                key,
-                mux,
-                inbox,
-                wants,
-                exits,
-                closed,
-                woken,
-                screen,
-                program: Program::Runs(Box::new(Running {
-                    pty,
-                    unread: Unread::default(),
-                    looks: Looks::first(looker),
-                    pid,
-                    shell: Shell::default(),
-                    told: Told::default(),
-                })),
-                buffer: vec![0; READ_BYTES].into_boxed_slice(),
-                watchers: Vec::new(),
-                dirty: false,
-                framed: Instant::now().checked_sub(FRAME_GAP).unwrap_or_else(Instant::now),
-                synced: None,
-                titles: Titles::default(),
-                host: host(),
-                statuses_version: 0,
-                resumes: Resumes::new(ProgramResumes::new(token, pid.get(), pty_device)),
-            };
-            let failed = match panics::contained(|| thread.run()) {
-                Ok(Ok(())) => None,
-                Ok(Err(error)) => Some(error.to_string()),
-                Err(Panicked) => Some("it panicked".to_owned()),
-            };
-            thread.program = Program::Gone;
-            if let Some(failed) = failed {
-                eprintln!("lune-mux: terminal {terminal} failed: {failed}");
-                thread.mux.lost(terminal);
             }
-        }
-        leader.end();
-    })?;
-    Ok(Started { handle, pid, placing: Placing(placing) })
+            let screen = match Screen::new(size, SCROLLBACK_BYTES) {
+                Ok(screen) => screen,
+                Err(error) => {
+                    eprintln!("lune-mux: terminal {terminal}'s screen could not be made: {error}");
+                    drop(pty);
+                    drop(looker);
+                    mux.lost(terminal);
+                    leader.end();
+                    return;
+                }
+            };
+            {
+                let mut thread = Thread {
+                    key,
+                    mux,
+                    inbox,
+                    wants,
+                    exits,
+                    closed,
+                    woken,
+                    screen,
+                    program: Program::Runs(Box::new(Running {
+                        pty,
+                        unread: Unread::default(),
+                        looks: Looks::first(looker),
+                        pid,
+                        shell: Shell::default(),
+                        told: Told::default(),
+                    })),
+                    buffer: vec![0; READ_BYTES].into_boxed_slice(),
+                    watchers: Vec::new(),
+                    dirty: false,
+                    framed: Instant::now()
+                        .checked_sub(FRAME_GAP)
+                        .unwrap_or_else(Instant::now),
+                    synced: None,
+                    titles: Titles::default(),
+                    host: host(),
+                    statuses_version: 0,
+                    resumes: Resumes::new(ProgramResumes::new(token, pid.get(), pty_device)),
+                };
+                let failed = match panics::contained(|| thread.run()) {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error.to_string()),
+                    Err(Panicked) => Some("it panicked".to_owned()),
+                };
+                thread.program = Program::Gone;
+                if let Some(failed) = failed {
+                    eprintln!("lune-mux: terminal {terminal} failed: {failed}");
+                    thread.mux.lost(terminal);
+                }
+            }
+            leader.end();
+        })?;
+    Ok(Started {
+        handle,
+        pid,
+        placing: Placing(placing),
+    })
 }
 
 struct Shown {
@@ -393,12 +411,21 @@ impl Resumes {
     }
 
     fn looked(&mut self, terminal: TerminalId, mux: &Mux, look: Look) -> Schedule {
-        let Look { last, heard, now, going } = look;
+        let Look {
+            last,
+            heard,
+            now,
+            going,
+        } = look;
         self.held.reap_exited(now, &OsInspector);
         self.tell(terminal, mux);
         let going = going || !self.held.is_empty();
         let schedule = Schedule::next(last, heard, now, going);
-        if self.held.has_exiting() { schedule.by(now + LOOK_AGAIN) } else { schedule }
+        if self.held.has_exiting() {
+            schedule.by(now + LOOK_AGAIN)
+        } else {
+            schedule
+        }
     }
 }
 
@@ -435,8 +462,13 @@ mod titles {
     enum TitlePace {
         #[default]
         Fresh,
-        Sent { at: Instant },
-        Pending { next: String, last: Instant },
+        Sent {
+            at: Instant,
+        },
+        Pending {
+            next: String,
+            last: Instant,
+        },
     }
 
     impl Titles {
@@ -462,7 +494,7 @@ mod titles {
                         self.pace = TitlePace::Sent { at: last };
                     }
                     None
-                },
+                }
                 None => match &self.pace {
                     TitlePace::Pending { next, .. } => Some(next.clone()),
                     TitlePace::Fresh | TitlePace::Sent { .. } => None,
@@ -503,11 +535,11 @@ mod titles {
                     self.told.clone_from(&next);
                     self.pace = TitlePace::Sent { at: now };
                     Some(next)
-                },
+                }
                 other => {
                     self.pace = other;
                     None
-                },
+                }
             }
         }
 
@@ -539,7 +571,7 @@ mod titles {
                     let cwd = local_cwd(&pwd, host);
                     self.pwd = Some(pwd);
                     cwd
-                },
+                }
                 Some(_) | None => None,
             }
         }
@@ -554,20 +586,32 @@ mod titles {
         if !local {
             return None;
         }
-        let path = percent_encoding::percent_decode_str(path).decode_utf8().ok()?;
+        let path = percent_encoding::percent_decode_str(path)
+            .decode_utf8()
+            .ok()?;
         AbsoluteCwd::of_path(path.into_owned())
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Schedule {
-    Quiet { last: Instant },
-    Scheduled { due: Instant, last: Option<Instant>, heard: bool },
+    Quiet {
+        last: Instant,
+    },
+    Scheduled {
+        due: Instant,
+        last: Option<Instant>,
+        heard: bool,
+    },
 }
 
 impl Schedule {
     fn first(now: Instant) -> Schedule {
-        Schedule::Scheduled { due: now, last: None, heard: false }
+        Schedule::Scheduled {
+            due: now,
+            last: None,
+            heard: false,
+        }
     }
 
     #[must_use]
@@ -587,8 +631,12 @@ impl Schedule {
             },
             Schedule::Scheduled { due, last, .. } => {
                 let soonest = last.map_or(now, |last| (last + LOOK_AGAIN).max(now));
-                Schedule::Scheduled { due: due.min(soonest), last, heard: true }
-            },
+                Schedule::Scheduled {
+                    due: due.min(soonest),
+                    last,
+                    heard: true,
+                }
+            }
         };
         self.assert_paced();
     }
@@ -598,9 +646,17 @@ impl Schedule {
             assert!(now >= last, "time does not go backwards");
         }
         let schedule = if heard {
-            Schedule::Scheduled { due: now + LOOK_AGAIN, last: Some(now), heard: false }
+            Schedule::Scheduled {
+                due: now + LOOK_AGAIN,
+                last: Some(now),
+                heard: false,
+            }
         } else if going {
-            Schedule::Scheduled { due: now + LOOK_WHILE_GOING, last: Some(now), heard: false }
+            Schedule::Scheduled {
+                due: now + LOOK_WHILE_GOING,
+                last: Some(now),
+                heard: false,
+            }
         } else {
             Schedule::Quiet { last: now }
         };
@@ -609,19 +665,32 @@ impl Schedule {
     }
 
     fn assert_paced(self) {
-        if let Schedule::Scheduled { due, last: Some(last), .. } = self {
-            assert!(due >= last + LOOK_AGAIN, "{:?} after the last", due.duration_since(last));
+        if let Schedule::Scheduled {
+            due,
+            last: Some(last),
+            ..
+        } = self
+        {
+            assert!(
+                due >= last + LOOK_AGAIN,
+                "{:?} after the last",
+                due.duration_since(last)
+            );
         }
     }
 
     #[must_use]
     fn by(self, soon: Instant) -> Schedule {
         let schedule = match self {
-            Schedule::Quiet { last } => {
-                Schedule::Scheduled { due: soon, last: Some(last), heard: false }
+            Schedule::Quiet { last } => Schedule::Scheduled {
+                due: soon,
+                last: Some(last),
+                heard: false,
             },
-            Schedule::Scheduled { due, last, heard } => {
-                Schedule::Scheduled { due: due.min(soon), last, heard }
+            Schedule::Scheduled { due, last, heard } => Schedule::Scheduled {
+                due: due.min(soon),
+                last,
+                heard,
             },
         };
         schedule.assert_paced();
@@ -630,13 +699,23 @@ impl Schedule {
 }
 
 enum Looks {
-    Idle { looker: Looker, schedule: Schedule },
-    InFlight { waiting: InFlight, last: Option<Instant>, heard: bool },
+    Idle {
+        looker: Looker,
+        schedule: Schedule,
+    },
+    InFlight {
+        waiting: InFlight,
+        last: Option<Instant>,
+        heard: bool,
+    },
 }
 
 impl Looks {
     fn first(looker: Looker) -> Looks {
-        Looks::Idle { looker, schedule: Schedule::first(Instant::now()) }
+        Looks::Idle {
+            looker,
+            schedule: Schedule::first(Instant::now()),
+        }
     }
 
     #[must_use]
@@ -666,19 +745,36 @@ impl Running {
             idle @ Looks::Idle { .. } => {
                 self.looks = idle;
                 return Ok(self);
-            },
-            Looks::InFlight { waiting, last, heard } => match waiting.take_seen().map_err(looks_gone)? {
+            }
+            Looks::InFlight {
+                waiting,
+                last,
+                heard,
+            } => match waiting.take_seen().map_err(looks_gone)? {
                 Taken::Pending(waiting) => {
-                    self.looks = Looks::InFlight { waiting, last, heard };
+                    self.looks = Looks::InFlight {
+                        waiting,
+                        last,
+                        heard,
+                    };
                     return Ok(self);
-                },
-                Taken::Ready { looker, shell_version, seen } => {
+                }
+                Taken::Ready {
+                    looker,
+                    shell_version,
+                    seen,
+                } => {
                     let going = self.shell.going();
-                    let look = Look { last, heard, now: Instant::now(), going };
+                    let look = Look {
+                        last,
+                        heard,
+                        now: Instant::now(),
+                        going,
+                    };
                     let schedule = resumes.looked(terminal, mux, look);
                     self.looks = Looks::Idle { looker, schedule };
                     (shell_version, seen)
-                },
+                }
             },
         };
         let (shell_version, seen) = ready;
@@ -687,10 +783,14 @@ impl Running {
         }
         let foreground = match seen {
             Seen::Foreground(foreground) => foreground,
-            Seen::WithFront { foreground, group, front } => {
+            Seen::WithFront {
+                foreground,
+                group,
+                front,
+            } => {
                 self.shell.saw(group, self.pid, front);
                 foreground
-            },
+            }
         };
         self.tell(terminal, mux, foreground);
         Ok(self)
@@ -704,19 +804,27 @@ impl Running {
     ) -> io::Result<Box<Running>> {
         let now = Instant::now();
         let (looker, last, heard) = match self.looks {
-            Looks::Idle { looker, schedule: Schedule::Scheduled { due, last, heard } }
-                if due <= now =>
-            {
-                (looker, last, heard)
-            },
+            Looks::Idle {
+                looker,
+                schedule: Schedule::Scheduled { due, last, heard },
+            } if due <= now => (looker, last, heard),
             looks => {
                 self.looks = looks;
                 return Ok(self);
-            },
+            }
         };
         let going = self.shell.going();
         let Some(group) = self.pty.front_group() else {
-            let schedule = resumes.looked(terminal, mux, Look { last, heard, now, going });
+            let schedule = resumes.looked(
+                terminal,
+                mux,
+                Look {
+                    last,
+                    heard,
+                    now,
+                    going,
+                },
+            );
             self.looks = Looks::Idle { looker, schedule };
             self.tell(terminal, mux, None);
             return Ok(self);
@@ -724,18 +832,35 @@ impl Running {
         let snapshot = going
             .then(|| pty_modes(terminal, &self.pty))
             .flatten()
-            .map(|modes| front::Snapshot { modes, device: self.pty.device() });
+            .map(|modes| front::Snapshot {
+                modes,
+                device: self.pty.device(),
+            });
         let ask = match snapshot {
-            Some(snapshot) => Ask::WithFront { program: self.pid, group, snapshot },
-            None => Ask::Foreground { program: self.pid, group },
+            Some(snapshot) => Ask::WithFront {
+                program: self.pid,
+                group,
+                snapshot,
+            },
+            None => Ask::Foreground {
+                program: self.pid,
+                group,
+            },
         };
         let waiting = looker.ask(ask, self.shell.version()).map_err(looks_gone)?;
-        self.looks = Looks::InFlight { waiting, last, heard };
+        self.looks = Looks::InFlight {
+            waiting,
+            last,
+            heard,
+        };
         Ok(self)
     }
 
     fn tell(&mut self, terminal: TerminalId, mux: &Mux, foreground: Option<Foreground>) {
-        let told = Told { foreground, ran: self.shell.said() };
+        let told = Told {
+            foreground,
+            ran: self.shell.said(),
+        };
         if told != self.told {
             self.told = told.clone();
             mux.looked(terminal, told.foreground, told.ran);
@@ -796,7 +921,10 @@ impl Thread {
             Program::Runs(running) => running.looks.waits_until(),
             Program::Gone => None,
         };
-        [self.framing(), due(look), due(self.titles.due())].into_iter().flatten().min()
+        [self.framing(), due(look), due(self.titles.due())]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn framing(&self) -> Option<Duration> {
@@ -833,27 +961,34 @@ impl Thread {
             count = 2;
         }
         match rustix::event::poll(&mut fds[..count], wait.as_ref()) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(rustix::io::Errno::INTR) => return Ok((false, false, false)),
             Err(error) => return Err(error.into()),
         }
         let woken = !fds[0].revents().is_empty();
-        let near = if count == 2 { fds[1].revents() } else { PollFlags::empty() };
+        let near = if count == 2 {
+            fds[1].revents()
+        } else {
+            PollFlags::empty()
+        };
         let readable = near.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
         Ok((readable, near.contains(PollFlags::OUT), woken))
     }
 
     fn want(&mut self) -> io::Result<Held> {
         match self.wants.has_changed() {
-            Ok(true) => {},
+            Ok(true) => {}
             Ok(false) => return Ok(Held::Still),
             Err(_) => return Ok(Held::LetGo),
         }
         let Wanted { size, viewers } = self.wants.borrow_and_update().clone();
-        self.watchers.retain(|watcher| viewers.iter().any(|it| it.client == watcher.viewer.client));
+        self.watchers
+            .retain(|watcher| viewers.iter().any(|it| it.client == watcher.viewer.client));
         for viewer in viewers.iter().cloned() {
-            if let Some(watcher) =
-                self.watchers.iter_mut().find(|watcher| watcher.viewer.client == viewer.client)
+            if let Some(watcher) = self
+                .watchers
+                .iter_mut()
+                .find(|watcher| watcher.viewer.client == viewer.client)
             {
                 if watcher.viewer.came != viewer.came {
                     watcher.shown = None;
@@ -863,13 +998,27 @@ impl Thread {
                 continue;
             }
             if viewer.colours != Colours::default() {
-                let Colours { foreground, background } = viewer.colours;
-                self.screen.colour(foreground, background).map_err(io::Error::other)?;
+                let Colours {
+                    foreground,
+                    background,
+                } = viewer.colours;
+                self.screen
+                    .colour(foreground, background)
+                    .map_err(io::Error::other)?;
             }
-            self.watchers.push(Watcher { viewer, back: 0, shown: None, owed: false });
+            self.watchers.push(Watcher {
+                viewer,
+                back: 0,
+                shown: None,
+                owed: false,
+            });
             self.dirty = true;
         }
-        assert_eq!(self.watchers.len(), viewers.len(), "a watcher for each viewer the model wants");
+        assert_eq!(
+            self.watchers.len(),
+            viewers.len(),
+            "a watcher for each viewer the model wants"
+        );
         self.resized(size)?;
         Ok(Held::Still)
     }
@@ -878,7 +1027,7 @@ impl Thread {
         match message {
             ToTerminal::Input(client, input) => match self.want()? {
                 Held::Still => self.input(client, input)?,
-                Held::LetGo => {},
+                Held::LetGo => {}
             },
             ToTerminal::Dump(dumped, answer) => {
                 let text = match dumped {
@@ -887,20 +1036,20 @@ impl Thread {
                 };
                 let failed = |error| Status::internal(format!("the dump failed: {error}"));
                 let _ = answer.send(text.map_err(failed));
-            },
+            }
             ToTerminal::Look(answer) => {
                 let failed = |error| Status::internal(format!("the look failed: {error}"));
                 let _ = answer.send(self.screen.looked().map_err(failed));
-            },
+            }
             ToTerminal::Press(shown, inputs, answer) => {
                 let pressed = match self.want()? {
                     Held::Still => self.press(shown, inputs),
                     Held::LetGo => {
                         Err(Status::not_found(format!("terminal {} ended", self.key.id)))
-                    },
+                    }
                 };
                 let _ = answer.send(pressed);
-            },
+            }
         }
         Ok(())
     }
@@ -913,10 +1062,13 @@ impl Thread {
         }
         let mut bytes = Vec::new();
         for input in inputs {
-            assert!(matches!(input, Input::Key { .. } | Input::Paste(_)), "{input:?} is pressed");
+            assert!(
+                matches!(input, Input::Key { .. } | Input::Paste(_)),
+                "{input:?} is pressed"
+            );
             match self.does(input).map_err(failed)? {
                 Does::Write(written) => bytes.extend(written),
-                Does::Scroll(_) | Does::Nothing => {},
+                Does::Scroll(_) | Does::Nothing => {}
             }
         }
         let terminal = self.key.id;
@@ -938,14 +1090,17 @@ impl Thread {
             running.unread.clear();
         }
         self.drain_pty(LAST_WORDS_BYTES_MAX)?;
-        let final_meta =
-            self.titles.finish(self.screen.title(), self.screen.pwd(), &self.host);
+        let final_meta = self
+            .titles
+            .finish(self.screen.title(), self.screen.pwd(), &self.host);
         let ended_statuses = self.screen.program_exited();
         self.statuses_version = self.screen.program_statuses_version();
         self.program = Program::Gone;
         self.dirty = true;
         self.frame()?;
-        Ok(self.mux.ended(self.key.id, exit, ended_statuses, final_meta))
+        Ok(self
+            .mux
+            .ended(self.key.id, exit, ended_statuses, final_meta))
     }
 
     fn tell_statuses(&mut self) {
@@ -960,7 +1115,9 @@ impl Thread {
     }
 
     fn watcher(&mut self, client: ClientId) -> Option<&mut Watcher> {
-        self.watchers.iter_mut().find(|watcher| watcher.viewer.client == client)
+        self.watchers
+            .iter_mut()
+            .find(|watcher| watcher.viewer.client == client)
     }
 
     fn resized(&mut self, size: Size) -> io::Result<()> {
@@ -991,11 +1148,14 @@ impl Thread {
                     && let Err(refused) =
                         type_into(terminal, &running.pty, &mut running.unread, &bytes)
                 {
-                    eprintln!("lune-mux: {}: input dropped", refused_text(terminal, refused));
+                    eprintln!(
+                        "lune-mux: {}: input dropped",
+                        refused_text(terminal, refused)
+                    );
                 }
-            },
+            }
             Does::Scroll(rows) => self.back(client, Some(rows)),
-            Does::Nothing => {},
+            Does::Nothing => {}
         }
         Ok(())
     }
@@ -1005,21 +1165,31 @@ impl Thread {
         let within = |column, row| size.holds(column, row);
         let screen = &mut self.screen;
         Ok(match input {
-            Input::Key { action, key, mods, text, unshifted } => {
-                Does::Write(screen.key(action, key, mods, text.as_deref(), unshifted)?)
-            },
+            Input::Key {
+                action,
+                key,
+                mods,
+                text,
+                unshifted,
+            } => Does::Write(screen.key(action, key, mods, text.as_deref(), unshifted)?),
             Input::Paste(text) => Does::Write(screen.paste(&text)?),
             Input::Focus(focused) => Does::Write(screen.focus(focused)?),
-            Input::Mouse { click, mods, column, row } if within(column, row) => {
-                Does::Write(screen.mouse(click, mods, column, row)?)
-            },
-            Input::Wheel { wheel, mods, column, row } if within(column, row) => {
-                wheeled(screen, wheel, mods, column, row)?
-            },
+            Input::Mouse {
+                click,
+                mods,
+                column,
+                row,
+            } if within(column, row) => Does::Write(screen.mouse(click, mods, column, row)?),
+            Input::Wheel {
+                wheel,
+                mods,
+                column,
+                row,
+            } if within(column, row) => wheeled(screen, wheel, mods, column, row)?,
             Input::Mouse { .. } | Input::Wheel { .. } => Does::Nothing,
             Input::Scroll(rows) => {
                 Does::Scroll(isize::try_from(rows).expect("an i32 fits in an isize"))
-            },
+            }
         })
     }
 
@@ -1050,9 +1220,12 @@ impl Thread {
         if !self.drain_pty(most)? {
             return Ok(());
         }
-        if let Some(update) =
-            self.titles.observed(self.screen.title(), self.screen.pwd(), &self.host, Instant::now())
-        {
+        if let Some(update) = self.titles.observed(
+            self.screen.title(),
+            self.screen.pwd(),
+            &self.host,
+            Instant::now(),
+        ) {
             self.mux.titled(self.key.id, update);
         }
         self.tell_statuses();
@@ -1063,7 +1236,14 @@ impl Thread {
         let Program::Runs(running) = &mut self.program else {
             return Ok(false);
         };
-        let Running { pty, unread, looks, pid, shell, .. } = &mut **running;
+        let Running {
+            pty,
+            unread,
+            looks,
+            pid,
+            shell,
+            ..
+        } = &mut **running;
         let mut total = 0;
         let mut marks: Vec<Mark> = Vec::new();
         let mut resume_reports: VecDeque<Vec<u8>> = VecDeque::new();
@@ -1075,8 +1255,10 @@ impl Thread {
                 Ok(0) => break,
                 Ok(read) => {
                     total += read;
-                    let written =
-                        self.screen.write(&self.buffer[..read]).map_err(io::Error::other)?;
+                    let written = self
+                        .screen
+                        .write(&self.buffer[..read])
+                        .map_err(io::Error::other)?;
                     let kept = unread.answer(&written.answers);
                     too_long += kept.too_long;
                     if kept.oldest == Oldest::Lost {
@@ -1087,14 +1269,14 @@ impl Thread {
                         push_bounded_resume_report(&mut resume_reports, body);
                     }
                     pushed = pushed.then(written.pushed);
-                },
+                }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == ErrorKind::Interrupted => {},
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error)
                     if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
                 {
                     break;
-                },
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -1108,7 +1290,11 @@ impl Thread {
             let in_front = pty.front_group() == Some(Group::of_process(*pid));
             let job = |group: Group| {
                 let leader = process::process(group.leader())?;
-                Some(if leader.stopped { Job::Stopped } else { Job::Runs })
+                Some(if leader.stopped {
+                    Job::Stopped
+                } else {
+                    Job::Runs
+                })
             };
             shell.read(marks, now, in_front, job);
         }
@@ -1147,16 +1333,20 @@ impl Thread {
         while let Some(lined_up) = unread.line_up() {
             match pty.near.write(lined_up) {
                 Ok(written) => {
-                    assert!(written > 0, "the program took none of {} bytes", lined_up.len());
+                    assert!(
+                        written > 0,
+                        "the program took none of {} bytes",
+                        lined_up.len()
+                    );
                     unread.sent(written);
-                },
+                }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == ErrorKind::Interrupted => {},
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(error)
                     if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
                 {
                     unread.clear();
-                },
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -1164,7 +1354,8 @@ impl Thread {
     }
 
     fn frame(&mut self) -> io::Result<()> {
-        self.watchers.retain(|watcher| !watcher.viewer.frames.is_closed());
+        self.watchers
+            .retain(|watcher| !watcher.viewer.frames.is_closed());
         if self.watchers.is_empty() {
             self.dirty = false;
             return Ok(());
@@ -1174,7 +1365,10 @@ impl Thread {
         if !due {
             return Ok(());
         }
-        if self.synced.is_some_and(|since| since.elapsed() >= SYNC_HOLD) {
+        if self
+            .synced
+            .is_some_and(|since| since.elapsed() >= SYNC_HOLD)
+        {
             self.screen.unsync().map_err(io::Error::other)?;
             self.synced = None;
         }
@@ -1200,7 +1394,12 @@ impl Thread {
                 .find(|(back, _)| *back == watcher.back)
                 .expect("a view from where the client looks, drawn above")
                 .1;
-            let flags = Flags { clusters, tracks, back: watcher.back, scrollback };
+            let flags = Flags {
+                clusters,
+                tracks,
+                back: watcher.back,
+                scrollback,
+            };
             let unchanged = watcher
                 .shown
                 .as_ref()
@@ -1213,9 +1412,12 @@ impl Thread {
             let said = frame::said(self.key, view, before, flags);
             match sent(&watcher.viewer.frames, said) {
                 Sent::Taken => {
-                    watcher.shown = Some(Shown { view: view.clone(), flags });
+                    watcher.shown = Some(Shown {
+                        view: view.clone(),
+                        flags,
+                    });
                     watcher.owed = false;
-                },
+                }
                 Sent::Full => watcher.owed = true,
                 Sent::Closed => watcher.owed = false,
             }
@@ -1240,7 +1442,7 @@ fn type_into(
         Err(error) => {
             eprintln!("lune-mux: terminal {terminal}'s input could not be read: {error}");
             return unread.type_in(bytes);
-        },
+        }
     };
     let signal = key.signal.name();
     let Raise { queue, signalled } = pty.raise(key);
@@ -1272,17 +1474,19 @@ fn refused_text(terminal: TerminalId, refused: Refused) -> String {
     match refused {
         Refused::Behind { typed_bytes } => {
             format!("terminal {terminal} has {typed_bytes} typed bytes unread")
-        },
+        }
         Refused::Larger { bytes } => {
             format!("terminal {terminal} takes {TYPED_BYTES_MAX} typed bytes at most, not {bytes}")
-        },
+        }
     }
 }
 
 fn answers_lost(terminal: TerminalId, kept: Kept) {
     if kept.too_long > 0 {
         let too_long = kept.too_long;
-        eprintln!("lune-mux: terminal {terminal}'s screen gave {too_long} answers too long to keep");
+        eprintln!(
+            "lune-mux: terminal {terminal}'s screen gave {too_long} answers too long to keep"
+        );
     }
     if kept.oldest == Oldest::Lost {
         eprintln!(
@@ -1298,7 +1502,7 @@ fn pty_modes(terminal: TerminalId, pty: &Pty) -> Option<crate::pty::Modes> {
         Err(error) => {
             eprintln!("lune-mux: terminal {terminal}'s modes could not be read: {error}");
             None
-        },
+        }
     }
 }
 
@@ -1307,7 +1511,10 @@ fn looks_gone(Gone: Gone) -> io::Error {
 }
 
 fn host() -> String {
-    rustix::system::uname().nodename().to_string_lossy().into_owned()
+    rustix::system::uname()
+        .nodename()
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn wheeled(
@@ -1369,22 +1576,32 @@ mod tests {
         let mut schedule = Schedule::first(start);
         schedule.heard(start);
         assert_eq!(schedule.due(), Some(start));
-        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let Schedule::Scheduled { last, heard, .. } = schedule else {
+            panic!("scheduled")
+        };
         schedule = Schedule::next(last, heard, start, true);
         assert_eq!(schedule.due(), Some(at(100)));
-        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let Schedule::Scheduled { last, heard, .. } = schedule else {
+            panic!("scheduled")
+        };
         schedule = Schedule::next(last, heard, at(100), true);
         assert_eq!(schedule.due(), Some(at(1100)));
         schedule.heard(at(300));
         assert_eq!(schedule.due(), Some(at(300)));
-        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let Schedule::Scheduled { last, heard, .. } = schedule else {
+            panic!("scheduled")
+        };
         schedule = Schedule::next(last, heard, at(300), true);
         schedule.heard(at(310));
         assert_eq!(schedule.due(), Some(at(400)));
-        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let Schedule::Scheduled { last, heard, .. } = schedule else {
+            panic!("scheduled")
+        };
         schedule = Schedule::next(last, heard, at(400), false);
         assert_eq!(schedule.due(), Some(at(500)));
-        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let Schedule::Scheduled { last, heard, .. } = schedule else {
+            panic!("scheduled")
+        };
         schedule = Schedule::next(last, heard, at(500), false);
         assert_eq!(schedule, Schedule::Quiet { last: at(500) });
         assert_eq!(schedule.due(), None);
@@ -1398,15 +1615,26 @@ mod tests {
         let at = |millis| start + Duration::from_millis(millis);
         let looker = Looker::started(TerminalId::next(&mut None), || {}).unwrap();
         let pid = ProcessId::new(std::process::id()).unwrap();
-        let ask = Ask::Foreground { program: pid, group: Group::of_process(pid) };
+        let ask = Ask::Foreground {
+            program: pid,
+            group: Group::of_process(pid),
+        };
         let waiting = looker.ask(ask, 0).unwrap();
-        let mut looks = Looks::InFlight { waiting, last: None, heard: false };
+        let mut looks = Looks::InFlight {
+            waiting,
+            last: None,
+            heard: false,
+        };
         looks.heard(at(50));
         assert_eq!(looks.waits_until(), None);
-        let Looks::InFlight { last, heard, .. } = looks else { panic!("in flight") };
+        let Looks::InFlight { last, heard, .. } = looks else {
+            panic!("in flight")
+        };
         let schedule = Schedule::next(last, heard, at(250), true);
         assert_eq!(schedule.due(), Some(at(350)));
-        let Schedule::Scheduled { last, heard, .. } = schedule else { panic!("scheduled") };
+        let Schedule::Scheduled { last, heard, .. } = schedule else {
+            panic!("scheduled")
+        };
         let schedule = Schedule::next(last, heard, at(350), false);
         assert_eq!(schedule, Schedule::Quiet { last: at(350) });
         assert_eq!(schedule.due(), None);
@@ -1422,7 +1650,10 @@ mod tests {
         let cwd = |path: &str| AbsoluteCwd::of_path(path.to_owned()).unwrap();
         let mut titles = Titles::default();
 
-        assert_eq!(titles.observed(Some(String::new()), None, "here", start), None);
+        assert_eq!(
+            titles.observed(Some(String::new()), None, "here", start),
+            None
+        );
         assert_eq!(titles.due(), None);
 
         assert_eq!(
@@ -1431,17 +1662,29 @@ mod tests {
         );
         assert_eq!(titles.due(), None);
 
-        assert_eq!(titles.observed(Some("⠙ Task".to_owned()), None, "here", at(20)), None);
+        assert_eq!(
+            titles.observed(Some("⠙ Task".to_owned()), None, "here", at(20)),
+            None
+        );
         assert_eq!(titles.due(), Some(at(100)));
         assert_eq!(titles.take_due(at(99)), None);
 
-        assert_eq!(titles.observed(Some("⠹ Task".to_owned()), None, "here", at(50)), None);
+        assert_eq!(
+            titles.observed(Some("⠹ Task".to_owned()), None, "here", at(50)),
+            None
+        );
         assert_eq!(titles.due(), Some(at(100)));
 
-        assert_eq!(titles.observed(Some("⠋ Task".to_owned()), None, "here", at(60)), None);
+        assert_eq!(
+            titles.observed(Some("⠋ Task".to_owned()), None, "here", at(60)),
+            None
+        );
         assert_eq!(titles.due(), None);
 
-        assert_eq!(titles.observed(Some("⠸ Task".to_owned()), None, "here", at(70)), None);
+        assert_eq!(
+            titles.observed(Some("⠸ Task".to_owned()), None, "here", at(70)),
+            None
+        );
         assert_eq!(titles.due(), Some(at(100)));
         assert_eq!(titles.take_due(at(100)), Some("⠸ Task".to_owned()));
         assert_eq!(titles.due(), None);
@@ -1455,19 +1698,31 @@ mod tests {
             Some(MetaUpdate::Cwd(cwd("/tmp"))),
         );
 
-        assert_eq!(titles.observed(Some("⠼ Task".to_owned()), None, "here", at(120)), None);
+        assert_eq!(
+            titles.observed(Some("⠼ Task".to_owned()), None, "here", at(120)),
+            None
+        );
         assert_eq!(titles.due(), Some(at(200)));
         assert_eq!(
             titles.observed(None, Some("file://here/var".to_owned()), "here", at(130)),
-            Some(MetaUpdate::Both { title: "⠼ Task".to_owned(), cwd: cwd("/var") }),
+            Some(MetaUpdate::Both {
+                title: "⠼ Task".to_owned(),
+                cwd: cwd("/var")
+            }),
         );
         assert_eq!(titles.due(), None);
 
-        assert_eq!(titles.observed(Some("⠴ Task".to_owned()), None, "here", at(150)), None);
+        assert_eq!(
+            titles.observed(Some("⠴ Task".to_owned()), None, "here", at(150)),
+            None
+        );
         assert_eq!(titles.due(), Some(at(230)));
         assert_eq!(
             titles.finish(None, Some("file://here/opt".to_owned()), "here"),
-            FinalMeta { title: Some("⠴ Task".to_owned()), cwd: Some(cwd("/opt")) },
+            FinalMeta {
+                title: Some("⠴ Task".to_owned()),
+                cwd: Some(cwd("/opt"))
+            },
         );
         assert_eq!(titles.due(), None);
         assert_eq!(titles.finish(None, None, "here"), FinalMeta::default());

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::api::{
-    self, ask_response, list_work_response, make_worktree_response, prune_request,
-    prune_response, prunes_response, rebase_response, waiting_response,
+    self, ask_response, list_work_response, make_worktree_response, prune_request, prune_response,
+    prunes_response, rebase_response, waiting_response,
 };
 use lune_protocol::CONFLICTED_NAMED_MAX;
 
@@ -31,17 +31,29 @@ pub enum Asks {
 }
 
 impl Waiting {
-    pub(crate) fn of(terminal: Arc<TerminalKey>, said: api::WaitingResponse) -> Result<Waiting, Unanswered> {
+    pub(crate) fn of(
+        terminal: Arc<TerminalKey>,
+        said: api::WaitingResponse,
+    ) -> Result<Waiting, Unanswered> {
         let asks = match said.asks {
             Some(waiting_response::Asks::Words(())) => Asks::Words,
-            Some(waiting_response::Asks::Menu(menu)) => {
-                Asks::Menu { choices: menu.choices, chosen: menu.chosen }
+            Some(waiting_response::Asks::Menu(menu)) => Asks::Menu {
+                choices: menu.choices,
+                chosen: menu.chosen,
             },
             Some(waiting_response::Asks::Unread(why)) => Asks::Unread { why },
             None => return Err(Unanswered::unread("it says nothing of what the agent asks")),
         };
-        let at = Screen { terminal, shown: said.shown };
-        Ok(Waiting { at, screen: said.screen, asks, said: said.said })
+        let at = Screen {
+            terminal,
+            shown: said.shown,
+        };
+        Ok(Waiting {
+            at,
+            screen: said.screen,
+            asks,
+            said: said.said,
+        })
     }
 }
 
@@ -59,7 +71,7 @@ impl Answer {
             Answer::Text { text } => answer_request::Answer::Text(text),
             Answer::Choice { index, label } => {
                 answer_request::Answer::Choice(Choice { index, label })
-            },
+            }
             Answer::Escape => answer_request::Answer::Escape(()),
         }
     }
@@ -85,7 +97,11 @@ impl Landed {
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Listed {
-    Work { issues: Issues, pulls: Vec<Pull>, more_pulls: bool },
+    Work {
+        issues: Issues,
+        pulls: Vec<Pull>,
+        more_pulls: bool,
+    },
     Unhosted,
 }
 
@@ -127,20 +143,40 @@ impl Listed {
             None => return Err(Unanswered::unread("it says nothing of the issues")),
         };
         let pulls = work.pulls.into_iter().map(Pull::of).collect();
-        Ok(Listed::Work { issues, pulls, more_pulls: work.more_pulls })
+        Ok(Listed::Work {
+            issues,
+            pulls,
+            more_pulls: work.more_pulls,
+        })
     }
 }
 
 impl Issue {
     fn of(said: list_work_response::Issue) -> Issue {
-        Issue { number: said.number, title: said.title, labels: said.labels }
+        Issue {
+            number: said.number,
+            title: said.title,
+            labels: said.labels,
+        }
     }
 }
 
 impl Pull {
     fn of(said: list_work_response::Pull) -> Pull {
-        let list_work_response::Pull { number, title, draft, branch, author } = said;
-        Pull { number, title, draft, branch, author }
+        let list_work_response::Pull {
+            number,
+            title,
+            draft,
+            branch,
+            author,
+        } = said;
+        Pull {
+            number,
+            title,
+            draft,
+            branch,
+            author,
+        }
     }
 }
 
@@ -152,7 +188,10 @@ pub struct Marked {
 
 impl Marked {
     pub(crate) fn none() -> Marked {
-        Marked { issues: Vec::new(), pulls: Vec::new() }
+        Marked {
+            issues: Vec::new(),
+            pulls: Vec::new(),
+        }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -180,11 +219,14 @@ pub(crate) enum Heard {
 
 impl Heard {
     pub(crate) fn of(said: api::AskResponse) -> Result<Heard, Unanswered> {
-        match said.step.ok_or_else(|| Unanswered::unread("a step says nothing"))? {
+        match said
+            .step
+            .ok_or_else(|| Unanswered::unread("a step says nothing"))?
+        {
             ask_response::Step::Session(id) => Ok(Heard::Session(id)),
             ask_response::Step::Ran(ask_response::Ran { id, command }) => {
                 Ok(Heard::Step(Step::Ran { id, command }))
-            },
+            }
             ask_response::Step::Denied(id) => Ok(Heard::Step(Step::Denied { id })),
             ask_response::Step::Said(text) => Ok(Heard::Step(Step::Said { text })),
         }
@@ -231,9 +273,21 @@ pub struct Unasked {
 
 impl Plan {
     pub(crate) fn of(said: api::PrunesResponse) -> Plan {
-        let api::PrunesResponse { repository, goes, kept, unasked } = said;
-        let kept = kept.into_iter().map(|it| Kept { folder: it.folder, number: it.number, why: it.why });
-        let unasked = unasked.into_iter().map(|it| Unasked { folder: it.folder, why: it.why });
+        let api::PrunesResponse {
+            repository,
+            goes,
+            kept,
+            unasked,
+        } = said;
+        let kept = kept.into_iter().map(|it| Kept {
+            folder: it.folder,
+            number: it.number,
+            why: it.why,
+        });
+        let unasked = unasked.into_iter().map(|it| Unasked {
+            folder: it.folder,
+            why: it.why,
+        });
         Plan {
             repository,
             goes: goes.into_iter().map(Goes::of).collect(),
@@ -246,23 +300,52 @@ impl Plan {
 impl Goes {
     fn of(said: prunes_response::Goes) -> Goes {
         let pushed = match said.pushed {
-            Some(prunes_response::goes::Pushed::Remote(far)) => {
-                Pushed::Goes { remote: far.remote, branch: far.branch }
+            Some(prunes_response::goes::Pushed::Remote(far)) => Pushed::Goes {
+                remote: far.remote,
+                branch: far.branch,
             },
             Some(prunes_response::goes::Pushed::Stays(why)) => Pushed::Stays { why },
             None => Pushed::Nowhere,
         };
-        let prunes_response::Goes { folder, branch, head, number, bytes, .. } = said;
-        Goes { folder, branch, head, number, pushed, bytes }
+        let prunes_response::Goes {
+            folder,
+            branch,
+            head,
+            number,
+            bytes,
+            ..
+        } = said;
+        Goes {
+            folder,
+            branch,
+            head,
+            number,
+            pushed,
+            bytes,
+        }
     }
 
     pub(crate) fn deleting(self) -> prune_request::Deleting {
         let remote = match self.pushed {
-            Pushed::Goes { remote, branch } => Some(prunes_response::RemoteBranch { remote, branch }),
+            Pushed::Goes { remote, branch } => {
+                Some(prunes_response::RemoteBranch { remote, branch })
+            }
             Pushed::Nowhere | Pushed::Stays { .. } => None,
         };
-        let Goes { folder, branch, head, number, .. } = self;
-        prune_request::Deleting { folder, branch, head, number, remote }
+        let Goes {
+            folder,
+            branch,
+            head,
+            number,
+            ..
+        } = self;
+        prune_request::Deleting {
+            folder,
+            branch,
+            head,
+            number,
+            remote,
+        }
     }
 }
 
@@ -289,11 +372,15 @@ impl Pruned {
     pub(crate) fn of(said: Option<api::PruneResponse>) -> Result<Pruned, Unanswered> {
         let answer = said.and_then(|said| said.answer);
         match answer.ok_or_else(|| Unanswered::unread("it says nothing of how it went"))? {
-            prune_response::Answer::Changed(plan) => Ok(Pruned::Changed { plan: Plan::of(plan) }),
+            prune_response::Answer::Changed(plan) => Ok(Pruned::Changed {
+                plan: Plan::of(plan),
+            }),
             prune_response::Answer::Deleted(deleted) => {
                 let outcomes = deleted.outcomes.into_iter().map(Outcome::of);
-                Ok(Pruned::Went { outcomes: outcomes.collect::<Result<_, _>>()? })
-            },
+                Ok(Pruned::Went {
+                    outcomes: outcomes.collect::<Result<_, _>>()?,
+                })
+            }
         }
     }
 }
@@ -306,7 +393,11 @@ impl Outcome {
             Some(Said::Gone(())) => Came::Gone,
             Some(Said::WentBut(why)) => Came::WentBut { why },
             Some(Said::Stays(why)) => Came::Stays { why },
-            None => return Err(Unanswered::unread(format!("it says nothing of how {folder} went"))),
+            None => {
+                return Err(Unanswered::unread(format!(
+                    "it says nothing of how {folder} went"
+                )));
+            }
         };
         Ok(Outcome { folder, came })
     }
@@ -322,32 +413,56 @@ pub struct Rebased {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Rebase {
     Already,
-    Clean { ahead: u32 },
-    Stopped { at: Option<String>, named: Vec<String>, unnamed: u32 },
+    Clean {
+        ahead: u32,
+    },
+    Stopped {
+        at: Option<String>,
+        named: Vec<String>,
+        unnamed: u32,
+    },
 }
 
 impl Rebased {
     pub(crate) fn of(said: Option<api::RebaseResponse>) -> Result<Rebased, Unanswered> {
         let said = said.ok_or_else(|| Unanswered::unread("it ended with no rebase"))?;
-        let came = match said.came.ok_or_else(|| Unanswered::unread("it says nothing of how it came out"))? {
+        let came = match said
+            .came
+            .ok_or_else(|| Unanswered::unread("it says nothing of how it came out"))?
+        {
             rebase_response::Came::Already(()) => Rebase::Already,
-            rebase_response::Came::Clean(rebase_response::Clean { ahead }) => Rebase::Clean { ahead },
+            rebase_response::Came::Clean(rebase_response::Clean { ahead }) => {
+                Rebase::Clean { ahead }
+            }
             rebase_response::Came::Stopped(stopped) => {
-                let rebase_response::Stopped { at, conflicted, conflicted_count } = stopped;
+                let rebase_response::Stopped {
+                    at,
+                    conflicted,
+                    conflicted_count,
+                } = stopped;
                 let wanted = usize::try_from(conflicted_count).unwrap_or(usize::MAX);
                 let wanted = wanted.min(CONFLICTED_NAMED_MAX);
                 if conflicted.len() != wanted {
                     let (named, count) = (conflicted.len(), conflicted_count);
-                    let why = format!("it names {named} files of the {count} in conflict, not {wanted}");
+                    let why =
+                        format!("it names {named} files of the {count} in conflict, not {wanted}");
                     return Err(Unanswered::unread(why));
                 }
                 let named = u32::try_from(conflicted.len());
                 let named = named.expect("at most CONFLICTED_NAMED_MAX files are named");
                 assert!(named <= conflicted_count);
-                Rebase::Stopped { at, named: conflicted, unnamed: conflicted_count - named }
-            },
+                Rebase::Stopped {
+                    at,
+                    named: conflicted,
+                    unnamed: conflicted_count - named,
+                }
+            }
         };
-        Ok(Rebased { branch: said.branch, onto: said.onto, came })
+        Ok(Rebased {
+            branch: said.branch,
+            onto: said.onto,
+            came,
+        })
     }
 }
 
@@ -366,7 +481,10 @@ pub struct Filed {
 impl Filed {
     pub(crate) fn of(said: Option<api::FileIssueResponse>) -> Result<Filed, Unanswered> {
         let said = said.ok_or_else(|| Unanswered::unread("it ended with no issue"))?;
-        Ok(Filed { url: said.url, title: said.title })
+        Ok(Filed {
+            url: said.url,
+            title: said.title,
+        })
     }
 }
 
@@ -376,7 +494,10 @@ mod tests {
 
     #[test]
     fn a_branch_that_goes_is_deleted_with_what_was_pushed_of_it_and_nothing_else() {
-        let far = prunes_response::RemoteBranch { remote: "origin".to_owned(), branch: "fix".to_owned() };
+        let far = prunes_response::RemoteBranch {
+            remote: "origin".to_owned(),
+            branch: "fix".to_owned(),
+        };
         let said = |pushed| prunes_response::Goes {
             folder: "/w/lune/fix".to_owned(),
             branch: "fix".to_owned(),
@@ -385,38 +506,74 @@ mod tests {
             pushed,
             bytes: Some(4096),
         };
-        let pushed = Goes::of(said(Some(prunes_response::goes::Pushed::Remote(far.clone()))));
-        assert_eq!(pushed.pushed, Pushed::Goes { remote: "origin".to_owned(), branch: "fix".to_owned() });
+        let pushed = Goes::of(said(Some(prunes_response::goes::Pushed::Remote(
+            far.clone(),
+        ))));
+        assert_eq!(
+            pushed.pushed,
+            Pushed::Goes {
+                remote: "origin".to_owned(),
+                branch: "fix".to_owned()
+            }
+        );
         assert_eq!(pushed.deleting().remote, Some(far));
-        let stays = Goes::of(said(Some(prunes_response::goes::Pushed::Stays("forked".to_owned()))));
+        let stays = Goes::of(said(Some(prunes_response::goes::Pushed::Stays(
+            "forked".to_owned(),
+        ))));
         assert_eq!(stays.deleting().remote, None);
         let local = Goes::of(said(None)).deleting();
-        assert_eq!((local.folder.as_str(), local.number, local.remote), ("/w/lune/fix", 7, None));
+        assert_eq!(
+            (local.folder.as_str(), local.number, local.remote),
+            ("/w/lune/fix", 7, None)
+        );
     }
 
     #[test]
     fn a_worktree_made_by_a_luned_too_old_to_read_what_it_opens_runs_a_shell() {
         use make_worktree_response::Landed as Said;
-        let said = |landed| Some(api::MakeWorktreeResponse { landed: Some(landed) });
-        assert_eq!(Landed::of(said(Said::Made(4))), Ok(Landed::Shell { worktree: 4 }));
-        assert_eq!(Landed::of(said(Said::Started(4))), Ok(Landed::Started { worktree: 4 }));
-        assert_eq!(Landed::of(said(Said::Found(4))), Ok(Landed::Found { worktree: 4 }));
+        let said = |landed| {
+            Some(api::MakeWorktreeResponse {
+                landed: Some(landed),
+            })
+        };
+        assert_eq!(
+            Landed::of(said(Said::Made(4))),
+            Ok(Landed::Shell { worktree: 4 })
+        );
+        assert_eq!(
+            Landed::of(said(Said::Started(4))),
+            Ok(Landed::Started { worktree: 4 })
+        );
+        assert_eq!(
+            Landed::of(said(Said::Found(4))),
+            Ok(Landed::Found { worktree: 4 })
+        );
     }
 
     #[test]
     fn a_rebase_stopped_names_its_conflicts_up_to_the_most_and_counts_the_rest() {
         let stopped = |named: usize, count| {
             let conflicted = (0..named).map(|file| format!("f{file}")).collect();
-            let stopped = rebase_response::Stopped { at: None, conflicted, conflicted_count: count };
+            let stopped = rebase_response::Stopped {
+                at: None,
+                conflicted,
+                conflicted_count: count,
+            };
             let came = Some(rebase_response::Came::Stopped(stopped));
-            Rebased::of(Some(api::RebaseResponse { came, ..api::RebaseResponse::default() }))
+            Rebased::of(Some(api::RebaseResponse {
+                came,
+                ..api::RebaseResponse::default()
+            }))
         };
         let unnamed = |rebased: Result<Rebased, Unanswered>| match rebased.unwrap().came {
             Rebase::Stopped { named, unnamed, .. } => (named.len(), unnamed),
             came => panic!("the rebase stopped: {came:?}"),
         };
         assert_eq!(unnamed(stopped(3, 3)), (3, 0));
-        assert_eq!(unnamed(stopped(CONFLICTED_NAMED_MAX, 30)), (CONFLICTED_NAMED_MAX, 10));
+        assert_eq!(
+            unnamed(stopped(CONFLICTED_NAMED_MAX, 30)),
+            (CONFLICTED_NAMED_MAX, 10)
+        );
         for (named, count) in [(3, 2), (2, 3), (CONFLICTED_NAMED_MAX + 1, 30)] {
             let unread = matches!(stopped(named, count), Err(Unanswered::InDoubt { .. }));
             assert!(unread, "{named} of {count}");
@@ -426,8 +583,17 @@ mod tests {
     #[test]
     fn an_answer_that_says_nothing_is_in_doubt() {
         assert!(matches!(Landed::of(None), Err(Unanswered::InDoubt { .. })));
-        assert!(matches!(Pruned::of(Some(api::PruneResponse::default())), Err(Unanswered::InDoubt { .. })));
-        let unsaid = api::RebaseResponse { branch: "fix".to_owned(), ..api::RebaseResponse::default() };
-        assert!(matches!(Rebased::of(Some(unsaid)), Err(Unanswered::InDoubt { .. })));
+        assert!(matches!(
+            Pruned::of(Some(api::PruneResponse::default())),
+            Err(Unanswered::InDoubt { .. })
+        ));
+        let unsaid = api::RebaseResponse {
+            branch: "fix".to_owned(),
+            ..api::RebaseResponse::default()
+        };
+        assert!(matches!(
+            Rebased::of(Some(unsaid)),
+            Err(Unanswered::InDoubt { .. })
+        ));
     }
 }

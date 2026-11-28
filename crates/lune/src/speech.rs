@@ -83,10 +83,16 @@ impl Speech {
 
     pub fn listen(&self, number: u64, events: &Sender<Event>) -> Listening {
         let (listening, stop) = Listening::new();
-        let ended = Due::new(events, move |ended| {
-            Event::Spoken { number, spoken: Spoken::Ended(ended) }
+        let ended = Due::new(events, move |ended| Event::Spoken {
+            number,
+            spoken: Spoken::Ended(ended),
         });
-        let _ = self.jobs.send(Job { number, events: events.clone(), stop, ended });
+        let _ = self.jobs.send(Job {
+            number,
+            events: events.clone(),
+            stop,
+            ended,
+        });
         listening
     }
 }
@@ -108,7 +114,12 @@ impl Listening {
 }
 
 fn listen(session: &mut Option<Session>, job: Job) {
-    let Job { number, events, stop, ended } = job;
+    let Job {
+        number,
+        events,
+        stop,
+        ended,
+    } = job;
     let said = |spoken| {
         let _ = events.send(Event::Spoken { number, spoken });
     };
@@ -140,9 +151,9 @@ fn heard(
         match stop.try_recv() {
             Ok(()) => {
                 off.get_or_insert_with(|| Instant::now() + TAIL);
-            },
+            }
             Err(TryRecvError::Disconnected) => return Err("given up".to_owned()),
-            Err(TryRecvError::Empty) => {},
+            Err(TryRecvError::Empty) => {}
         }
         let now = Instant::now();
         if off.is_some_and(|off| now >= off) || now - started >= LONGEST {
@@ -173,11 +184,16 @@ fn heard(
     if !loudest.heard() {
         return Err(UNHEARD.to_owned());
     }
-    batch.resize(batch.len() + SHORTEST.saturating_sub(fed + batch.len()), 0.0);
+    batch.resize(
+        batch.len() + SHORTEST.saturating_sub(fed + batch.len()),
+        0.0,
+    );
     if !batch.is_empty() {
         feed(&mut stream, &batch, said)?;
     }
-    stream.finalize().map_err(|error| format!("the speech model failed: {error}"))?;
+    stream
+        .finalize()
+        .map_err(|error| format!("the speech model failed: {error}"))?;
     let text = stream.text().full.trim().to_owned();
     if text.is_empty() {
         return Err("the speech model made out no words".to_owned());
@@ -188,16 +204,26 @@ fn heard(
 fn load() -> Result<Session, String> {
     let path = PINS[0].path()?;
     let model = Model::load(&path).map_err(|error| {
-        format!("the speech model cannot be read in, {}: {error}", path.display())
+        format!(
+            "the speech model cannot be read in, {}: {error}",
+            path.display()
+        )
     })?;
-    let threads = thread::available_parallelism().map_or(1, usize::from).min(THREADS);
-    let options = SessionOptions { n_threads: threads as i32, ..SessionOptions::default() };
+    let threads = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(THREADS);
+    let options = SessionOptions {
+        n_threads: threads as i32,
+        ..SessionOptions::default()
+    };
     let session = model.session_with(&options);
     session.map_err(|error| format!("the speech model does not start: {error}"))
 }
 
 fn feed(stream: &mut Stream<'_>, samples: &[f32], said: &dyn Fn(Spoken)) -> Result<(), String> {
-    let update = stream.feed(samples).map_err(|error| format!("the speech model failed: {error}"))?;
+    let update = stream
+        .feed(samples)
+        .map_err(|error| format!("the speech model failed: {error}"))?;
     if update.committed_changed || update.tentative_changed {
         said(Spoken::Words(stream.text().display()));
     }
@@ -243,7 +269,9 @@ mod tests {
 
     fn tone(amplitude: f32, seconds: f32) -> Vec<f32> {
         let count = (mic::RATE as f32 * seconds) as usize;
-        (0..count).map(|at| amplitude * (at as f32 * 0.05).sin()).collect()
+        (0..count)
+            .map(|at| amplitude * (at as f32 * 0.05).sin())
+            .collect()
     }
 
     #[test]

@@ -9,7 +9,9 @@ pub struct Titled {
 
 impl Titled {
     pub(crate) fn to_api(&self) -> api::Titled {
-        api::Titled { topic: self.topic.clone().map(String::from) }
+        api::Titled {
+            topic: self.topic.clone().map(String::from),
+        }
     }
 }
 
@@ -21,5 +23,7 @@ pub(crate) fn titled(title: &str) -> Option<Titled> {
     let agent = matches!(glyph, '✳' | '◐' | '◑' | '✢' | '✶' | '✻' | '✽' | '·')
         || ('\u{2800}'..='\u{28ff}').contains(&glyph);
     let topic = Some(chars.as_str().trim_start()).filter(|topic| *topic != GENERIC_TITLE);
-    agent.then(|| Titled { topic: topic.map(str::to_owned).and_then(Said::new) })
+    agent.then(|| Titled {
+        topic: topic.map(str::to_owned).and_then(Said::new),
+    })
 }

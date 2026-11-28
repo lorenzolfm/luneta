@@ -41,7 +41,10 @@ const _: () = {
     let mut index = 0;
     while index < Program::ALL.len() {
         let name = Program::ALL[index].name();
-        assert!(name.len() <= process::NAME_BYTES_MAX, "Linux keeps 15 bytes of a name");
+        assert!(
+            name.len() <= process::NAME_BYTES_MAX,
+            "Linux keeps 15 bytes of a name"
+        );
         index += 1;
     }
 };
@@ -52,8 +55,14 @@ pub const GRACE: Duration = Duration::from_secs(5);
 
 pub const KILL_WAIT: Duration = Duration::from_secs(2);
 
-const _: () = assert!(!GRACE.is_zero(), "a process has a while to end at its SIGTERM");
-const _: () = assert!(!KILL_WAIT.is_zero(), "a process has a while to end at its SIGKILL");
+const _: () = assert!(
+    !GRACE.is_zero(),
+    "a process has a while to end at its SIGTERM"
+);
+const _: () = assert!(
+    !KILL_WAIT.is_zero(),
+    "a process has a while to end at its SIGKILL"
+);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lune {
@@ -96,24 +105,39 @@ impl Folders {
     #[must_use]
     pub fn of(here: &Path) -> Folders {
         let holder = projects::holder().filter(|holder| !same(holder, here));
-        Folders { here: here.to_owned(), holder }
+        Folders {
+            here: here.to_owned(),
+            holder,
+        }
     }
 
     fn each(&self) -> Vec<&Path> {
-        std::iter::once(self.here.as_path()).chain(self.holder.as_deref()).collect()
+        std::iter::once(self.here.as_path())
+            .chain(self.holder.as_deref())
+            .collect()
     }
 }
 
 #[must_use]
 pub fn running(folders: &Folders) -> Running {
     let programs = Program::ALL.map(|program| (program, program.name()));
-    running_of(process::mine(&programs), &folders.each(), std::process::id())
+    running_of(
+        process::mine(&programs),
+        &folders.each(),
+        std::process::id(),
+    )
 }
 
 fn running_of(mine: process::Mine<Program>, folders: &[&Path], me: u32) -> Running {
     let process::Mine { found, unreadable } = mine;
-    let unreadable = unreadable.into_iter().filter(|it| it.id.pid != me).collect();
-    let mut running = Running { unreadable, ..Running::default() };
+    let unreadable = unreadable
+        .into_iter()
+        .filter(|it| it.id.pid != me)
+        .collect();
+    let mut running = Running {
+        unreadable,
+        ..Running::default()
+    };
     for found in found {
         if found.id.pid == me {
             continue;
@@ -125,14 +149,17 @@ fn running_of(mine: process::Mine<Program>, folders: &[&Path], me: u32) -> Runni
             continue;
         };
         match found.program {
-            Program::Lune => running.lunes.push(Lune { id: found.id, argv: found.argv }),
+            Program::Lune => running.lunes.push(Lune {
+                id: found.id,
+                argv: found.argv,
+            }),
             Program::Luned if helps(&found.argv) => running.helpers.push(found.id),
             Program::Luned => {
                 running.luneds.push(found.id);
                 if !running.served.iter().any(|served| served == folder) {
                     running.served.push(folder.to_owned());
                 }
-            },
+            }
             Program::Mux => running.muxes.push(found.id),
         }
     }
@@ -145,7 +172,9 @@ fn running_of(mine: process::Mine<Program>, folders: &[&Path], me: u32) -> Runni
 }
 
 fn helps(argv: &[OsString]) -> bool {
-    argv.get(1).and_then(|first| first.to_str()).is_some_and(Helper::has_subcommand)
+    argv.get(1)
+        .and_then(|first| first.to_str())
+        .is_some_and(Helper::has_subcommand)
 }
 
 fn listened_in(found: &process::Found<Program>) -> Option<PathBuf> {
@@ -165,8 +194,9 @@ fn same(a: &Path, b: &Path) -> bool {
 #[must_use]
 pub fn end(ids: &[Id]) -> Vec<(Id, Unended)> {
     let termed = process::signalled(ids, Signal::TERM, GRACE);
-    let (outlived, mut left): (Vec<_>, Vec<_>) =
-        termed.into_iter().partition(|(_, why)| *why == Unended::Outlived);
+    let (outlived, mut left): (Vec<_>, Vec<_>) = termed
+        .into_iter()
+        .partition(|(_, why)| *why == Unended::Outlived);
     if !outlived.is_empty() {
         let outlived: Vec<Id> = outlived.into_iter().map(|(id, _)| id).collect();
         left.extend(process::signalled(&outlived, Signal::KILL, KILL_WAIT));
@@ -186,7 +216,10 @@ mod tests {
     use super::*;
 
     fn id_of(child: &Child) -> Id {
-        Id { pid: child.id(), start: process::start(child.id()).unwrap() }
+        Id {
+            pid: child.id(),
+            start: process::start(child.id()).unwrap(),
+        }
     }
 
     #[test]
@@ -200,12 +233,16 @@ mod tests {
             .spawn()
             .unwrap();
         let mut held = String::new();
-        BufReader::new(holds.stdout.take().unwrap()).read_line(&mut held).unwrap();
+        BufReader::new(holds.stdout.take().unwrap())
+            .read_line(&mut held)
+            .unwrap();
         assert_eq!(held, "held\n");
         let started = Began::now();
         let (ends_id, holds_id) = (id_of(&ends), id_of(&holds));
         assert_eq!(end(&[ends_id.clone(), holds_id]), []);
-        started.lasted().at_least(GRACE, "the one that holds out has its grace");
+        started
+            .lasted()
+            .at_least(GRACE, "the one that holds out has its grace");
         assert!(ends.wait().unwrap().code().is_none());
         assert!(holds.wait().unwrap().code().is_none());
         assert_eq!(end(&[ends_id]), [], "one that has ended is left alone");
@@ -214,15 +251,24 @@ mod tests {
     #[test]
     fn a_process_that_took_an_ended_one_s_pid_is_left_alone() {
         let mut runs = Command::new("sleep").arg("60").spawn().unwrap();
-        let earlier = Id { pid: runs.id(), start: Start::spelled("0".to_owned()).unwrap() };
+        let earlier = Id {
+            pid: runs.id(),
+            start: Start::spelled("0".to_owned()).unwrap(),
+        };
         assert_eq!(end(&[earlier]), []);
-        assert!(runs.try_wait().unwrap().is_none(), "another process of its pid was ended");
+        assert!(
+            runs.try_wait().unwrap().is_none(),
+            "another process of its pid was ended"
+        );
         runs.kill().unwrap();
         runs.wait().unwrap();
     }
 
     fn mine(found: Vec<process::Found<Program>>) -> process::Mine<Program> {
-        process::Mine { found, unreadable: Vec::new() }
+        process::Mine {
+            found,
+            unreadable: Vec::new(),
+        }
     }
 
     fn found(pid: u32, program: Program, environ: &[&str]) -> process::Found<Program> {
@@ -235,10 +281,22 @@ mod tests {
         arguments: &[&str],
         environ: &[&str],
     ) -> process::Found<Program> {
-        let id = Id { pid, start: Start::spelled("1".to_owned()).unwrap() };
-        let argv = [program.name()].iter().chain(arguments).map(OsString::from).collect();
+        let id = Id {
+            pid,
+            start: Start::spelled("1".to_owned()).unwrap(),
+        };
+        let argv = [program.name()]
+            .iter()
+            .chain(arguments)
+            .map(OsString::from)
+            .collect();
         let environ = environ.iter().map(OsString::from).collect();
-        process::Found { id, program, argv, environ }
+        process::Found {
+            id,
+            program,
+            argv,
+            environ,
+        }
     }
 
     #[test]
@@ -259,14 +317,34 @@ mod tests {
     fn a_process_is_lune_s_only_in_the_folder_its_variables_name() {
         let folder = Path::new("/run/user/1000/lune");
         let listed = vec![
-            found(1, Program::Lune, &["XDG_RUNTIME_DIR=/run/user/1000", "TMPDIR=/tmp"]),
-            found(2, Program::Luned, &["HOME=/home/me", "TMPDIR=/run/user/1000"]),
-            found(3, Program::Mux, &["XDG_RUNTIME_DIR=", "TMPDIR=/run/user/1000"]),
-            found(4, Program::Luned, &["XDG_RUNTIME_DIR=/tmp/test", "TMPDIR=/run/user/1000"]),
+            found(
+                1,
+                Program::Lune,
+                &["XDG_RUNTIME_DIR=/run/user/1000", "TMPDIR=/tmp"],
+            ),
+            found(
+                2,
+                Program::Luned,
+                &["HOME=/home/me", "TMPDIR=/run/user/1000"],
+            ),
+            found(
+                3,
+                Program::Mux,
+                &["XDG_RUNTIME_DIR=", "TMPDIR=/run/user/1000"],
+            ),
+            found(
+                4,
+                Program::Luned,
+                &["XDG_RUNTIME_DIR=/tmp/test", "TMPDIR=/run/user/1000"],
+            ),
             found(5, Program::Mux, &["TMPDIR=/tmp"]),
             found(6, Program::Lune, &[]),
             found(7, Program::Lune, &["XDG_RUNTIME_DIR=/run/user/1000"]),
-            found(8, Program::Luned, &["XDG_RUNTIME_DIR=/run/user/1000", "XDG_RUNTIME_DIR=/tmp"]),
+            found(
+                8,
+                Program::Luned,
+                &["XDG_RUNTIME_DIR=/run/user/1000", "XDG_RUNTIME_DIR=/tmp"],
+            ),
         ];
         let running = running_of(mine(listed), &[folder], 7);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
@@ -281,7 +359,11 @@ mod tests {
         let listed = vec![
             found(1, Program::Luned, &["TMPDIR=/var/T/nix-shell.a"]),
             found(2, Program::Mux, &[]),
-            found(3, Program::Lune, &["XDG_RUNTIME_DIR=/tmp/test", "TMPDIR=/var/T/nix-shell.b"]),
+            found(
+                3,
+                Program::Lune,
+                &["XDG_RUNTIME_DIR=/tmp/test", "TMPDIR=/var/T/nix-shell.b"],
+            ),
         ];
         let running = running_of(mine(listed), &[&folder], 0);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
@@ -294,14 +376,27 @@ mod tests {
         let folder = Path::new("/run/user/1000/lune");
         let ours = ["XDG_RUNTIME_DIR=/run/user/1000"];
         let listed = vec![
-            given(1, Program::Luned, &["fetch-upstream", "--", "/w", "main"], &ours),
-            given(2, Program::Luned, &["worktree", "--repo", "/w", "--", "feat"], &ours),
+            given(
+                1,
+                Program::Luned,
+                &["fetch-upstream", "--", "/w", "main"],
+                &ours,
+            ),
+            given(
+                2,
+                Program::Luned,
+                &["worktree", "--repo", "/w", "--", "feat"],
+                &ours,
+            ),
             given(3, Program::Luned, &["follow", "/w"], &ours),
             given(4, Program::Luned, &["--detached"], &ours),
         ];
         let running = running_of(mine(listed), &[folder], 0);
         let pids = |ids: Vec<Id>| ids.into_iter().map(|id| id.pid).collect::<Vec<_>>();
-        assert_eq!((pids(running.luneds), pids(running.helpers)), (vec![4], vec![1, 2, 3]));
+        assert_eq!(
+            (pids(running.luneds), pids(running.helpers)),
+            (vec![4], vec![1, 2, 3])
+        );
         assert_eq!(running.served, [folder.to_owned()]);
 
         let left = given(1, Program::Luned, &["follow", "/w"], &ours);
@@ -312,7 +407,10 @@ mod tests {
 
     #[test]
     fn a_process_in_the_folder_of_the_projects_holder_is_lune_s_too() {
-        let (folder, holder) = (Path::new("/run/user/1000/lune"), Path::new("/tmp/test/lune"));
+        let (folder, holder) = (
+            Path::new("/run/user/1000/lune"),
+            Path::new("/tmp/test/lune"),
+        );
         let listed = vec![
             found(1, Program::Luned, &["XDG_RUNTIME_DIR=/tmp/test"]),
             given(2, Program::Mux, &["/tmp/test/lune"], &[]),
@@ -331,15 +429,36 @@ mod tests {
     fn a_process_that_did_not_read_is_said_and_never_ended() {
         let folder = Path::new("/run/user/1000/lune");
         let unreadable = |pid: u32, program: Program| Unreadable {
-            id: Id { pid, start: Start::spelled("1".to_owned()).unwrap() },
+            id: Id {
+                pid,
+                start: Start::spelled("1".to_owned()).unwrap(),
+            },
             program,
             why: "KERN_PROCARGS2 holds a negative argc".to_owned(),
         };
-        let found = vec![found(1, Program::Luned, &["XDG_RUNTIME_DIR=/run/user/1000"])];
+        let found = vec![found(
+            1,
+            Program::Luned,
+            &["XDG_RUNTIME_DIR=/run/user/1000"],
+        )];
         let (lune, luned, mux) = (Program::Lune, Program::Luned, Program::Mux);
-        let unread = vec![unreadable(4, mux), unreadable(2, luned), unreadable(3, lune)];
-        let running = running_of(process::Mine { found, unreadable: unread }, &[folder], 3);
-        assert_eq!(running.unreadable, [unreadable(2, luned), unreadable(4, mux)]);
+        let unread = vec![
+            unreadable(4, mux),
+            unreadable(2, luned),
+            unreadable(3, lune),
+        ];
+        let running = running_of(
+            process::Mine {
+                found,
+                unreadable: unread,
+            },
+            &[folder],
+            3,
+        );
+        assert_eq!(
+            running.unreadable,
+            [unreadable(2, luned), unreadable(4, mux)]
+        );
         let daemons: Vec<u32> = running.luneds.iter().map(|id| id.pid).collect();
         assert_eq!(daemons, [1]);
         assert_eq!(running.muxes, []);

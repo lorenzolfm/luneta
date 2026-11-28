@@ -287,12 +287,8 @@ impl RibbonShape {
     pub const fn spans(self) -> (Range<usize>, Range<usize>) {
         match self {
             RibbonShape::Modified { left, right } => (left.to_range(), right.to_range()),
-            RibbonShape::Inserted { left_seam, right } => {
-                (left_seam..left_seam, right.to_range())
-            }
-            RibbonShape::Deleted { left, right_seam } => {
-                (left.to_range(), right_seam..right_seam)
-            }
+            RibbonShape::Inserted { left_seam, right } => (left_seam..left_seam, right.to_range()),
+            RibbonShape::Deleted { left, right_seam } => (left.to_range(), right_seam..right_seam),
         }
     }
 }
@@ -394,10 +390,7 @@ impl SplitLayout {
                                             block: block_index,
                                             line: line_index,
                                         };
-                                        pending_left.push(LeftRow::Deleted {
-                                            line: del.line,
-                                            at,
-                                        });
+                                        pending_left.push(LeftRow::Deleted { line: del.line, at });
                                     }
                                     let right_start = rows.len() + pending_right.len();
                                     for (line_index, add) in changed.added().iter().enumerate() {
@@ -407,10 +400,7 @@ impl SplitLayout {
                                             block: block_index,
                                             line: line_index,
                                         };
-                                        pending_right.push(RightRow::Added {
-                                            line: add.line,
-                                            at,
-                                        });
+                                        pending_right.push(RightRow::Added { line: add.line, at });
                                     }
                                     let shape = match changed {
                                         ChangedBlock::Modified { deleted, added } => {
@@ -441,14 +431,21 @@ impl SplitLayout {
                 }
             }
             let end_row = rows.len();
-            assert!(start_row < end_row, "every file emits at least its header row");
+            assert!(
+                start_row < end_row,
+                "every file emits at least its header row"
+            );
             files.push(FileSpan {
                 file: file_index,
                 start_row,
                 end_row,
             });
         }
-        assert_eq!(files.len(), patch.files.len(), "every patch file has a split span");
+        assert_eq!(
+            files.len(),
+            patch.files.len(),
+            "every patch file has a split span"
+        );
         for ribbon in &ribbons {
             let (left, right) = ribbon.shape.spans();
             assert!(left.end <= rows.len(), "ribbon left end fits layout");
@@ -639,14 +636,21 @@ impl UnifiedLayout {
                 }
             }
             let end_row = rows.len();
-            assert!(start_row < end_row, "every file emits at least its header row");
+            assert!(
+                start_row < end_row,
+                "every file emits at least its header row"
+            );
             files.push(FileSpan {
                 file: file_index,
                 start_row,
                 end_row,
             });
         }
-        assert_eq!(files.len(), patch.files.len(), "every patch file has a unified span");
+        assert_eq!(
+            files.len(),
+            patch.files.len(),
+            "every patch file has a unified span"
+        );
         for anchor in &hunks {
             assert!(anchor.row < rows.len(), "unified hunk anchor fits layout");
         }

@@ -42,20 +42,27 @@ impl Leader {
         let (kept, let_go) = mpsc::channel::<Infallible>();
         let loses = Arc::clone(&lost);
         let unreaped = leaders.unreaped();
-        let leader = Leader { terminal, pid, lost, _kept: kept };
-        thread::Builder::new().name(format!("terminal {terminal} waits")).spawn(move || {
-            match ended(terminal, pid) {
-                Ok(exit) => {
-                    if exited.try_send(exit).is_ok() {
-                        woken();
+        let leader = Leader {
+            terminal,
+            pid,
+            lost,
+            _kept: kept,
+        };
+        thread::Builder::new()
+            .name(format!("terminal {terminal} waits"))
+            .spawn(move || {
+                match ended(terminal, pid) {
+                    Ok(exit) => {
+                        if exited.try_send(exit).is_ok() {
+                            woken();
+                        }
+                        let Err(RecvError) = let_go.recv();
+                        reaped(terminal, &mut child, exit);
                     }
-                    let Err(RecvError) = let_go.recv();
-                    reaped(terminal, &mut child, exit);
-                },
-                Err(Unwaited) => loses.store(true, Ordering::Release),
-            }
-            drop(unreaped);
-        })?;
+                    Err(Unwaited) => loses.store(true, Ordering::Release),
+                }
+                drop(unreaped);
+            })?;
         Ok((leader, exits))
     }
 
@@ -70,7 +77,9 @@ impl Leader {
         if self.holds() && !has_ended(self.pid) {
             let terminal = self.terminal;
             let grace = GRACE.as_secs();
-            eprintln!("lune-mux: terminal {terminal}'s program outlasted {grace}s, so it is killed");
+            eprintln!(
+                "lune-mux: terminal {terminal}'s program outlasted {grace}s, so it is killed"
+            );
         }
     }
 
@@ -83,12 +92,12 @@ impl Leader {
             return;
         }
         match process::kill_process_group(self.pid, signal) {
-            Ok(()) | Err(Errno::SRCH) => {},
-            Err(Errno::PERM) if has_ended(self.pid) => {},
+            Ok(()) | Err(Errno::SRCH) => {}
+            Err(Errno::PERM) if has_ended(self.pid) => {}
             Err(error) => {
                 let terminal = self.terminal;
                 eprintln!("lune-mux: terminal {terminal}'s programs were not sent {name}: {error}");
-            },
+            }
         }
     }
 }
@@ -104,12 +113,16 @@ fn ended(terminal: TerminalId, pid: Pid) -> Result<Exit, Unwaited> {
     loop {
         match process::waitid(WaitId::Pid(pid), ended) {
             Ok(Some(status)) => return Ok(end_of(&status)),
-            Ok(None) => unreachable!("a wait for terminal {terminal}'s program without NOHANG waits"),
-            Err(Errno::INTR) => {},
+            Ok(None) => {
+                unreachable!("a wait for terminal {terminal}'s program without NOHANG waits")
+            }
+            Err(Errno::INTR) => {}
             Err(error) => {
-                eprintln!("lune-mux: terminal {terminal}'s program could not be waited for: {error}");
+                eprintln!(
+                    "lune-mux: terminal {terminal}'s program could not be waited for: {error}"
+                );
                 return Err(Unwaited);
-            },
+            }
         }
     }
 }
@@ -117,9 +130,15 @@ fn ended(terminal: TerminalId, pid: Pid) -> Result<Exit, Unwaited> {
 fn reaped(terminal: TerminalId, child: &mut Child, exit: Exit) {
     match child.wait() {
         Ok(status) => {
-            assert_eq!(Exit::of(status), exit, "terminal {terminal}'s program ends as it was seen to");
-        },
-        Err(error) => eprintln!("lune-mux: terminal {terminal}'s program could not be reaped: {error}"),
+            assert_eq!(
+                Exit::of(status),
+                exit,
+                "terminal {terminal}'s program ends as it was seen to"
+            );
+        }
+        Err(error) => {
+            eprintln!("lune-mux: terminal {terminal}'s program could not be reaped: {error}");
+        }
     }
 }
 
@@ -197,14 +216,17 @@ mod tests {
             if let Ok(count) = (&pty.near).read(&mut read) {
                 said.extend_from_slice(&read[..count]);
             }
-            said.ends_with(b"\n").then(|| String::from_utf8_lossy(&said).trim().to_owned())
+            said.ends_with(b"\n")
+                .then(|| String::from_utf8_lossy(&said).trim().to_owned())
         });
         drop(pty);
         (led, said)
     }
 
     fn reaped(leaders: &Leaders) {
-        eventually("its waiter ends", || (*leaders.0.borrow() == 0).then_some(()));
+        eventually("its waiter ends", || {
+            (*leaders.0.borrow() == 0).then_some(())
+        });
     }
 
     #[test]
@@ -283,7 +305,11 @@ mod tests {
         let exit = eventually("its leader is seen to end", || exits.try_recv().ok());
         assert_eq!(exit, Exit::Code(4));
         assert_eq!(process::test_kill_process(outlives), Ok(()));
-        assert_eq!(*leaders.0.borrow(), 1, "an ended leader is held until it is let go");
+        assert_eq!(
+            *leaders.0.borrow(),
+            1,
+            "an ended leader is held until it is let go"
+        );
         leader.end();
         reaped(&leaders);
         eventually("what outlived its leader ends", || {

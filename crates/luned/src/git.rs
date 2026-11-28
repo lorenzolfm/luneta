@@ -18,10 +18,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::projects::{Dir, PATH_BYTES_MAX};
+pub use lune_protocol::PATCH_BYTES_MAX;
 use lune_protocol::diff::{ReadDiff, RelativePath, UntrackedFile};
 use lune_protocol::git::{self, Changed, GitStatus, Head};
 use lune_protocol::said::Said;
-pub use lune_protocol::PATCH_BYTES_MAX;
 use lune_protocol::{UNTRACKED_BYTES_MAX, UNTRACKED_FILES_MAX, UNTRACKED_TOTAL_BYTES_MAX};
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, PathsMut, RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -58,7 +58,8 @@ const RECURSIVE_ADD_RETRIES: usize = 4;
 
 const _: () = assert!(program::SAID_MAX <= u32::MAX as u64);
 const _: () = assert!(UNTRACKED_PATHS_INSPECTED_MAX >= UNTRACKED_FILES_MAX);
-const _: () = assert!(PATCH_BYTES_MAX + UNTRACKED_TOTAL_BYTES_MAX < lune_protocol::RPC_MESSAGE_BYTES_MAX);
+const _: () =
+    assert!(PATCH_BYTES_MAX + UNTRACKED_TOTAL_BYTES_MAX < lune_protocol::RPC_MESSAGE_BYTES_MAX);
 const _: () = assert!(TREE_DIRS_MAX > 0);
 const _: () = assert!(GIT_FOLDERS_MAX == 5);
 const _: () = assert!(TREE_PATHS_MAX > TREE_DIRS_MAX);
@@ -92,7 +93,12 @@ pub fn local(command: &mut Command) -> &mut Command {
     command
 }
 
-const HARDENED: [&str; 4] = ["-c", "core.fsmonitor=false", "-c", "safe.bareRepository=explicit"];
+const HARDENED: [&str; 4] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "safe.bareRepository=explicit",
+];
 
 fn hardened() -> Command {
     let mut git = Command::new("git");
@@ -114,7 +120,10 @@ impl Git {
     pub fn at(dir: impl AsRef<OsStr>, command: &'static str) -> Git {
         let mut git = hardened();
         git.arg("-C").arg(dir);
-        Git { command: git, words: vec![command.into()] }
+        Git {
+            command: git,
+            words: vec![command.into()],
+        }
     }
 
     #[must_use]
@@ -123,7 +132,10 @@ impl Git {
         let mut git_dir = OsString::from("--git-dir=");
         git_dir.push(common.as_str());
         git.arg(git_dir).current_dir("/");
-        Git { command: git, words: vec![command.into()] }
+        Git {
+            command: git,
+            words: vec![command.into()],
+        }
     }
 
     pub fn arg(&mut self, word: &'static str) -> &mut Git {
@@ -142,12 +154,15 @@ impl Git {
     }
 
     pub fn leased(&mut self, branch: &str, at: &str) -> &mut Git {
-        self.words.push(format!("--force-with-lease=refs/heads/{branch}:{at}").into());
+        self.words
+            .push(format!("--force-with-lease=refs/heads/{branch}:{at}").into());
         self
     }
 
     pub fn editing_nothing(&mut self) -> &mut Git {
-        self.command.env("GIT_EDITOR", ":").env("GIT_SEQUENCE_EDITOR", ":");
+        self.command
+            .env("GIT_EDITOR", ":")
+            .env("GIT_SEQUENCE_EDITOR", ":");
         self
     }
 
@@ -206,7 +221,14 @@ pub(crate) fn scratch(dir: impl AsRef<OsStr>, args: &[&str]) -> Result<Vec<u8>, 
         .arg(dir)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(["-c", "maintenance.auto=false"])
         .args(args);
     let ran = program::run(&mut git, LIMIT).map_err(|error| format!("git {args:?}: {error}"))?;
@@ -236,7 +258,8 @@ fn status(dir: &Dir, placed: &Placed, common: Option<&AbsPath>) -> Stood {
     let dir = dir.as_str();
     let mut git = Git::at(dir, "status");
     git.args(git::STATUS);
-    let ran = git.run(LIMIT)
+    let ran = git
+        .run(LIMIT)
         .map_err(|error| format!("git status in {dir} could not be run: {error}"))?;
     let said = match ran {
         Ran::Stuck => return Err(format!("git status in {dir} did not answer in time")),
@@ -254,9 +277,10 @@ fn status(dir: &Dir, placed: &Placed, common: Option<&AbsPath>) -> Stood {
         (Ok(stdout), _) => GitStatus::parse(&String::from_utf8_lossy(&stdout), repository)
             .map(|mut status| {
                 let uncounted = match &mut status {
-                    GitStatus::Checkout { head: Head::Branch { name, changed, .. }, .. } => {
-                        counted(dir, name.as_str(), changed)
-                    },
+                    GitStatus::Checkout {
+                        head: Head::Branch { name, changed, .. },
+                        ..
+                    } => counted(dir, name.as_str(), changed),
                     _ => None,
                 };
                 (status, uncounted)
@@ -265,7 +289,7 @@ fn status(dir: &Dir, placed: &Placed, common: Option<&AbsPath>) -> Stood {
         (Err(_), Placed::Outside(_)) => Ok((GitStatus::NoCheckout { repository }, None)),
         (Err(why), Placed::In(_) | Placed::Unsaid) => {
             Err(format!("git status in {dir} said {why}"))
-        },
+        }
     }
 }
 
@@ -274,7 +298,12 @@ type Stood = Result<(GitStatus, Option<String>), String>;
 fn counted(dir: &str, branch: &str, count: &mut Option<Changed>) -> Option<String> {
     let (changed, why) = match changed(dir, branch) {
         Ok(changed) => (changed, None),
-        Err(why) => (None, Some(format!("git in {dir} did not count {branch}'s lines: {why}"))),
+        Err(why) => (
+            None,
+            Some(format!(
+                "git in {dir} did not count {branch}'s lines: {why}"
+            )),
+        ),
     };
     *count = changed;
     why
@@ -285,7 +314,9 @@ fn holder_of(dir: &str) -> Result<Option<Said>, String> {
         Common::Of(common) => holder_said(common.as_str()).map(Some),
         Common::NoRepository | Common::Gone => Ok(None),
         Common::BareUnread(bare) => Err(format!("{dir} is in {}", Common::bare_unread(&bare))),
-        Common::Unsaid(why) => Err(format!("git did not say what repository {dir} is in: {why}")),
+        Common::Unsaid(why) => Err(format!(
+            "git did not say what repository {dir} is in: {why}"
+        )),
     }
 }
 
@@ -342,13 +373,18 @@ pub fn common_within(dir: &str, limit: Duration) -> Common {
     let mut git = Git::at(dir, "rev-parse");
     git.args(["--path-format=absolute", "--git-common-dir"]);
     let ran = git.run(limit);
-    Common::of(ran.map_err(|error| format!("it could not be run: {error}")).and_then(Ran::answer))
+    Common::of(
+        ran.map_err(|error| format!("it could not be run: {error}"))
+            .and_then(Ran::answer),
+    )
 }
 
 #[must_use]
 pub fn directory_gone(stderr: &[u8]) -> bool {
     stderr.starts_with(b"fatal: cannot change to ")
-        && stderr.trim_ascii_end().ends_with(b": No such file or directory")
+        && stderr
+            .trim_ascii_end()
+            .ends_with(b": No such file or directory")
 }
 
 #[must_use]
@@ -404,14 +440,18 @@ pub fn pointed(
     let mut git = git("symbolic-ref");
     git.arg("--quiet");
     let asked = format!("git symbolic-ref {name}");
-    let ran = git.named([&name]).run(limit)
+    let ran = git
+        .named([&name])
+        .run(limit)
         .map_err(|error| format!("{asked} could not be run: {error}"))?;
     let said = match ran {
         Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
         ran => ran.answer().map_err(|why| format!("{asked}: {why}"))?,
     };
     let said = one_line(said).ok_or_else(|| format!("{asked} said no one line"))?;
-    let pointed = said.strip_prefix(&symbolic.folder()).filter(|pointed| !pointed.is_empty());
+    let pointed = said
+        .strip_prefix(&symbolic.folder())
+        .filter(|pointed| !pointed.is_empty());
     Ok(pointed.map(str::to_owned))
 }
 
@@ -419,14 +459,18 @@ pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
     let git = |command: &'static str, args: &[&'static str], names: &[&str]| {
         let mut git = Git::at(dir, command);
         git.args(args.iter().copied()).fetching_nothing_lazily();
-        git.named(names).run(LIMIT).map_err(|error| format!("git could not be run: {error}"))
+        git.named(names)
+            .run(LIMIT)
+            .map_err(|error| format!("git could not be run: {error}"))
     };
     let tip = format!("refs/heads/{branch}");
     let bases = defaults();
     let mut listing = vec![tip.as_str()];
     listing.extend(bases.iter().map(String::as_str));
     let listed = git("for-each-ref", &[LISTING], &listing)?;
-    let listed = listed.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
+    let listed = listed
+        .answer()
+        .map_err(|why| format!("git for-each-ref said {why}"))?;
     let listed = String::from_utf8_lossy(&listed);
     let listed = refs(&listed);
     let Some(&(tip, _)) = listed.get(tip.as_str()) else {
@@ -440,12 +484,18 @@ pub fn changed(dir: &str, branch: &str) -> Result<Option<Changed>, String> {
     }
     let fork = match git("merge-base", &[], &[tip, base])? {
         Ran::Ended { status, .. } if status.code() == Some(1) => return Ok(None),
-        ran => ran.answer().map_err(|why| format!("git merge-base said {why}"))?,
+        ran => ran
+            .answer()
+            .map_err(|why| format!("git merge-base said {why}"))?,
     };
     let fork = one_line(fork).ok_or("git merge-base named no commit")?;
-    let said = git("diff-index", &["-M", "--numstat", "--no-textconv"], &[&fork])?
-        .answer()
-        .map_err(|why| format!("git diff-index said {why}"))?;
+    let said = git(
+        "diff-index",
+        &["-M", "--numstat", "--no-textconv"],
+        &[&fork],
+    )?
+    .answer()
+    .map_err(|why| format!("git diff-index said {why}"))?;
     let (mut added, mut deleted) = (0u32, 0u32);
     for line in String::from_utf8_lossy(&said).lines() {
         let mut fields = line.split('\t');
@@ -467,7 +517,9 @@ pub fn patch(dir: &Dir) -> Result<ReadDiff, String> {
     let git = |command: &'static str, args: &[&'static str], names: &[&str]| {
         let mut git = Git::at(dir, command);
         git.args(args.iter().copied()).fetching_nothing_lazily();
-        git.named(names).run(LIMIT).map_err(|error| format!("git could not be run: {error}"))
+        git.named(names)
+            .run(LIMIT)
+            .map_err(|error| format!("git could not be run: {error}"))
     };
     let head_branch = branch(dir)?;
     let head = head_branch
@@ -484,7 +536,9 @@ pub fn patch(dir: &Dir) -> Result<ReadDiff, String> {
         .named([fork.as_str()])
         .run_prefix(LIMIT, patch_limit)
         .map_err(|error| format!("git could not be run: {error}"))?;
-    let mut raw = ran.answer().map_err(|why| format!("git diff-index said {why}"))?;
+    let mut raw = ran
+        .answer()
+        .map_err(|why| format!("git diff-index said {why}"))?;
     let mut truncated = extra_bytes > 0 || raw.len() > PATCH_BYTES_MAX;
     if truncated {
         raw.truncate(PATCH_BYTES_MAX);
@@ -508,7 +562,9 @@ fn patch_base(
         let mut listing = vec![tip.as_str()];
         listing.extend(bases.iter().map(String::as_str));
         let listed = git("for-each-ref", &[LISTING], &listing)?;
-        let listed = listed.answer().map_err(|why| format!("git for-each-ref said {why}"))?;
+        let listed = listed
+            .answer()
+            .map_err(|why| format!("git for-each-ref said {why}"))?;
         let listed = String::from_utf8_lossy(&listed);
         let listed = refs(&listed);
         if let Some(&(tip_oid, _)) = listed.get(tip.as_str())
@@ -517,28 +573,36 @@ fn patch_base(
             && default.branch() != branch
         {
             match git("merge-base", &[], &[tip_oid, base_oid])? {
-                Ran::Ended { status, .. } if status.code() == Some(1) => {},
+                Ran::Ended { status, .. } if status.code() == Some(1) => {}
                 ran => {
-                    let fork = ran.answer().map_err(|why| format!("git merge-base said {why}"))?;
+                    let fork = ran
+                        .answer()
+                        .map_err(|why| format!("git merge-base said {why}"))?;
                     if let Some(fork) = one_line(fork)
                         && let Some(label) = Said::new(default.to_string())
                     {
                         return Ok((fork, label));
                     }
-                },
+                }
             }
         }
     }
     match git("rev-parse", &["--verify", "--quiet"], &["HEAD"])? {
         Ran::Ended { status, stdout, .. } if status.success() => {
             if let Some(head_oid) = one_line(stdout) {
-                return Ok((head_oid, Said::new("HEAD".to_owned()).expect("HEAD is non-empty")));
+                return Ok((
+                    head_oid,
+                    Said::new("HEAD".to_owned()).expect("HEAD is non-empty"),
+                ));
             }
-        },
-        Ran::Ended { .. } => {},
+        }
+        Ran::Ended { .. } => {}
         Ran::Stuck => return Err(format!("git rev-parse in {dir} did not answer in time")),
     }
-    Ok((EMPTY_TREE.to_owned(), Said::new("empty".to_owned()).expect("empty is non-empty")))
+    Ok((
+        EMPTY_TREE.to_owned(),
+        Said::new("empty".to_owned()).expect("empty is non-empty"),
+    ))
 }
 
 fn open_untracked_at(root: &OwnedFd, rel_path: &RelativePath) -> Result<OwnedFd, Errno> {
@@ -609,11 +673,11 @@ fn read_untracked(
             Ok(fd) => fd,
             Err(Errno::NOENT | Errno::LOOP | Errno::NOTDIR | Errno::ISDIR | Errno::NXIO) => {
                 continue;
-            },
+            }
             Err(_) => {
                 truncated = true;
                 continue;
-            },
+            }
         };
         let file = File::from(fd);
         let Ok(meta) = file.metadata() else {
@@ -653,7 +717,10 @@ fn read_untracked(
         total_bytes += untracked.content().len();
         files.push(untracked);
     }
-    assert!(inspected <= UNTRACKED_PATHS_INSPECTED_MAX, "inspected untracked paths stay bounded");
+    assert!(
+        inspected <= UNTRACKED_PATHS_INSPECTED_MAX,
+        "inspected untracked paths stay bounded"
+    );
     Ok((files, truncated))
 }
 
@@ -662,7 +729,9 @@ const DEFAULT_REMOTES: [&str; 3] = ["upstream", "github", "origin"];
 const LISTING: &str = "--format=%(refname) %(objectname) %(symref)";
 
 fn defaults() -> Vec<String> {
-    let mut named = DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/HEAD")).to_vec();
+    let mut named = DEFAULT_REMOTES
+        .map(|remote| format!("refs/remotes/{remote}/HEAD"))
+        .to_vec();
     for name in ["main", "master"] {
         named.extend(DEFAULT_REMOTES.map(|remote| format!("refs/remotes/{remote}/{name}")));
         named.push(format!("refs/heads/{name}"));
@@ -675,7 +744,10 @@ fn refs(listed: &str) -> HashMap<&str, (&str, &str)> {
         .lines()
         .filter_map(|line| {
             let mut fields = line.splitn(3, ' ');
-            Some((fields.next()?, (fields.next()?, fields.next().unwrap_or(""))))
+            Some((
+                fields.next()?,
+                (fields.next()?, fields.next().unwrap_or("")),
+            ))
         })
         .collect()
 }
@@ -686,26 +758,43 @@ fn first_default<'a>(
 ) -> Option<(&'a str, &'a str)> {
     named.iter().find_map(|name| {
         let &(base, symref) = listed.get(name.as_str())?;
-        Some((base, if symref.is_empty() { name.as_str() } else { symref }))
+        Some((
+            base,
+            if symref.is_empty() {
+                name.as_str()
+            } else {
+                symref
+            },
+        ))
     })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DefaultBranch {
-    Remote { remote: &'static str, branch: String },
-    Local { branch: String },
+    Remote {
+        remote: &'static str,
+        branch: String,
+    },
+    Local {
+        branch: String,
+    },
 }
 
 impl DefaultBranch {
     fn of(target: &str) -> Option<DefaultBranch> {
         let named = |branch: &&str| !branch.is_empty();
         if let Some(branch) = target.strip_prefix("refs/heads/").filter(named) {
-            return Some(DefaultBranch::Local { branch: branch.to_owned() });
+            return Some(DefaultBranch::Local {
+                branch: branch.to_owned(),
+            });
         }
         let remote = target.strip_prefix("refs/remotes/")?;
         DEFAULT_REMOTES.into_iter().find_map(|name| {
             let branch = remote.strip_prefix(name)?.strip_prefix('/').filter(named)?;
-            Some(DefaultBranch::Remote { remote: name, branch: branch.to_owned() })
+            Some(DefaultBranch::Remote {
+                remote: name,
+                branch: branch.to_owned(),
+            })
         })
     }
 
@@ -754,12 +843,22 @@ pub enum NamedHead {
 
 pub fn named_head(dir: &str, branch: &str) -> Result<Option<NamedHead>, String> {
     let head = format!("refs/heads/{branch}");
-    let push = says(dir, "for-each-ref", &["--format=%(push:remotename)"], &[&head])?;
+    let push = says(
+        dir,
+        "for-each-ref",
+        &["--format=%(push:remotename)"],
+        &[&head],
+    )?;
     if push.is_empty() {
         return Ok(None);
     }
     let config = |name: &str| {
-        says(dir, "config", &["--default", "", "--get"], &[format!("branch.{branch}.{name}")])
+        says(
+            dir,
+            "config",
+            &["--default", "", "--get"],
+            &[format!("branch.{branch}.{name}")],
+        )
     };
     let (merge, remote) = (config("merge")?, config("remote")?);
     if merge.starts_with("refs/pull/") {
@@ -788,12 +887,21 @@ pub(crate) fn says_within<S: AsRef<OsStr>>(
     names: &[S],
     limit: Duration,
 ) -> Result<String, String> {
-    let asked = [command].iter().chain(args).copied().collect::<Vec<_>>().join(" ");
+    let asked = [command]
+        .iter()
+        .chain(args)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut git = Git::at(dir, command);
     git.args(args.iter().copied());
-    let ran = git.named(names).run(limit)
+    let ran = git
+        .named(names)
+        .run(limit)
         .map_err(|error| format!("git {asked} in {dir} could not be run: {error}"))?;
-    let said = ran.answer().map_err(|why| format!("git {asked} in {dir}: {why}"))?;
+    let said = ran
+        .answer()
+        .map_err(|why| format!("git {asked} in {dir}: {why}"))?;
     Ok(String::from_utf8_lossy(&said).trim_end().to_owned())
 }
 
@@ -911,7 +1019,11 @@ impl Place {
         let lines = said.strip_suffix(b"\n")?.split(|byte| *byte == b'\n');
         let [top, own, common]: [&[u8]; 3] = lines.collect::<Vec<_>>().try_into().ok()?;
         let real = |path: &[u8]| AbsPath::canonical(Path::new(OsStr::from_bytes(path))).ok();
-        Some(Place { top: real(top)?, own: real(own)?, common: real(common)? })
+        Some(Place {
+            top: real(top)?,
+            own: real(own)?,
+            common: real(common)?,
+        })
     }
 }
 
@@ -919,9 +1031,13 @@ fn listed(top: &AbsPath) -> Result<Vec<u8>, String> {
     let mut git = Git::at(top, "ls-files");
     git.arg("-z");
     let ran = git.run(LIMIT).map_err(|error| {
-        format!("git ls-files in {} could not be run: {error}", top.display())
+        format!(
+            "git ls-files in {} could not be run: {error}",
+            top.display()
+        )
     })?;
-    ran.answer().map_err(|why| format!("git ls-files in {}: {why}", top.display()))
+    ran.answer()
+        .map_err(|why| format!("git ls-files in {}: {why}", top.display()))
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -957,7 +1073,11 @@ fn tracked(top: &AbsPath, listed: &[u8]) -> Option<TrackedDirs> {
     let mut dirs = BTreeSet::from([top.clone()]);
     for path in listed.split(|byte| *byte == 0) {
         let path = Path::new(OsStr::from_bytes(path));
-        for dir in path.ancestors().skip(1).take_while(|dir| !dir.as_os_str().is_empty()) {
+        for dir in path
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| !dir.as_os_str().is_empty())
+        {
             if !dirs.insert(top.join(dir)) {
                 break;
             }
@@ -1042,8 +1162,11 @@ fn git_folders(place: &Place) -> BTreeMap<AbsPath, RecursiveMode> {
         (place.common.join("reftable"), NonRecursive),
         (place.own.join("reftable"), NonRecursive),
     ];
-    let paths: BTreeMap<AbsPath, RecursiveMode> =
-        folders.into_iter().chain(refs).filter(|(path, _)| path.is_dir()).collect();
+    let paths: BTreeMap<AbsPath, RecursiveMode> = folders
+        .into_iter()
+        .chain(refs)
+        .filter(|(path, _)| path.is_dir())
+        .collect();
     assert!(paths.len() <= GIT_FOLDERS_MAX);
     paths
 }
@@ -1091,7 +1214,7 @@ fn denied(error: &notify::Error) -> bool {
 
 fn wake_up(wake: &SyncSender<()>) {
     match wake.try_send(()) {
-        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {},
+        Ok(()) | Err(TrySendError::Full(()) | TrySendError::Disconnected(())) => {}
     }
 }
 
@@ -1236,13 +1359,13 @@ enum Dirs {
 impl Dirs {
     fn record(&mut self, path: &NonEmptyPathBuf) {
         match self {
-            Dirs::All => {},
+            Dirs::All => {}
             Dirs::None => *self = Dirs::Under(DirEvents::single(path.clone())),
             Dirs::Under(events) => {
                 if !events.insert(path) {
                     *self = Dirs::All;
                 }
-            },
+            }
         }
     }
 
@@ -1307,7 +1430,10 @@ impl PathIndex {
     }
 
     fn remove(&mut self, key: WatchKey, path: &AbsPath) {
-        let keys = self.0.get_mut(path).expect("removed watch path must be indexed");
+        let keys = self
+            .0
+            .get_mut(path)
+            .expect("removed watch path must be indexed");
         assert!(keys.remove(&key));
         if keys.is_empty() {
             self.0.remove(path);
@@ -1348,15 +1474,19 @@ fn rescan_target(
 ) {
     match key {
         WatchKey::Tree(id) => {
-            let target = trees.get_mut(&id).expect("indexed tree id must have a target");
+            let target = trees
+                .get_mut(&id)
+                .expect("indexed tree id must have a target");
             target.heard = true;
             target.dirs.all();
-        },
+        }
         WatchKey::Outside(id) => {
-            let target = outsides.get_mut(&id).expect("indexed outside id must have a target");
+            let target = outsides
+                .get_mut(&id)
+                .expect("indexed outside id must have a target");
             target.heard = true;
             target.went = true;
-        },
+        }
     }
 }
 
@@ -1448,7 +1578,12 @@ impl Routing {
         }
         self.matched.sort_unstable();
         self.matched.dedup();
-        let Routing { trees, outsides, matched, .. } = self;
+        let Routing {
+            trees,
+            outsides,
+            matched,
+            ..
+        } = self;
         for &key in &*matched {
             rescan_target(trees, outsides, key);
         }
@@ -1468,7 +1603,12 @@ impl Routing {
         }
         self.matched.sort_unstable();
         self.matched.dedup();
-        let Routing { trees, outsides, matched, .. } = self;
+        let Routing {
+            trees,
+            outsides,
+            matched,
+            ..
+        } = self;
         for &key in &*matched {
             rescan_target(trees, outsides, key);
         }
@@ -1554,7 +1694,9 @@ struct EventPath {
 enum ParsedEvent {
     Ignore,
     RescanAll,
-    HearAll { dir_changed: bool },
+    HearAll {
+        dir_changed: bool,
+    },
     Paths {
         folder_event: bool,
         rename: bool,
@@ -1596,13 +1738,21 @@ impl ParsedEvent {
             .paths
             .into_iter()
             .filter_map(NonEmptyPathBuf::new)
-            .map(|path| EventPath { renamed_dir: rename && path.as_path().is_dir(), path })
+            .map(|path| EventPath {
+                renamed_dir: rename && path.as_path().is_dir(),
+                path,
+            })
             .collect();
         if paths.is_empty() {
             return ParsedEvent::Ignore;
         }
         assert!(paths.len() <= EVENT_PATHS_MAX);
-        ParsedEvent::Paths { folder_event, rename, removal, paths }
+        ParsedEvent::Paths {
+            folder_event,
+            rename,
+            removal,
+            paths,
+        }
     }
 }
 
@@ -1614,16 +1764,19 @@ fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &S
                 wake_up(wake);
             }
             return;
-        },
+        }
         ParsedEvent::HearAll { dir_changed } => {
             if locked(routing).hear_all(dir_changed) {
                 wake_up(wake);
             }
             return;
-        },
-        ParsedEvent::Paths { folder_event, rename, removal, paths } => {
-            (folder_event, rename, removal, paths)
-        },
+        }
+        ParsedEvent::Paths {
+            folder_event,
+            rename,
+            removal,
+            paths,
+        } => (folder_event, rename, removal, paths),
     };
     let outside_left = removal || rename;
     let mut notified = false;
@@ -1632,7 +1785,12 @@ fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &S
         assert!(routing.target_count() <= WATCHES_MAX);
         for EventPath { path, renamed_dir } in paths {
             let too_deep = {
-                let Routing { direct, recursive, matched, .. } = &mut *routing;
+                let Routing {
+                    direct,
+                    recursive,
+                    matched,
+                    ..
+                } = &mut *routing;
                 !collect_matches(direct, recursive, &path, matched)
             };
             if too_deep {
@@ -1641,23 +1799,34 @@ fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &S
                 }
                 break;
             }
-            let Routing { trees, outsides, direct, recursive, matched, descendants } = &mut *routing;
+            let Routing {
+                trees,
+                outsides,
+                direct,
+                recursive,
+                matched,
+                descendants,
+            } = &mut *routing;
             for &key in &*matched {
                 match key {
                     WatchKey::Tree(id) => {
-                        let target = trees.get_mut(&id).expect("indexed tree id must have a target");
+                        let target = trees
+                            .get_mut(&id)
+                            .expect("indexed tree id must have a target");
                         target.heard = true;
-                        let exact =
-                            direct.contains(path.as_path(), key) || recursive.contains(path.as_path(), key);
-                        let record_dir = folder_event || renamed_dir || ((rename || removal) && exact);
+                        let exact = direct.contains(path.as_path(), key)
+                            || recursive.contains(path.as_path(), key);
+                        let record_dir =
+                            folder_event || renamed_dir || ((rename || removal) && exact);
                         if record_dir {
                             target.dirs.record(&path);
                         }
                         notified = true;
-                    },
+                    }
                     WatchKey::Outside(id) => {
-                        let target =
-                            outsides.get_mut(&id).expect("indexed outside id must have a target");
+                        let target = outsides
+                            .get_mut(&id)
+                            .expect("indexed outside id must have a target");
                         if outside_left && path.as_path() == target.real.as_path() {
                             target.went = true;
                             target.heard = true;
@@ -1668,7 +1837,7 @@ fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &S
                             target.heard = true;
                             notified = true;
                         }
-                    },
+                    }
                 }
             }
             if removal || rename {
@@ -1685,12 +1854,13 @@ fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &S
                     for &key in &*descendants {
                         match key {
                             WatchKey::Tree(id) => {
-                                let target =
-                                    trees.get_mut(&id).expect("indexed tree id must have a target");
+                                let target = trees
+                                    .get_mut(&id)
+                                    .expect("indexed tree id must have a target");
                                 target.heard = true;
                                 target.dirs.record(&path);
                                 notified = true;
-                            },
+                            }
                             WatchKey::Outside(id) => {
                                 let target = outsides
                                     .get_mut(&id)
@@ -1698,7 +1868,7 @@ fn handle_event(event: notify::Result<Event>, routing: &Mutex<Routing>, wake: &S
                                 target.went = true;
                                 target.heard = true;
                                 notified = true;
-                            },
+                            }
                         }
                     }
                 }
@@ -1726,7 +1896,10 @@ fn make_watcher(
 enum AddOutcome {
     Watched,
     Skipped,
-    Failed { error: notify::Error, needs_reset: bool },
+    Failed {
+        error: notify::Error,
+        needs_reset: bool,
+    },
 }
 
 fn active_has_descendant(active: &BTreeMap<AbsPath, RecursiveMode>, root: &AbsPath) -> bool {
@@ -1752,10 +1925,13 @@ fn add_one(
                 active.insert(path.clone(), mode);
                 assert_eq!(active.get(path), Some(&mode));
                 AddOutcome::Watched
-            },
+            }
             Err(error) if watch::missing(&error) => AddOutcome::Skipped,
             Err(error) if path.ends_with(".git") && denied(&error) => AddOutcome::Skipped,
-            Err(error) => AddOutcome::Failed { error, needs_reset: false },
+            Err(error) => AddOutcome::Failed {
+                error,
+                needs_reset: false,
+            },
         },
         RecursiveMode::Recursive => {
             for attempt in 0..RECURSIVE_ADD_RETRIES {
@@ -1764,7 +1940,7 @@ fn add_one(
                         active.insert(path.clone(), mode);
                         assert_eq!(active.get(path), Some(&mode));
                         return AddOutcome::Watched;
-                    },
+                    }
                     Err(error) => {
                         let needs_reset = if active_has_descendant(active, path) {
                             true
@@ -1785,11 +1961,11 @@ fn add_one(
                             continue;
                         }
                         return AddOutcome::Failed { error, needs_reset };
-                    },
+                    }
                 }
             }
             unreachable!("RECURSIVE_ADD_RETRIES is non-zero")
-        },
+        }
     }
 }
 
@@ -1797,11 +1973,10 @@ fn remove_one(edits: &mut dyn PathsMut, path: &AbsPath) -> notify::Result<()> {
     match edits.remove(path.as_path()) {
         Ok(()) => Ok(()),
         Err(error)
-            if matches!(error.kind, notify::ErrorKind::WatchNotFound)
-                || watch::missing(&error) =>
+            if matches!(error.kind, notify::ErrorKind::WatchNotFound) || watch::missing(&error) =>
         {
             Ok(())
-        },
+        }
         Err(error) => Err(error),
     }
 }
@@ -1872,14 +2047,20 @@ impl Watches {
 
     fn next_id(&mut self) -> u64 {
         let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).expect("watch id space exhausted");
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("watch id space exhausted");
         id
     }
 
     fn ensure_running(&mut self) -> notify::Result<()> {
         if matches!(self.engine, WatchEngine::Idle) {
             let watcher = make_watcher(&self.routing, &self.wake)?;
-            self.engine = WatchEngine::Running { watcher, active: BTreeMap::new() };
+            self.engine = WatchEngine::Running {
+                watcher,
+                active: BTreeMap::new(),
+            };
         }
         Ok(())
     }
@@ -1938,13 +2119,20 @@ impl Watches {
 
     fn take_dirs(&self, watch: &TreeWatch) -> Dirs {
         let mut routing = locked(&self.routing);
-        let target = routing.trees.get_mut(&watch.id()).expect("tree watch id must have a target");
+        let target = routing
+            .trees
+            .get_mut(&watch.id())
+            .expect("tree watch id must have a target");
         target.dirs.take()
     }
 
     fn went(&self, watch: &OutsideWatch) -> bool {
         let routing = locked(&self.routing);
-        routing.outsides.get(&watch.id()).expect("outside watch id must have a target").went
+        routing
+            .outsides
+            .get(&watch.id())
+            .expect("outside watch id must have a target")
+            .went
     }
 
     fn add_tree(&mut self, paths: BTreeMap<AbsPath, RecursiveMode>) -> notify::Result<TreeWatch> {
@@ -1955,7 +2143,13 @@ impl Watches {
         {
             let mut routing = locked(&self.routing);
             assert!(routing.target_count() < WATCHES_MAX);
-            let replaced = routing.trees.insert(id, TreeTarget { heard: false, dirs: Dirs::None });
+            let replaced = routing.trees.insert(
+                id,
+                TreeTarget {
+                    heard: false,
+                    dirs: Dirs::None,
+                },
+            );
             assert!(replaced.is_none());
             for (path, &mode) in &paths {
                 routing.add_path(key, path, mode);
@@ -1963,7 +2157,11 @@ impl Watches {
         }
         let touched: BTreeSet<AbsPath> = paths.keys().cloned().collect();
         let watch = TreeWatch::new(id, paths);
-        let request = SyncRequest { caller: Some(key), touched: &touched, refresh: &BTreeSet::new() };
+        let request = SyncRequest {
+            caller: Some(key),
+            touched: &touched,
+            refresh: &BTreeSet::new(),
+        };
         if let Err(error) = self.sync(request) {
             if self.remove_tree(watch).is_err() {
                 self.rescan_all();
@@ -1983,11 +2181,20 @@ impl Watches {
             paths.insert(git.clone(), RecursiveMode::NonRecursive);
         }
         assert!(paths.len() <= 2);
-        let refreshed = if refresh { paths.keys().cloned().collect() } else { BTreeSet::new() };
+        let refreshed = if refresh {
+            paths.keys().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
         {
             let mut routing = locked(&self.routing);
             assert!(routing.target_count() < WATCHES_MAX);
-            let target = OutsideTarget { real: ground.real.clone(), git, heard: false, went: false };
+            let target = OutsideTarget {
+                real: ground.real.clone(),
+                git,
+                heard: false,
+                went: false,
+            };
             let replaced = routing.outsides.insert(id, target);
             assert!(replaced.is_none());
             for (path, &mode) in &paths {
@@ -1996,7 +2203,11 @@ impl Watches {
         }
         let touched: BTreeSet<AbsPath> = paths.keys().cloned().collect();
         let watch = OutsideWatch::new(id, paths);
-        let request = SyncRequest { caller: Some(key), touched: &touched, refresh: &refreshed };
+        let request = SyncRequest {
+            caller: Some(key),
+            touched: &touched,
+            refresh: &refreshed,
+        };
         if let Err(error) = self.sync(request) {
             let RemovedOutside { synced, .. } = self.remove_outside(watch);
             if synced.is_err() {
@@ -2049,7 +2260,11 @@ impl Watches {
         for path in refresh {
             touched.insert(path.clone());
         }
-        let request = SyncRequest { caller: Some(key), touched: &touched, refresh };
+        let request = SyncRequest {
+            caller: Some(key),
+            touched: &touched,
+            refresh,
+        };
         if let Err(error) = self.sync(request) {
             if self.remove_tree(watch).is_err() {
                 self.rescan_all();
@@ -2071,7 +2286,11 @@ impl Watches {
             assert!(removed.is_some());
         }
         let touched: BTreeSet<AbsPath> = paths.into_keys().collect();
-        self.sync(SyncRequest { caller: None, touched: &touched, refresh: &BTreeSet::new() })
+        self.sync(SyncRequest {
+            caller: None,
+            touched: &touched,
+            refresh: &BTreeSet::new(),
+        })
     }
 
     fn remove_outside(&mut self, watch: OutsideWatch) -> RemovedOutside {
@@ -2082,11 +2301,18 @@ impl Watches {
             for (path, &mode) in &paths {
                 routing.remove_path(key, path, mode);
             }
-            routing.outsides.remove(&id).expect("outside watch id must have a target").went
+            routing
+                .outsides
+                .remove(&id)
+                .expect("outside watch id must have a target")
+                .went
         };
         let touched: BTreeSet<AbsPath> = paths.into_keys().collect();
-        let synced =
-            self.sync(SyncRequest { caller: None, touched: &touched, refresh: &BTreeSet::new() });
+        let synced = self.sync(SyncRequest {
+            caller: None,
+            touched: &touched,
+            refresh: &BTreeSet::new(),
+        });
         RemovedOutside { went, synced }
     }
 
@@ -2107,17 +2333,27 @@ impl Watches {
             let mut edits = watcher.paths_mut();
             for (path, mode) in desired {
                 match add_one(&mut *edits, &mut active, &path, mode) {
-                    AddOutcome::Watched | AddOutcome::Skipped => {},
-                    AddOutcome::Failed { error, needs_reset: true } => {
+                    AddOutcome::Watched | AddOutcome::Skipped => {}
+                    AddOutcome::Failed {
+                        error,
+                        needs_reset: true,
+                    } => {
                         reset_error = Some(error);
                         break;
-                    },
-                    AddOutcome::Failed { error, needs_reset: false } => {
+                    }
+                    AddOutcome::Failed {
+                        error,
+                        needs_reset: false,
+                    } => {
                         failed_paths.push((path, mode, error));
-                    },
+                    }
                 }
             }
-            if reset_error.is_none() { edits.commit() } else { Ok(()) }
+            if reset_error.is_none() {
+                edits.commit()
+            } else {
+                Ok(())
+            }
         };
         if let Some(error) = reset_error.or_else(|| committed.err()) {
             self.engine = WatchEngine::NeedsRebuild;
@@ -2177,26 +2413,32 @@ impl Watches {
                 match (was, want) {
                     (Some(old_mode), None) => {
                         to_remove.insert(path.clone(), old_mode);
-                    },
+                    }
                     (Some(old_mode), Some(new_mode)) => {
                         if old_mode != new_mode || request.refresh.contains(path) {
                             to_remove.insert(path.clone(), old_mode);
                             let caller_owns = request
                                 .caller
                                 .is_none_or(|key| routing.watches_exact(key, path.as_path()));
-                            readd.insert(path.clone(), Readd { mode: new_mode, caller_owns });
+                            readd.insert(
+                                path.clone(),
+                                Readd {
+                                    mode: new_mode,
+                                    caller_owns,
+                                },
+                            );
                             if new_mode == RecursiveMode::Recursive {
                                 recursive_added.push(path.clone());
                             }
                         }
-                    },
+                    }
                     (None, Some(new_mode)) => {
                         fresh_add.insert(path.clone(), new_mode);
                         if new_mode == RecursiveMode::Recursive {
                             recursive_added.push(path.clone());
                         }
-                    },
-                    (None, None) => {},
+                    }
+                    (None, None) => {}
                 }
                 if want != Some(RecursiveMode::Recursive)
                     && !routing.has_recursive_ancestor(path.as_path())
@@ -2229,10 +2471,14 @@ impl Watches {
                 }
             }
             for root in &uncover_roots {
-                let direct_desc =
-                    routing.direct.strict_descendants(root.as_path()).map(|(path, _)| path);
-                let recursive_desc =
-                    routing.recursive.strict_descendants(root.as_path()).map(|(path, _)| path);
+                let direct_desc = routing
+                    .direct
+                    .strict_descendants(root.as_path())
+                    .map(|(path, _)| path);
+                let recursive_desc = routing
+                    .recursive
+                    .strict_descendants(root.as_path())
+                    .map(|(path, _)| path);
                 for descendant in direct_desc.chain(recursive_desc) {
                     let Some(mode) = routing.effective_mode(descendant.as_path()) else {
                         continue;
@@ -2271,11 +2517,11 @@ impl Watches {
                 match remove_one(&mut *edits, path) {
                     Ok(()) => {
                         active.remove(path);
-                    },
+                    }
                     Err(error) => {
                         needs_reset = true;
                         failed.get_or_insert(error);
-                    },
+                    }
                 }
             }
             for path in &wiped {
@@ -2284,38 +2530,45 @@ impl Watches {
             if !needs_reset {
                 for (path, &Readd { mode, caller_owns }) in &readd {
                     match add_one(&mut *edits, active, path, mode) {
-                        AddOutcome::Watched | AddOutcome::Skipped => {},
-                        AddOutcome::Failed { error, needs_reset: true } => {
+                        AddOutcome::Watched | AddOutcome::Skipped => {}
+                        AddOutcome::Failed {
+                            error,
+                            needs_reset: true,
+                        } => {
                             needs_reset = true;
                             failed.get_or_insert(error);
                             break;
-                        },
-                        AddOutcome::Failed { error, needs_reset: false } => {
+                        }
+                        AddOutcome::Failed {
+                            error,
+                            needs_reset: false,
+                        } => {
                             readd_failed_paths.push((path.clone(), mode));
                             if caller_owns {
                                 failed.get_or_insert(error);
                             }
-                        },
+                        }
                     }
                 }
                 if !needs_reset && failed.is_none() {
                     for (path, &mode) in &fresh_add {
                         match add_one(&mut *edits, active, path, mode) {
-                            AddOutcome::Watched | AddOutcome::Skipped => {},
-                            AddOutcome::Failed { error, needs_reset: reset } => {
+                            AddOutcome::Watched | AddOutcome::Skipped => {}
+                            AddOutcome::Failed {
+                                error,
+                                needs_reset: reset,
+                            } => {
                                 if reset {
                                     needs_reset = true;
                                 }
                                 failed = Some(error);
                                 break;
-                            },
+                            }
                         }
                     }
                 }
             }
-            if !needs_reset
-                && let Err(error) = edits.commit()
-            {
+            if !needs_reset && let Err(error) = edits.commit() {
                 needs_reset = true;
                 failed.get_or_insert(error);
             }
@@ -2390,8 +2643,7 @@ impl<F: Fn(&AbsPath) -> Option<AbsPath>> Reconcile<'_, F> {
     fn remove_tracked_dir(&mut self, dir: &AbsPath) {
         for candidate in [dir.clone(), dir.join(".git")] {
             let watched = self.aliases.remove(&candidate).unwrap_or(candidate);
-            if !self.git_paths.contains_key(&watched)
-                && !self.is_tracked_actual(watched.as_path())
+            if !self.git_paths.contains_key(&watched) && !self.is_tracked_actual(watched.as_path())
             {
                 self.new_paths.remove(&watched);
             }
@@ -2402,7 +2654,9 @@ impl<F: Fn(&AbsPath) -> Option<AbsPath>> Reconcile<'_, F> {
         for candidate in [dir.clone(), dir.join(".git")] {
             if let Some(actual) = (self.resolve)(&candidate) {
                 self.aliases.set(candidate, actual.clone());
-                self.new_paths.entry(actual).or_insert(RecursiveMode::NonRecursive);
+                self.new_paths
+                    .entry(actual)
+                    .or_insert(RecursiveMode::NonRecursive);
             }
         }
     }
@@ -2418,18 +2672,18 @@ impl<F: Fn(&AbsPath) -> Option<AbsPath>> Reconcile<'_, F> {
                 for added in now.difference(old) {
                     self.add_tracked_dir(added);
                 }
-            },
+            }
             (Some(old), None) => {
                 for removed in old.iter() {
                     self.remove_tracked_dir(removed);
                 }
                 self.aliases.clear();
-            },
+            }
             (None, Some(now)) => {
                 for added in now.iter() {
                     self.add_tracked_dir(added);
                 }
-            },
+            }
         }
         assert!(self.new_paths.len() <= TREE_PATHS_MAX);
     }
@@ -2489,7 +2743,10 @@ impl<F: Fn(&AbsPath) -> Option<AbsPath>> Reconcile<'_, F> {
     fn reconcile_dirs(&mut self, affected: &DirEvents) {
         let mut roots: Vec<&NonEmptyPathBuf> = Vec::new();
         for affected_path in affected.iter() {
-            if roots.last().is_some_and(|root| affected_path.starts_with(root.as_path())) {
+            if roots
+                .last()
+                .is_some_and(|root| affected_path.starts_with(root.as_path()))
+            {
                 continue;
             }
             roots.push(affected_path);
@@ -2554,7 +2811,9 @@ impl<F: Fn(&AbsPath) -> Option<AbsPath>> Reconcile<'_, F> {
         }
         if self.scan_unwatched_aliases
             && let Some(tracked) = self.new_tracked
-            && roots.iter().any(|root| root.starts_with(self.place.top.as_path()))
+            && roots
+                .iter()
+                .any(|root| root.starts_with(self.place.top.as_path()))
         {
             for dir in tracked.iter() {
                 for candidate in [dir.clone(), dir.join(".git")] {
@@ -2591,7 +2850,8 @@ impl<F: Fn(&AbsPath) -> Option<AbsPath>> Reconcile<'_, F> {
                     if self.old_paths.contains_key(&actual) {
                         self.refresh.insert(actual.clone());
                     }
-                    self.new_paths.insert(actual.clone(), RecursiveMode::NonRecursive);
+                    self.new_paths
+                        .insert(actual.clone(), RecursiveMode::NonRecursive);
                     resolved_actuals.insert(actual);
                 }
             } else {
@@ -2665,13 +2925,20 @@ fn reconcile_with(
                     refresh: state.refresh,
                 })
             }
-        },
+        }
         Dirs::All => {
             let (paths, aliases) = watched_with(place, new_tracked, resolve);
-            let refresh =
-                paths.keys().filter(|path| old_paths.contains_key(*path)).cloned().collect();
-            Some(Reconciled { paths, aliases, refresh })
-        },
+            let refresh = paths
+                .keys()
+                .filter(|path| old_paths.contains_key(*path))
+                .cloned()
+                .collect();
+            Some(Reconciled {
+                paths,
+                aliases,
+                refresh,
+            })
+        }
         Dirs::Under(affected) => {
             let mut state = Reconcile {
                 place,
@@ -2700,7 +2967,7 @@ fn reconcile_with(
                     refresh: state.refresh,
                 })
             }
-        },
+        }
     };
     if let Some(ref reconciled) = result {
         assert!(reconciled.paths.len() <= TREE_PATHS_MAX);
@@ -2768,9 +3035,18 @@ impl Tracked {
 }
 
 enum Watching {
-    Whole { id: TreeWatch, tracked: TrackedDirs, aliases: WatchAliases },
-    Folders { id: TreeWatch, why: FoldersOnly },
-    Sweep { why: String },
+    Whole {
+        id: TreeWatch,
+        tracked: TrackedDirs,
+        aliases: WatchAliases,
+    },
+    Folders {
+        id: TreeWatch,
+        why: FoldersOnly,
+    },
+    Sweep {
+        why: String,
+    },
 }
 
 impl Watching {
@@ -2837,7 +3113,10 @@ impl Tree {
         let index = stamp(place.own.join("index").as_path());
         let reuse = match before {
             Some(tree) => {
-                let dirs = tree.watching.id().map_or(Dirs::None, |id| watches.take_dirs(id));
+                let dirs = tree
+                    .watching
+                    .id()
+                    .map_or(Dirs::None, |id| watches.take_dirs(id));
                 let same_place = tree.place == place;
                 let same_index = tree.index == index;
                 let trigger = if same_place {
@@ -2851,7 +3130,14 @@ impl Tree {
                     None
                 };
                 match (tree.watching, trigger) {
-                    (Watching::Whole { id, tracked, aliases }, Some(trigger)) => Some(TreeReuse {
+                    (
+                        Watching::Whole {
+                            id,
+                            tracked,
+                            aliases,
+                        },
+                        Some(trigger),
+                    ) => Some(TreeReuse {
                         watch: id,
                         previous: Tracked::Listed(tracked),
                         aliases,
@@ -2867,10 +3153,10 @@ impl Tree {
                         let synced = watches.remove_tree(id);
                         note_watch_trouble(watches, troubles, synced);
                         None
-                    },
+                    }
                     (Watching::Sweep { .. }, _) => None,
                 }
-            },
+            }
             None => None,
         };
         let tracked = match &reuse {
@@ -2900,7 +3186,11 @@ impl Tree {
                 dirs,
             );
             match update {
-                Some(Reconciled { paths, aliases, refresh }) => {
+                Some(Reconciled {
+                    paths,
+                    aliases,
+                    refresh,
+                }) => {
                     let changed = paths != *reuse.watch.paths() || !refresh.is_empty();
                     let updated = if changed {
                         watches.update_tree(reuse.watch, paths, &refresh)
@@ -2908,7 +3198,7 @@ impl Tree {
                         Ok(reuse.watch)
                     };
                     (updated, aliases, changed)
-                },
+                }
                 None => (Ok(reuse.watch), reuse.aliases, false),
             }
         } else {
@@ -2916,17 +3206,34 @@ impl Tree {
             (watches.add_tree(paths), aliases, true)
         };
         let watching = match (watch, tracked) {
-            (Ok(id), Tracked::Listed(tracked)) => Watching::Whole { id, tracked, aliases },
+            (Ok(id), Tracked::Listed(tracked)) => Watching::Whole {
+                id,
+                tracked,
+                aliases,
+            },
             (Ok(id), Tracked::FoldersOnly(why)) => Watching::Folders { id, why },
             (Err(error), _) => Watching::Sweep {
-                why: format!("{} is read on the sweep alone: {error}", place.top.display()),
+                why: format!(
+                    "{} is read on the sweep alone: {error}",
+                    place.top.display()
+                ),
             },
         };
         if let Some(trouble) = watching.trouble(&place.top) {
             troubles.say(trouble);
         }
-        assert_eq!(watching.id().is_some(), !matches!(watching, Watching::Sweep { .. }));
-        (Tree { place, index, watching }, anew)
+        assert_eq!(
+            watching.id().is_some(),
+            !matches!(watching, Watching::Sweep { .. })
+        );
+        (
+            Tree {
+                place,
+                index,
+                watching,
+            },
+            anew,
+        )
     }
 }
 
@@ -2980,8 +3287,14 @@ impl Beginning {
                 } else {
                     ground == now
                 }
-            },
-            (Beginning::Sweep { ground: Some(ground), .. }, Ok(Some(now))) => ground == now,
+            }
+            (
+                Beginning::Sweep {
+                    ground: Some(ground),
+                    ..
+                },
+                Ok(Some(now)),
+            ) => ground == now,
             (Beginning::Gone, Ok(None)) => true,
             (Beginning::Watched { .. } | Beginning::Gone | Beginning::Sweep { .. }, _) => false,
         }
@@ -3010,7 +3323,7 @@ impl Outside {
                     let RemovedOutside { went, synced } = watches.remove_outside(id);
                     note_watch_trouble(watches, troubles, synced);
                     went
-                },
+                }
                 None => false,
             },
             None => false,
@@ -3113,8 +3426,11 @@ fn prune_trees(
     assert!(asked.len() <= FOLLOW_DIRS_MAX);
     assert!(trees.len() <= WATCHES_MAX);
     let live: HashSet<&AbsPath> = asked.values().filter_map(|was| was.placed.top()).collect();
-    let stale: Vec<AbsPath> =
-        trees.keys().filter(|top| !live.contains(*top)).cloned().collect();
+    let stale: Vec<AbsPath> = trees
+        .keys()
+        .filter(|top| !live.contains(*top))
+        .cloned()
+        .collect();
     for top in stale {
         if let Some(tree) = trees.remove(&top)
             && let Some(id) = tree.watching.into_id()
@@ -3136,7 +3452,10 @@ fn assert_watches_consistent(
     for top in &live_tops {
         assert!(trees.contains_key(*top));
     }
-    let live_trees = trees.values().filter(|tree| tree.watching.id().is_some()).count();
+    let live_trees = trees
+        .values()
+        .filter(|tree| tree.watching.id().is_some())
+        .count();
     let live_outside = asked
         .values()
         .filter(|was| {
@@ -3164,29 +3483,29 @@ fn ask(
                         let RemovedOutside { synced, .. } = watches.remove_outside(id);
                         note_watch_trouble(watches, troubles, synced);
                     }
-                },
+                }
                 Some(Placed::In(old_top)) if old_top != place.top => {
                     prune_tree_if_unused(&old_top, asked, trees, watches, troubles);
-                },
-                Some(Placed::In(_) | Placed::Unsaid) | None => {},
+                }
+                Some(Placed::In(_) | Placed::Unsaid) | None => {}
             }
             let (top, common) = (place.top.clone(), place.common.clone());
             let (tree, anew) = Tree::watch(trees.remove(&top), place, watches, troubles);
             trees.insert(top.clone(), tree);
             (Placed::In(top), anew, Some(common))
-        },
+        }
         Ok(None) => {
             let before = match before {
                 Some(Placed::Outside(outside)) => Some(outside),
                 Some(Placed::In(old_top)) => {
                     prune_tree_if_unused(&old_top, asked, trees, watches, troubles);
                     None
-                },
+                }
                 Some(Placed::Unsaid) | None => None,
             };
             let (outside, anew) = Outside::watch(dir, before, watches, troubles);
             (Placed::Outside(outside), anew, None)
-        },
+        }
         Err(Unanswered) => (before.unwrap_or(Placed::Unsaid), false, None),
     };
     assert!(trees.len() <= WATCHES_MAX);
@@ -3213,19 +3532,18 @@ impl Follow {
         }
     }
 
-    fn run(
-        &mut self,
-        core: &SyncSender<core::Command>,
-        woken: &Receiver<()>,
-        sweep: Duration,
-    ) {
+    fn run(&mut self, core: &SyncSender<core::Command>, woken: &Receiver<()>, sweep: Duration) {
         'sweep: loop {
             let Some(dirs) = core::ask(core, core::Command::Dirs) else {
                 return;
             };
             assert!(dirs.len() <= FOLLOW_DIRS_MAX);
-            let stale: Vec<Dir> =
-                self.asked.keys().filter(|dir| !dirs.contains(dir)).cloned().collect();
+            let stale: Vec<Dir> = self
+                .asked
+                .keys()
+                .filter(|dir| !dirs.contains(dir))
+                .cloned()
+                .collect();
             for dir in stale {
                 if let Some(was) = self.asked.remove(&dir)
                     && let Placed::Outside(outside) = was.placed
@@ -3235,20 +3553,28 @@ impl Follow {
                     note_watch_trouble(&self.watches, &mut self.troubles, synced);
                 }
             }
-            prune_trees(&self.asked, &mut self.trees, &mut self.watches, &mut self.troubles);
+            prune_trees(
+                &self.asked,
+                &mut self.trees,
+                &mut self.watches,
+                &mut self.troubles,
+            );
             assert_watches_consistent(&self.asked, &self.trees, &self.watches);
             let heard = self.watches.take_heard();
             if !heard.is_empty() {
                 for was in self.asked.values_mut() {
                     let notified = match &was.placed {
                         Placed::In(top) => {
-                            let tree =
-                                self.trees.get(top).expect("placed worktree must exist in trees");
+                            let tree = self
+                                .trees
+                                .get(top)
+                                .expect("placed worktree must exist in trees");
                             tree.watching.id().is_some_and(|id| heard.contains_tree(id))
-                        },
-                        Placed::Outside(outside) => {
-                            outside.watching.id().is_some_and(|id| heard.contains_outside(id))
-                        },
+                        }
+                        Placed::Outside(outside) => outside
+                            .watching
+                            .id()
+                            .is_some_and(|id| heard.contains_outside(id)),
                         Placed::Unsaid => false,
                     };
                     if notified {
@@ -3282,13 +3608,27 @@ impl Follow {
                     self.troubles.say(trouble.clone());
                 }
                 let next = if moved { Why::Moved } else { Why::Swept };
-                self.asked.insert(dir.clone(), Asked { ended, took, next, placed, trouble });
+                self.asked.insert(
+                    dir.clone(),
+                    Asked {
+                        ended,
+                        took,
+                        next,
+                        placed,
+                        trouble,
+                    },
+                );
                 assert_watches_consistent(&self.asked, &self.trees, &self.watches);
                 if let Ok((status, _)) = said {
-                    let stored = |answer| core::Command::GitStatus { dir, status, why, answer };
+                    let stored = |answer| core::Command::GitStatus {
+                        dir,
+                        status,
+                        why,
+                        answer,
+                    };
                     match core::ask(core, stored) {
                         Some(Some(line)) => log::say(&line),
-                        Some(None) => {},
+                        Some(None) => {}
                         None => return,
                     }
                 }
@@ -3302,18 +3642,22 @@ impl Follow {
                 Placed::Outside(outside) => outside.watching.trouble().cloned(),
                 Placed::In(_) | Placed::Unsaid => None,
             });
-            let watching =
-                self.trees.values().filter_map(|tree| tree.watching.trouble(&tree.place.top));
+            let watching = self
+                .trees
+                .values()
+                .filter_map(|tree| tree.watching.trouble(&tree.place.top));
             for trouble in asking.chain(outside).chain(watching) {
                 self.troubles.say(trouble);
             }
             self.troubles.done();
             let now = Instant::now();
-            let next =
-                self.asked.values().map(|was| was.due(sweep).saturating_duration_since(now));
+            let next = self
+                .asked
+                .values()
+                .map(|was| was.due(sweep).saturating_duration_since(now));
             match woken.recv_timeout(next.min().unwrap_or(sweep)) {
                 Ok(()) => watch::settle(woken),
-                Err(RecvTimeoutError::Timeout) => {},
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
         }
@@ -3344,10 +3688,12 @@ pub fn follow(
     woken: Receiver<()>,
     sweep: Duration,
 ) -> io::Result<()> {
-    thread::Builder::new().name("git".to_owned()).spawn(move || {
-        let mut state = Follow::new(wake);
-        state.run(&core, &woken, sweep);
-    })?;
+    thread::Builder::new()
+        .name("git".to_owned())
+        .spawn(move || {
+            let mut state = Follow::new(wake);
+            state.run(&core, &woken, sweep);
+        })?;
     Ok(())
 }
 
@@ -3369,8 +3715,9 @@ mod tests {
         AbsPath, AddOutcome, BARE_UNREAD, Changed, Common, DIR_EVENTS_MAX, DefaultBranch,
         DirEvents, Directory, Dirs, EVENT_PATHS_MAX, FoldersOnly, Git, Ground, LIMIT,
         NonEmptyPathBuf, ParsedEvent, Placed, RECURSIVE_ADD_RETRIES, REPOSITORY_VARS, Symbolic,
-        TrackedDirs, Tree, TreeWatch, Troubles, WatchEngine, Watches, Watching, add_one, ask, assert_watches_consistent, branch, changed, config_count, handle_event,
-        locked, place, pointed, reconcile, reconcile_with, scratch, stamp, watched, watched_with,
+        TrackedDirs, Tree, TreeWatch, Troubles, WatchEngine, Watches, Watching, add_one, ask,
+        assert_watches_consistent, branch, changed, config_count, handle_event, locked, place,
+        pointed, reconcile, reconcile_with, scratch, stamp, watched, watched_with,
     };
 
     fn git(dir: &Path, args: &[&str]) -> bool {
@@ -3441,7 +3788,10 @@ mod tests {
             fs::write(file.as_path(), format!("{attempt}\n")).unwrap();
         };
         write_probe(NonZeroU32::MIN);
-        let mut state = Probe::Writing { attempt: NonZeroU32::MIN, woke: false };
+        let mut state = Probe::Writing {
+            attempt: NonZeroU32::MIN,
+            woke: false,
+        };
         lune_waits::eventually(what, || match state {
             Probe::Writing { attempt, woke } => {
                 let woke = woke || woken.try_recv().is_ok();
@@ -3454,24 +3804,44 @@ mod tests {
                 }
                 let next = attempt.checked_add(1).expect("probe write count fits u32");
                 write_probe(next);
-                state = Probe::Writing { attempt: next, woke };
+                state = Probe::Writing {
+                    attempt: next,
+                    woke,
+                };
                 None
-            },
+            }
             Probe::WaitingWake => woken.try_recv().is_ok().then_some(()),
         });
-        assert!(file.as_path().is_file(), "probed file must exist: {}", file.display());
+        assert!(
+            file.as_path().is_file(),
+            "probed file must exist: {}",
+            file.display()
+        );
     }
 
     #[test]
     fn a_default_branch_is_a_named_branch_of_a_known_remote_or_of_its_own() {
-        let remote = |branch: &str| {
-            DefaultBranch::Remote { remote: "origin", branch: branch.to_owned() }
+        let remote = |branch: &str| DefaultBranch::Remote {
+            remote: "origin",
+            branch: branch.to_owned(),
         };
-        assert_eq!(DefaultBranch::of("refs/remotes/origin/main"), Some(remote("main")));
-        assert_eq!(DefaultBranch::of("refs/remotes/origin/team/main"), Some(remote("team/main")));
-        let local = DefaultBranch::Local { branch: "trunk".to_owned() };
+        assert_eq!(
+            DefaultBranch::of("refs/remotes/origin/main"),
+            Some(remote("main"))
+        );
+        assert_eq!(
+            DefaultBranch::of("refs/remotes/origin/team/main"),
+            Some(remote("team/main"))
+        );
+        let local = DefaultBranch::Local {
+            branch: "trunk".to_owned(),
+        };
         assert_eq!(DefaultBranch::of("refs/heads/trunk"), Some(local));
-        for unnamed in ["refs/remotes/origin/", "refs/heads/", "refs/remotes/originals/main"] {
+        for unnamed in [
+            "refs/remotes/origin/",
+            "refs/heads/",
+            "refs/remotes/originals/main",
+        ] {
             assert_eq!(DefaultBranch::of(unnamed), None, "{unnamed}");
         }
     }
@@ -3505,11 +3875,21 @@ mod tests {
         let origin = Symbolic::RemoteHead("origin");
         let remote = || pointed(|command| Git::at(at, command), origin, limit);
         assert_eq!(remote(), Ok(None), "an origin never heard of");
-        assert!(git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/x"]));
+        assert!(git(
+            dir.path(),
+            &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/heads/x"]
+        ));
         assert_eq!(remote(), Ok(None), "it points outside the folder");
         let main = "refs/remotes/origin/main";
-        assert!(git(dir.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", main]));
-        assert_eq!(remote(), Ok(Some("main".to_owned())), "it points at origin's main");
+        assert!(git(
+            dir.path(),
+            &["symbolic-ref", "refs/remotes/origin/HEAD", main]
+        ));
+        assert_eq!(
+            remote(),
+            Ok(Some("main".to_owned())),
+            "it points at origin's main"
+        );
     }
 
     #[test]
@@ -3530,7 +3910,10 @@ mod tests {
         assert!(git(&["add", "-N", "new"]));
         let at = dir.path().to_str().unwrap();
         let later = SystemTime::now() + Duration::from_secs(60);
-        let same = File::options().write(true).open(dir.path().join("same")).unwrap();
+        let same = File::options()
+            .write(true)
+            .open(dir.path().join("same"))
+            .unwrap();
         same.set_modified(later).unwrap();
         let index = dir.path().join(".git").join("index");
         let before = stamp(&index);
@@ -3547,13 +3930,21 @@ mod tests {
         assert!(git(&["switch", "-q", "-c", "trunk"]));
         commit("trunk", "t\n");
         assert!(git(&["update-ref", "refs/remotes/origin/trunk", "HEAD"]));
-        assert!(git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]));
+        assert!(git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk"
+        ]));
         assert!(git(&["switch", "-q", "-c", "fold"]));
         commit("fold", "f\n");
         assert_eq!(changed(at, "fold"), Ok(Changed::new(1, 0)));
         assert_eq!(changed(at, "trunk"), Ok(None));
         assert!(git(&["update-ref", "refs/remotes/upstream/next", "HEAD"]));
-        assert!(git(&["symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/next"]));
+        assert!(git(&[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/next"
+        ]));
         assert!(git(&["switch", "-q", "-c", "next"]));
         assert_eq!(changed(at, "next"), Ok(None));
         commit("next", "n\n");
@@ -3587,13 +3978,27 @@ mod tests {
         commit(lines(1, 70));
         assert!(git(&origin, &["switch", "-q", "main"]));
         let url = format!("file://{}", origin.display());
-        let cloned = ["clone", "-q", "--filter=blob:none", "--no-checkout", &url, "clone"];
+        let cloned = [
+            "clone",
+            "-q",
+            "--filter=blob:none",
+            "--no-checkout",
+            &url,
+            "clone",
+        ];
         assert!(git(dir.path(), &cloned));
-        assert!(git(&clone, &["checkout", "-q", "-b", "fold", "origin/fold"]));
+        assert!(git(
+            &clone,
+            &["checkout", "-q", "-b", "fold", "origin/fold"]
+        ));
 
         let at = clone.to_str().unwrap();
         let said = changed(at, "fold");
-        assert!(said.as_ref().is_err_and(|why| why.starts_with("git diff-index said")), "{said:?}");
+        assert!(
+            said.as_ref()
+                .is_err_and(|why| why.starts_with("git diff-index said")),
+            "{said:?}"
+        );
     }
 
     #[test]
@@ -3616,25 +4021,41 @@ mod tests {
         ] {
             assert_eq!(said(why), Common::Unsaid(why.to_owned()), "{why}");
         }
-        assert_eq!(said("fatal: cannot change to '/w': No such file or directory"), Common::Gone);
+        assert_eq!(
+            said("fatal: cannot change to '/w': No such file or directory"),
+            Common::Gone
+        );
         let dir = |path: &str| Directory::parse(path.to_owned()).unwrap();
-        assert_eq!(Common::of(Ok(b"/w/.bare\n".to_vec())), Common::Of(dir("/w/.bare")));
-        assert!(matches!(Common::of(Ok(b".bare\n".to_vec())), Common::Unsaid(_)));
+        assert_eq!(
+            Common::of(Ok(b"/w/.bare\n".to_vec())),
+            Common::Of(dir("/w/.bare"))
+        );
+        assert!(matches!(
+            Common::of(Ok(b".bare\n".to_vec())),
+            Common::Unsaid(_)
+        ));
         assert!(matches!(Common::of(Ok(Vec::new())), Common::Unsaid(_)));
     }
 
     #[test]
     fn a_bare_repository_git_will_not_open_unnamed_is_one_it_names_by_an_absolute_path() {
-        let refused = |bare: &str| {
-            format!("{BARE_UNREAD}'{bare}' (safe.bareRepository is 'explicit')")
-        };
+        let refused =
+            |bare: &str| format!("{BARE_UNREAD}'{bare}' (safe.bareRepository is 'explicit')");
         let said = |why: &str| Common::of(Err(why.to_owned()));
         let bare = |path: &str| Common::BareUnread(Directory::parse(path.to_owned()).unwrap());
         assert_eq!(said(&refused("/w/o/n.git")), bare("/w/o/n.git"));
         assert_eq!(said(&refused("/w/it' (s).git")), bare("/w/it' (s).git"));
         let relative = refused("n.git");
-        assert_eq!(said(&relative), Common::Unsaid(relative.clone()), "it would be read from /");
-        assert_eq!(said(BARE_UNREAD), Common::Unsaid(BARE_UNREAD.to_owned()), "it named none");
+        assert_eq!(
+            said(&relative),
+            Common::Unsaid(relative.clone()),
+            "it would be read from /"
+        );
+        assert_eq!(
+            said(BARE_UNREAD),
+            Common::Unsaid(BARE_UNREAD.to_owned()),
+            "it named none"
+        );
     }
 
     #[test]
@@ -3646,7 +4067,10 @@ mod tests {
         let said = String::from_utf8(said).unwrap();
         for name in said.lines() {
             let known = REPOSITORY_VARS.contains(&name) || CONFIG_VARS.contains(&name);
-            assert!(known, "git keeps {name} to a repository; luned neither drops nor keeps it");
+            assert!(
+                known,
+                "git keeps {name} to a repository; luned neither drops nor keeps it"
+            );
         }
     }
 
@@ -3687,7 +4111,12 @@ mod tests {
         let modified = fs::metadata(&index).unwrap().modified().unwrap();
         let before = stamp(&index);
         fs::write(&lock, "after!").unwrap();
-        File::options().write(true).open(&lock).unwrap().set_modified(modified).unwrap();
+        File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
         fs::rename(&lock, &index).unwrap();
         assert_ne!(stamp(&index), before);
     }
@@ -3732,19 +4161,29 @@ mod tests {
         let secret = outside.path().join("secret.txt");
         fs::write(&secret, "do not read").unwrap();
         std::os::unix::fs::symlink(&secret, path.join("link.txt")).unwrap();
-        fs::write(path.join("huge.txt"), "x".repeat(super::UNTRACKED_BYTES_MAX + 10)).unwrap();
+        fs::write(
+            path.join("huge.txt"),
+            "x".repeat(super::UNTRACKED_BYTES_MAX + 10),
+        )
+        .unwrap();
         fs::write(path.join("small.txt"), "hello\n").unwrap();
 
         let dir = super::Dir::parse(path.to_str().unwrap()).unwrap();
         let out = super::patch(&dir).unwrap();
         assert!(out.truncated());
-        let paths: Vec<&str> = out.untracked().iter().map(|file| file.path().as_str()).collect();
+        let paths: Vec<&str> = out
+            .untracked()
+            .iter()
+            .map(|file| file.path().as_str())
+            .collect();
         assert_eq!(paths, ["small.txt"]);
 
         std::os::unix::fs::symlink(outside.path(), path.join("escape")).unwrap();
         let root_fd = rustix::fs::open(
             path,
-            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::CLOEXEC,
             rustix::fs::Mode::empty(),
         )
         .unwrap();
@@ -3752,7 +4191,10 @@ mod tests {
         assert!(super::open_untracked_at(&root_fd, &escaped).is_err());
 
         let fifo_path = path.join("pipe.fifo");
-        let status = std::process::Command::new("mkfifo").arg(&fifo_path).status().unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .unwrap();
         assert!(status.success());
         let fifo = super::RelativePath::parse("pipe.fifo".to_owned()).unwrap();
         if let Ok(fd) = super::open_untracked_at(&root_fd, &fifo) {
@@ -3813,7 +4255,9 @@ mod tests {
         assert!(!watches.active().unwrap().contains_key(extra.as_path()));
         assert!(watches.active().unwrap().contains_key(src.as_path()));
 
-        watches.remove_tree(tree.watching.into_id().unwrap()).unwrap();
+        watches
+            .remove_tree(tree.watching.into_id().unwrap())
+            .unwrap();
         assert!(watches.active().unwrap().is_empty());
         let routing = locked(&watches.routing);
         assert!(routing.trees.is_empty());
@@ -3840,8 +4284,14 @@ mod tests {
                 (child.clone(), RecursiveMode::NonRecursive),
             ]))
             .unwrap();
-        assert_eq!(watches.active().unwrap().get(shared.as_path()), Some(&RecursiveMode::NonRecursive));
-        assert_eq!(watches.active().unwrap().get(child.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(shared.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
+        assert_eq!(
+            watches.active().unwrap().get(child.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
 
         let second = watches
             .add_tree(BTreeMap::from([
@@ -3849,12 +4299,24 @@ mod tests {
                 (other.clone(), RecursiveMode::NonRecursive),
             ]))
             .unwrap();
-        assert_eq!(watches.active().unwrap().get(shared.as_path()), Some(&RecursiveMode::Recursive));
-        assert_eq!(watches.active().unwrap().get(other.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(shared.as_path()),
+            Some(&RecursiveMode::Recursive)
+        );
+        assert_eq!(
+            watches.active().unwrap().get(other.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
 
         watches.remove_tree(second).unwrap();
-        assert_eq!(watches.active().unwrap().get(shared.as_path()), Some(&RecursiveMode::NonRecursive));
-        assert_eq!(watches.active().unwrap().get(child.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(shared.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
+        assert_eq!(
+            watches.active().unwrap().get(child.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
         assert!(!watches.active().unwrap().contains_key(other.as_path()));
 
         #[cfg(target_os = "linux")]
@@ -3902,7 +4364,10 @@ mod tests {
         let (wake, woken) = mpsc::sync_channel(1);
         let mut watches = Watches::new(wake);
         let survivor = watches
-            .add_tree(BTreeMap::from([(child.clone(), RecursiveMode::NonRecursive)]))
+            .add_tree(BTreeMap::from([(
+                child.clone(),
+                RecursiveMode::NonRecursive,
+            )]))
             .unwrap();
         let recursive = watches
             .add_tree(BTreeMap::from([
@@ -3910,12 +4375,18 @@ mod tests {
                 (child.clone(), RecursiveMode::NonRecursive),
             ]))
             .unwrap();
-        assert_eq!(watches.active().unwrap().get(shared.as_path()), Some(&RecursiveMode::Recursive));
+        assert_eq!(
+            watches.active().unwrap().get(shared.as_path()),
+            Some(&RecursiveMode::Recursive)
+        );
         assert!(!watches.active().unwrap().contains_key(child.as_path()));
 
         watches.remove_tree(recursive).unwrap();
         assert!(!watches.active().unwrap().contains_key(shared.as_path()));
-        assert_eq!(watches.active().unwrap().get(child.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(child.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
         clear_heard(&watches, &woken);
 
         fs::write(child.join("probe").as_path(), "changed\n").unwrap();
@@ -3978,7 +4449,8 @@ mod tests {
 
         let mut oversized = Event::new(EventKind::Remove(RemoveKind::Any));
         for index in 0..=EVENT_PATHS_MAX {
-            oversized = oversized.add_path(root.join(format!("path-{index}")).as_path().to_path_buf());
+            oversized =
+                oversized.add_path(root.join(format!("path-{index}")).as_path().to_path_buf());
         }
         handle_event(Ok(oversized), &watches.routing, &wake);
         assert!(woken.try_recv().is_ok());
@@ -4028,7 +4500,10 @@ mod tests {
             let (wake, _woken) = mpsc::sync_channel(1);
             let mut watches = Watches::new(wake);
             let kept = watches
-                .add_tree(BTreeMap::from([(sibling.clone(), RecursiveMode::NonRecursive)]))
+                .add_tree(BTreeMap::from([(
+                    sibling.clone(),
+                    RecursiveMode::NonRecursive,
+                )]))
                 .unwrap();
             let updated = watches
                 .add_tree(BTreeMap::from([(src.clone(), RecursiveMode::NonRecursive)]))
@@ -4073,7 +4548,10 @@ mod tests {
         let (wake, woken) = mpsc::sync_channel(1);
         let mut watches = Watches::new(wake);
         let survivor = watches
-            .add_tree(BTreeMap::from([(child.clone(), RecursiveMode::NonRecursive)]))
+            .add_tree(BTreeMap::from([(
+                child.clone(),
+                RecursiveMode::NonRecursive,
+            )]))
             .unwrap();
         let caller = watches
             .add_tree(BTreeMap::from([
@@ -4094,7 +4572,10 @@ mod tests {
             .unwrap();
         fs::set_permissions(child.as_path(), Permissions::from_mode(0o755)).unwrap();
 
-        assert_eq!(watches.active().unwrap().get(other.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(other.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
         assert!(!watches.active().unwrap().contains_key(shared.as_path()));
         assert!(!watches.active().unwrap().contains_key(child.as_path()));
         assert!(woken.try_recv().is_ok());
@@ -4108,7 +4589,10 @@ mod tests {
                 &BTreeSet::from([child.clone()]),
             )
             .unwrap();
-        assert_eq!(watches.active().unwrap().get(child.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(child.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
         clear_heard(&watches, &woken);
 
         fs::write(child.join("probe").as_path(), "after\n").unwrap();
@@ -4137,15 +4621,24 @@ mod tests {
         let (wake, woken) = mpsc::sync_channel(1);
         let mut watches = Watches::new(wake);
         let first = watches
-            .add_tree(BTreeMap::from([(first_dir.clone(), RecursiveMode::NonRecursive)]))
+            .add_tree(BTreeMap::from([(
+                first_dir.clone(),
+                RecursiveMode::NonRecursive,
+            )]))
             .unwrap();
         let second = watches
-            .add_tree(BTreeMap::from([(second_dir.clone(), RecursiveMode::NonRecursive)]))
+            .add_tree(BTreeMap::from([(
+                second_dir.clone(),
+                RecursiveMode::NonRecursive,
+            )]))
             .unwrap();
 
         watches.engine = WatchEngine::NeedsRebuild;
         let third = watches
-            .add_tree(BTreeMap::from([(third_dir.clone(), RecursiveMode::NonRecursive)]))
+            .add_tree(BTreeMap::from([(
+                third_dir.clone(),
+                RecursiveMode::NonRecursive,
+            )]))
             .unwrap();
         assert_eq!(
             watches.active().unwrap().get(first_dir.as_path()),
@@ -4162,11 +4655,21 @@ mod tests {
         clear_heard(&watches, &woken);
 
         fs::write(first_dir.join("probe").as_path(), "a\n").unwrap();
-        wait_heard_tree("first survivor hears edit after rebuild", &watches, &woken, &first);
+        wait_heard_tree(
+            "first survivor hears edit after rebuild",
+            &watches,
+            &woken,
+            &first,
+        );
 
         clear_heard(&watches, &woken);
         fs::write(second_dir.join("probe").as_path(), "b\n").unwrap();
-        wait_heard_tree("second survivor hears edit after rebuild", &watches, &woken, &second);
+        wait_heard_tree(
+            "second survivor hears edit after rebuild",
+            &watches,
+            &woken,
+            &second,
+        );
 
         watches.remove_tree(third).unwrap();
         watches.remove_tree(second).unwrap();
@@ -4187,15 +4690,28 @@ mod tests {
         let mut watches = Watches::new(wake);
         let mut troubles = Troubles::default();
 
-        let (placed, _, _) = ask(&followed, None, &asked, &mut trees, &mut watches, &mut troubles);
+        let (placed, _, _) = ask(
+            &followed,
+            None,
+            &asked,
+            &mut trees,
+            &mut watches,
+            &mut troubles,
+        );
         assert!(matches!(placed, Placed::In(_)));
         assert_eq!(trees.len(), 1);
         assert_eq!(watches.tree_count(), 1);
         assert_eq!(watches.outside_count(), 0);
 
         fs::remove_dir_all(root.join(".git").as_path()).unwrap();
-        let (placed, _, _) =
-            ask(&followed, Some(placed), &asked, &mut trees, &mut watches, &mut troubles);
+        let (placed, _, _) = ask(
+            &followed,
+            Some(placed),
+            &asked,
+            &mut trees,
+            &mut watches,
+            &mut troubles,
+        );
         assert!(matches!(placed, Placed::Outside(_)));
         assert!(trees.is_empty());
         assert_eq!(watches.tree_count(), 0);
@@ -4244,10 +4760,10 @@ mod tests {
             ParsedEvent::HearAll { dir_changed: true }
         ));
         assert!(matches!(
-            ParsedEvent::of(Ok(
-                Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Any)))
-                    .add_path(PathBuf::new()),
-            )),
+            ParsedEvent::of(Ok(Event::new(EventKind::Modify(ModifyKind::Name(
+                RenameMode::Any
+            )))
+            .add_path(PathBuf::new()),)),
             ParsedEvent::Ignore
         ));
 
@@ -4255,7 +4771,12 @@ mod tests {
             .add_path(PathBuf::new())
             .add_path(sub.clone())
             .add_path(file.clone());
-        let ParsedEvent::Paths { rename: true, paths, .. } = ParsedEvent::of(Ok(renamed)) else {
+        let ParsedEvent::Paths {
+            rename: true,
+            paths,
+            ..
+        } = ParsedEvent::of(Ok(renamed))
+        else {
             panic!("expected parsed rename paths");
         };
         assert_eq!(paths.len(), 2);
@@ -4266,7 +4787,10 @@ mod tests {
 
         let top = AbsPath::from_absolute(PathBuf::from("/repo")).unwrap();
         assert!(FoldersOnly::TooManyDirs.trouble(&top).contains("more than"));
-        assert_eq!(FoldersOnly::Unlisted("failed".to_owned()).trouble(&top), "failed");
+        assert_eq!(
+            FoldersOnly::Unlisted("failed".to_owned()).trouble(&top),
+            "failed"
+        );
     }
 
     #[cfg(debug_assertions)]
@@ -4338,7 +4862,9 @@ mod tests {
         assert_eq!(active.get(&refs), Some(&RecursiveMode::Recursive));
 
         let mut exhausted = FakePathsMut {
-            outcomes: (0..RECURSIVE_ADD_RETRIES).map(|_| Err(child_missing())).collect(),
+            outcomes: (0..RECURSIVE_ADD_RETRIES)
+                .map(|_| Err(child_missing()))
+                .collect(),
             remove_error: false,
             removed: Vec::new(),
             add_calls: 0,
@@ -4346,7 +4872,10 @@ mod tests {
         let mut active = BTreeMap::new();
         assert!(matches!(
             add_one(&mut exhausted, &mut active, &refs, RecursiveMode::Recursive),
-            AddOutcome::Failed { needs_reset: false, .. }
+            AddOutcome::Failed {
+                needs_reset: false,
+                ..
+            }
         ));
         assert_eq!(exhausted.add_calls, RECURSIVE_ADD_RETRIES);
         assert_eq!(exhausted.removed.len(), RECURSIVE_ADD_RETRIES);
@@ -4362,8 +4891,16 @@ mod tests {
         };
         let mut active = BTreeMap::new();
         assert!(matches!(
-            add_one(&mut max_watches, &mut active, &refs, RecursiveMode::Recursive),
-            AddOutcome::Failed { needs_reset: false, .. }
+            add_one(
+                &mut max_watches,
+                &mut active,
+                &refs,
+                RecursiveMode::Recursive
+            ),
+            AddOutcome::Failed {
+                needs_reset: false,
+                ..
+            }
         ));
         assert_eq!(max_watches.removed, vec![refs.as_path().to_path_buf()]);
 
@@ -4376,8 +4913,16 @@ mod tests {
             add_calls: 0,
         };
         assert!(matches!(
-            add_one(&mut cleanup_fails, &mut active, &refs, RecursiveMode::Recursive),
-            AddOutcome::Failed { needs_reset: true, .. }
+            add_one(
+                &mut cleanup_fails,
+                &mut active,
+                &refs,
+                RecursiveMode::Recursive
+            ),
+            AddOutcome::Failed {
+                needs_reset: true,
+                ..
+            }
         ));
 
         let active_child = refs.join("heads");
@@ -4391,22 +4936,36 @@ mod tests {
             add_calls: 0,
         };
         assert!(matches!(
-            add_one(&mut has_descendant_edits, &mut with_descendant, &refs, RecursiveMode::Recursive),
-            AddOutcome::Failed { needs_reset: true, .. }
+            add_one(
+                &mut has_descendant_edits,
+                &mut with_descendant,
+                &refs,
+                RecursiveMode::Recursive
+            ),
+            AddOutcome::Failed {
+                needs_reset: true,
+                ..
+            }
         ));
         assert_eq!(has_descendant_edits.removed, [] as [PathBuf; 0]);
 
         let gone = root.join("gone");
         let mut root_missing = FakePathsMut {
-            outcomes: std::collections::VecDeque::from([Err(
-                notify::Error::new(ErrorKind::PathNotFound).add_path(gone.as_path().to_path_buf()),
-            )]),
+            outcomes: std::collections::VecDeque::from([Err(notify::Error::new(
+                ErrorKind::PathNotFound,
+            )
+            .add_path(gone.as_path().to_path_buf()))]),
             remove_error: false,
             removed: Vec::new(),
             add_calls: 0,
         };
         assert!(matches!(
-            add_one(&mut root_missing, &mut active, &gone, RecursiveMode::Recursive),
+            add_one(
+                &mut root_missing,
+                &mut active,
+                &gone,
+                RecursiveMode::Recursive
+            ),
             AddOutcome::Skipped
         ));
     }
@@ -4424,9 +4983,15 @@ mod tests {
         let tree = watches
             .add_tree(BTreeMap::from([(refs.clone(), RecursiveMode::Recursive)]))
             .unwrap();
-        let ground = Ground { real: heads.clone(), git: false };
+        let ground = Ground {
+            real: heads.clone(),
+            git: false,
+        };
         let outside = watches.add_outside(&ground, false).unwrap();
-        assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
+        assert_eq!(
+            watches.active().unwrap().get(refs.as_path()),
+            Some(&RecursiveMode::Recursive)
+        );
         assert!(!watches.active().unwrap().contains_key(heads.as_path()));
         clear_heard(&watches, &woken);
         let _ = watches.take_dirs(&tree);
@@ -4451,7 +5016,10 @@ mod tests {
         );
 
         watches.remove_outside(outside).synced.unwrap();
-        assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
+        assert_eq!(
+            watches.active().unwrap().get(refs.as_path()),
+            Some(&RecursiveMode::Recursive)
+        );
         clear_heard(&watches, &woken);
 
         fs::write(heads.join("main").as_path(), "def\n").unwrap();
@@ -4486,11 +5054,17 @@ mod tests {
         assert!(watches.active().unwrap().is_empty());
 
         let first_outside = watches.add_outside(&ground, false).unwrap();
-        assert_eq!(watches.active().unwrap().get(heads.as_path()), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            watches.active().unwrap().get(heads.as_path()),
+            Some(&RecursiveMode::NonRecursive)
+        );
         let second_tree = watches
             .add_tree(BTreeMap::from([(refs.clone(), RecursiveMode::Recursive)]))
             .unwrap();
-        assert_eq!(watches.active().unwrap().get(refs.as_path()), Some(&RecursiveMode::Recursive));
+        assert_eq!(
+            watches.active().unwrap().get(refs.as_path()),
+            Some(&RecursiveMode::Recursive)
+        );
         assert!(!watches.active().unwrap().contains_key(heads.as_path()));
         watches.remove_outside(first_outside).synced.unwrap();
         clear_heard(&watches, &woken);
@@ -4527,9 +5101,20 @@ mod tests {
             ]))
             .unwrap();
         let inner_tree = watches
-            .add_tree(BTreeMap::from([(inner.clone(), RecursiveMode::NonRecursive)]))
+            .add_tree(BTreeMap::from([(
+                inner.clone(),
+                RecursiveMode::NonRecursive,
+            )]))
             .unwrap();
-        let plain_outside = watches.add_outside(&Ground { real: plain.clone(), git: false }, false).unwrap();
+        let plain_outside = watches
+            .add_outside(
+                &Ground {
+                    real: plain.clone(),
+                    git: false,
+                },
+                false,
+            )
+            .unwrap();
         while woken.try_recv().is_ok() {}
         let _ = watches.take_heard();
 
@@ -4608,9 +5193,14 @@ mod tests {
         assert!(git(root.as_path(), &["commit", "-q", "-m", "start"]));
 
         let placed = place(root.to_str().unwrap()).ok().flatten().unwrap();
-        let tracked_dirs = TrackedDirs::from_paths(BTreeSet::from([root.clone(), logical_src.clone()]));
+        let tracked_dirs =
+            TrackedDirs::from_paths(BTreeSet::from([root.clone(), logical_src.clone()]));
         let resolve = |path: &AbsPath| {
-            let mapped = if *path == logical_src { actual_src.clone() } else { path.clone() };
+            let mapped = if *path == logical_src {
+                actual_src.clone()
+            } else {
+                path.clone()
+            };
             super::is_real_dir(mapped.as_path()).then_some(mapped)
         };
 
@@ -4620,7 +5210,8 @@ mod tests {
         assert_eq!(aliases.get(&logical_src), Some(&actual_src));
 
         fs::remove_dir_all(actual_src.as_path()).unwrap();
-        let affected = DirEvents::single(NonEmptyPathBuf::new(actual_src.as_path().to_path_buf()).unwrap());
+        let affected =
+            DirEvents::single(NonEmptyPathBuf::new(actual_src.as_path().to_path_buf()).unwrap());
         let after_delete = reconcile_with(
             &placed,
             Some(&tracked_dirs),
@@ -4636,7 +5227,8 @@ mod tests {
         assert!(after_delete.aliases.is_empty());
 
         fs::create_dir(actual_src.as_path()).unwrap();
-        let affected = DirEvents::single(NonEmptyPathBuf::new(actual_src.as_path().to_path_buf()).unwrap());
+        let affected =
+            DirEvents::single(NonEmptyPathBuf::new(actual_src.as_path().to_path_buf()).unwrap());
         let after_recreate = reconcile_with(
             &placed,
             Some(&tracked_dirs),
@@ -4717,8 +5309,17 @@ mod tests {
         )
         .unwrap();
         assert!(!updated.paths.contains_key(&old_refs));
-        assert_eq!(updated.paths.get(&dropped_dir), Some(&RecursiveMode::Recursive));
-        assert_eq!(updated.paths.get(&added_dir), Some(&RecursiveMode::NonRecursive));
-        assert_eq!(updated.paths.get(&kept_dir), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(
+            updated.paths.get(&dropped_dir),
+            Some(&RecursiveMode::Recursive)
+        );
+        assert_eq!(
+            updated.paths.get(&added_dir),
+            Some(&RecursiveMode::NonRecursive)
+        );
+        assert_eq!(
+            updated.paths.get(&kept_dir),
+            Some(&RecursiveMode::NonRecursive)
+        );
     }
 }

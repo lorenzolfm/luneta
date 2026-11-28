@@ -29,7 +29,9 @@ impl BrowserUrl {
             return Err(format!("a URL is longer than {URL_BYTES_MAX} bytes"));
         }
         if text.chars().any(|ch| ch.is_control() || ch.is_whitespace()) {
-            return Err(format!("the URL {text:?} holds a space or control character"));
+            return Err(format!(
+                "the URL {text:?} holds a space or control character"
+            ));
         }
         let Some((scheme, rest)) = text.split_once(':') else {
             return Err(format!("the URL {text:?} names no scheme"));
@@ -44,7 +46,7 @@ impl BrowserUrl {
                 if !valid_http_authority(authority) {
                     return Err(format!("{text:?} names no host"));
                 }
-            },
+            }
             _ => return Err(format!("the URL {text:?} uses an unsupported scheme")),
         }
         let canonical = if scheme == lower_scheme {
@@ -56,7 +58,10 @@ impl BrowserUrl {
             canonical.starts_with("http://") || canonical.starts_with("https://"),
             "a parsed BrowserUrl uses http or https"
         );
-        assert!(canonical.len() <= URL_BYTES_MAX, "a parsed URL fits URL_BYTES_MAX");
+        assert!(
+            canonical.len() <= URL_BYTES_MAX,
+            "a parsed URL fits URL_BYTES_MAX"
+        );
         Ok(BrowserUrl(canonical))
     }
 
@@ -65,7 +70,9 @@ impl BrowserUrl {
         if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("about:blank") {
             return Ok(None);
         }
-        let has_about = trimmed.get(..6).is_some_and(|head| head.eq_ignore_ascii_case("about:"));
+        let has_about = trimmed
+            .get(..6)
+            .is_some_and(|head| head.eq_ignore_ascii_case("about:"));
         if trimmed.contains("://") || has_about {
             return BrowserUrl::parse(trimmed).map(Some);
         }
@@ -127,7 +134,9 @@ fn valid_port(port: &str) -> bool {
 }
 
 fn valid_http_authority(authority: &str) -> bool {
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, rest)| rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, rest)| rest);
     if host_port.is_empty() {
         return false;
     }
@@ -213,7 +222,12 @@ pub struct Terminal {
 impl Terminal {
     #[must_use]
     pub fn new(id: TerminalViewId, folder: Dir, runs: Runs) -> Terminal {
-        Terminal { id, folder, runs, name: None }
+        Terminal {
+            id,
+            folder,
+            runs,
+            name: None,
+        }
     }
 
     #[must_use]
@@ -359,12 +373,19 @@ impl Prompted {
             return Err("an agent is asked for with no words".to_owned());
         }
         let argv = Argv::on_words(harness, words.clone(), &[])?;
-        Ok(Prompted { harness, words, argv })
+        Ok(Prompted {
+            harness,
+            words,
+            argv,
+        })
     }
 
     #[must_use]
     pub fn to_api(&self) -> api::Prompted {
-        api::Prompted { harness: self.harness.to_api().into(), words: self.words.clone() }
+        api::Prompted {
+            harness: self.harness.to_api().into(),
+            words: self.words.clone(),
+        }
     }
 
     #[must_use]
@@ -390,8 +411,8 @@ impl Argv {
             None => return Err("an argv names no program".to_owned()),
             Some(program) if program.is_empty() => {
                 return Err("an argv names its program with an empty word".to_owned());
-            },
-            Some(_) => {},
+            }
+            Some(_) => {}
         }
         let line = Line::parse(&quoted(&words))?;
         Ok(Argv { words, line })
@@ -407,7 +428,7 @@ impl Argv {
                     command.extend(rules);
                 }
                 command.push("--".to_owned());
-            },
+            }
             Harness::Pi => command.push("--".to_owned()),
             Harness::Antigravity => command.push("-i".to_owned()),
         }
@@ -421,7 +442,9 @@ impl Argv {
 
     #[must_use]
     pub fn to_api(&self) -> api::Argv {
-        api::Argv { words: self.words.clone() }
+        api::Argv {
+            words: self.words.clone(),
+        }
     }
 
     #[must_use]
@@ -447,7 +470,11 @@ pub fn quoted(argv: &[String]) -> String {
         !word.is_empty() && word.bytes().all(safe)
     };
     let words = argv.iter().map(|word| {
-        if plain(word) { word.clone() } else { format!("'{}'", word.replace('\'', r"'\''")) }
+        if plain(word) {
+            word.clone()
+        } else {
+            format!("'{}'", word.replace('\'', r"'\''"))
+        }
     });
     words.collect::<Vec<String>>().join(" ")
 }
@@ -461,9 +488,14 @@ impl Line {
             return Err("a command line is blank".to_owned());
         }
         if text.len() > LINE_BYTES_MAX {
-            return Err(format!("a command line is longer than {LINE_BYTES_MAX} bytes"));
+            return Err(format!(
+                "a command line is longer than {LINE_BYTES_MAX} bytes"
+            ));
         }
-        if text.chars().any(|char| char.is_control() && !matches!(char, '\n' | '\t')) {
+        if text
+            .chars()
+            .any(|char| char.is_control() && !matches!(char, '\n' | '\t'))
+        {
             return Err("a command line holds a control character".to_owned());
         }
         Ok(Line(text.to_owned()))
@@ -481,10 +513,14 @@ pub struct Session(String);
 impl Session {
     pub fn parse(text: &str) -> Result<Session, String> {
         if text.is_empty() || text.len() > SESSION_BYTES_MAX {
-            return Err(format!("an agent's session is 1 to {SESSION_BYTES_MAX} bytes"));
+            return Err(format!(
+                "an agent's session is 1 to {SESSION_BYTES_MAX} bytes"
+            ));
         }
         if !text.bytes().all(|byte| byte.is_ascii_graphic()) {
-            return Err(format!("the agent's session {text:?} holds more than letters and marks"));
+            return Err(format!(
+                "the agent's session {text:?} holds more than letters and marks"
+            ));
         }
         if text.starts_with('-') {
             return Err(format!("the agent's session {text:?} reads as an option"));
@@ -550,8 +586,13 @@ impl Shape {
 
     fn full(self) -> Option<ViewId> {
         match self {
-            Shape::Panes { focus: Some(Focus::Full(full)) } => Some(full),
-            Shape::Panes { focus: Some(Focus::Last(_)) | None } | Shape::Tabs { .. } => None,
+            Shape::Panes {
+                focus: Some(Focus::Full(full)),
+            } => Some(full),
+            Shape::Panes {
+                focus: Some(Focus::Last(_)) | None,
+            }
+            | Shape::Tabs { .. } => None,
         }
     }
 
@@ -565,7 +606,9 @@ impl Shape {
     fn focused_on(self, view: ViewId) -> Shape {
         match self {
             Shape::Tabs { .. } => Shape::Tabs { last: Some(view) },
-            Shape::Panes { .. } => Shape::Panes { focus: Some(Focus::Last(view)) },
+            Shape::Panes { .. } => Shape::Panes {
+                focus: Some(Focus::Last(view)),
+            },
         }
     }
 
@@ -578,7 +621,8 @@ impl Shape {
 
     fn arranged_as(self, arranged: Arranged) -> Shape {
         let unfocused = Shape::unfocused(arranged);
-        self.last_focus().map_or(unfocused, |view| unfocused.focused_on(view))
+        self.last_focus()
+            .map_or(unfocused, |view| unfocused.focused_on(view))
     }
 }
 
@@ -595,13 +639,18 @@ impl Layout {
         }
         let tree = Tree::of_preorder(preorder)?;
         match shape {
-            Shape::Tabs { last: Some(last) } | Shape::Panes { focus: Some(Focus::Last(last)) } => {
+            Shape::Tabs { last: Some(last) }
+            | Shape::Panes {
+                focus: Some(Focus::Last(last)),
+            } => {
                 if !tree.holds(last) {
                     return Err(format!("the layout holds no view {last} to focus"));
                 }
-            },
-            Shape::Panes { focus: Some(Focus::Full(full)) } => fills(&tree, full)?,
-            Shape::Tabs { last: None } | Shape::Panes { focus: None } => {},
+            }
+            Shape::Panes {
+                focus: Some(Focus::Full(full)),
+            } => fills(&tree, full)?,
+            Shape::Tabs { last: None } | Shape::Panes { focus: None } => {}
         }
         Ok(Layout(Some(Laid { tree, shape })))
     }
@@ -611,20 +660,37 @@ impl Layout {
         let (Some(one), Some(other)) = (self.tree(), other.tree()) else {
             return Ok(if self.is_empty() { other } else { self });
         };
-        let arranged = self.arranged().expect("a layout that holds views is arranged");
+        let arranged = self
+            .arranged()
+            .expect("a layout that holds views is arranged");
         let owned = |node: Preordered<&View>| match node {
             Preordered::Split { towards, share } => Preordered::Split { towards, share },
             Preordered::View(view) => Preordered::View(view.clone()),
         };
-        let split = Preordered::Split { towards: Towards::Right, share: SHARES / 2 };
-        let halves = one.preorder().into_iter().chain(other.preorder()).map(owned);
+        let split = Preordered::Split {
+            towards: Towards::Right,
+            share: SHARES / 2,
+        };
+        let halves = one
+            .preorder()
+            .into_iter()
+            .chain(other.preorder())
+            .map(owned);
         let preorder = std::iter::once(split).chain(halves).collect();
         let unfocused = Shape::unfocused(arranged);
         let shape = last_focus.map_or(unfocused, |view| unfocused.focused_on(view));
         let joined = Layout::read(preorder, shape)?;
         let both = one.len() + other.len();
-        assert_eq!(joined.len(), both, "a joined layout holds both layouts' views");
-        assert_eq!(joined.last_focus(), last_focus, "a joined layout keeps a focus of either");
+        assert_eq!(
+            joined.len(),
+            both,
+            "a joined layout holds both layouts' views"
+        );
+        assert_eq!(
+            joined.last_focus(),
+            last_focus,
+            "a joined layout keeps a focus of either"
+        );
         Ok(joined)
     }
 
@@ -650,7 +716,11 @@ impl Layout {
 
     #[must_use]
     fn room_in(&self, size: Size) -> Size {
-        if self.tabbed() { layout::SIZE_MAX } else { size }
+        if self.tabbed() {
+            layout::SIZE_MAX
+        } else {
+            size
+        }
     }
 
     #[must_use]
@@ -695,7 +765,10 @@ impl Layout {
         use layout::Direction;
         let laid = self.0.as_ref()?;
         let views = laid.tree.views();
-        let at = views.iter().position(|it| *it == view).expect("a view stepped from is laid");
+        let at = views
+            .iter()
+            .position(|it| *it == view)
+            .expect("a view stepped from is laid");
         match (laid.shape, direction) {
             (Shape::Panes { .. }, _) => laid.tree.neighbour(view, direction, size),
             (Shape::Tabs { .. }, Direction::Up | Direction::Down) => None,
@@ -707,7 +780,10 @@ impl Layout {
     #[must_use]
     pub fn room_for(&self, new: ViewId, beside: Option<ViewId>, size: Size) -> Option<Placed> {
         let tree = self.tree()?;
-        assert!(!tree.holds(new), "view {new} is placed in a layout that holds it");
+        assert!(
+            !tree.holds(new),
+            "view {new} is placed in a layout that holds it"
+        );
         let at = beside.unwrap_or_else(|| tree.largest(size).0);
         let rects = tree.rects(size);
         let (_, rect) = rects.iter().find(|(view, _)| *view == at)?;
@@ -720,7 +796,8 @@ impl Layout {
     #[must_use]
     pub fn room_towards(&self, at: ViewId, towards: Towards, new: ViewId, size: Size) -> bool {
         let room_in = self.room_in(size);
-        self.tree().is_some_and(|tree| tree.room(at, towards, new, room_in).is_some())
+        self.tree()
+            .is_some_and(|tree| tree.room(at, towards, new, room_in).is_some())
     }
 
     #[must_use]
@@ -733,11 +810,21 @@ impl Layout {
             Shape::Tabs { .. } => {
                 let fitted = layout::lone_whole(size);
                 let tab = Rect::whole(fitted);
-                (fitted, tiles.into_iter().map(|(view, _)| (view, tab)).collect::<Vec<_>>())
-            },
+                (
+                    fitted,
+                    tiles
+                        .into_iter()
+                        .map(|(view, _)| (view, tab))
+                        .collect::<Vec<_>>(),
+                )
+            }
             Shape::Panes { .. } => (laid.tree.fitted(size), tiles),
         };
-        assert_eq!(laid_out.len(), laid.tree.len(), "a layout lays out each of its views");
+        assert_eq!(
+            laid_out.len(),
+            laid.tree.len(),
+            "a layout lays out each of its views"
+        );
         (fitted, laid_out)
     }
 
@@ -746,64 +833,89 @@ impl Layout {
         let full = self.full();
         let (fitted, laid_out) = self.rects(size);
         let sized = laid_out.into_iter().map(|(view, rect)| {
-            let shown = if full == Some(view.id()) { Rect::whole(fitted) } else { rect };
+            let shown = if full == Some(view.id()) {
+                Rect::whole(fitted)
+            } else {
+                rect
+            };
             (view, shown.inner())
         });
         let sized: Vec<(&View, Size)> = sized.collect();
         for (view, inner) in &sized {
             let ((columns, rows), (columns_fitted, rows_fitted)) = (inner.get(), fitted.get());
             let id = view.id();
-            assert!(columns + 2 * FRAME_CELLS <= columns_fitted, "view {id} fits its width");
-            assert!(rows + 2 * FRAME_CELLS <= rows_fitted, "view {id} fits its height");
+            assert!(
+                columns + 2 * FRAME_CELLS <= columns_fitted,
+                "view {id} fits its width"
+            );
+            assert!(
+                rows + 2 * FRAME_CELLS <= rows_fitted,
+                "view {id} fits its height"
+            );
         }
         (fitted, sized)
     }
 
     pub(super) fn terminal_mut(&mut self, terminal: TerminalViewId) -> &mut Terminal {
-        let laid = self.0.as_mut().expect("a layout asked for its terminal is laid");
-        match laid.tree.get_mut(terminal.view()).expect("its layout holds the terminal") {
+        let laid = self
+            .0
+            .as_mut()
+            .expect("a layout asked for its terminal is laid");
+        match laid
+            .tree
+            .get_mut(terminal.view())
+            .expect("its layout holds the terminal")
+        {
             View::Terminal(held) => held,
             View::Welcome(_) | View::Browser(_) | View::Review(_) => {
                 unreachable!("terminal {terminal} is made only as a terminal")
-            },
+            }
         }
     }
 
     pub(super) fn browser_mut(&mut self, view: ViewId) -> Result<&mut Browser, String> {
-        let laid = self.0.as_mut().expect("a layout asked for its browser is laid");
-        match laid.tree.get_mut(view).expect("its layout holds the browser") {
+        let laid = self
+            .0
+            .as_mut()
+            .expect("a layout asked for its browser is laid");
+        match laid
+            .tree
+            .get_mut(view)
+            .expect("its layout holds the browser")
+        {
             View::Browser(held) => Ok(held),
             View::Terminal(_) | View::Welcome(_) | View::Review(_) => {
                 Err(format!("view {view} runs no browser"))
-            },
+            }
         }
     }
 
     pub(super) fn first(view: View) -> Layout {
         let shape = Shape::unfocused(Arranged::Tabs);
-        let first = Layout(Some(Laid { tree: Tree::one(view), shape }));
+        let first = Layout(Some(Laid {
+            tree: Tree::one(view),
+            shape,
+        }));
         assert_eq!(first.len(), 1, "a first layout holds its one view");
         first
     }
 
-    pub(super) fn opened(
-        &mut self,
-        view: View,
-        placed: Placed,
-        size: Size,
-    ) -> Result<(), String> {
+    pub(super) fn opened(&mut self, view: View, placed: Placed, size: Size) -> Result<(), String> {
         let id = view.id();
         let count = self.len();
         let size = self.room_in(size);
         match (&mut self.0, placed) {
             (None, Placed::Alone) => {
                 let shape = Shape::unfocused(Arranged::Tabs);
-                self.0 = Some(Laid { tree: Tree::one(view), shape });
-            },
+                self.0 = Some(Laid {
+                    tree: Tree::one(view),
+                    shape,
+                });
+            }
             (Some(_), Placed::Alone) => return Err("the layout holds views already".to_owned()),
             (None, Placed::Beside { at, .. }) => {
                 return Err(format!("the layout is empty, and so holds no view {at}"));
-            },
+            }
             (Some(laid), Placed::Beside { at, towards }) => {
                 if !laid.tree.holds(at) {
                     return Err(format!("the layout holds no view {at}"));
@@ -817,7 +929,7 @@ impl Layout {
                 }
                 laid.tree.split(at, towards, view, size);
                 laid.shape = laid.shape.unfilled();
-            },
+            }
         }
         assert!(self.holds(id), "view {id} is in the layout it opened in");
         assert_eq!(self.len(), count + 1, "a layout opens one view at a time");
@@ -830,7 +942,7 @@ impl Layout {
             Removed::Last => {
                 self.0 = None;
                 None
-            },
+            }
             Removed::Out { heir, .. } => {
                 laid.shape = match laid.shape.last_focus() {
                     Some(focus) if focus == view => laid.shape.focused_on(heir),
@@ -838,7 +950,7 @@ impl Layout {
                     Some(_) | None => laid.shape,
                 };
                 Some(heir)
-            },
+            }
         };
         assert!(!self.holds(view), "view {view} left its layout");
         if let Some(heir) = heir {
@@ -851,11 +963,18 @@ impl Layout {
 
     pub(super) fn focused(&mut self, view: ViewId) {
         let laid = self.0.as_mut().expect("a focused view is in the layout");
-        assert!(laid.tree.holds(view), "view {view} is focused in its own layout");
+        assert!(
+            laid.tree.holds(view),
+            "view {view} is focused in its own layout"
+        );
         if laid.shape.full() != Some(view) {
             laid.shape = laid.shape.focused_on(view);
         }
-        assert_eq!(self.last_focus(), Some(view), "view {view} is its layout's last focus");
+        assert_eq!(
+            self.last_focus(),
+            Some(view),
+            "view {view} is its layout's last focus"
+        );
     }
 
     pub(super) fn filled(&mut self, full: Option<ViewId>) -> Result<(), String> {
@@ -868,15 +987,21 @@ impl Layout {
         laid.shape = match (laid.shape, full) {
             (Shape::Tabs { .. }, Some(_)) => {
                 return Err("a layout shown as tabs shows each view whole already".to_owned());
-            },
+            }
             (Shape::Tabs { .. }, None) => laid.shape,
             (Shape::Panes { .. }, Some(full)) => {
                 fills(&laid.tree, full)?;
-                Shape::Panes { focus: Some(Focus::Full(full)) }
-            },
+                Shape::Panes {
+                    focus: Some(Focus::Full(full)),
+                }
+            }
             (Shape::Panes { .. }, None) => laid.shape.unfilled(),
         };
-        assert_eq!(self.full(), full, "a layout is filled by the view it was asked to be");
+        assert_eq!(
+            self.full(),
+            full,
+            "a layout is filled by the view it was asked to be"
+        );
         Ok(())
     }
 
@@ -886,9 +1011,20 @@ impl Layout {
         };
         let last_focus = laid.shape.last_focus();
         laid.shape = laid.shape.arranged_as(arranged);
-        assert_eq!(self.arranged(), Some(arranged), "a layout is arranged as it was asked");
-        assert_eq!(self.last_focus(), last_focus, "a layout arranged anew keeps its last focus");
-        assert!(self.full().is_none(), "a layout arranged anew is filled by no view");
+        assert_eq!(
+            self.arranged(),
+            Some(arranged),
+            "a layout is arranged as it was asked"
+        );
+        assert_eq!(
+            self.last_focus(),
+            last_focus,
+            "a layout arranged anew keeps its last focus"
+        );
+        assert!(
+            self.full().is_none(),
+            "a layout arranged anew is filled by no view"
+        );
         Ok(())
     }
 
@@ -911,11 +1047,15 @@ impl Layout {
         match laid.shape {
             Shape::Tabs { .. } => {
                 return Err("a layout shown as tabs is resized by none".to_owned());
-            },
-            Shape::Panes { focus: Some(Focus::Full(_)) } => {
+            }
+            Shape::Panes {
+                focus: Some(Focus::Full(_)),
+            } => {
                 return Err("a layout one view fills is resized by none".to_owned());
-            },
-            Shape::Panes { focus: Some(Focus::Last(_)) | None } => {},
+            }
+            Shape::Panes {
+                focus: Some(Focus::Last(_)) | None,
+            } => {}
         }
         if !laid.tree.resize(view, sides, growth, size) {
             return Err(format!("no border of view {view} moves that way"));
@@ -950,7 +1090,7 @@ impl Arranged {
             Ok(api::Arrangement::Panes) => Ok(Arranged::Panes),
             Ok(api::Arrangement::Unspecified) | Err(_) => {
                 Err("it says neither tabs nor panes".to_owned())
-            },
+            }
         }
     }
 
@@ -975,7 +1115,7 @@ fn read_rule(file: &str) -> Option<String> {
             ')' => inside = false,
             '*' | '[' | ']' => rule.push('\\'),
             '\\' => rule.push_str(r"\\\"),
-            _ => {},
+            _ => {}
         }
         rule.push(c);
     }
@@ -1008,17 +1148,23 @@ mod tests {
             let prompt = format!("Tackle {file}");
             let command = ["claude", "--allowedTools", rule, "--", prompt.as_str()];
             assert_eq!(
-                Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
+                Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file])
+                    .unwrap()
+                    .words(),
                 command.map(str::to_owned).to_vec(),
                 "{file}"
             );
             assert_eq!(
-                Argv::on_words(Harness::Pi, prompt.clone(), &[file]).unwrap().words(),
+                Argv::on_words(Harness::Pi, prompt.clone(), &[file])
+                    .unwrap()
+                    .words(),
                 ["pi".to_owned(), "--".to_owned(), prompt.clone()],
                 "{file}"
             );
             assert_eq!(
-                Argv::on_words(Harness::Antigravity, prompt.clone(), &[file]).unwrap().words(),
+                Argv::on_words(Harness::Antigravity, prompt.clone(), &[file])
+                    .unwrap()
+                    .words(),
                 ["agy".to_owned(), "-i".to_owned(), prompt],
                 "{file}"
             );
@@ -1031,7 +1177,9 @@ mod tests {
         ] {
             let prompt = format!("Tackle {file}");
             assert_eq!(
-                Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file]).unwrap().words(),
+                Argv::on_words(Harness::ClaudeCode, prompt.clone(), &[file])
+                    .unwrap()
+                    .words(),
                 ["claude".to_owned(), "--".to_owned(), prompt],
                 "{file:?}"
             );
@@ -1053,15 +1201,27 @@ mod tests {
         ] {
             let asked = asked(said, "Tackle #444");
             let opens = Opens::of_api(Some(asked.clone())).unwrap();
-            let Opens::Agent(prompted) = &opens else { panic!("an agent opens as an agent, not {opens:?}") };
+            let Opens::Agent(prompted) = &opens else {
+                panic!("an agent opens as an agent, not {opens:?}")
+            };
             assert_eq!(prompted.harness(), harness);
-            assert_eq!(prompted.argv().words(), [harness.program(), flag, "Tackle #444"]);
+            assert_eq!(
+                prompted.argv().words(),
+                [harness.program(), flag, "Tackle #444"]
+            );
             assert_eq!(opens.argv(), Some(prompted.argv()));
-            assert_eq!(opens.to_api(), asked, "an agent reads back as the agent asked for");
+            assert_eq!(
+                opens.to_api(),
+                asked,
+                "an agent reads back as the agent asked for"
+            );
             assert_eq!(opens.runs(), Runs::Command(prompted.argv().line.clone()));
         }
         let unnamed = Opens::of_api(Some(asked(api::Harness::Unspecified, "Tackle #444")));
-        assert_eq!(unnamed, Err("a harness this luned does not know".to_owned()));
+        assert_eq!(
+            unnamed,
+            Err("a harness this luned does not know".to_owned())
+        );
         let blank = Opens::of_api(Some(asked(api::Harness::ClaudeCode, " \n")));
         assert_eq!(blank, Err("an agent is asked for with no words".to_owned()));
     }
@@ -1080,19 +1240,28 @@ mod tests {
     #[test]
     fn browser_urls_validate_schemes_and_normalize_user_input() {
         assert_eq!(
-            BrowserUrl::parse("https://github.com/lorenzolfm/lune/issues/809").unwrap().as_str(),
+            BrowserUrl::parse("https://github.com/lorenzolfm/lune/issues/809")
+                .unwrap()
+                .as_str(),
             "https://github.com/lorenzolfm/lune/issues/809"
         );
         assert_eq!(
-            BrowserUrl::parse("http://localhost:3000/app").unwrap().as_str(),
+            BrowserUrl::parse("http://localhost:3000/app")
+                .unwrap()
+                .as_str(),
             "http://localhost:3000/app"
         );
 
         assert_eq!(
-            BrowserUrl::parse("HTTPS://example.com/Path").unwrap().as_str(),
+            BrowserUrl::parse("HTTPS://example.com/Path")
+                .unwrap()
+                .as_str(),
             "https://example.com/Path"
         );
-        assert_eq!(BrowserUrl::parse("HTTPS://example.com/").unwrap().short(), "example.com");
+        assert_eq!(
+            BrowserUrl::parse("HTTPS://example.com/").unwrap().short(),
+            "example.com"
+        );
 
         for bad in [
             "",
@@ -1126,23 +1295,38 @@ mod tests {
         assert_eq!(BrowserUrl::from_user("about:blank"), Ok(None));
         assert_eq!(BrowserUrl::from_user("ABOUT:blank"), Ok(None));
         assert_eq!(
-            BrowserUrl::from_user("example.com/docs").unwrap().unwrap().as_str(),
+            BrowserUrl::from_user("example.com/docs")
+                .unwrap()
+                .unwrap()
+                .as_str(),
             "https://example.com/docs"
         );
         assert_eq!(
-            BrowserUrl::from_user("example.com?a=1").unwrap().unwrap().as_str(),
+            BrowserUrl::from_user("example.com?a=1")
+                .unwrap()
+                .unwrap()
+                .as_str(),
             "https://example.com?a=1"
         );
         assert_eq!(
-            BrowserUrl::from_user("LOCALHOST:5173").unwrap().unwrap().as_str(),
+            BrowserUrl::from_user("LOCALHOST:5173")
+                .unwrap()
+                .unwrap()
+                .as_str(),
             "http://LOCALHOST:5173"
         );
         assert_eq!(
-            BrowserUrl::from_user("[::1]:5173").unwrap().unwrap().as_str(),
+            BrowserUrl::from_user("[::1]:5173")
+                .unwrap()
+                .unwrap()
+                .as_str(),
             "http://[::1]:5173"
         );
         assert_eq!(
-            BrowserUrl::from_user("127.0.0.1:8080/health").unwrap().unwrap().as_str(),
+            BrowserUrl::from_user("127.0.0.1:8080/health")
+                .unwrap()
+                .unwrap()
+                .as_str(),
             "http://127.0.0.1:8080/health"
         );
         for bad in [

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
@@ -5,11 +6,11 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
-use std::sync::mpsc::{self, Receiver};
 use std::sync::LazyLock;
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use lune_waits::{Patience, Span, PATIENCE};
+use lune_waits::{PATIENCE, Patience, Span};
 use luned::api;
 use luned::folder::{self, Folder};
 use luned::{Answer, RoundTrip};
@@ -20,8 +21,15 @@ pub const LUNED: &str = env!("CARGO_BIN_EXE_luned");
 pub static LUNE: LazyLock<String> = LazyLock::new(|| {
     let beside = Path::new(LUNED).with_file_name("lune");
     let built = beside.is_file();
-    assert!(built, "no lune is built beside luned, at {}: test with -p lune too", beside.display());
-    beside.into_os_string().into_string().expect("cargo builds lune at a UTF-8 path")
+    assert!(
+        built,
+        "no lune is built beside luned, at {}: test with -p lune too",
+        beside.display()
+    );
+    beside
+        .into_os_string()
+        .into_string()
+        .expect("cargo builds lune at a UTF-8 path")
 });
 
 pub const SOCKET: &str = "lune/luned.sock";
@@ -40,7 +48,10 @@ pub struct Vars<'a> {
 
 impl<'a> Vars<'a> {
     pub fn runtime(root: &'a Path) -> Self {
-        Vars { runtime: Some(root), ..Vars::default() }
+        Vars {
+            runtime: Some(root),
+            ..Vars::default()
+        }
     }
 
     pub fn command(self, program: &str) -> Command {
@@ -82,7 +93,9 @@ impl<'a> Vars<'a> {
             let paths = std::iter::once(bin.to_owned()).chain(std::env::split_paths(&path));
             command.env("PATH", std::env::join_paths(paths).unwrap());
         }
-        command.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null");
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null");
         command
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "maintenance.auto")
@@ -93,8 +106,18 @@ impl<'a> Vars<'a> {
 
 pub fn install(from: &Path, to: &Path) {
     let mut install = Command::new("install");
-    let installed = install.args(["-m", "755"]).arg(from).arg(to).status().unwrap();
-    assert!(installed.success(), "{} was not installed at {}", from.display(), to.display());
+    let installed = install
+        .args(["-m", "755"])
+        .arg(from)
+        .arg(to)
+        .status()
+        .unwrap();
+    assert!(
+        installed.success(),
+        "{} was not installed at {}",
+        from.display(),
+        to.display()
+    );
 }
 
 pub fn script(path: &Path, text: &str) {
@@ -132,7 +155,9 @@ pub struct FakeGh {
 
 impl FakeGh {
     fn new(bin: &Path) -> Self {
-        let gh = FakeGh { pulls: bin.join("pulls") };
+        let gh = FakeGh {
+            pulls: bin.join("pulls"),
+        };
         fs::create_dir(&gh.pulls).unwrap();
         let text = r#"pulls="${0%/*}/pulls"
 if [ "$1 $2" = "label list" ] || [ "$1 $2 $3 $4" = "issue list --author @me" ]; then
@@ -294,7 +319,11 @@ exec cat "$said"
     }
 
     pub fn issue(&self, number: u32, page: &str) {
-        fs::write(self.pulls.join(format!("issue-{number}")), format!("{page}\n")).unwrap();
+        fs::write(
+            self.pulls.join(format!("issue-{number}")),
+            format!("{page}\n"),
+        )
+        .unwrap();
     }
 
     pub fn issues(&self) -> Vec<String> {
@@ -324,7 +353,11 @@ exec cat "$said"
             "headRefOid": head,
             "statusCheckRollup": rollup,
         });
-        fs::write(self.pulls.join(format!("checks-{number}")), said.to_string()).unwrap();
+        fs::write(
+            self.pulls.join(format!("checks-{number}")),
+            said.to_string(),
+        )
+        .unwrap();
     }
 
     pub fn log(&self, job: u64, log: &str) {
@@ -468,8 +501,12 @@ pub struct NotedGit {
 impl NotedGit {
     fn new(bin: &Path) -> Self {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let git = std::env::split_paths(&path).map(|dir| dir.join("git")).find(|it| it.is_file());
-        let noted = NotedGit { notes: bin.join("statuses") };
+        let git = std::env::split_paths(&path)
+            .map(|dir| dir.join("git"))
+            .find(|it| it.is_file());
+        let noted = NotedGit {
+            notes: bin.join("statuses"),
+        };
         let text = format!(
             r#"for arg; do
     if [ "$arg" = status ]; then
@@ -483,7 +520,11 @@ exec "{git}" "$@"
         );
         let path = bin.join("git");
         shared_script(&path, &text);
-        let ran = Command::new(&path).arg("--version").stdout(Stdio::null()).status().unwrap();
+        let ran = Command::new(&path)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
         assert!(ran.success(), "the git of the test's own does not run");
         noted
     }
@@ -508,7 +549,12 @@ impl Host {
     pub fn new() -> Self {
         let bin = tempfile::tempdir().unwrap();
         let gh = FakeGh::new(bin.path());
-        Host { runtime: tempfile::tempdir().unwrap(), home: tempfile::tempdir().unwrap(), bin, gh }
+        Host {
+            runtime: tempfile::tempdir().unwrap(),
+            home: tempfile::tempdir().unwrap(),
+            bin,
+            gh,
+        }
     }
 
     pub fn bin(&self) -> &Path {
@@ -534,14 +580,24 @@ impl Host {
 
     pub fn host(&self) -> api::Host {
         let folder = folder_in(self.runtime.path()).expect("no daemon has made its folder");
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
             let mut daemon = luned::connect(&folder, PATIENT).await.unwrap();
             let asked = api::WatchChangesRequest {
                 after: None,
                 waiter: api::ClientWaiter::Client.into(),
             };
-            daemon.watch_changes(asked).await.unwrap().into_inner().read_host().unwrap().into_host()
+            daemon
+                .watch_changes(asked)
+                .await
+                .unwrap()
+                .into_inner()
+                .read_host()
+                .unwrap()
+                .into_host()
         })
     }
 }
@@ -556,7 +612,9 @@ pub struct Running {
 
 impl Running {
     pub fn spawn(command: &mut Command) -> Self {
-        Running { child: command.spawn().unwrap() }
+        Running {
+            child: command.spawn().unwrap(),
+        }
     }
 
     pub fn pid(&self) -> u32 {
@@ -568,7 +626,10 @@ impl Running {
     }
 
     pub fn piped(&mut self) -> (ChildStdin, ChildStdout) {
-        (self.child.stdin.take().unwrap(), self.child.stdout.take().unwrap())
+        (
+            self.child.stdin.take().unwrap(),
+            self.child.stdout.take().unwrap(),
+        )
     }
 
     pub fn ended(&mut self, what: &str) -> ExitStatus {
@@ -675,7 +736,11 @@ pub fn start_as(mut luned: Command) -> Result<Daemon, (ExitStatus, String)> {
     let mut said = Vec::new();
     while let Ok(line) = heard.recv() {
         if line.starts_with("luned: listening on ") {
-            return Ok(Daemon { process, said, heard });
+            return Ok(Daemon {
+                process,
+                said,
+                heard,
+            });
         }
         said.push(line);
     }
@@ -683,10 +748,18 @@ pub fn start_as(mut luned: Command) -> Result<Daemon, (ExitStatus, String)> {
 }
 
 pub fn answered(command: &mut Command) -> Output {
-    let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let (tell, heard) = mpsc::channel();
     thread::spawn(move || tell.send(child.wait_with_output()));
-    lune_waits::heard("it answers, and leaves nothing running that holds what it writes", &heard).unwrap()
+    lune_waits::heard(
+        "it answers, and leaves nothing running that holds what it writes",
+        &heard,
+    )
+    .unwrap()
 }
 
 pub fn info(vars: Vars) -> String {
@@ -695,4 +768,503 @@ pub fn info(vars: Vars) -> String {
     let why = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "lune info failed: {why}");
     said
+}
+
+const SIDE_BY_SIDE_MAX: usize = 8;
+
+const NEXTEST_OVERRIDES_MAX: usize = 64;
+
+const NEXTEST_EXACT_FILTERS_MAX: usize = 64;
+
+const DAEMON_TESTS_MAX: usize = 2048;
+
+pub struct Slot(());
+
+pub type Wait = (&'static str, fn(Slot));
+
+#[derive(Clone, Copy)]
+pub struct Waits<const N: usize>([Wait; N]);
+
+impl<const N: usize> Waits<N> {
+    #[must_use]
+    pub const fn of(items: [Wait; N]) -> Self {
+        assert!(N >= 2, "side_by_side overlaps at least two waits");
+        assert!(
+            N <= SIDE_BY_SIDE_MAX,
+            "side_by_side runs too many waits in one test slot"
+        );
+        let mut index = 0;
+        while index < N {
+            let name = items[index].0.as_bytes();
+            assert!(!name.is_empty(), "a side_by_side wait has a name");
+            let mut has_non_space = false;
+            let mut byte_index = 0;
+            while byte_index < name.len() {
+                let byte = name[byte_index];
+                assert!(byte != b'\0', "a side_by_side wait name has no NUL byte");
+                if !byte.is_ascii_whitespace() {
+                    has_non_space = true;
+                }
+                byte_index += 1;
+            }
+            assert!(
+                has_non_space,
+                "a side_by_side wait name is not only whitespace"
+            );
+            let mut prior = 0;
+            while prior < index {
+                assert!(
+                    !bytes_eq(name, items[prior].0.as_bytes()),
+                    "duplicate side_by_side wait name"
+                );
+                prior += 1;
+            }
+            index += 1;
+        }
+        Self(items)
+    }
+}
+
+const fn bytes_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+pub fn side_by_side<const N: usize>(waits: Waits<N>) {
+    for (index, (name, wait)) in waits.0.iter().enumerate() {
+        for (prior_name, prior_wait) in &waits.0[..index] {
+            assert!(
+                !std::ptr::fn_addr_eq(*wait, *prior_wait),
+                "duplicate side_by_side wait function under {name:?} and {prior_name:?}"
+            );
+        }
+    }
+    let failed: Vec<&str> = thread::scope(|scope| {
+        let running = waits.0.map(|(name, wait)| {
+            let named = thread::Builder::new().name(name.to_owned());
+            let handle = named
+                .spawn_scoped(scope, move || wait(Slot(())))
+                .unwrap_or_else(|error| panic!("could not spawn wait {name:?}: {error}"));
+            (name, handle)
+        });
+        running
+            .into_iter()
+            .filter_map(|(name, handle)| handle.join().is_err().then_some(name))
+            .collect()
+    });
+    assert_eq!(failed, [] as [&str; 0]);
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NextestConfig {
+    profile: NextestProfiles,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NextestProfiles {
+    default: DefaultProfile,
+    quick: QuickProfile,
+    ci: CiProfile,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DefaultProfile {
+    #[serde(default, rename = "fail-fast")]
+    _fail_fast: Option<bool>,
+    #[serde(default)]
+    overrides: Vec<NextestOverride>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuickProfile {
+    #[serde(rename = "default-filter")]
+    default_filter: ExactExclusionFilter,
+    #[serde(default)]
+    overrides: Vec<NextestOverride>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CiProfile {
+    #[serde(default, rename = "retries")]
+    _retries: Option<u32>,
+    #[serde(default, rename = "slow-timeout")]
+    _slow_timeout: Option<toml::Value>,
+    #[serde(default, rename = "failure-output")]
+    _failure_output: Option<String>,
+    #[serde(default, rename = "final-status-level")]
+    _final_status_level: Option<String>,
+    #[serde(default, rename = "junit")]
+    _junit: Option<toml::Value>,
+    #[serde(default)]
+    overrides: Vec<NextestOverride>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NextestOverride {
+    filter: ExactUnionFilter,
+    #[serde(default)]
+    priority: Option<NextestPriority>,
+    #[serde(default, rename = "retries")]
+    _retries: Option<u32>,
+    #[serde(default, rename = "slow-timeout")]
+    _slow_timeout: Option<toml::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NextestPriority(i8);
+
+impl NextestPriority {
+    const MIN: i8 = -100;
+    const MAX: i8 = 100;
+
+    const fn is_positive(self) -> bool {
+        self.0 > 0
+    }
+}
+
+const _: () = assert!(NextestPriority::MIN < 0 && NextestPriority::MAX > 0);
+
+impl<'de> serde::Deserialize<'de> for NextestPriority {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = i8::deserialize(deserializer)?;
+        if !(Self::MIN..=Self::MAX).contains(&value) {
+            return Err(serde::de::Error::custom(format!(
+                "priority {value} outside {}..={}",
+                Self::MIN,
+                Self::MAX
+            )));
+        }
+        Ok(Self(value))
+    }
+}
+
+struct ExactUnionFilter(Vec<String>);
+
+impl<'de> serde::Deserialize<'de> for ExactUnionFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let tokens: Vec<&str> = raw.split_whitespace().collect();
+        if tokens.is_empty() || tokens.len().is_multiple_of(2) {
+            return Err(serde::de::Error::custom(
+                "override filter must be `test(=...)` clauses joined by `or`",
+            ));
+        }
+        let mut names = Vec::new();
+        for (index, token) in tokens.iter().enumerate() {
+            if !index.is_multiple_of(2) {
+                if *token != "or" {
+                    return Err(serde::de::Error::custom(format!(
+                        "expected `or`, got {token:?}"
+                    )));
+                }
+                continue;
+            }
+            let name = parse_exact_test_token(token).map_err(serde::de::Error::custom)?;
+            if names.contains(&name) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate test(={name}) in one nextest filter"
+                )));
+            }
+            names.push(name);
+        }
+        if names.len() > NEXTEST_EXACT_FILTERS_MAX {
+            return Err(serde::de::Error::custom(format!(
+                "nextest filter exceeds NEXTEST_EXACT_FILTERS_MAX ({NEXTEST_EXACT_FILTERS_MAX})"
+            )));
+        }
+        Ok(Self(names))
+    }
+}
+
+struct ExactExclusionFilter(Vec<String>);
+
+impl<'de> serde::Deserialize<'de> for ExactExclusionFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        let tokens: Vec<&str> = raw.split_whitespace().collect();
+        if tokens.len() < 2 || !(tokens.len() + 1).is_multiple_of(3) {
+            return Err(serde::de::Error::custom(
+                "default-filter must be `not test(=...)` clauses joined by `and`",
+            ));
+        }
+        let mut names = Vec::new();
+        for (index, chunk) in tokens.chunks(3).enumerate() {
+            if chunk[0] != "not" {
+                return Err(serde::de::Error::custom(format!(
+                    "expected `not`, got {:?}",
+                    chunk[0]
+                )));
+            }
+            let name = parse_exact_test_token(chunk[1]).map_err(serde::de::Error::custom)?;
+            if names.contains(&name) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate test(={name}) in one nextest filter"
+                )));
+            }
+            names.push(name);
+            let is_last = (index + 1) * 3 >= tokens.len();
+            if !is_last && chunk[2] != "and" {
+                return Err(serde::de::Error::custom(format!(
+                    "expected `and`, got {:?}",
+                    chunk[2]
+                )));
+            }
+        }
+        if names.len() > NEXTEST_EXACT_FILTERS_MAX {
+            return Err(serde::de::Error::custom(format!(
+                "nextest filter exceeds NEXTEST_EXACT_FILTERS_MAX ({NEXTEST_EXACT_FILTERS_MAX})"
+            )));
+        }
+        Ok(Self(names))
+    }
+}
+
+fn parse_exact_test_token(token: &str) -> Result<String, String> {
+    let name = token
+        .strip_prefix("test(=")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .ok_or_else(|| format!("expected exact test(=...) filter, got {token:?}"))?;
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':'))
+    {
+        return Err(format!("invalid daemon test name {name:?}"));
+    }
+    Ok(name.to_owned())
+}
+
+fn effective_priority(test_name: &str, layers: &[&[NextestOverride]]) -> NextestPriority {
+    for overrides in layers {
+        for entry in *overrides {
+            if entry.filter.0.iter().any(|name| name == test_name)
+                && let Some(priority) = entry.priority
+            {
+                return priority;
+            }
+        }
+    }
+    NextestPriority(0)
+}
+
+fn listed_daemon_tests(extra_args: &[&str]) -> BTreeSet<String> {
+    let exe = std::env::current_exe().expect("test binary knows its own path");
+    let output = Command::new(&exe)
+        .args(["--list", "--format=terse"])
+        .args(extra_args)
+        .output()
+        .expect("test binary lists its tests");
+    assert!(
+        output.status.success(),
+        "test binary --list failed: {}",
+        output.status
+    );
+    let stdout = String::from_utf8(output.stdout).expect("test names are UTF-8");
+    let mut tests = BTreeSet::new();
+    for (line_index, line) in stdout.lines().enumerate() {
+        assert!(
+            line_index < DAEMON_TESTS_MAX,
+            "daemon test listing exceeds DAEMON_TESTS_MAX ({DAEMON_TESTS_MAX})"
+        );
+        if let Some(name) = line.strip_suffix(": test") {
+            assert!(tests.insert(name.to_owned()), "duplicate test name {name}");
+        }
+    }
+    tests
+}
+
+fn active_daemon_tests() -> BTreeSet<String> {
+    let all = listed_daemon_tests(&[]);
+    let ignored = listed_daemon_tests(&["--ignored"]);
+    assert!(
+        ignored.is_subset(&all),
+        "ignored daemon tests are a subset of all listed tests"
+    );
+    let active: BTreeSet<String> = all.difference(&ignored).cloned().collect();
+    assert!(
+        !active.is_empty(),
+        "daemon test binary lists at least one active test"
+    );
+    active
+}
+
+#[test]
+fn nextest_toml_names_only_existing_daemon_tests() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.config/nextest.toml");
+    let text = fs::read_to_string(&path).expect("nextest.toml is in the source tree");
+    let config: NextestConfig = toml::from_str(&text).expect("nextest.toml matches typed schema");
+
+    let active = active_daemon_tests();
+    let profile_overrides: [(&str, &[NextestOverride]); 3] = [
+        ("default", &config.profile.default.overrides),
+        ("quick", &config.profile.quick.overrides),
+        ("ci", &config.profile.ci.overrides),
+    ];
+    for (profile_name, overrides) in profile_overrides {
+        assert!(
+            overrides.len() <= NEXTEST_OVERRIDES_MAX,
+            "profile {profile_name} override count exceeds NEXTEST_OVERRIDES_MAX ({NEXTEST_OVERRIDES_MAX})"
+        );
+        for entry in overrides {
+            for name in &entry.filter.0 {
+                assert!(
+                    active.contains(name),
+                    "nextest.toml [profile.{profile_name}.overrides] names {name}, which is no active daemon test"
+                );
+            }
+        }
+    }
+
+    let default_layers = [config.profile.default.overrides.as_slice()];
+    let ci_layers = [
+        config.profile.ci.overrides.as_slice(),
+        config.profile.default.overrides.as_slice(),
+    ];
+    let prioritized_default: BTreeSet<&str> = active
+        .iter()
+        .filter(|name| effective_priority(name, &default_layers).is_positive())
+        .map(String::as_str)
+        .collect();
+    let prioritized_ci: BTreeSet<&str> = active
+        .iter()
+        .filter(|name| effective_priority(name, &ci_layers).is_positive())
+        .map(String::as_str)
+        .collect();
+    assert!(
+        !prioritized_default.is_empty(),
+        "nextest.toml assigns positive priority to at least one active daemon test"
+    );
+    assert_eq!(
+        prioritized_default, prioritized_ci,
+        "nextest.toml [profile.ci] overrides change which daemon tests get positive priority"
+    );
+
+    let quick_excluded = &config.profile.quick.default_filter.0;
+    assert!(
+        !quick_excluded.is_empty(),
+        "nextest.toml [profile.quick] excludes at least one test"
+    );
+    for name in quick_excluded {
+        assert!(
+            active.contains(name),
+            "nextest.toml [profile.quick].default-filter names {name}, which is no active daemon test"
+        );
+        assert!(
+            prioritized_default.contains(name.as_str()),
+            "nextest.toml [profile.quick] excludes {name}, which lacks positive priority in [profile.default.overrides]"
+        );
+    }
+}
+
+#[test]
+fn nextest_schema_rejects_malformed_filters_priorities_and_shadowed_ci_threads() {
+    let invalid_configs = [
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one) and test(=b::two)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 101
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "test(=a::one)"
+[profile.ci]
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one) or not test(=b::two)"
+[profile.ci]
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+test-threads = 4
+"#,
+    ];
+    for raw in invalid_configs {
+        assert!(
+            toml::from_str::<NextestConfig>(raw).is_err(),
+            "expected rejection for:\n{raw}"
+        );
+    }
+
+    let shadowed: NextestConfig = toml::from_str(
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+[[profile.ci.overrides]]
+filter = "test(=a::one)"
+priority = 0
+"#,
+    )
+    .expect("syntactically valid nextest config");
+    assert!(
+        effective_priority("a::one", &[&shadowed.profile.default.overrides]).is_positive(),
+        "default profile prioritizes a::one"
+    );
+    assert!(
+        !effective_priority(
+            "a::one",
+            &[
+                &shadowed.profile.ci.overrides,
+                &shadowed.profile.default.overrides
+            ]
+        )
+        .is_positive(),
+        "ci override priority = 0 shadows default priority = 100"
+    );
 }

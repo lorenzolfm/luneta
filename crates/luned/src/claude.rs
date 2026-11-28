@@ -12,16 +12,16 @@ use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize;
 
+use crate::Directory;
 use crate::agent::{
-    absolute, moment, named_pid, nonempty, read_file_text, terminal_or_trouble, Name, Sighting,
-    Source, Unread, FILE_BYTES_MAX,
+    FILE_BYTES_MAX, Name, Sighting, Source, Unread, absolute, moment, named_pid, nonempty,
+    read_file_text, terminal_or_trouble,
 };
 use crate::mux;
 use crate::process::{self, AgentId, AgentPid};
 use crate::statuses::{self, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
-use crate::{log, program};
 use crate::watch::{self, Troubles};
-use crate::Directory;
+use crate::{log, program};
 
 pub const TORN: Duration = Duration::from_secs(1);
 
@@ -80,8 +80,13 @@ impl RawStart {
 
 #[derive(Clone)]
 enum Feed {
-    Sdk { entrypoint: Said },
-    Interactive { entrypoint: Option<Said>, update: RungUpdate },
+    Sdk {
+        entrypoint: Said,
+    },
+    Interactive {
+        entrypoint: Option<Said>,
+        update: RungUpdate,
+    },
 }
 
 impl Feed {
@@ -96,13 +101,14 @@ impl Feed {
             Some(entrypoint) if has_sdk_prefix(entrypoint.as_str()) => Feed::Sdk { entrypoint },
             entrypoint => {
                 let update = match statuses::parse_word(status, waiting_for) {
-                    Some(status) => {
-                        RungUpdate::Active { status, at: status_updated_at.map(moment) }
+                    Some(status) => RungUpdate::Active {
+                        status,
+                        at: status_updated_at.map(moment),
                     },
                     None => RungUpdate::Clear,
                 };
                 Feed::Interactive { entrypoint, update }
-            },
+            }
         }
     }
 
@@ -147,7 +153,10 @@ impl Session {
         let name = raw
             .name
             .and_then(|text| Said::new(text.trim().to_owned()))
-            .map(|text| Name { text, source: name_source });
+            .map(|text| Name {
+                text,
+                source: name_source,
+            });
         let feed = Feed::parse(
             raw.entrypoint,
             raw.status.as_deref(),
@@ -169,7 +178,10 @@ impl Session {
 
 enum Seen {
     Whole(Session),
-    Torn { since: Instant, before: Option<Session> },
+    Torn {
+        since: Instant,
+        before: Option<Session>,
+    },
     Unread,
 }
 
@@ -183,7 +195,9 @@ impl Scan {
     pub fn pids(&self) -> Vec<u32> {
         let Scan { agents, unread } = self;
         let agents = agents.iter().map(|agent| agent.seen().id.pid().get());
-        agents.chain(unread.iter().map(|unread| unread.pid)).collect()
+        agents
+            .chain(unread.iter().map(|unread| unread.pid))
+            .collect()
     }
 }
 
@@ -218,9 +232,10 @@ impl SessionFiles {
         let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
             Err(error) => {
-                self.troubles.say(format!("{}: {error}", self.dir.display()));
+                self.troubles
+                    .say(format!("{}: {error}", self.dir.display()));
                 Vec::new()
-            },
+            }
         };
         if paths.len() > SOURCE_AGENTS_MAX {
             self.troubles.say(format!(
@@ -265,15 +280,22 @@ impl SessionFiles {
         let mut unread = Vec::new();
         for (&pid, found) in &self.seen {
             let session = match found {
-                Seen::Whole(session) | Seen::Torn { before: Some(session), .. } => session,
+                Seen::Whole(session)
+                | Seen::Torn {
+                    before: Some(session),
+                    ..
+                } => session,
                 Seen::Torn { before: None, .. } => continue,
                 Seen::Unread => {
                     if let Some(start) = process::start(pid.get()) {
                         let terminal = terminal_of(AgentId::new(pid, start)).ok().flatten();
-                        unread.push(Unread { pid: pid.get(), terminal });
+                        unread.push(Unread {
+                            pid: pid.get(),
+                            terminal,
+                        });
                     }
                     continue;
-                },
+                }
             };
             if !local(&self.domain, session) {
                 continue;
@@ -295,21 +317,33 @@ impl SessionFiles {
 }
 
 fn local(domain: &process::Domain, session: &Session) -> bool {
-    session.pid_domain.as_deref().is_none_or(|recorded| domain.admits(recorded))
+    session
+        .pid_domain
+        .as_deref()
+        .is_none_or(|recorded| domain.admits(recorded))
 }
 
 fn torn(was: Option<Seen>, first: bool, path: &Path, error: &impl fmt::Display) -> Seen {
     let unread = || {
-        log::say(&format!("{} does not read as a session file: {error}", path.display()));
+        log::say(&format!(
+            "{} does not read as a session file: {error}",
+            path.display()
+        ));
         Seen::Unread
     };
     match was {
-        Some(Seen::Whole(session)) => Seen::Torn { since: Instant::now(), before: Some(session) },
+        Some(Seen::Whole(session)) => Seen::Torn {
+            since: Instant::now(),
+            before: Some(session),
+        },
         None if first => unread(),
-        None => Seen::Torn { since: Instant::now(), before: None },
+        None => Seen::Torn {
+            since: Instant::now(),
+            before: None,
+        },
         Some(Seen::Torn { since, before }) if since.elapsed() < TORN => {
             Seen::Torn { since, before }
-        },
+        }
         Some(Seen::Torn { .. }) => unread(),
         Some(Seen::Unread) => Seen::Unread,
     }
@@ -331,7 +365,12 @@ fn parse_leading_file(bytes: &[u8], written: SystemTime) -> io::Result<Session> 
     let raw = match stream.next() {
         Some(Ok(raw)) => raw,
         Some(Err(error)) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
-        None => return Err(io::Error::new(ErrorKind::UnexpectedEof, "empty session file")),
+        None => {
+            return Err(io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "empty session file",
+            ));
+        }
     };
     assert!(stream.byte_offset() > 0);
     assert!(stream.byte_offset() <= bytes.len());
@@ -340,7 +379,9 @@ fn parse_leading_file(bytes: &[u8], written: SystemTime) -> io::Result<Session> 
 
 #[cfg(test)]
 pub(crate) fn update_of_file(bytes: &[u8]) -> io::Result<RungUpdate> {
-    Ok(parse_leading_file(bytes, SystemTime::UNIX_EPOCH)?.feed.update())
+    Ok(parse_leading_file(bytes, SystemTime::UNIX_EPOCH)?
+        .feed
+        .update())
 }
 
 fn has_sdk_prefix(text: &str) -> bool {
@@ -358,7 +399,9 @@ fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> Re
         entrypoint: session.feed.entrypoint(),
         terminal,
     };
-    let proof = Proof::Started { written: session.written };
+    let proof = Proof::Started {
+        written: session.written,
+    };
     ReportedAgent::new(READS, id, sighting, session.feed.update(), proof)
 }
 
@@ -374,16 +417,31 @@ mod tests {
         let (claude, told) = one_answer("haiku", "be brief", "the prompt").unwrap();
         let args: Vec<&OsStr> = claude.get_args().collect();
         let said = [
-            "-p", "--model", "haiku", "--tools", "", "--safe-mode", "--no-session-persistence",
-            "--system-prompt", "be brief",
+            "-p",
+            "--model",
+            "haiku",
+            "--tools",
+            "",
+            "--safe-mode",
+            "--no-session-persistence",
+            "--system-prompt",
+            "be brief",
         ];
         assert_eq!(args, said.map(OsStr::new));
-        let mut unset: Vec<&OsStr> =
-            claude.get_envs().filter(|(_, value)| value.is_none()).map(|(name, _)| name).collect();
+        let mut unset: Vec<&OsStr> = claude
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name)
+            .collect();
         unset.sort_unstable();
         assert_eq!(
             unset,
-            ["LUNE_MUX_TERMINAL", "LUNE_MUX_TERMINAL_MADE", "OSC7577_TOKEN"].map(OsStr::new)
+            [
+                "LUNE_MUX_TERMINAL",
+                "LUNE_MUX_TERMINAL_MADE",
+                "OSC7577_TOKEN"
+            ]
+            .map(OsStr::new)
         );
         let heard = Command::new("cat").stdin(told).output().unwrap();
         assert_eq!(heard.stdout, b"the prompt");
@@ -405,7 +463,10 @@ mod tests {
             assert_eq!(parsed.id.as_str(), "s1");
             assert_eq!(
                 parsed.feed.update(),
-                RungUpdate::Active { status: statuses::ActiveStatus::Idle, at: None }
+                RungUpdate::Active {
+                    status: statuses::ActiveStatus::Idle,
+                    at: None
+                }
             );
         }
         for invalid in [
@@ -447,12 +508,18 @@ mod tests {
         for sdk in ["sdk-cli", "sdk-ts", "  SDK-py  ", "sdk-"] {
             let entry = reported(id.clone(), &session(Some(sdk)), None);
             assert_eq!(entry.report().update(), &RungUpdate::Clear, "{sdk}");
-            assert_eq!(entry.seen().entrypoint.as_ref().map(Said::as_str), Some(sdk.trim()));
+            assert_eq!(
+                entry.seen().entrypoint.as_ref().map(Said::as_str),
+                Some(sdk.trim())
+            );
         }
         for interactive in [Some("cli"), Some("claude-vscode"), Some("sdk"), None] {
             let entry = reported(id.clone(), &session(interactive), None);
             let update = entry.report().update();
-            assert!(matches!(update, RungUpdate::Active { .. }), "{interactive:?}");
+            assert!(
+                matches!(update, RungUpdate::Active { .. }),
+                "{interactive:?}"
+            );
         }
     }
 }

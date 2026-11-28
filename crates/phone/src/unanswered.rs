@@ -22,9 +22,11 @@ impl Refusals {
                 Code::AlreadyExists,
                 Code::Unimplemented,
             ],
-            Refusals::Filings => {
-                &[Code::InvalidArgument, Code::FailedPrecondition, Code::Unimplemented]
-            },
+            Refusals::Filings => &[
+                Code::InvalidArgument,
+                Code::FailedPrecondition,
+                Code::Unimplemented,
+            ],
             Refusals::Others => &[
                 Code::InvalidArgument,
                 Code::FailedPrecondition,
@@ -51,8 +53,13 @@ impl Unanswered {
     #[must_use]
     pub fn of(status: &Status, refusals: Refusals) -> Unanswered {
         let said = status.message();
-        let mut why = if said.is_empty() { format!("luned said {}", status.code()) } else { said.to_owned() };
-        let causes = std::iter::successors(std::error::Error::source(status), |&error| error.source());
+        let mut why = if said.is_empty() {
+            format!("luned said {}", status.code())
+        } else {
+            said.to_owned()
+        };
+        let causes =
+            std::iter::successors(std::error::Error::source(status), |&error| error.source());
         for error in causes.take(CAUSES_TOLD_MAX) {
             let told = error.to_string();
             if !says(&why, &told) {
@@ -69,15 +76,21 @@ impl Unanswered {
 
     #[must_use]
     pub fn late(within: Duration) -> Unanswered {
-        Unanswered::InDoubt { why: format!("luned did not answer in {}s", within.as_secs()) }
+        Unanswered::InDoubt {
+            why: format!("luned did not answer in {}s", within.as_secs()),
+        }
     }
 
     pub(crate) fn unread(why: impl fmt::Display) -> Unanswered {
-        Unanswered::InDoubt { why: format!("the core can't read luned's answer: {why}") }
+        Unanswered::InDoubt {
+            why: format!("the core can't read luned's answer: {why}"),
+        }
     }
 
     pub(crate) fn refused(why: impl fmt::Display) -> Unanswered {
-        Unanswered::Refused { why: why.to_string() }
+        Unanswered::Refused {
+            why: why.to_string(),
+        }
     }
 
     #[must_use]
@@ -107,9 +120,19 @@ mod tests {
     fn a_refusal_is_told_apart_from_an_answer_that_may_have_been_done() {
         let dirty = Status::failed_precondition("fix has changes");
         let refused = Unanswered::of(&dirty, Refusals::Others);
-        assert_eq!(refused, Unanswered::Refused { why: "fix has changes".to_owned() });
+        assert_eq!(
+            refused,
+            Unanswered::Refused {
+                why: "fix has changes".to_owned()
+            }
+        );
         let in_doubt = Unanswered::of(&Status::unavailable("the bridge went"), Refusals::Changes);
-        assert_eq!(in_doubt, Unanswered::InDoubt { why: "the bridge went".to_owned() });
+        assert_eq!(
+            in_doubt,
+            Unanswered::InDoubt {
+                why: "the bridge went".to_owned()
+            }
+        );
         let unsaid = Unanswered::of(&Status::new(Code::Internal, ""), Refusals::Others);
         assert_eq!(unsaid.why(), "luned said Internal error");
     }
@@ -125,7 +148,9 @@ mod tests {
 
     impl std::error::Error for Said {
         fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            self.1.as_deref().map(|said| said as &(dyn std::error::Error + 'static))
+            self.1
+                .as_deref()
+                .map(|said| said as &(dyn std::error::Error + 'static))
         }
     }
 
@@ -138,21 +163,32 @@ mod tests {
         assert_eq!(status.message(), "transport error");
         let unreached = Unanswered::of(&status, Refusals::Others);
         let why = "transport error: tcp connect error: Connection refused (os error 61)";
-        assert_eq!(unreached, Unanswered::InDoubt { why: why.to_owned() });
+        assert_eq!(
+            unreached,
+            Unanswered::InDoubt {
+                why: why.to_owned()
+            }
+        );
         let late = Said("deadline has elapsed", None);
         let connect = Said("tcp connect error", Some(Box::new(late)));
         let transport = Said("transport error", Some(Box::new(connect)));
         let mut status = Status::unavailable("tcp connect error");
         status.set_source(std::sync::Arc::new(transport));
         let late = Unanswered::of(&status, Refusals::Others);
-        assert_eq!(late.why(), "tcp connect error: transport error: deadline has elapsed");
+        assert_eq!(
+            late.why(),
+            "tcp connect error: transport error: deadline has elapsed"
+        );
     }
 
     #[test]
     fn a_cause_that_tells_its_own_cause_is_said_once() {
         let refused = Said("Connection refused (os error 61)", None);
         let connect = Said("tcp connect error", Some(Box::new(refused)));
-        let trying = Said("error trying to connect: tcp connect error", Some(Box::new(connect)));
+        let trying = Said(
+            "error trying to connect: tcp connect error",
+            Some(Box::new(connect)),
+        );
         let status = Status::from_error(Box::new(trying));
         let unreached = Unanswered::of(&status, Refusals::Others);
         let why = "error trying to connect: tcp connect error: Connection refused (os error 61)";
@@ -186,12 +222,18 @@ mod tests {
     fn an_aborted_answer_is_a_refusal_only_of_a_change() {
         let aborted = || Status::aborted("the worktree may be made");
         let stale = Unanswered::of(&aborted(), Refusals::Changes);
-        assert!(matches!(stale, Unanswered::Refused { .. }), "a seen list that changed since");
+        assert!(
+            matches!(stale, Unanswered::Refused { .. }),
+            "a seen list that changed since"
+        );
         for refusals in [Refusals::Filings, Refusals::Others] {
             let read = Unanswered::of(&aborted(), refusals);
             assert!(matches!(read, Unanswered::InDoubt { .. }), "{refusals:?}");
         }
         let unfiled = Unanswered::of(&Status::not_found("far went"), Refusals::Filings);
-        assert!(matches!(unfiled, Unanswered::InDoubt { .. }), "the bridge may have filed it");
+        assert!(
+            matches!(unfiled, Unanswered::InDoubt { .. }),
+            "the bridge may have filed it"
+        );
     }
 }

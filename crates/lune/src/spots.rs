@@ -48,14 +48,23 @@ impl<S> Spots<S> {
     fn moved(self, right: u16, down: u16) -> Spots<S> {
         let moved = |(area, spot): (Rect, S)| {
             let x = area.x.saturating_add(right);
-            (Rect { x, y: area.y.saturating_add(down), ..area }, spot)
+            (
+                Rect {
+                    x,
+                    y: area.y.saturating_add(down),
+                    ..area
+                },
+                spot,
+            )
         };
         Spots(self.0.into_iter().map(moved).collect())
     }
 
     pub fn placed(self, area: Rect) -> Spots<S> {
         let Spots(moved) = self.moved(area.x, area.y);
-        let cut = moved.into_iter().map(|(spot_area, spot)| (spot_area.intersection(area), spot));
+        let cut = moved
+            .into_iter()
+            .map(|(spot_area, spot)| (spot_area.intersection(area), spot));
         Spots(cut.filter(|(area, _)| !area.is_empty()).collect())
     }
 
@@ -64,15 +73,26 @@ impl<S> Spots<S> {
     }
 
     pub fn map<T>(self, does: impl Fn(S) -> T) -> Spots<T> {
-        Spots(self.0.into_iter().map(|(area, spot)| (area, does(spot))).collect())
+        Spots(
+            self.0
+                .into_iter()
+                .map(|(area, spot)| (area, does(spot)))
+                .collect(),
+        )
     }
 
     pub fn at(&self, at: Position) -> Option<&S> {
-        self.0.iter().find(|(area, _)| area.contains(at)).map(|(_, spot)| spot)
+        self.0
+            .iter()
+            .find(|(area, _)| area.contains(at))
+            .map(|(_, spot)| spot)
     }
 
     pub fn hovered(&self, pointer: Position) -> Option<Rect> {
-        self.0.iter().find(|(area, _)| area.contains(pointer)).map(|(area, _)| *area)
+        self.0
+            .iter()
+            .find(|(area, _)| area.contains(pointer))
+            .map(|(area, _)| *area)
     }
 
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
@@ -110,23 +130,40 @@ pub enum SidebarBottom {
     #[default]
     Nothing,
     Keys(Keyed, Spots<KeyEvent>),
-    Menu { number: u64, spots: Spots<Choice> },
+    Menu {
+        number: u64,
+        spots: Spots<Choice>,
+    },
 }
 
 #[derive(Debug, Default)]
 pub enum Drawn {
     #[default]
     Nothing,
-    Menu { number: u64, area: Rect, spots: Spots<Choice> },
-    Picker { number: u64, area: Rect, spots: Spots<Pick> },
-    Sidebar { numbers: Spots<Link>, bottom: SidebarBottom },
+    Menu {
+        number: u64,
+        area: Rect,
+        spots: Spots<Choice>,
+    },
+    Picker {
+        number: u64,
+        area: Rect,
+        spots: Spots<Pick>,
+    },
+    Sidebar {
+        numbers: Spots<Link>,
+        bottom: SidebarBottom,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DrawnHover {
     None,
     Spot(Rect),
-    Sidebar { number: Option<Rect>, bottom: Option<Rect> },
+    Sidebar {
+        number: Option<Rect>,
+        bottom: Option<Rect>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,15 +186,16 @@ impl SidebarBottom {
         match self {
             SidebarBottom::Nothing => None,
             SidebarBottom::Keys(keyed, spots) => spots.at(at).map(|key| Hit::Keys(*keyed, *key)),
-            SidebarBottom::Menu { number, spots } => {
-                spots.at(at).cloned().map(|choice| Hit::Menu(*number, choice))
-            },
+            SidebarBottom::Menu { number, spots } => spots
+                .at(at)
+                .cloned()
+                .map(|choice| Hit::Menu(*number, choice)),
         }
     }
 
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
         match self {
-            SidebarBottom::Nothing => {},
+            SidebarBottom::Nothing => {}
             SidebarBottom::Keys(_, spots) => spots.light(buffer, pointer),
             SidebarBottom::Menu { spots, .. } => spots.light(buffer, pointer),
         }
@@ -177,9 +215,10 @@ impl SidebarBottom {
             SidebarBottom::Nothing => SidebarBottom::Nothing,
             SidebarBottom::Keys(keyed, spots) => {
                 SidebarBottom::Keys(keyed, spots.down(lines).placed(area))
-            },
-            SidebarBottom::Menu { number, spots } => {
-                SidebarBottom::Menu { number, spots: spots.down(lines).placed(area) }
+            }
+            SidebarBottom::Menu { number, spots } => SidebarBottom::Menu {
+                number,
+                spots: spots.down(lines).placed(area),
             },
         }
     }
@@ -196,27 +235,30 @@ impl Drawn {
     pub fn at(&self, at: Position) -> Option<Hit> {
         match self {
             Drawn::Nothing => None,
-            Drawn::Menu { number, spots, .. } => {
-                spots.at(at).cloned().map(|choice| Hit::Menu(*number, choice))
-            },
+            Drawn::Menu { number, spots, .. } => spots
+                .at(at)
+                .cloned()
+                .map(|choice| Hit::Menu(*number, choice)),
             Drawn::Picker { number, spots, .. } => {
                 spots.at(at).cloned().map(|pick| Hit::Picker(*number, pick))
-            },
-            Drawn::Sidebar { numbers, bottom } => {
-                numbers.at(at).cloned().map(Hit::Number).or_else(|| bottom.at(at))
-            },
+            }
+            Drawn::Sidebar { numbers, bottom } => numbers
+                .at(at)
+                .cloned()
+                .map(Hit::Number)
+                .or_else(|| bottom.at(at)),
         }
     }
 
     pub fn light(&self, buffer: &mut Buffer, pointer: Position) {
         match self {
-            Drawn::Nothing => {},
+            Drawn::Nothing => {}
             Drawn::Menu { spots, .. } => spots.light(buffer, pointer),
             Drawn::Picker { spots, .. } => spots.light(buffer, pointer),
             Drawn::Sidebar { numbers, bottom } => {
                 numbers.raise(buffer, pointer);
                 bottom.light(buffer, pointer);
-            },
+            }
         }
     }
 
@@ -224,18 +266,18 @@ impl Drawn {
     pub fn hovered(&self, pointer: Position) -> DrawnHover {
         match self {
             Drawn::Nothing => DrawnHover::None,
-            Drawn::Menu { spots, .. } => {
-                spots.hovered(pointer).map_or(DrawnHover::None, DrawnHover::Spot)
-            },
-            Drawn::Picker { spots, .. } => {
-                spots.hovered(pointer).map_or(DrawnHover::None, DrawnHover::Spot)
-            },
+            Drawn::Menu { spots, .. } => spots
+                .hovered(pointer)
+                .map_or(DrawnHover::None, DrawnHover::Spot),
+            Drawn::Picker { spots, .. } => spots
+                .hovered(pointer)
+                .map_or(DrawnHover::None, DrawnHover::Spot),
             Drawn::Sidebar { numbers, bottom } => {
                 match (numbers.hovered(pointer), bottom.hovered(pointer)) {
                     (None, None) => DrawnHover::None,
                     (number, bottom) => DrawnHover::Sidebar { number, bottom },
                 }
-            },
+            }
         }
     }
 }
@@ -324,13 +366,27 @@ mod tests {
         assert!(buffer.content().iter().all(|cell| cell.bg != POINTED));
         spots.light(&mut buffer, Position::new(2, 0));
         let lit: Vec<Color> = (0..6).map(|x| buffer[(x, 0)].bg).collect();
-        assert_eq!(lit, [POINTED, moonlight::LIFTED, POINTED, POINTED, Color::Reset, Color::Reset]);
+        assert_eq!(
+            lit,
+            [
+                POINTED,
+                moonlight::LIFTED,
+                POINTED,
+                POINTED,
+                Color::Reset,
+                Color::Reset
+            ]
+        );
     }
 
     #[test]
     fn the_pointer_raises_a_number_whatever_its_row_is_on() {
         let mut spots = Spots::default();
-        spots.add(0, 1..3, Link::parse("https://github.com/o/r/pull/1").expect("a link"));
+        spots.add(
+            0,
+            1..3,
+            Link::parse("https://github.com/o/r/pull/1").expect("a link"),
+        );
         for (on, raised) in [
             (Color::Reset, POINTED),
             (POINTED, moonlight::LIFTED),
@@ -360,11 +416,18 @@ mod tests {
         assert_eq!(legend.boxed(), None);
         let docked = Drawn::Sidebar {
             numbers: Spots::default(),
-            bottom: SidebarBottom::Menu { number: 3, spots: spots.clone().map(Choice::Key) },
+            bottom: SidebarBottom::Menu {
+                number: 3,
+                spots: spots.clone().map(Choice::Key),
+            },
         };
         assert_eq!(docked.at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
         assert_eq!(docked.boxed(), None);
-        let floating = Drawn::Menu { number: 3, area, spots: spots.clone().map(Choice::Key) };
+        let floating = Drawn::Menu {
+            number: 3,
+            area,
+            spots: spots.clone().map(Choice::Key),
+        };
         assert_eq!(floating.at(at), Some(Hit::Menu(3, Choice::Key(key('d')))));
         assert_eq!(floating.boxed(), Some(area));
         assert_eq!(Drawn::Nothing.at(at), None);
@@ -380,7 +443,11 @@ mod tests {
         assert!(burst.takes(at, after(300)));
         assert!(burst.takes(at, after(750)));
         assert!(!burst.takes(at, after(1300)));
-        for off in [Position::new(6, 14), Position::new(2, 14), Position::new(4, 16)] {
+        for off in [
+            Position::new(6, 14),
+            Position::new(2, 14),
+            Position::new(4, 16),
+        ] {
             let mut burst = Burst::new(at, start);
             assert!(!burst.takes(off, after(100)), "{off:?}");
         }
@@ -412,8 +479,14 @@ mod tests {
         settling.drawn(&Spots::<char>::default(), after(1000));
         assert!(settling.takes(on, after(1100)));
         assert!(!settling.takes(on, after(1400)), "you have seen them go");
-        assert!(!settling.takes(Position::new(9, 5), after(1100)), "beside them");
-        assert!(!settling.takes(Position::new(11, 4), after(1100)), "above them");
+        assert!(
+            !settling.takes(Position::new(9, 5), after(1100)),
+            "beside them"
+        );
+        assert!(
+            !settling.takes(Position::new(11, 4), after(1100)),
+            "above them"
+        );
     }
 
     #[test]
@@ -454,20 +527,34 @@ mod tests {
     #[test]
     fn hovered_reports_sidebar_numbers_and_bottom_spots_without_recursion() {
         let mut numbers = Spots::default();
-        numbers.add(1, 2..6, Link::parse("https://github.com/o/r/pull/1").unwrap());
+        numbers.add(
+            1,
+            2..6,
+            Link::parse("https://github.com/o/r/pull/1").unwrap(),
+        );
         let mut keys = Spots::default();
-        keys.add(4, 1..5, KeyEvent::from(crossterm::event::KeyCode::Char('g')));
+        keys.add(
+            4,
+            1..5,
+            KeyEvent::from(crossterm::event::KeyCode::Char('g')),
+        );
         let drawn = Drawn::Sidebar {
             numbers,
             bottom: SidebarBottom::Keys(Keyed::Legend, keys),
         };
         assert_eq!(
             drawn.hovered(Position::new(3, 1)),
-            DrawnHover::Sidebar { number: Some(Rect::new(2, 1, 4, 1)), bottom: None }
+            DrawnHover::Sidebar {
+                number: Some(Rect::new(2, 1, 4, 1)),
+                bottom: None
+            }
         );
         assert_eq!(
             drawn.hovered(Position::new(2, 4)),
-            DrawnHover::Sidebar { number: None, bottom: Some(Rect::new(1, 4, 4, 1)) }
+            DrawnHover::Sidebar {
+                number: None,
+                bottom: Some(Rect::new(1, 4, 4, 1))
+            }
         );
         assert_eq!(drawn.hovered(Position::new(0, 0)), DrawnHover::None);
     }

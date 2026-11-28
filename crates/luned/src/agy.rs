@@ -13,17 +13,14 @@ use lune_protocol::said::Said;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use crate::agent::{
-    named_pid, terminal_or_trouble, Name, Sighting, Source, FILE_BYTES_MAX,
-};
+use crate::agent::{FILE_BYTES_MAX, Name, Sighting, Source, named_pid, terminal_or_trouble};
 use crate::mux;
 use crate::process::{self, AgentId};
 use crate::statuses::{
-    self, ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate,
-    SOURCE_AGENTS_MAX,
+    self, ActiveStatus, BlockedReason, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX,
 };
 use crate::watch::{self, Troubles};
-use crate::{log, Directory};
+use crate::{Directory, log};
 
 const SCRIPT_BODY: &str = r#"if [ -n "$LUNE_AGY_TITLE_DEPTH" ]; then
     exit 0
@@ -111,7 +108,8 @@ const _: () = assert!(TORN.as_secs() > 0);
 pub fn folder() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").filter(|value: &OsString| !value.is_empty())?;
     let home = PathBuf::from(home);
-    home.is_absolute().then(|| home.join(".gemini/antigravity-cli"))
+    home.is_absolute()
+        .then(|| home.join(".gemini/antigravity-cli"))
 }
 
 #[derive(Deserialize)]
@@ -221,8 +219,9 @@ impl AgentFiles {
             Ok(InstallOutcome::Retry) => self.installed = None,
             Err(error) => {
                 self.installed = None;
-                self.troubles.say(format!("agy's title hook in {}: {error}", agy.display()));
-            },
+                self.troubles
+                    .say(format!("agy's title hook in {}: {error}", agy.display()));
+            }
         }
     }
 
@@ -239,9 +238,10 @@ impl AgentFiles {
         let mut paths = match watch::listed(&self.dir) {
             Ok(paths) => paths,
             Err(error) => {
-                self.troubles.say(format!("{}: {error}", self.dir.display()));
+                self.troubles
+                    .say(format!("{}: {error}", self.dir.display()));
                 Vec::new()
-            },
+            }
         };
         if paths.len() > AGENT_FILES_MAX {
             self.troubles.say(format!(
@@ -272,8 +272,10 @@ impl AgentFiles {
             };
             let id = AgentId::new(pid, start);
             let cached = self.processes.remove(&id);
-            let Some(started) =
-                cached.as_ref().map(|it| it.started).or_else(|| process::started(pid.get()))
+            let Some(started) = cached
+                .as_ref()
+                .map(|it| it.started)
+                .or_else(|| process::started(pid.get()))
             else {
                 continue;
             };
@@ -298,10 +300,10 @@ impl AgentFiles {
                     };
                     processes.insert(id, found);
                     agents.push(built);
-                },
+                }
                 Ok(None) => {
                     self.reap(&path);
-                },
+                }
                 Err(error) => {
                     if error.kind() == ErrorKind::NotFound {
                         continue;
@@ -315,7 +317,7 @@ impl AgentFiles {
                         }
                     }
                     self.troubles.say(format!("{}: {error}", path.display()));
-                },
+                }
             }
         }
         assert!(agents.len() <= paths_count);
@@ -329,10 +331,13 @@ impl AgentFiles {
 impl Payload {
     fn cwd(&self) -> Option<Directory> {
         let parse = |raw: &str| Directory::parse(raw.trim().to_owned()).ok();
-        self.cwd
-            .as_deref()
-            .and_then(parse)
-            .or_else(|| self.workspace.as_ref()?.current_dir.as_deref().and_then(parse))
+        self.cwd.as_deref().and_then(parse).or_else(|| {
+            self.workspace
+                .as_ref()?
+                .current_dir
+                .as_deref()
+                .and_then(parse)
+        })
     }
 
     fn session_id(&self) -> Option<Said> {
@@ -345,24 +350,36 @@ impl Payload {
 
     fn name(&self) -> Option<Name> {
         let text = Said::new(self.conversation_title.as_deref()?.trim().to_owned())?;
-        Some(Name { text, source: Some(Source::User) })
+        Some(Name {
+            text,
+            source: Some(Source::User),
+        })
     }
 }
 
 fn state_of(state: &Payload) -> Option<ActiveStatus> {
     if state.tool_confirmation_pending == Some(true) {
-        return Some(ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None });
+        return Some(ActiveStatus::Blocked {
+            reason: BlockedReason::Permission,
+            message: None,
+        });
     }
-    let word = state.agent_state.as_deref().map(str::trim).filter(|word| !word.is_empty())?;
+    let word = state
+        .agent_state
+        .as_deref()
+        .map(str::trim)
+        .filter(|word| !word.is_empty())?;
     match word.to_ascii_lowercase().as_str() {
         "idle" => Some(ActiveStatus::Idle),
         "working" | "tool_use" | "initializing" => Some(ActiveStatus::Working),
-        "reviewing" => {
-            Some(ActiveStatus::Blocked { reason: BlockedReason::Question, message: None })
-        },
-        "authenticating" => {
-            Some(ActiveStatus::Blocked { reason: BlockedReason::Auth, message: None })
-        },
+        "reviewing" => Some(ActiveStatus::Blocked {
+            reason: BlockedReason::Question,
+            message: None,
+        }),
+        "authenticating" => Some(ActiveStatus::Blocked {
+            reason: BlockedReason::Auth,
+            message: None,
+        }),
         _ => statuses::parse_word(Some(word), None),
     }
 }
@@ -387,7 +404,10 @@ fn reported(
 
 fn update_of(status: Option<ActiveStatus>, modified: SystemTime) -> RungUpdate {
     match status {
-        Some(status) => RungUpdate::Active { status, at: Some(modified) },
+        Some(status) => RungUpdate::Active {
+            status,
+            at: Some(modified),
+        },
         None => RungUpdate::Clear,
     }
 }
@@ -402,7 +422,9 @@ pub(crate) fn update_of_file(bytes: &[u8], modified: SystemTime) -> io::Result<R
 fn temp_file_pid(path: &Path) -> Option<u32> {
     let name = path.file_name()?.to_str()?;
     let rest = name.strip_prefix('.')?;
-    let stem = rest.strip_suffix(".tmp").or_else(|| rest.strip_suffix(".in"))?;
+    let stem = rest
+        .strip_suffix(".tmp")
+        .or_else(|| rest.strip_suffix(".in"))?;
     let pid = stem.parse::<u32>().ok()?;
     if pid.to_string() != stem {
         return None;
@@ -442,7 +464,10 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
         return Ok(None);
     };
     let Some(cwd) = envelope.state.cwd() else {
-        return Err(io::Error::new(ErrorKind::InvalidData, "cwd is missing or relative"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "cwd is missing or relative",
+        ));
     };
     let status = state_of(&envelope.state);
     Ok(Some(Snapshot {
@@ -456,7 +481,9 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
 }
 
 fn dated_since(modified: SystemTime, started: SystemTime) -> bool {
-    modified.checked_add(DATED_LATE).is_none_or(|late| started <= late)
+    modified
+        .checked_add(DATED_LATE)
+        .is_none_or(|late| started <= late)
 }
 
 fn file_stamp_of(meta: &Metadata) -> FileStamp {
@@ -512,7 +539,10 @@ impl ExternalCommand {
 fn script(lune: &Path, chain: Option<&ExternalCommand>) -> io::Result<String> {
     let dir = lune.join(FOLDER);
     let Some(dir) = dir.to_str() else {
-        return Err(io::Error::new(ErrorKind::InvalidData, "the daemon's folder is not UTF-8"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "the daemon's folder is not UTF-8",
+        ));
     };
     assert_ne!(dir, "");
     let chain = chain.map(ExternalCommand::as_str);
@@ -522,7 +552,12 @@ fn script(lune: &Path, chain: Option<&ExternalCommand>) -> io::Result<String> {
     let rendered = format!(
         "#!/bin/sh\n{CHAIN_PREFIX}{chain_json}\nset -f\ndir={dir_sh}\nchain={chain_sh}\n{SCRIPT_BODY}"
     );
-    assert!(rendered.lines().nth(1).is_some_and(|line| line.starts_with(CHAIN_PREFIX)));
+    assert!(
+        rendered
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with(CHAIN_PREFIX))
+    );
     Ok(rendered)
 }
 
@@ -533,7 +568,11 @@ fn parse_chain(
 ) -> io::Result<Option<ExternalCommand>> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
-    let Some(line) = text.lines().take(4).find_map(|line| line.strip_prefix(CHAIN_PREFIX)) else {
+    let Some(line) = text
+        .lines()
+        .take(4)
+        .find_map(|line| line.strip_prefix(CHAIN_PREFIX))
+    else {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
             format!("{SCRIPT_FILE} is missing its {CHAIN_PREFIX}header"),
@@ -562,7 +601,10 @@ fn read_script_and_chain(
 
 fn own_command(script_path: &Path) -> io::Result<String> {
     let Some(path) = script_path.to_str() else {
-        return Err(io::Error::new(ErrorKind::InvalidData, "agy's folder is not UTF-8"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "agy's folder is not UTF-8",
+        ));
     };
     assert_ne!(path, "");
     Ok(format!("exec {}", shell_quote(path)))
@@ -572,7 +614,11 @@ fn is_own_command(command: &str, script_path: &Path, ours: &str) -> bool {
     let Some(path) = script_path.to_str() else {
         return false;
     };
-    if command == ours || command == path || command == format!("exec {path}") || command.contains(path) {
+    if command == ours
+        || command == path
+        || command == format!("exec {path}")
+        || command.contains(path)
+    {
         return true;
     }
     let suffix = format!("/{SCRIPT_FILE}");
@@ -583,7 +629,9 @@ fn is_own_command(command: &str, script_path: &Path, ours: &str) -> bool {
 
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<FileStamp> {
     assert_eq!(mode & !0o777, 0);
-    let dir = path.parent().expect("atomic write target has a parent directory");
+    let dir = path
+        .parent()
+        .expect("atomic write target has a parent directory");
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -612,11 +660,7 @@ fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> io::Result<FileStamp> {
     })
 }
 
-fn write_script(
-    script_path: &Path,
-    text: &str,
-    existing: Option<&[u8]>,
-) -> io::Result<FileStamp> {
+fn write_script(script_path: &Path, text: &str, existing: Option<&[u8]>) -> io::Result<FileStamp> {
     let matches = match existing {
         Some(there) => there == text.as_bytes(),
         None => match read_bounded(script_path, SCRIPT_BYTES_MAX) {
@@ -629,9 +673,9 @@ fn write_script(
         match fs::metadata(script_path) {
             Ok(meta) if meta.permissions().mode() & 0o100 != 0 => {
                 return Ok(file_stamp_of(&meta));
-            },
-            Ok(_) => {},
-            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
     }
@@ -640,7 +684,11 @@ fn write_script(
 
 enum SettingsSnapshot {
     Missing,
-    Present { map: Map<String, Value>, stamp: FileStamp, mode: u32 },
+    Present {
+        map: Map<String, Value>,
+        stamp: FileStamp,
+        mode: u32,
+    },
 }
 
 impl SettingsSnapshot {
@@ -693,7 +741,7 @@ fn read_settings(settings_path: &Path) -> io::Result<SettingsSnapshot> {
             Ok(_) => {
                 let why = format!("{} is not a JSON object", settings_path.display());
                 return Err(io::Error::new(ErrorKind::InvalidData, why));
-            },
+            }
             Err(error) => return Err(io::Error::new(ErrorKind::InvalidData, error)),
         }
     };
@@ -732,25 +780,25 @@ fn decide_title_action(
         Some(Value::Bool(true)) | None => Ok(TitleAction::Wire(ChainSource::None)),
         Some(Value::Object(title)) => {
             match title.get("enabled") {
-                None | Some(Value::Bool(true)) => {},
+                None | Some(Value::Bool(true)) => {}
                 Some(Value::Bool(false)) => return Ok(TitleAction::LeaveUntouched),
                 Some(_) => {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
                         format!("{SETTINGS_FILE}: title.enabled is not a boolean"),
                     ));
-                },
+                }
             }
             match title.get("type") {
-                None => {},
-                Some(Value::String(kind)) if kind == "command" => {},
+                None => {}
+                Some(Value::String(kind)) if kind == "command" => {}
                 Some(Value::String(_)) => return Ok(TitleAction::LeaveUntouched),
                 Some(_) => {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
                         format!("{SETTINGS_FILE}: title.type is not a string"),
                     ));
-                },
+                }
             }
             match title.get("command") {
                 None => Ok(TitleAction::Wire(ChainSource::None)),
@@ -766,13 +814,13 @@ fn decide_title_action(
                             None => Ok(TitleAction::Wire(ChainSource::None)),
                         }
                     }
-                },
+                }
                 Some(_) => Err(io::Error::new(
                     ErrorKind::InvalidData,
                     format!("{SETTINGS_FILE}: title.command is not a string"),
                 )),
             }
-        },
+        }
         Some(_) => Err(io::Error::new(
             ErrorKind::InvalidData,
             format!("{SETTINGS_FILE}: title is neither an object nor a boolean"),
@@ -784,7 +832,11 @@ struct FileLock(File);
 
 impl FileLock {
     fn try_acquire(path: &Path) -> io::Result<Option<Self>> {
-        let file = OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(path)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(FileLock(file))),
             Err(TryLockError::WouldBlock) => Ok(None),
@@ -828,7 +880,7 @@ fn install(agy: &Path, lune: &Path) -> io::Result<InstallOutcome> {
                 settings: snapshot.stamp(),
                 script: Some(script_stamp),
             }))
-        },
+        }
         TitleAction::Wire(source) => {
             let (existing, chain) = match source {
                 ChainSource::None => (None, None),
@@ -839,7 +891,7 @@ fn install(agy: &Path, lune: &Path) -> io::Result<InstallOutcome> {
                         Some((bytes, chain)) => (Some(bytes), chain),
                         None => (None, None),
                     }
-                },
+                }
             };
             let text = script(lune, chain.as_ref())?;
             let script_stamp = write_script(&script_path, &text, existing.as_deref())?;
@@ -856,7 +908,9 @@ fn install(agy: &Path, lune: &Path) -> io::Result<InstallOutcome> {
                     _ => None,
                 })
                 .unwrap_or_default();
-            title.entry("type".to_owned()).or_insert_with(|| Value::String("command".to_owned()));
+            title
+                .entry("type".to_owned())
+                .or_insert_with(|| Value::String("command".to_owned()));
             title.insert("command".to_owned(), Value::String(ours));
             settings.insert("title".to_owned(), Value::Object(title));
             let settings_stamp = write_settings(&settings_path, &settings, mode)?;
@@ -864,7 +918,7 @@ fn install(agy: &Path, lune: &Path) -> io::Result<InstallOutcome> {
                 settings: Some(settings_stamp),
                 script: Some(script_stamp),
             }))
-        },
+        }
     }
 }
 
@@ -887,21 +941,42 @@ mod tests {
             agent_state: agent_state.map(str::to_owned),
             tool_confirmation_pending: pending,
         };
-        assert_eq!(state_of(&state(Some("idle"), None)), Some(ActiveStatus::Idle));
-        assert_eq!(state_of(&state(Some("working"), None)), Some(ActiveStatus::Working));
-        assert_eq!(state_of(&state(Some("tool_use"), None)), Some(ActiveStatus::Working));
-        assert_eq!(state_of(&state(Some("initializing"), None)), Some(ActiveStatus::Working));
+        assert_eq!(
+            state_of(&state(Some("idle"), None)),
+            Some(ActiveStatus::Idle)
+        );
+        assert_eq!(
+            state_of(&state(Some("working"), None)),
+            Some(ActiveStatus::Working)
+        );
+        assert_eq!(
+            state_of(&state(Some("tool_use"), None)),
+            Some(ActiveStatus::Working)
+        );
+        assert_eq!(
+            state_of(&state(Some("initializing"), None)),
+            Some(ActiveStatus::Working)
+        );
         assert_eq!(
             state_of(&state(Some("working"), Some(true))),
-            Some(ActiveStatus::Blocked { reason: BlockedReason::Permission, message: None })
+            Some(ActiveStatus::Blocked {
+                reason: BlockedReason::Permission,
+                message: None
+            })
         );
         assert_eq!(
             state_of(&state(Some("reviewing"), None)),
-            Some(ActiveStatus::Blocked { reason: BlockedReason::Question, message: None })
+            Some(ActiveStatus::Blocked {
+                reason: BlockedReason::Question,
+                message: None
+            })
         );
         assert_eq!(
             state_of(&state(Some("authenticating"), None)),
-            Some(ActiveStatus::Blocked { reason: BlockedReason::Auth, message: None })
+            Some(ActiveStatus::Blocked {
+                reason: BlockedReason::Auth,
+                message: None
+            })
         );
         assert_eq!(
             state_of(&state(Some("error"), None)),
@@ -952,14 +1027,21 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(payload.to_string().as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success());
         let stdout = String::from_utf8(out.stdout).unwrap();
         assert!(stdout.starts_with("custom-title: "), "{stdout}");
         assert!(stdout.contains("\"agent_state\":\"idle\""), "{stdout}");
 
-        let mine = lune.join(FOLDER).join(format!("{}.json", std::process::id()));
+        let mine = lune
+            .join(FOLDER)
+            .join(format!("{}.json", std::process::id()));
         let wrote: Envelope = serde_json::from_slice(&fs::read(&mine).unwrap()).unwrap();
         assert_eq!(wrote.state.conversation_id.as_deref(), Some("c1"));
         assert_eq!(wrote.state.agent_state.as_deref(), Some("idle"));
@@ -981,7 +1063,8 @@ mod tests {
         fs::create_dir_all(&agy).unwrap();
         fs::create_dir_all(lune.join(FOLDER)).unwrap();
 
-        let disabled = json!({"title": {"type": "command", "command": "echo hi", "enabled": false}});
+        let disabled =
+            json!({"title": {"type": "command", "command": "echo hi", "enabled": false}});
         fs::write(agy.join(SETTINGS_FILE), disabled.to_string()).unwrap();
         install(&agy, &lune).unwrap();
         assert_eq!(
@@ -1014,7 +1097,10 @@ mod tests {
 
         fs::write(agy.join(SETTINGS_FILE), "not json").unwrap();
         assert!(install(&agy, &lune).is_err());
-        assert_eq!(fs::read_to_string(agy.join(SETTINGS_FILE)).unwrap(), "not json");
+        assert_eq!(
+            fs::read_to_string(agy.join(SETTINGS_FILE)).unwrap(),
+            "not json"
+        );
     }
 
     #[test]
@@ -1062,11 +1148,16 @@ mod tests {
         fs::create_dir_all(&agy).unwrap();
         fs::create_dir_all(lune.join(FOLDER)).unwrap();
 
-        let lock = FileLock::try_acquire(&agy.join(LOCK_FILE)).unwrap().unwrap();
+        let lock = FileLock::try_acquire(&agy.join(LOCK_FILE))
+            .unwrap()
+            .unwrap();
         assert_eq!(install(&agy, &lune).unwrap(), InstallOutcome::Retry);
         assert!(!agy.join(SETTINGS_FILE).exists());
         drop(lock);
-        assert!(matches!(install(&agy, &lune).unwrap(), InstallOutcome::Installed(_)));
+        assert!(matches!(
+            install(&agy, &lune).unwrap(),
+            InstallOutcome::Installed(_)
+        ));
     }
 
     #[test]
@@ -1084,7 +1175,8 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(agy.join(SETTINGS_FILE)).unwrap()).unwrap();
         let cmd = updated["title"]["command"].as_str().unwrap().to_owned();
 
-        let valid = json!({"cwd": "/w", "conversation_id": "c1", "agent_state": "idle"}).to_string();
+        let valid =
+            json!({"cwd": "/w", "conversation_id": "c1", "agent_state": "idle"}).to_string();
         let run = |input: &[u8]| {
             let mut child = Command::new("sh")
                 .args(["-c", &cmd])
@@ -1099,7 +1191,9 @@ mod tests {
         };
 
         assert_eq!(run(valid.as_bytes()), valid.len().to_string());
-        let mine = lune.join(FOLDER).join(format!("{}.json", std::process::id()));
+        let mine = lune
+            .join(FOLDER)
+            .join(format!("{}.json", std::process::id()));
         let before = fs::read_to_string(&mine).unwrap();
 
         let huge = format!(
@@ -1114,17 +1208,38 @@ mod tests {
     fn payload_cwd_trims_and_falls_back_to_workspace_current_dir() {
         let make = |cwd: Option<&str>, current_dir: Option<&str>| Payload {
             cwd: cwd.map(str::to_owned),
-            workspace: current_dir.map(|dir| Workspace { current_dir: Some(dir.to_owned()) }),
+            workspace: current_dir.map(|dir| Workspace {
+                current_dir: Some(dir.to_owned()),
+            }),
             conversation_id: None,
             session_id: None,
             conversation_title: None,
             agent_state: None,
             tool_confirmation_pending: None,
         };
-        assert_eq!(make(Some("  /w/one  "), Some("/w/two")).cwd().unwrap().as_str(), "/w/one");
-        assert_eq!(make(Some("relative/path"), Some(" /w/two ")).cwd().unwrap().as_str(), "/w/two");
-        assert_eq!(make(Some("  "), Some("/w/two")).cwd().unwrap().as_str(), "/w/two");
-        assert!(make(Some("relative"), Some("also-relative")).cwd().is_none());
+        assert_eq!(
+            make(Some("  /w/one  "), Some("/w/two"))
+                .cwd()
+                .unwrap()
+                .as_str(),
+            "/w/one"
+        );
+        assert_eq!(
+            make(Some("relative/path"), Some(" /w/two "))
+                .cwd()
+                .unwrap()
+                .as_str(),
+            "/w/two"
+        );
+        assert_eq!(
+            make(Some("  "), Some("/w/two")).cwd().unwrap().as_str(),
+            "/w/two"
+        );
+        assert!(
+            make(Some("relative"), Some("also-relative"))
+                .cwd()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1174,7 +1289,10 @@ mod tests {
         assert_eq!(first[0].seen().session_id, None);
         assert!(matches!(
             first[0].report().update(),
-            RungUpdate::Active { status: ActiveStatus::Idle, .. }
+            RungUpdate::Active {
+                status: ActiveStatus::Idle,
+                ..
+            }
         ));
 
         fs::write(&state_file, "{truncated").unwrap();

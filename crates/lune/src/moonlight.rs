@@ -15,5 +15,6 @@ pub const PEACH: Color = Color::Rgb(0xf8, 0xb4, 0x8c);
 pub const MUTE: Color = Color::Rgb(0x7f, 0x7b, 0x99);
 
 #[cfg(test)]
-pub const ALL: [Color; 13] =
-    [INK, TEXT, SURFACE, LIFTED, RAISED, RED, GREEN, YELLOW, BLUE, MAUVE, CYAN, PEACH, MUTE];
+pub const ALL: [Color; 13] = [
+    INK, TEXT, SURFACE, LIFTED, RAISED, RED, GREEN, YELLOW, BLUE, MAUVE, CYAN, PEACH, MUTE,
+];

@@ -29,8 +29,16 @@ pub fn pair_emphasis(deleted: &[&str], added: &[&str]) -> (Vec<Vec<ByteSpan>>, V
         deleted_spans[index] = left;
         added_spans[index] = right;
     }
-    assert_eq!(deleted_spans.len(), deleted.len(), "deleted span count matches lines");
-    assert_eq!(added_spans.len(), added.len(), "added span count matches lines");
+    assert_eq!(
+        deleted_spans.len(),
+        deleted.len(),
+        "deleted span count matches lines"
+    );
+    assert_eq!(
+        added_spans.len(),
+        added.len(),
+        "added span count matches lines"
+    );
     (deleted_spans, added_spans)
 }
 
@@ -45,8 +53,14 @@ pub fn line_emphasis(old: &str, new: &str) -> (Vec<ByteSpan>, Vec<ByteSpan>) {
     let Some(new_tokens) = tokenize_bounded(new, TOKENS_MAX) else {
         return fallback_affix(old, new);
     };
-    assert!(old_tokens.len() <= TOKENS_MAX, "old token count fits DP table");
-    assert!(new_tokens.len() <= TOKENS_MAX, "new token count fits DP table");
+    assert!(
+        old_tokens.len() <= TOKENS_MAX,
+        "old token count fits DP table"
+    );
+    assert!(
+        new_tokens.len() <= TOKENS_MAX,
+        "new token count fits DP table"
+    );
 
     let rows = old_tokens.len() + 1;
     let cols = new_tokens.len() + 1;
@@ -209,10 +223,19 @@ fn assert_valid_byte_spans(line: &str, spans: &[ByteSpan]) {
     let mut previous_end = 0usize;
     for span in spans {
         assert!(span.start < span.end, "emphasis span is non-empty");
-        assert!(span.start >= previous_end, "emphasis spans are sorted and non-overlapping");
+        assert!(
+            span.start >= previous_end,
+            "emphasis spans are sorted and non-overlapping"
+        );
         assert!(span.end <= line.len(), "emphasis span stays in line");
-        assert!(line.is_char_boundary(span.start), "emphasis start is UTF-8 aligned");
-        assert!(line.is_char_boundary(span.end), "emphasis end is UTF-8 aligned");
+        assert!(
+            line.is_char_boundary(span.start),
+            "emphasis start is UTF-8 aligned"
+        );
+        assert!(
+            line.is_char_boundary(span.end),
+            "emphasis end is UTF-8 aligned"
+        );
         previous_end = span.end;
     }
 }

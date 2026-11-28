@@ -22,7 +22,8 @@ impl Lists {
         whole: bool,
     ) {
         for (session, views) in sessions {
-            self.projects.insert(session, (machine.clone(), views.into_iter().collect()));
+            self.projects
+                .insert(session, (machine.clone(), views.into_iter().collect()));
         }
         if !whole {
             self.unsure.insert(machine.clone());
@@ -59,7 +60,10 @@ pub struct Missing<R> {
 
 impl<R> Default for Missing<R> {
     fn default() -> Self {
-        Missing { since: BTreeMap::new(), ran_on: BTreeMap::new() }
+        Missing {
+            since: BTreeMap::new(),
+            ran_on: BTreeMap::new(),
+        }
     }
 }
 
@@ -112,7 +116,11 @@ mod tests {
     fn lists<const N: usize>(machines: [(&Machine, &[Session], bool); N]) -> Lists {
         let mut live = Lists::default();
         for (machine, sessions, whole) in machines {
-            live.lists(machine, sessions.iter().map(|session| (*session, [])), whole);
+            live.lists(
+                machine,
+                sessions.iter().map(|session| (*session, [])),
+                whole,
+            );
         }
         live
     }
@@ -134,7 +142,14 @@ mod tests {
 
         let kept = BTreeSet::from([its, unheard]);
         let forgotten = lists([(&here, &[], true)]);
-        assert!(missing.gone(&kept, Some(&forgotten), start + GONE * 2).is_empty());
-        assert_eq!(missing.gone(&kept, Some(&forgotten), start + GONE * 3), kept);
+        assert!(
+            missing
+                .gone(&kept, Some(&forgotten), start + GONE * 2)
+                .is_empty()
+        );
+        assert_eq!(
+            missing.gone(&kept, Some(&forgotten), start + GONE * 3),
+            kept
+        );
     }
 }

@@ -18,9 +18,8 @@ const BUFFER: usize = 64 * 1024;
 const REACHING: Duration = Duration::from_secs(6);
 
 const _: () = assert!(daemon::START.as_millis() < REACHING.as_millis());
-const _: () = assert!(
-    REACHING.as_millis() + daemon::VERSION_LIMIT.as_millis() < luned::REACH.as_millis()
-);
+const _: () =
+    assert!(REACHING.as_millis() + daemon::VERSION_LIMIT.as_millis() < luned::REACH.as_millis());
 
 pub fn run(folder: &Path) -> ExitCode {
     let bridged = reached(folder).and_then(|socket| {
@@ -31,7 +30,7 @@ pub fn run(folder: &Path) -> ExitCode {
         Err(why) => {
             eprintln!("lune: {why}");
             ExitCode::FAILURE
-        },
+        }
     }
 }
 
@@ -62,7 +61,8 @@ fn handed_on(socket: UnixStream) -> io::Result<()> {
     let ending = ended.clone();
     thread::spawn(move || ending.send(copied(&mut stdin, &mut up)));
     thread::spawn(move || ended.send(copied(&mut down, &mut stdout)));
-    end.recv().unwrap_or_else(|_| Err(io::Error::other("both ways of the bridge panicked")))
+    end.recv()
+        .unwrap_or_else(|_| Err(io::Error::other("both ways of the bridge panicked")))
 }
 
 fn copied(from: &mut impl Read, to: &mut impl Write) -> io::Result<()> {

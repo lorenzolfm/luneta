@@ -44,11 +44,19 @@ impl Kept {
     #[must_use]
     pub fn to_api(&self) -> PrintedFile {
         let (lines, left_out) = (self.lines as u64, self.left_out as u64);
-        PrintedFile { path: self.file.clone(), lines, left_out }
+        PrintedFile {
+            path: self.file.clone(),
+            lines,
+            left_out,
+        }
     }
 
     pub fn of_api(said: PrintedFile) -> Result<Kept, String> {
-        let PrintedFile { path, lines, left_out } = said;
+        let PrintedFile {
+            path,
+            lines,
+            left_out,
+        } = said;
         if !path.starts_with('/') {
             return Err(format!("luned kept the lines at \"{path}\""));
         }
@@ -56,13 +64,21 @@ impl Kept {
             let more = |_| format!("{count} lines are more than this lune counts");
             usize::try_from(count).map_err(more)
         };
-        Ok(Kept { file: path, lines: count(lines)?, left_out: count(left_out)? })
+        Ok(Kept {
+            file: path,
+            lines: count(lines)?,
+            left_out: count(left_out)?,
+        })
     }
 }
 
 #[must_use]
 pub fn asked(on: Option<On>, terminal: TerminalKey, typed: &Said) -> KeepPrintedRequest {
-    KeepPrintedRequest { on, terminal: Some(terminal.into()), typed: typed.as_str().to_owned() }
+    KeepPrintedRequest {
+        on,
+        terminal: Some(terminal.into()),
+        typed: typed.as_str().to_owned(),
+    }
 }
 
 impl Printed {
@@ -72,22 +88,29 @@ impl Printed {
             Printed::After(kept) => Told::After(kept.to_api()),
             Printed::Nothing => Told::Nothing(()),
             Printed::Unsure(kept) => Told::Unsure(kept.to_api()),
-            Printed::Top(kept) => {
-                Told::Top(keep_printed_response::Top { kept: kept.as_ref().map(Kept::to_api) })
-            },
+            Printed::Top(kept) => Told::Top(keep_printed_response::Top {
+                kept: kept.as_ref().map(Kept::to_api),
+            }),
         };
-        KeepPrintedResponse { printed: Some(printed) }
+        KeepPrintedResponse {
+            printed: Some(printed),
+        }
     }
 
     pub fn of_api(said: KeepPrintedResponse) -> Result<Printed, String> {
-        Ok(match said.printed.ok_or("luned said nothing of what was printed")? {
-            Told::After(kept) => Printed::After(Kept::of_api(kept)?),
-            Told::Nothing(()) => Printed::Nothing,
-            Told::Unsure(kept) => Printed::Unsure(Kept::of_api(kept)?),
-            Told::Top(keep_printed_response::Top { kept }) => {
-                Printed::Top(kept.map(Kept::of_api).transpose()?)
+        Ok(
+            match said
+                .printed
+                .ok_or("luned said nothing of what was printed")?
+            {
+                Told::After(kept) => Printed::After(Kept::of_api(kept)?),
+                Told::Nothing(()) => Printed::Nothing,
+                Told::Unsure(kept) => Printed::Unsure(Kept::of_api(kept)?),
+                Told::Top(keep_printed_response::Top { kept }) => {
+                    Printed::Top(kept.map(Kept::of_api).transpose()?)
+                }
             },
-        })
+        )
     }
 
     #[must_use]
@@ -95,7 +118,7 @@ impl Printed {
         match self {
             Printed::After(kept) | Printed::Unsure(kept) | Printed::Top(Some(kept)) => {
                 Some(&kept.file)
-            },
+            }
             Printed::Nothing | Printed::Top(None) => None,
         }
     }
@@ -140,7 +163,10 @@ fn tail<'a>(lines: &[&'a str]) -> Option<Tail<'a>> {
     let last = lines.iter().rposition(filled)?;
     let lines = &lines[first..=last];
     let left_out = lines.len().saturating_sub(TAIL);
-    Some(Tail { lines: lines[left_out..].to_vec(), left_out })
+    Some(Tail {
+        lines: lines[left_out..].to_vec(),
+        left_out,
+    })
 }
 
 fn ran_on(lines: &[&str], command: &str) -> Option<usize> {
@@ -189,7 +215,11 @@ fn write(runtime: &Path, tail: &Tail<'_>, now: SystemTime) -> Result<Kept, Strin
     let mut text = lines.join("\n");
     text.push('\n');
     draft.write(text.as_bytes())?;
-    Ok(Kept { file: draft.keep()?, lines: lines.len(), left_out: *left_out })
+    Ok(Kept {
+        file: draft.keep()?,
+        lines: lines.len(),
+        left_out: *left_out,
+    })
 }
 
 #[cfg(test)]
@@ -210,7 +240,11 @@ mod tests {
 
     #[test]
     fn what_was_printed_is_said_over_the_wire_as_it_was_kept() {
-        let kept = || Kept { file: "/run/printed/a.txt".to_owned(), lines: 3, left_out: 1 };
+        let kept = || Kept {
+            file: "/run/printed/a.txt".to_owned(),
+            lines: 3,
+            left_out: 1,
+        };
         let all = [
             Printed::After(kept()),
             Printed::Nothing,
@@ -223,10 +257,19 @@ mod tests {
         }
         let unsaid = KeepPrintedResponse { printed: None };
         let unsaid = Printed::of_api(unsaid);
-        assert_eq!(unsaid, Err("luned said nothing of what was printed".to_owned()));
-        let relative = Kept { file: "a.txt".to_owned(), ..kept() };
+        assert_eq!(
+            unsaid,
+            Err("luned said nothing of what was printed".to_owned())
+        );
+        let relative = Kept {
+            file: "a.txt".to_owned(),
+            ..kept()
+        };
         let said = Printed::After(relative).to_api();
-        assert_eq!(Printed::of_api(said), Err("luned kept the lines at \"a.txt\"".to_owned()));
+        assert_eq!(
+            Printed::of_api(said),
+            Err("luned kept the lines at \"a.txt\"".to_owned())
+        );
     }
 
     #[test]
@@ -239,7 +282,10 @@ mod tests {
                     line 3\n\
                     lorenzo@nixos ~/w/lune [1]>\n";
         let command = "printf \"line %s\\n\" (seq 1 3); false";
-        assert_eq!(kept(dump, command), Printed::After(vec!["line 1", "line 2", "line 3"]));
+        assert_eq!(
+            kept(dump, command),
+            Printed::After(vec!["line 1", "line 2", "line 3"])
+        );
     }
 
     #[test]
@@ -247,7 +293,10 @@ mod tests {
         let dump = "➜ cargo test\nfirst run\n\n➜ cargo test       12:00\nsecond run\n➜\n";
         assert_eq!(kept(dump, "cargo test"), Printed::After(vec!["second run"]));
         let dump = "~> begin\n       echo one\n       echo two\n   end\none\ntwo\n~>\n";
-        assert_eq!(kept(dump, "begin echo one echo two end"), Printed::After(vec!["one", "two"]));
+        assert_eq!(
+            kept(dump, "begin echo one echo two end"),
+            Printed::After(vec!["one", "two"])
+        );
     }
 
     #[test]
@@ -255,22 +304,36 @@ mod tests {
         let dump = "➜ ls\nls\ntools\n➜\n";
         assert_eq!(kept(dump, "ls"), Printed::After(vec!["ls", "tools"]));
         let dump = "➜ ls\nold\n➜ lsof -i\nnew\n➜\n";
-        assert_eq!(kept(dump, "ls"), Printed::After(vec!["old", "➜ lsof -i", "new"]));
+        assert_eq!(
+            kept(dump, "ls"),
+            Printed::After(vec!["old", "➜ lsof -i", "new"])
+        );
     }
 
     #[test]
     fn nothing_after_the_command_s_line_is_nothing_printed_only_with_nothing_above() {
         assert_eq!(kept("➜ true\n➜\n\n", "true"), Printed::Nothing);
         assert_eq!(kept("\n\n➜ true\n\n➜\n", "true"), Printed::Nothing);
-        assert_eq!(kept("out\n➜ true\n➜\n", "true"), Printed::Unsure(vec!["out", "➜ true"]));
+        assert_eq!(
+            kept("out\n➜ true\n➜\n", "true"),
+            Printed::Unsure(vec!["out", "➜ true"])
+        );
         let dump = "➜ make\ncc -o a a.c\na.c:1: error\nError: make failed\n➜\n";
-        let screen = vec!["➜ make", "cc -o a a.c", "a.c:1: error", "Error: make failed"];
+        let screen = vec![
+            "➜ make",
+            "cc -o a a.c",
+            "a.c:1: error",
+            "Error: make failed",
+        ];
         assert_eq!(kept(dump, "make"), Printed::Unsure(screen));
     }
 
     #[test]
     fn without_the_command_s_line_all_the_view_holds_is_kept() {
-        assert_eq!(kept("out\nmore\n➜\n", "make"), Printed::Top(Some(vec!["out", "more"])));
+        assert_eq!(
+            kept("out\nmore\n➜\n", "make"),
+            Printed::Top(Some(vec!["out", "more"]))
+        );
         assert_eq!(kept("\n➜\n", "make"), Printed::Top(None));
         let dump = "\nlune on main\n➜ make\nbuilt\n\nlune on main took 3s\n➜\n";
         let built = vec!["built", "", "lune on main took 3s"];
@@ -282,9 +345,15 @@ mod tests {
         let dump = "➜ cargo build\n   Compiling foo\n^Z\nfish: Job 1, 'cargo build' has stopped\n\
                     ➜ git status\nOn branch main\n➜ fg\nSend job 1 'cargo build' to foreground\n\
                     error[E0308]: mismatched types\n➜\n";
-        let back = vec!["Send job 1 'cargo build' to foreground", "error[E0308]: mismatched types"];
+        let back = vec![
+            "Send job 1 'cargo build' to foreground",
+            "error[E0308]: mismatched types",
+        ];
         assert_eq!(kept(dump, "fg"), Printed::After(back));
-        assert_eq!(kept("➜ fg %1\nerror\n➜\n", "fg"), Printed::After(vec!["error"]));
+        assert_eq!(
+            kept("➜ fg %1\nerror\n➜\n", "fg"),
+            Printed::After(vec!["error"])
+        );
     }
 
     #[test]
@@ -295,7 +364,10 @@ mod tests {
             panic!("no output");
         };
         assert_eq!((lines.len(), left_out), (TAIL, 5));
-        assert_eq!((lines[0], lines[TAIL - 1]), ("line 6", output[TAIL + 4].as_str()));
+        assert_eq!(
+            (lines[0], lines[TAIL - 1]),
+            ("line 6", output[TAIL + 4].as_str())
+        );
     }
 
     #[test]
@@ -304,24 +376,40 @@ mod tests {
         let runtime = root.path().join("lune");
         let now = SystemTime::now();
         assert_eq!(keep(&runtime, Printed::Nothing, now), Ok(Printed::Nothing));
-        assert_eq!(keep(&runtime, Printed::Top(None), now), Ok(Printed::Top(None)));
+        assert_eq!(
+            keep(&runtime, Printed::Top(None), now),
+            Ok(Printed::Top(None))
+        );
         assert!(!runtime.exists());
 
-        let cut = Printed::Top(Some(Tail { lines: vec!["one", "two"], left_out: 3 }));
+        let cut = Printed::Top(Some(Tail {
+            lines: vec!["one", "two"],
+            left_out: 3,
+        }));
         let first = keep(&runtime, cut.clone(), now).expect("kept");
         let folder = fs::canonicalize(runtime.join(FOLDER)).expect("the folder");
-        let Printed::Top(Some(Kept { file, lines: 2, left_out: 3 })) = &first else {
+        let Printed::Top(Some(Kept {
+            file,
+            lines: 2,
+            left_out: 3,
+        })) = &first
+        else {
             panic!("kept {first:?}");
         };
         let file = Path::new(file);
         assert_eq!(file.parent(), Some(folder.as_path()));
         assert_eq!(fs::read_to_string(file).expect("the file"), "one\ntwo\n");
         let mode = |path: &Path| fs::metadata(path).expect("there").permissions().mode() & 0o777;
-        assert_eq!((mode(&runtime), mode(&folder), mode(file)), (0o700, 0o700, 0o600));
+        assert_eq!(
+            (mode(&runtime), mode(&folder), mode(file)),
+            (0o700, 0o700, 0o600)
+        );
 
         let aged = |name: &str, ago: Duration| {
             let path = folder.join(name);
-            File::create(&path).and_then(|it| it.set_modified(now - ago)).expect("aged");
+            File::create(&path)
+                .and_then(|it| it.set_modified(now - ago))
+                .expect("aged");
             path
         };
         let old = aged("old.txt", Duration::from_hours(25));
@@ -335,14 +423,21 @@ mod tests {
     #[test]
     fn a_file_no_rule_names_alone_is_not_kept() {
         let root = tempfile::tempdir().expect("a folder");
-        let tail = || Printed::After(Tail { lines: vec!["error"], left_out: 0 });
+        let tail = || {
+            Printed::After(Tail {
+                lines: vec!["error"],
+                left_out: 0,
+            })
+        };
         for named in ["lune[ta", "lune*ta", "lune(ta)"] {
             let runtime = root.path().join(named).join("lune");
             fs::create_dir_all(runtime.parent().expect("a parent")).expect("made");
             let refused = keep(&runtime, tail(), SystemTime::now()).expect_err("refused");
             let says = "`, which a rule of Claude Code's reads as more than a path";
             assert!(refused.ends_with(says), "{refused}");
-            let kept = fs::read_dir(runtime.join(FOLDER)).expect("the folder").count();
+            let kept = fs::read_dir(runtime.join(FOLDER))
+                .expect("the folder")
+                .count();
             assert_eq!(kept, 0, "{named}");
         }
     }

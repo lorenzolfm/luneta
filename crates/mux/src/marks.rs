@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 
 use libghostty_vt::terminal::{Boundary, StringEnd};
 use libghostty_vt::{Error, Terminal};
-use lune_protocol::program_resume::{BODY_BYTES_MAX as RESUME_BODY_BYTES_MAX, OSC_PREFIX as RESUME};
+use lune_protocol::program_resume::{
+    BODY_BYTES_MAX as RESUME_BODY_BYTES_MAX, OSC_PREFIX as RESUME,
+};
 use percent_encoding::percent_decode;
 
 pub const RESUME_REPORTS_PER_TURN_MAX: usize = 64;
@@ -55,17 +57,20 @@ impl Marks {
             let from = at;
             at += stop.consumed;
             if stop.reached.contains(Boundary::OSC_END) {
-                let mut osc = self.osc.take().expect("an OSC that ends started, as Ghostty said");
+                let mut osc = self
+                    .osc
+                    .take()
+                    .expect("an OSC that ends started, as Ghostty said");
                 osc.keep(&bytes[from..at - 1]);
                 match osc.end(stop.end == Some(StringEnd::Cancelled)) {
                     Some(ParsedOsc::Mark(mark)) => {
                         on_mark(&mark);
                         marks.push(mark);
-                    },
+                    }
                     Some(ParsedOsc::Resume(body)) => {
                         push_bounded_resume_report(resume_reports, body);
-                    },
-                    None => {},
+                    }
+                    None => {}
                 }
             }
             if stop.reached.contains(Boundary::OSC_START) {
@@ -155,11 +160,13 @@ fn mark(text: &[u8], over: bool) -> Option<Mark> {
                 start += field.len() + 1;
             }
             Some(Mark::Command(line.filter(|_| !over)))
-        },
+        }
         b"D" => {
-            let status = fields.next().and_then(|status| std::str::from_utf8(status).ok());
+            let status = fields
+                .next()
+                .and_then(|status| std::str::from_utf8(status).ok());
             Some(Mark::Done(status.and_then(|status| status.parse().ok())))
-        },
+        }
         _ => None,
     }
 }
@@ -178,7 +185,9 @@ mod tests {
         let mut marks = Vec::new();
         let mut resumes = VecDeque::new();
         for chunk in chunks {
-            scanner.write(&mut terminal, chunk, &mut marks, &mut resumes, |_| {}).unwrap();
+            scanner
+                .write(&mut terminal, chunk, &mut marks, &mut resumes, |_| {})
+                .unwrap();
         }
         (marks, resumes.into_iter().collect())
     }
@@ -193,7 +202,14 @@ mod tests {
             \x1b]133;C;cmdline_url=false%3B%20echo%20%27a%20b%27\x1b\\\
             \x1b]0;title\x1b\\a b\r\n\x1b]133;D;1\x1b\\";
         let marks = read(&[written]);
-        assert_eq!(marks, [Mark::Prompt, command("false; echo 'a b'"), Mark::Done(Some(1))]);
+        assert_eq!(
+            marks,
+            [
+                Mark::Prompt,
+                command("false; echo 'a b'"),
+                Mark::Done(Some(1))
+            ]
+        );
     }
 
     #[test]
@@ -202,7 +218,11 @@ mod tests {
         let whole = read(&[written]);
         assert_eq!(whole, [command("ls -l"), Mark::Done(Some(0))]);
         for at in 0..=written.len() {
-            assert_eq!(read(&[&written[..at], &written[at..]]), whole, "split at {at}");
+            assert_eq!(
+                read(&[&written[..at], &written[at..]]),
+                whole,
+                "split at {at}"
+            );
         }
         let bytes: Vec<&[u8]> = written.chunks(1).collect();
         assert_eq!(read(&bytes), whole);
@@ -211,8 +231,14 @@ mod tests {
     #[test]
     fn a_command_line_reads_raw_or_decoded() {
         assert_eq!(read(&[b"\x1b]133;C;cmdline=a; b\x07"]), [command("a; b")]);
-        assert_eq!(read(&[b"\x1b]133;C;cmdline_url=caf%C3%A9\x07"]), [command("café")]);
-        assert_eq!(read(&[b"\x1b]133;C;cmdline_url=%FF\x07"]), [command("\u{fffd}")]);
+        assert_eq!(
+            read(&[b"\x1b]133;C;cmdline_url=caf%C3%A9\x07"]),
+            [command("café")]
+        );
+        assert_eq!(
+            read(&[b"\x1b]133;C;cmdline_url=%FF\x07"]),
+            [command("\u{fffd}")]
+        );
         assert_eq!(read(&[b"\x1b]133;C\x07"]), [Mark::Command(None)]);
         assert_eq!(read(&[b"\x1b]133;C;aid=3\x07"]), [Mark::Command(None)]);
     }
@@ -235,7 +261,10 @@ mod tests {
     #[test]
     fn a_mark_starts_and_ends_where_ghostty_says() {
         assert_eq!(read(&[b"\x1b]133;A\x1b[m"]), [Mark::Prompt]);
-        assert_eq!(read(&[b"\x1b]133;A\x1b\x1b]133;D;2\x07"]), [Mark::Prompt, Mark::Done(Some(2))]);
+        assert_eq!(
+            read(&[b"\x1b]133;A\x1b\x1b]133;D;2\x07"]),
+            [Mark::Prompt, Mark::Done(Some(2))]
+        );
         assert_eq!(read(&[b"\x1b_x\x9d133;A\x07"]), [Mark::Prompt]);
         assert_eq!(read(&[b"\x1b]133;A\x9d133;D;1\x07"]), []);
         assert_eq!(read(&[b"\x1b]\x1b]\x9d\x9d\x07\x07"]), []);
@@ -245,9 +274,18 @@ mod tests {
     fn a_command_line_too_long_reads_as_none() {
         let line = "a".repeat(MARK_BYTES_MAX);
         let long = format!("\x1b]133;C;cmdline_url={line}\x07\x1b]133;D;0\x07");
-        assert_eq!(read(&[long.as_bytes()]), [Mark::Command(None), Mark::Done(Some(0))]);
-        let fits = format!("\x1b]133;C;cmdline_url={}\x07", "a".repeat(MARK_BYTES_MAX - 20));
-        assert_eq!(read(&[fits.as_bytes()]), [command(&"a".repeat(MARK_BYTES_MAX - 20))]);
+        assert_eq!(
+            read(&[long.as_bytes()]),
+            [Mark::Command(None), Mark::Done(Some(0))]
+        );
+        let fits = format!(
+            "\x1b]133;C;cmdline_url={}\x07",
+            "a".repeat(MARK_BYTES_MAX - 20)
+        );
+        assert_eq!(
+            read(&[fits.as_bytes()]),
+            [command(&"a".repeat(MARK_BYTES_MAX - 20))]
+        );
     }
 
     #[test]
@@ -264,12 +302,19 @@ mod tests {
         assert_eq!(whole.0, [Mark::Prompt]);
         assert_eq!(whole.1, [body.to_vec(), body.to_vec()]);
         for at in 0..=wire.len() {
-            assert_eq!(read_both(&[&wire[..at], &wire[at..]]), whole, "split at {at}");
+            assert_eq!(
+                read_both(&[&wire[..at], &wire[at..]]),
+                whole,
+                "split at {at}"
+            );
         }
         let singles: Vec<&[u8]> = wire.chunks(1).collect();
         assert_eq!(read_both(&singles), whole);
 
-        assert_eq!(read_both(&[b"\x1b]7577;pid=1\x18\x07"]).1, Vec::<Vec<u8>>::new());
+        assert_eq!(
+            read_both(&[b"\x1b]7577;pid=1\x18\x07"]).1,
+            Vec::<Vec<u8>>::new()
+        );
         let too_long = format!("\x1b]7577;{}\x07", "a".repeat(RESUME_BODY_BYTES_MAX + 1));
         assert_eq!(read_both(&[too_long.as_bytes()]).1, Vec::<Vec<u8>>::new());
         let exact = "a".repeat(RESUME_BODY_BYTES_MAX);
@@ -286,7 +331,10 @@ mod tests {
         }
         let (_, reports) = read_both(&[&wire]);
         assert_eq!(reports.len(), RESUME_REPORTS_PER_TURN_MAX);
-        assert_eq!(reports.first().map(Vec::as_slice), Some(b"seq=25".as_slice()));
+        assert_eq!(
+            reports.first().map(Vec::as_slice),
+            Some(b"seq=25".as_slice())
+        );
         assert_eq!(
             reports.last().map(Vec::as_slice),
             Some(format!("seq={}", total - 1).as_bytes())

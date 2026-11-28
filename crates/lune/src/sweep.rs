@@ -22,7 +22,10 @@ pub struct Sweep {
 
 impl Sweep {
     pub fn new(from: Position, to: Position, within: Rect) -> Sweep {
-        Sweep { from: kept(from, within), to: kept(to, within) }
+        Sweep {
+            from: kept(from, within),
+            to: kept(to, within),
+        }
     }
 
     pub fn reach(&mut self, to: Position, within: Rect) {
@@ -44,7 +47,11 @@ impl Sweep {
     fn columns(self, y: u16, within: Rect) -> Range<u16> {
         let (first, last) = self.ends();
         let start = if y == first.y { first.x } else { within.left() };
-        let end = if y == last.y { last.x.saturating_add(1) } else { within.right() };
+        let end = if y == last.y {
+            last.x.saturating_add(1)
+        } else {
+            within.right()
+        };
         start..end
     }
 
@@ -52,7 +59,12 @@ impl Sweep {
         let (first, last) = self.ends();
         for y in first.y..=last.y {
             let columns = self.columns(y, within);
-            let cells = Rect::new(columns.start, y, columns.end.saturating_sub(columns.start), 1);
+            let cells = Rect::new(
+                columns.start,
+                y,
+                columns.end.saturating_sub(columns.start),
+                1,
+            );
             let reversed = Style::new().add_modifier(Modifier::REVERSED);
             buffer.set_style(cells.intersection(within), reversed);
         }
@@ -69,7 +81,9 @@ impl Sweep {
                 columns.start = columns.start.saturating_add(1);
             }
             let said = page.lines.get(line).map_or_else(String::new, |drawn| {
-                read(drawn, within.x, columns, |x| page.cuts.at(Position::new(x, y)))
+                read(drawn, within.x, columns, |x| {
+                    page.cuts.at(Position::new(x, y))
+                })
             });
             if y < last.y && goes_on(line + 1) {
                 text.push_str(&said);
@@ -113,21 +127,31 @@ fn read<'a>(
 
 pub fn cells(text: &str) -> usize {
     let span = Span::raw(text);
-    span.styled_graphemes(Style::new()).map(|it| usize::from(it.symbol.cell_width())).sum()
+    span.styled_graphemes(Style::new())
+        .map(|it| usize::from(it.symbol.cell_width()))
+        .sum()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const WITHIN: Rect = Rect { x: 2, y: 1, width: 10, height: 6 };
+    const WITHIN: Rect = Rect {
+        x: 2,
+        y: 1,
+        width: 10,
+        height: 6,
+    };
 
     fn at(x: u16, y: u16) -> Position {
         Position::new(x, y)
     }
 
     fn page(lines: &[&'static str]) -> Page {
-        Page { lines: lines.iter().map(|line| Line::raw(*line)).collect(), ..Page::default() }
+        Page {
+            lines: lines.iter().map(|line| Line::raw(*line)).collect(),
+            ..Page::default()
+        }
     }
 
     fn swept(from: Position, to: Position, page: &Page) -> String {
@@ -181,7 +205,10 @@ mod tests {
             goes_on: vec![1, 2],
             ..page(&[" luned: ", " stopped a", " nswering", " next note"])
         };
-        assert_eq!(swept(at(2, 1), at(11, 4), &page), " luned: stopped answering\n next note");
+        assert_eq!(
+            swept(at(2, 1), at(11, 4), &page),
+            " luned: stopped answering\n next note"
+        );
         assert_eq!(swept(at(3, 2), at(5, 3), &page), "stopped answ");
         assert_eq!(swept(at(5, 1), at(11, 1), &page), "ned:");
     }
@@ -190,7 +217,10 @@ mod tests {
     fn the_end_of_a_cut_comes_out_as_what_it_took() {
         let mut cuts = Spots::default();
         cuts.add(1, 6..7, "-branch-name".to_owned());
-        let page = Page { cuts: cuts.placed(WITHIN), ..page(&["", "  long…", ""]) };
+        let page = Page {
+            cuts: cuts.placed(WITHIN),
+            ..page(&["", "  long…", ""])
+        };
         assert_eq!(swept(at(4, 2), at(8, 2), &page), "long-branch-name");
         assert_eq!(swept(at(6, 2), at(11, 2), &page), "ng-branch-name");
         assert_eq!(swept(at(4, 2), at(7, 2), &page), "long");
@@ -213,7 +243,11 @@ mod tests {
         buffer.set_line(WITHIN.x, WITHIN.y, &page.lines[0], WITHIN.width);
         for x in WITHIN.left()..WITHIN.right() {
             let drawn = buffer[(x, WITHIN.y)].symbol().trim_end().to_owned();
-            assert_eq!(swept(at(x, WITHIN.y), at(x, WITHIN.y), &page), drawn, "cell {x}");
+            assert_eq!(
+                swept(at(x, WITHIN.y), at(x, WITHIN.y), &page),
+                drawn,
+                "cell {x}"
+            );
         }
     }
 }

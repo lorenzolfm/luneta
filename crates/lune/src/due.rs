@@ -16,7 +16,10 @@ impl<T> Due<T> {
         events: &Sender<Event>,
         event: impl FnOnce(Result<T, String>) -> Event + Send + 'static,
     ) -> Self {
-        Due { events: events.clone(), event: Some(Box::new(event)) }
+        Due {
+            events: events.clone(),
+            event: Some(Box::new(event)),
+        }
     }
 
     pub fn pay(mut self, answer: Result<T, String>) {
@@ -56,8 +59,18 @@ mod tests {
         assert!(panicked.join().is_err());
         let heard: Vec<Event> = heard.try_iter().collect();
         assert_eq!(heard.len(), 2);
-        assert!(matches!(heard[0], Event::Voiced { number: 7, ended: Ok(()) }));
-        let Event::Voiced { number: 8, ended: Err(why) } = &heard[1] else {
+        assert!(matches!(
+            heard[0],
+            Event::Voiced {
+                number: 7,
+                ended: Ok(())
+            }
+        ));
+        let Event::Voiced {
+            number: 8,
+            ended: Err(why),
+        } = &heard[1]
+        else {
             panic!("the box waiting on the thread that panicked hears");
         };
         assert_eq!(why, UNANSWERED);

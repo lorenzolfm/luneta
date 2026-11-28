@@ -71,7 +71,7 @@ impl Ending {
             Ending::Unreached(unreached) => {
                 let why = unreached.to_string();
                 api::watched::ended::Why::Unreached(api::watched::Unreached { why })
-            },
+            }
         };
         api::watched::Ended { why: Some(why) }
     }
@@ -111,7 +111,13 @@ impl Mux {
     pub fn serving(runtime_dir: Option<PathBuf>, browser_socket: Option<PathBuf>) -> Arc<Mux> {
         let (listing, _) = watch::channel(Listed::Holds(api::Listing::default()));
         let model = Shared::new(Model::new());
-        Arc::new(Mux { model, listing, leaders: Leaders::new(), runtime_dir, browser_socket })
+        Arc::new(Mux {
+            model,
+            listing,
+            leaders: Leaders::new(),
+            runtime_dir,
+            browser_socket,
+        })
     }
 
     pub fn watched(&self) -> watch::Receiver<Listed> {
@@ -172,7 +178,10 @@ impl Mux {
 
     pub fn reserve_terminal(self: &Arc<Mux>) -> Result<Reserved, Status> {
         let key = self.change(Model::reserve)?;
-        Ok(Reserved { mux: Arc::clone(self), key })
+        Ok(Reserved {
+            mux: Arc::clone(self),
+            key,
+        })
     }
 
     pub fn close_terminal(&self, key: TerminalKey) -> Result<(), Status> {
@@ -248,17 +257,12 @@ impl Mux {
                 MetaUpdate::Both { title, cwd } => {
                     meta.set_title(title);
                     meta.set_cwd(cwd);
-                },
+                }
             },
         );
     }
 
-    pub fn looked(
-        &self,
-        terminal: TerminalId,
-        foreground: Option<Foreground>,
-        ran: Option<Doing>,
-    ) {
+    pub fn looked(&self, terminal: TerminalId, foreground: Option<Foreground>, ran: Option<Doing>) {
         let _ = self.change_terminal_meta(
             |model| model.terminal_of_id_mut(terminal).ok_or(()),
             |meta| meta.set_looked(foreground, ran),
@@ -402,7 +406,10 @@ mod model {
         terminal: &mut Terminal,
         change: impl FnOnce(&mut MetaMut<'_>),
     ) -> bool {
-        let mut meta = MetaMut { terminal, modified: false };
+        let mut meta = MetaMut {
+            terminal,
+            modified: false,
+        };
         change(&mut meta);
         meta.modified
     }
@@ -416,8 +423,7 @@ mod model {
         }
 
         pub(super) fn set_title(&mut self, title: String) {
-            if matches!(self.terminal.program, Program::Runs { .. })
-                && self.terminal.title != title
+            if matches!(self.terminal.program, Program::Runs { .. }) && self.terminal.title != title
             {
                 self.terminal.title = title;
                 self.modified = true;
@@ -431,12 +437,12 @@ mod model {
             }
         }
 
-        pub(super) fn set_looked(
-            &mut self,
-            foreground: Option<Foreground>,
-            ran: Option<Doing>,
-        ) {
-            let Program::Runs { foreground: was, ran: said, .. } = &mut self.terminal.program
+        pub(super) fn set_looked(&mut self, foreground: Option<Foreground>, ran: Option<Doing>) {
+            let Program::Runs {
+                foreground: was,
+                ran: said,
+                ..
+            } = &mut self.terminal.program
             else {
                 return;
             };
@@ -515,7 +521,14 @@ mod model {
 
         fn said(&self) -> api::Terminal {
             let (program, statuses) = match &self.program {
-                Program::Runs { pid, foreground, ran, statuses, resumes, .. } => {
+                Program::Runs {
+                    pid,
+                    foreground,
+                    ran,
+                    statuses,
+                    resumes,
+                    ..
+                } => {
                     let foreground = foreground.as_ref().map(Foreground::said);
                     let ran = ran.as_ref().map(Doing::to_mux);
                     let resumes = resumes.as_deref().map(TerminalResumes::to_mux);
@@ -526,10 +539,11 @@ mod model {
                         resumes,
                     });
                     (program, statuses.to_mux())
-                },
-                Program::Ended { exit, statuses } => {
-                    (api::terminal::Program::Ended(exit.said()), statuses.to_mux())
-                },
+                }
+                Program::Ended { exit, statuses } => (
+                    api::terminal::Program::Ended(exit.said()),
+                    statuses.to_mux(),
+                ),
             };
             api::Terminal {
                 key: Some(self.key.said()),
@@ -565,7 +579,7 @@ mod model {
                     let changed = change(&holding.terminals, &mut holding.viewers);
                     holding.settle();
                     changed
-                },
+                }
                 Model::Ended(ending) => when_ended(ending),
             }
         }
@@ -614,7 +628,11 @@ mod model {
                 .slots
                 .get_mut(&key.id)
                 .expect("a reserved terminal has its slot");
-            assert!(matches!(slot, Slot::Starting), "terminal {} is placed once", key.id);
+            assert!(
+                matches!(slot, Slot::Starting),
+                "terminal {} is placed once",
+                key.id
+            );
             *slot = Slot::Placed(Box::new(terminal));
             holding.terminals.empty = Empty::Ends;
             placing.placed();
@@ -677,11 +695,15 @@ mod model {
                 return (true, false);
             };
             match found.program {
-                Program::Runs { ends: Ends::Closes, .. } => {
+                Program::Runs {
+                    ends: Ends::Closes, ..
+                } => {
                     self.close(terminal);
                     (true, true)
-                },
-                Program::Runs { ends: Ends::Holds, .. } => {
+                }
+                Program::Runs {
+                    ends: Ends::Holds, ..
+                } => {
                     if let Some(title) = final_meta.title {
                         found.title = title;
                     }
@@ -690,7 +712,7 @@ mod model {
                     }
                     found.program = Program::Ended { exit, statuses };
                     (false, true)
-                },
+                }
                 Program::Ended { .. } => (false, false),
             }
         }
@@ -713,7 +735,10 @@ mod model {
             let Model::Holds(holding) = self else {
                 return Err(unmade(key));
             };
-            let found = holding.terminals.placed_mut(key.id).filter(|found| found.key == key);
+            let found = holding
+                .terminals
+                .placed_mut(key.id)
+                .filter(|found| found.key == key);
             found.ok_or_else(|| unmade(key))
         }
 
@@ -755,7 +780,12 @@ mod model {
             let mut terminals: Vec<api::Terminal> = self.placed().map(Terminal::said).collect();
             bound_fair(
                 &mut terminals,
-                |terminal| terminal.statuses.as_mut().map(|statuses| &mut statuses.children),
+                |terminal| {
+                    terminal
+                        .statuses
+                        .as_mut()
+                        .map(|statuses| &mut statuses.children)
+                },
                 |child| child.encoded_len().saturating_add(16),
                 LISTING_CHILDREN_BYTES_MAX,
             );
@@ -806,7 +836,10 @@ mod model {
                 continue;
             }
             let chosen = records.remove(0);
-            runs.resumes = Some(api::TerminalResumes { chosen: Some(chosen), others: records });
+            runs.resumes = Some(api::TerminalResumes {
+                chosen: Some(chosen),
+                others: records,
+            });
         }
     }
 
@@ -820,7 +853,13 @@ mod model {
             refuse_if_full(self.viewing.len(), CLIENTS_MAX, "clients")?;
             let client = ClientId::next(&mut self.last_client);
             let Greeting { colours, runs_in } = greeting;
-            let viewing = Viewing { out, colours, runs_in, shows: BTreeMap::new(), _gone: gone };
+            let viewing = Viewing {
+                out,
+                colours,
+                runs_in,
+                shows: BTreeMap::new(),
+                _gone: gone,
+            };
             let was = self.viewing.insert(client, viewing);
             assert!(was.is_none(), "viewer {client} is new");
             Ok(client)
@@ -856,7 +895,10 @@ mod model {
                 now.insert(*key, came);
             }
             assert_eq!(now.len() + gone.len(), keys.len());
-            self.viewing.get_mut(&client).expect("a viewer found above").shows = now;
+            self.viewing
+                .get_mut(&client)
+                .expect("a viewer found above")
+                .shows = now;
             Ok(gone)
         }
 
@@ -875,7 +917,9 @@ mod model {
                 let not_shown = format!("terminal {} is not shown", terminal.id);
                 return Err(Status::failed_precondition(not_shown));
             }
-            let terminal = terminals.terminal(terminal).expect("a shown terminal is the model's");
+            let terminal = terminals
+                .terminal(terminal)
+                .expect("a shown terminal is the model's");
             Ok(terminal.handle.clone())
         }
     }
@@ -918,22 +962,35 @@ mod model {
                 for (key, came) in &viewing.shows {
                     let frames = viewing.out.clone();
                     let colours = viewing.colours;
-                    let viewer = Viewer { client: *client, frames, colours, came: *came };
+                    let viewer = Viewer {
+                        client: *client,
+                        frames,
+                        colours,
+                        came: *came,
+                    };
                     by_terminal.entry(*key).or_default().push(viewer);
                 }
             }
             for terminal in self.terminals.placed() {
                 let viewers = by_terminal.remove(&terminal.key).unwrap_or_default();
-                terminal.handle.want(Wanted { size: terminal.size, viewers: viewers.into() });
+                terminal.handle.want(Wanted {
+                    size: terminal.size,
+                    viewers: viewers.into(),
+                });
             }
-            assert!(by_terminal.is_empty(), "every shown terminal is the model's");
+            assert!(
+                by_terminal.is_empty(),
+                "every shown terminal is the model's"
+            );
         }
     }
 
     pub(super) fn ending_status(ending: &Ending) -> Status {
         match ending {
             Ending::Emptied => Status::unavailable("it is ending, as nothing is left in it"),
-            Ending::Unreached(unreached) => Status::unavailable(format!("it is ending: {unreached}")),
+            Ending::Unreached(unreached) => {
+                Status::unavailable(format!("it is ending: {unreached}"))
+            }
         }
     }
 
@@ -952,10 +1009,16 @@ mod model {
     }
 
     fn told_closed(client: ClientId, out: &ViewerOut, key: TerminalKey) {
-        let closed = api::to_viewer::Event::Closed(api::Closed { terminal: Some(key.said()) });
-        if let Err(TrySendError::Full(_)) = out.try_send(Ok(api::ToViewer { event: Some(closed) }))
-        {
-            eprintln!("lune-mux: viewer {client} had no room to hear terminal {} closed", key.id);
+        let closed = api::to_viewer::Event::Closed(api::Closed {
+            terminal: Some(key.said()),
+        });
+        if let Err(TrySendError::Full(_)) = out.try_send(Ok(api::ToViewer {
+            event: Some(closed),
+        })) {
+            eprintln!(
+                "lune-mux: viewer {client} had no room to hear terminal {} closed",
+                key.id
+            );
         }
     }
 
@@ -963,7 +1026,9 @@ mod model {
         if count < max {
             return Ok(());
         }
-        Err(Status::resource_exhausted(format!("it holds {max} {what} at most")))
+        Err(Status::resource_exhausted(format!(
+            "it holds {max} {what} at most"
+        )))
     }
 }
 
@@ -974,28 +1039,34 @@ fn spawned(
     opens: &Opens,
     size: Size,
 ) -> Result<(Terminal, Placing), Status> {
-    let failed =
-        |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
+    let failed = |what: &str, error: std::io::Error| Status::internal(format!("{what}: {error}"));
     let token =
         ResumeToken::generate().map_err(|error| failed("no resume token generated", error))?;
     let (spec, ends, extra_vars, resume_guard) = match &opens.launch {
-        Launch::Direct { program, args, ends } => (
-            SpawnSpec { cwd: opens.cwd.clone(), program: program.clone(), args: args.clone() },
+        Launch::Direct {
+            program,
+            args,
+            ends,
+        } => (
+            SpawnSpec {
+                cwd: opens.cwd.clone(),
+                program: program.clone(),
+                args: args.clone(),
+            },
             *ends,
             Vec::new(),
             None,
         ),
-        Launch::ResumeInShell { shell, kind, resume } => {
-            let prep = resume_exec::prepare(
-                mux.runtime_dir.as_deref(),
-                &opens.cwd,
-                shell,
-                *kind,
-                resume,
-            )
-            .map_err(Status::failed_precondition)?;
+        Launch::ResumeInShell {
+            shell,
+            kind,
+            resume,
+        } => {
+            let prep =
+                resume_exec::prepare(mux.runtime_dir.as_deref(), &opens.cwd, shell, *kind, resume)
+                    .map_err(Status::failed_precondition)?;
             (prep.spec, Ends::Closes, prep.vars, Some(prep.guard))
-        },
+        }
     };
     let mut vars: Vec<(&str, String)> = vec![
         (pty::TERMINAL_VAR, key.id.to_string()),
@@ -1006,13 +1077,16 @@ fn spawned(
         vars.push((name.as_str(), value.clone()));
     }
     if let Some(socket) = &mux.browser_socket {
-        vars.push((pty::TERMINAL_BROWSER_SOCKET_VAR, socket.to_string_lossy().into_owned()));
+        vars.push((
+            pty::TERMINAL_BROWSER_SOCKET_VAR,
+            socket.to_string_lossy().into_owned(),
+        ));
     }
     let pty = Pty::opened(size).map_err(|error| failed("no pseudoterminal opened", error))?;
     let tty = pty.tty().to_owned();
-    let child = pty.spawned(&spec, &vars).map_err(|error| {
-        Status::failed_precondition(format!("opens did not start: {error}"))
-    })?;
+    let child = pty
+        .spawned(&spec, &vars)
+        .map_err(|error| Status::failed_precondition(format!("opens did not start: {error}")))?;
     let started = terminal::start(Arc::clone(mux), key, pty, child, size, token, resume_guard)
         .map_err(|error| failed("the terminal did not start", error))?;
     let terminal = Terminal::running(
@@ -1061,20 +1135,38 @@ pub(crate) mod tests {
 
     fn script(script: &str, args: &[&str]) -> Opens {
         let program = "/bin/sh".to_owned();
-        let args = ["-c", script].iter().chain(args).map(|arg| (*arg).to_owned()).collect();
-        Opens { cwd: cwd("/"), launch: Launch::Direct { program, args, ends: Ends::Holds } }
+        let args = ["-c", script]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect();
+        Opens {
+            cwd: cwd("/"),
+            launch: Launch::Direct {
+                program,
+                args,
+                ends: Ends::Holds,
+            },
+        }
     }
 
     fn unstartable() -> Opens {
         let program = "/nonexistent/program".to_owned();
         Opens {
             cwd: cwd("/"),
-            launch: Launch::Direct { program, args: Vec::new(), ends: Ends::Holds },
+            launch: Launch::Direct {
+                program,
+                args: Vec::new(),
+                ends: Ends::Holds,
+            },
         }
     }
 
     fn size() -> Size {
-        Size { columns: NonZeroU16::new(20).unwrap(), rows: NonZeroU16::new(4).unwrap() }
+        Size {
+            columns: NonZeroU16::new(20).unwrap(),
+            rows: NonZeroU16::new(4).unwrap(),
+        }
     }
 
     fn tag() -> Tag {
@@ -1114,9 +1206,16 @@ pub(crate) mod tests {
         let reserved = mux.reserve_terminal().unwrap();
         let refusal = reserved.start(&unstartable(), tag(), size()).unwrap_err();
         assert_eq!(refusal.code(), Code::FailedPrecondition);
-        assert!(refusal.message().starts_with("opens did not start: "), "{refusal:?}");
+        assert!(
+            refusal.message().starts_with("opens did not start: "),
+            "{refusal:?}"
+        );
         assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
-        let key = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let key = mux
+            .reserve_terminal()
+            .unwrap()
+            .start(&opens(), tag(), size())
+            .unwrap();
         assert_eq!(listed(&mux), [key.id.said()]);
     }
 
@@ -1141,7 +1240,11 @@ pub(crate) mod tests {
     #[test]
     fn a_start_that_fails_once_the_last_terminal_closed_ends_the_mux() {
         let mux = Mux::new();
-        let placed = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let placed = mux
+            .reserve_terminal()
+            .unwrap()
+            .start(&opens(), tag(), size())
+            .unwrap();
         let reserved = mux.reserve_terminal().unwrap();
         mux.close_terminal(placed).unwrap();
         assert_eq!(*mux.watched().borrow(), Listed::Holds(Listing::default()));
@@ -1167,11 +1270,15 @@ pub(crate) mod tests {
         assert_eq!(mux.end_unreached(unreached.clone()), Some(1));
         let refusal = reserved.place(started).unwrap_err();
         assert_eq!(refusal.code(), Code::Unavailable);
-        assert_eq!(*mux.watched().borrow(), Listed::Ended(Ending::Unreached(unreached)));
+        assert_eq!(
+            *mux.watched().borrow(),
+            Listed::Ended(Ending::Unreached(unreached))
+        );
         assert_eq!(listed(&mux), [] as [u32; 0]);
-        eventually("the program ends, though it ignores hangups and terms", || {
-            (process::test_kill_process(pid) == Err(Errno::SRCH)).then_some(())
-        });
+        eventually(
+            "the program ends, though it ignores hangups and terms",
+            || (process::test_kill_process(pid) == Err(Errno::SRCH)).then_some(()),
+        );
     }
 
     #[test]
@@ -1196,7 +1303,11 @@ pub(crate) mod tests {
         reserved.place(started).unwrap();
         eventually("the title is listed", || {
             let listing = mux.listing();
-            listing.terminals.iter().any(|terminal| terminal.title == "early").then_some(())
+            listing
+                .terminals
+                .iter()
+                .any(|terminal| terminal.title == "early")
+                .then_some(())
         });
     }
 
@@ -1214,23 +1325,33 @@ pub(crate) mod tests {
             cwd: None,
             reported_at: None,
         };
-        let make_terminal = |id: u32, chosen: api::ResumeRecord, others: Vec<api::ResumeRecord>| {
-            api::Terminal {
+        let make_terminal =
+            |id: u32, chosen: api::ResumeRecord, others: Vec<api::ResumeRecord>| api::Terminal {
                 key: Some(api::TerminalKey { id, made_at: None }),
                 program: Some(api::terminal::Program::Runs(api::Running {
                     pid: id,
                     foreground: None,
                     ran: None,
-                    resumes: Some(api::TerminalResumes { chosen: Some(chosen), others }),
+                    resumes: Some(api::TerminalResumes {
+                        chosen: Some(chosen),
+                        others,
+                    }),
                 })),
                 ..api::Terminal::default()
-            }
-        };
+            };
         let unit_cost = make_record(1, 200).encoded_len() + 16;
         let mut terminals = vec![
-            make_terminal(1, make_record(10, 200), vec![make_record(11, 200), make_record(12, 200)]),
+            make_terminal(
+                1,
+                make_record(10, 200),
+                vec![make_record(11, 200), make_record(12, 200)],
+            ),
             make_terminal(2, make_record(20, 200), vec![make_record(21, 200)]),
-            make_terminal(3, make_record(30, 200), vec![make_record(31, 200), make_record(32, 200)]),
+            make_terminal(
+                3,
+                make_record(30, 200),
+                vec![make_record(31, 200), make_record(32, 200)],
+            ),
         ];
         bound_listing_resumes(&mut terminals, unit_cost * 4);
         let counts: Vec<(Option<u32>, usize)> = terminals
@@ -1265,7 +1386,11 @@ pub(crate) mod tests {
         use crate::asked::{Colours, Greeting};
 
         let mux = Mux::new();
-        let key = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let key = mux
+            .reserve_terminal()
+            .unwrap()
+            .start(&opens(), tag(), size())
+            .unwrap();
         let mut watched = mux.watched();
         let _ = watched.borrow_and_update();
 
@@ -1284,8 +1409,16 @@ pub(crate) mod tests {
 
         let (out, _in) = mpsc::channel(1);
         let (gone, _let_go) = oneshot::channel();
-        let client =
-            mux.view(Greeting { colours: Colours::default(), runs_in: None }, out, gone).unwrap();
+        let client = mux
+            .view(
+                Greeting {
+                    colours: Colours::default(),
+                    runs_in: None,
+                },
+                out,
+                gone,
+            )
+            .unwrap();
         assert!(!watched.has_changed().unwrap());
         assert!(mux.show(client, &BTreeSet::from([key])).unwrap().is_empty());
         assert!(!watched.has_changed().unwrap());
@@ -1300,21 +1433,35 @@ pub(crate) mod tests {
             key.id,
             Exit::Code(0),
             EndedProgramStatuses::default(),
-            FinalMeta { title: Some("done".to_owned()), cwd: Some(cwd("/var")) },
+            FinalMeta {
+                title: Some("done".to_owned()),
+                cwd: Some(cwd("/var"))
+            },
         ));
         assert!(watched.has_changed().unwrap());
         let listed = watched.borrow_and_update().clone();
-        let Listed::Holds(listing) = listed else { panic!("held") };
+        let Listed::Holds(listing) = listed else {
+            panic!("held")
+        };
         assert_eq!(listing.terminals[0].title, "done");
         assert_eq!(listing.terminals[0].cwd, "/var");
 
-        mux.titled(key.id, MetaUpdate::Both { title: "late".to_owned(), cwd: cwd("/opt") });
+        mux.titled(
+            key.id,
+            MetaUpdate::Both {
+                title: "late".to_owned(),
+                cwd: cwd("/opt"),
+            },
+        );
         assert!(!watched.has_changed().unwrap());
         assert!(!mux.ended(
             key.id,
             Exit::Code(1),
             EndedProgramStatuses::default(),
-            FinalMeta { title: Some("again".to_owned()), cwd: None },
+            FinalMeta {
+                title: Some("again".to_owned()),
+                cwd: None
+            },
         ));
         assert!(!watched.has_changed().unwrap());
         let listing = mux.listing();
@@ -1327,7 +1474,11 @@ pub(crate) mod tests {
     #[test]
     fn closing_terminal_ended_removes_it_without_applying_final_metadata() {
         let mux = Mux::new();
-        let keeper = mux.reserve_terminal().unwrap().start(&opens(), tag(), size()).unwrap();
+        let keeper = mux
+            .reserve_terminal()
+            .unwrap()
+            .start(&opens(), tag(), size())
+            .unwrap();
         let closing_opens = Opens {
             cwd: cwd("/"),
             launch: Launch::Direct {
@@ -1336,7 +1487,11 @@ pub(crate) mod tests {
                 ends: Ends::Closes,
             },
         };
-        let closing = mux.reserve_terminal().unwrap().start(&closing_opens, tag(), size()).unwrap();
+        let closing = mux
+            .reserve_terminal()
+            .unwrap()
+            .start(&closing_opens, tag(), size())
+            .unwrap();
         let mut watched = mux.watched();
         let _ = watched.borrow_and_update();
 
@@ -1344,7 +1499,10 @@ pub(crate) mod tests {
             closing.id,
             Exit::Code(0),
             EndedProgramStatuses::default(),
-            FinalMeta { title: Some("bye".to_owned()), cwd: Some(cwd("/tmp")) },
+            FinalMeta {
+                title: Some("bye".to_owned()),
+                cwd: Some(cwd("/tmp"))
+            },
         ));
         assert!(watched.has_changed().unwrap());
         let Listed::Holds(listing) = watched.borrow_and_update().clone() else {

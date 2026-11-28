@@ -1,10 +1,25 @@
 [profile.default]
 fail-fast = false
 
+[[profile.default.overrides]]
+filter = """
+test(=git::pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails)
+or test(=layouts::the_restores_that_wait_out_their_pause_hold_side_by_side)
+or test(=demand::the_waits_of_half_a_minute_hold_side_by_side)
+or test(=resume::missing_explicit_cwd_skips_resume_and_tried_prevents_retry_after_failure)
+or test(=topics::the_topics_a_window_has_named_hold_side_by_side)
+or test(=resume::unlisted_flags_do_not_bypass_via_legacy_agent_and_pi_never_replays_prompt)
+or test(=resume::custom_nvim_rule_resumes_across_full_restart_and_blocks_symlink_escape)
+or test(=starts::a_named_lune_says_why_luned_keeps_no_more_projects_rather_than_go_to_another)
+or test(=bridge::a_client_is_told_why_a_command_reached_no_daemon)
+"""
+priority = 100
+
 [profile.quick]
 default-filter = """
 not test(=demand::the_waits_of_half_a_minute_hold_side_by_side)
-and not test(=sessions::pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails)
+and not test(=git::pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails)
+and not test(=layouts::the_restores_that_wait_out_their_pause_hold_side_by_side)
 """
 
 [profile.ci]

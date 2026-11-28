@@ -25,7 +25,11 @@ pub fn shared() -> Handle {
     let building = || built().expect("lune's tasks build as they are first handed over");
     let runtime = SHARED.get_or_init(building);
     let handle = runtime.handle().clone();
-    assert_eq!(handle.runtime_flavor(), RuntimeFlavor::MultiThread, "a task may block in place");
+    assert_eq!(
+        handle.runtime_flavor(),
+        RuntimeFlavor::MultiThread,
+        "a task may block in place"
+    );
     handle
 }
 
@@ -42,7 +46,7 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
 
-    use super::{shared, WORKER};
+    use super::{WORKER, shared};
 
     #[test]
     fn a_task_goes_on_after_the_thread_that_handed_it_over_ends() {

@@ -138,7 +138,9 @@ impl ProgramResumes {
             assert!(self.chosen.is_none());
             return None;
         }
-        let chosen_pid = self.chosen.expect("non-empty resume records have a chosen pid");
+        let chosen_pid = self
+            .chosen
+            .expect("non-empty resume records have a chosen pid");
         let chosen = self
             .records
             .get(&chosen_pid)
@@ -182,13 +184,7 @@ impl ProgramResumes {
         };
         let mut changed = false;
         for body in bodies {
-            changed |= self.apply_one(
-                body.as_ref(),
-                reported_at,
-                real_uid,
-                effective_uid,
-                inspect,
-            );
+            changed |= self.apply_one(body.as_ref(), reported_at, real_uid, effective_uid, inspect);
         }
         if changed {
             self.recompute_chosen(inspect);
@@ -211,12 +207,17 @@ impl ProgramResumes {
             Verified::Ignore => false,
             Verified::Reject { owner, .. } => {
                 owner.is_some_and(|pid| self.records.remove(&pid).is_some())
-            },
+            }
             Verified::Accept(AcceptedReport::Clear { pid, time }) => {
                 self.record_time(pid, time);
                 self.records.remove(&pid).is_some()
-            },
-            Verified::Accept(AcceptedReport::Set { pid, time, argv, cwd }) => {
+            }
+            Verified::Accept(AcceptedReport::Set {
+                pid,
+                time,
+                argv,
+                cwd,
+            }) => {
                 self.record_time(pid, time);
                 let Some(record) = self.validate_owner(
                     pid,
@@ -231,7 +232,7 @@ impl ProgramResumes {
                 };
                 self.insert_record(record);
                 true
-            },
+            }
         }
     }
 
@@ -348,7 +349,14 @@ impl ProgramResumes {
             }
         }
         let seq = self.next_seq();
-        self.records.insert(pid, StoredRecord { record, exited_at: None, seq });
+        self.records.insert(
+            pid,
+            StoredRecord {
+                record,
+                exited_at: None,
+                seq,
+            },
+        );
         assert!(self.records.len() <= RECORDS_MAX);
     }
 
@@ -405,13 +413,18 @@ impl ProgramResumes {
     }
 
     fn next_seq(&mut self) -> u64 {
-        self.seq = self.seq.checked_add(1).expect("resume records update fewer than 2^64 times");
+        self.seq = self
+            .seq
+            .checked_add(1)
+            .expect("resume records update fewer than 2^64 times");
         self.seq
     }
 
     fn bump_version(&mut self) {
-        self.version =
-            self.version.checked_add(1).expect("resume records change fewer than 2^64 times");
+        self.version = self
+            .version
+            .checked_add(1)
+            .expect("resume records change fewer than 2^64 times");
     }
 }
 
@@ -433,11 +446,7 @@ fn ancestor_chain(pid: u32, inspect: &impl ProcessInspector) -> Vec<OwnerInfo> {
     chain
 }
 
-fn is_wrapped(
-    chain: &[OwnerInfo],
-    pty_root_pid: u32,
-    inspect: &impl ProcessInspector,
-) -> bool {
+fn is_wrapped(chain: &[OwnerInfo], pty_root_pid: u32, inspect: &impl ProcessInspector) -> bool {
     for ancestor in chain.iter().skip(1) {
         let is_pty_root = ancestor.pid == pty_root_pid;
         let argv = inspect.argv(ancestor.pid);
@@ -526,8 +535,10 @@ mod tests {
     }
 
     fn report_argv(pid: u32, time: u64, words: &[&str], cwd: Option<&str>, token: &str) -> Vec<u8> {
-        let encoded: Vec<String> =
-            words.iter().map(|w| encode_base64_standard(w.as_bytes())).collect();
+        let encoded: Vec<String> = words
+            .iter()
+            .map(|w| encode_base64_standard(w.as_bytes()))
+            .collect();
         let mut prefix = format!("pid={pid}:time={time}:argv={}", encoded.join(","));
         if let Some(dir) = cwd {
             prefix.push_str(":cwd=");
@@ -552,9 +563,36 @@ mod tests {
     fn ancestor_is_preferred_over_descendant_and_clear_restores_child() {
         let token = ResumeToken::from_test("dummy-token-replace-me");
         let mut inspector = FakeInspector::default();
-        inspector.add(10, 1, 1000, "s10", "bash", &["/bin/bash"], Some(7), Some("/work"));
-        inspector.add(20, 10, 1000, "s20", "claude", &["claude"], Some(7), Some("/work"));
-        inspector.add(30, 20, 1000, "s30", "nvim", &["nvim"], Some(7), Some("/work/sub"));
+        inspector.add(
+            10,
+            1,
+            1000,
+            "s10",
+            "bash",
+            &["/bin/bash"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            20,
+            10,
+            1000,
+            "s20",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            30,
+            20,
+            1000,
+            "s30",
+            "nvim",
+            &["nvim"],
+            Some(7),
+            Some("/work/sub"),
+        );
 
         let mut resumes = ProgramResumes::new(token.clone(), 10, Some(7));
         let now_wall = UNIX_EPOCH + Duration::from_hours(500_000);
@@ -568,7 +606,9 @@ mod tests {
         assert_eq!(snap.chosen().placement(), ProcessPlacement::Wrapped);
         assert_eq!(
             snap.chosen().cwd(),
-            Some(&ResumeCwdSource::Inferred(ResumeCwd::parse("/work/sub").unwrap()))
+            Some(&ResumeCwdSource::Inferred(
+                ResumeCwd::parse("/work/sub").unwrap()
+            ))
         );
 
         let parent_rep = report_argv(
@@ -588,7 +628,9 @@ mod tests {
         assert_eq!(parent.placement(), ProcessPlacement::ShellHosted);
         assert_eq!(
             parent.cwd(),
-            Some(&ResumeCwdSource::Explicit(ResumeCwd::parse("/work").unwrap()))
+            Some(&ResumeCwdSource::Explicit(
+                ResumeCwd::parse("/work").unwrap()
+            ))
         );
 
         let clear = sign(&format!("pid=20:time={t}:clear=1"), token.as_str());
@@ -602,8 +644,26 @@ mod tests {
     fn dead_owner_survives_grace_window_and_is_removed_after() {
         let token = ResumeToken::from_test("dummy-token-replace-me");
         let mut inspector = FakeInspector::default();
-        inspector.add(10, 1, 1000, "s10", "bash", &["/bin/bash"], Some(7), Some("/work"));
-        inspector.add(20, 10, 1000, "s20", "claude", &["claude"], Some(7), Some("/work"));
+        inspector.add(
+            10,
+            1,
+            1000,
+            "s10",
+            "bash",
+            &["/bin/bash"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            20,
+            10,
+            1000,
+            "s20",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
 
         let mut resumes = ProgramResumes::new(token.clone(), 10, Some(7));
         let now_wall = UNIX_EPOCH + Duration::from_hours(500_000);
@@ -614,11 +674,19 @@ mod tests {
         inspector.owners.remove(&20);
         let t0 = Instant::now();
         resumes.reap_exited(t0, &inspector);
-        assert_eq!(resumes.snapshot().unwrap().count(), 1, "kept during grace window");
+        assert_eq!(
+            resumes.snapshot().unwrap().count(),
+            1,
+            "kept during grace window"
+        );
         assert!(resumes.has_exiting());
 
         resumes.reap_exited(t0 + Duration::from_millis(1900), &inspector);
-        assert_eq!(resumes.snapshot().unwrap().count(), 1, "still inside 2s grace");
+        assert_eq!(
+            resumes.snapshot().unwrap().count(),
+            1,
+            "still inside 2s grace"
+        );
 
         resumes.reap_exited(t0 + EXIT_GRACE, &inspector);
         assert!(resumes.snapshot().is_none(), "pruned after 2s grace");
@@ -628,15 +696,42 @@ mod tests {
     fn reused_pid_with_different_start_time_counts_as_exited() {
         let token = ResumeToken::from_test("dummy-token-replace-me");
         let mut inspector = FakeInspector::default();
-        inspector.add(10, 1, 1000, "s10", "bash", &["/bin/bash"], Some(7), Some("/work"));
-        inspector.add(20, 10, 1000, "s20", "claude", &["claude"], Some(7), Some("/work"));
+        inspector.add(
+            10,
+            1,
+            1000,
+            "s10",
+            "bash",
+            &["/bin/bash"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            20,
+            10,
+            1000,
+            "s20",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
 
         let mut resumes = ProgramResumes::new(token.clone(), 10, Some(7));
         let now_wall = UNIX_EPOCH + Duration::from_hours(500_000);
         let rep = report_argv(20, 1_800_000_000, &["claude"], None, token.as_str());
         resumes.apply_report(&rep, now_wall, 1000, 1000, &inspector);
 
-        inspector.add(20, 10, 1000, "s20-new", "sleep", &["sleep", "60"], Some(7), Some("/work"));
+        inspector.add(
+            20,
+            10,
+            1000,
+            "s20-new",
+            "sleep",
+            &["sleep", "60"],
+            Some(7),
+            Some("/work"),
+        );
         let t0 = Instant::now();
         resumes.reap_exited(t0, &inspector);
         assert!(resumes.has_exiting());
@@ -649,12 +744,66 @@ mod tests {
     fn rejects_wrong_uid_foreign_process_and_marks_chroot_and_sandbox_wrapped() {
         let token = ResumeToken::from_test("dummy-token-replace-me");
         let mut inspector = FakeInspector::default();
-        inspector.add(10, 1, 1000, "s10", "bash", &["/bin/bash"], Some(7), Some("/work"));
-        inspector.add(20, 10, 1001, "s20", "claude", &["claude"], Some(7), Some("/work"));
-        inspector.add(30, 1, 1000, "s30", "claude", &["claude"], Some(99), Some("/work"));
-        inspector.add(40, 10, 1000, "s40", "bwrap", &["bwrap", "claude"], Some(7), Some("/work"));
-        inspector.add(41, 40, 1000, "s41", "claude", &["claude"], Some(7), Some("/work"));
-        inspector.add(50, 10, 1000, "s50", "claude", &["claude"], Some(7), Some("/work"));
+        inspector.add(
+            10,
+            1,
+            1000,
+            "s10",
+            "bash",
+            &["/bin/bash"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            20,
+            10,
+            1001,
+            "s20",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            30,
+            1,
+            1000,
+            "s30",
+            "claude",
+            &["claude"],
+            Some(99),
+            Some("/work"),
+        );
+        inspector.add(
+            40,
+            10,
+            1000,
+            "s40",
+            "bwrap",
+            &["bwrap", "claude"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            41,
+            40,
+            1000,
+            "s41",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            50,
+            10,
+            1000,
+            "s50",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
         inspector.different_roots.push(50);
 
         let mut resumes = ProgramResumes::new(token.clone(), 10, Some(7));
@@ -693,7 +842,10 @@ mod tests {
         );
         let snap = resumes.snapshot().unwrap();
         assert_eq!(snap.count(), 2);
-        assert!(snap.iter().all(|record| record.placement() == ProcessPlacement::Wrapped));
+        assert!(
+            snap.iter()
+                .all(|record| record.placement() == ProcessPlacement::Wrapped)
+        );
     }
 
     #[test]
@@ -710,7 +862,16 @@ mod tests {
             Some(7),
             Some("/work"),
         );
-        inspector.add(20, 10, 1000, "s20", "claude", &["claude"], Some(7), Some("/work"));
+        inspector.add(
+            20,
+            10,
+            1000,
+            "s20",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
 
         let mut resumes = ProgramResumes::new(token.clone(), 10, Some(7));
         let now_wall = UNIX_EPOCH + Duration::from_hours(500_000);
@@ -722,7 +883,10 @@ mod tests {
             1000,
             &inspector,
         );
-        assert_eq!(resumes.snapshot().unwrap().chosen().placement(), ProcessPlacement::ShellHosted);
+        assert_eq!(
+            resumes.snapshot().unwrap().chosen().placement(),
+            ProcessPlacement::ShellHosted
+        );
 
         let mut root_resumes = ProgramResumes::new(token.clone(), 20, Some(7));
         root_resumes.apply_report(
@@ -732,18 +896,57 @@ mod tests {
             1000,
             &inspector,
         );
-        assert_eq!(root_resumes.snapshot().unwrap().chosen().placement(), ProcessPlacement::Root);
+        assert_eq!(
+            root_resumes.snapshot().unwrap().chosen().placement(),
+            ProcessPlacement::Root
+        );
     }
 
     #[test]
     fn reparented_or_overdeep_chain_without_pty_root_is_marked_wrapped() {
         let token = ResumeToken::from_test("dummy-token-replace-me");
         let mut inspector = FakeInspector::default();
-        inspector.add(10, 1, 1000, "s10", "bash", &["/bin/bash"], Some(7), Some("/work"));
-        inspector.add(500, 1, 1000, "s500", "bash", &["/bin/bash"], Some(7), Some("/work"));
-        inspector.add(501, 500, 1000, "s501", "claude", &["claude"], Some(7), Some("/work"));
+        inspector.add(
+            10,
+            1,
+            1000,
+            "s10",
+            "bash",
+            &["/bin/bash"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            500,
+            1,
+            1000,
+            "s500",
+            "bash",
+            &["/bin/bash"],
+            Some(7),
+            Some("/work"),
+        );
+        inspector.add(
+            501,
+            500,
+            1000,
+            "s501",
+            "claude",
+            &["claude"],
+            Some(7),
+            Some("/work"),
+        );
 
-        inspector.add(600, 10, 1000, "s600", "bwrap", &["bwrap", "sh"], Some(7), Some("/work"));
+        inspector.add(
+            600,
+            10,
+            1000,
+            "s600",
+            "bwrap",
+            &["bwrap", "sh"],
+            Some(7),
+            Some("/work"),
+        );
         let mut parent = 600;
         for step in 1..=70u32 {
             let pid = 600 + step;
@@ -786,7 +989,10 @@ mod tests {
         );
         let snap = resumes.snapshot().unwrap();
         assert_eq!(snap.count(), 2);
-        assert!(snap.iter().all(|record| record.placement() == ProcessPlacement::Wrapped));
+        assert!(
+            snap.iter()
+                .all(|record| record.placement() == ProcessPlacement::Wrapped)
+        );
         assert_eq!(resumes.version(), 1);
     }
 }

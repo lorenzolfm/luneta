@@ -100,16 +100,10 @@ let
         else
           [ ];
       raw =
-        if hashErrors == [ ] && hashMatches != [ ] then
-          builtins.head (builtins.head hashMatches)
-        else
-          null;
+        if hashErrors == [ ] && hashMatches != [ ] then builtins.head (builtins.head hashMatches) else null;
       isEmpty = raw != null && builtins.match "[ \t]*" raw != null;
       tokens =
-        if raw == null || isEmpty then
-          [ ]
-        else
-          builtins.filter builtins.isString (builtins.split "," raw);
+        if raw == null || isEmpty then [ ] else builtins.filter builtins.isString (builtins.split "," raw);
       parsed = map (
         token:
         let
@@ -227,8 +221,7 @@ let
           }
         else
           let
-            pattern =
-              if ref.kind == "workspace" then "crates/([A-Za-z0-9_-]+)" else "\\.\\./([A-Za-z0-9_-]+)";
+            pattern = if ref.kind == "workspace" then "crates/([A-Za-z0-9_-]+)" else "\\.\\./([A-Za-z0-9_-]+)";
             expected = if ref.kind == "workspace" then "crates/<crate>" else "../<crate>";
             matched = builtins.match pattern ref.path;
             dir = if matched == null then null else builtins.head matched;

@@ -1,24 +1,24 @@
 use std::collections::BTreeMap;
 use std::fs::{self, Permissions};
 use std::num::NonZeroU32;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
 use lune_protocol::watch::HostVersion;
-use lune_waits::{eventually, Began, Gap, Lasted};
+use lune_waits::{Began, Gap, Lasted, eventually};
 use luned::api::change_projects_request::{Change, ForgetProject};
 use luned::api::checkout::Head;
 use luned::api::git_status::{NoCheckout, Stands};
 use luned::api::projects::Held;
 use luned::api::{self, Branch, Changes, Checkout, PullRequestState, Upstream};
 use luned::checks::PullPage;
-use luned::{parked_watch, SETTLE, WATCH};
+use luned::{SETTLE, WATCH, parked_watch};
 use prost::Message as _;
 use serde_json::json;
 
-use crate::host::{start, Daemon, Host, LUNE};
+use crate::host::{Daemon, Host, LUNE, start};
 use crate::projects::{asked, project};
 
 fn number(pull_request: &api::PullRequest) -> u32 {
@@ -50,7 +50,10 @@ impl Host {
         let output = command.stderr(Stdio::inherit()).output().unwrap();
         let lasted = asked.lasted();
         assert!(output.status.success(), "lune watch --changes failed");
-        (api::WatchResponse::decode(output.stdout.as_slice()).unwrap(), lasted)
+        (
+            api::WatchResponse::decode(output.stdout.as_slice()).unwrap(),
+            lasted,
+        )
     }
 }
 
@@ -89,12 +92,24 @@ fn forgotten(host: &Host, project: u64) {
 
 fn git(dir: &Path, args: &[&str]) -> bool {
     let mut git = Command::new("git");
-    for repository in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
+    for repository in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
         git.env_remove(repository);
     }
     git.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
         .args(["-c", "maintenance.auto=false"])
         .arg("-C")
         .arg(dir)
@@ -115,11 +130,22 @@ fn commit(dir: &Path, file: &str, text: &str) {
 fn changed_every_way(dir: &Path, origin: &Path) {
     assert!(git(origin, &["init", "-q", "--bare", "-b", "main"]));
     assert!(git(dir, &["init", "-q", "-b", "main"]));
-    let files = ["stashed", "modified", "retyped", "staged", "deleted", "renamed", "conflicted"];
+    let files = [
+        "stashed",
+        "modified",
+        "retyped",
+        "staged",
+        "deleted",
+        "renamed",
+        "conflicted",
+    ];
     for file in files {
         commit(dir, file, "start\n");
     }
-    assert!(git(dir, &["remote", "add", "origin", &origin.display().to_string()]));
+    assert!(git(
+        dir,
+        &["remote", "add", "origin", &origin.display().to_string()]
+    ));
     assert!(git(dir, &["push", "-q", "-u", "origin", "main"]));
     fs::write(dir.join("stashed"), "kept for later\n").unwrap();
     assert!(git(dir, &["stash", "-q"]));
@@ -127,7 +153,10 @@ fn changed_every_way(dir: &Path, origin: &Path) {
     commit(dir, "conflicted", "theirs\n");
     assert!(git(dir, &["switch", "-q", "main"]));
     commit(dir, "conflicted", "ours\n");
-    assert!(!git(dir, &["merge", "-q", "other"]), "the merge should go wrong");
+    assert!(
+        !git(dir, &["merge", "-q", "other"]),
+        "the merge should go wrong"
+    );
     fs::write(dir.join("modified"), "changed\n").unwrap();
     fs::remove_file(dir.join("retyped")).unwrap();
     symlink("modified", dir.join("retyped")).unwrap();
@@ -146,14 +175,20 @@ fn names(line: &str, tool: &str) -> bool {
 fn git_says_how_each_project_s_folder_stands() {
     let host = Host::new();
     let dirs = scratch();
-    let (tree, plain, detached) =
-        (dirs.path().join("tree"), dirs.path().join("plain"), dirs.path().join("detached"));
+    let (tree, plain, detached) = (
+        dirs.path().join("tree"),
+        dirs.path().join("plain"),
+        dirs.path().join("detached"),
+    );
     let origin = dirs.path().join("origin.git");
     for dir in [&tree, &plain, &detached, &origin] {
         fs::create_dir(dir).unwrap();
     }
     changed_every_way(&tree, &origin);
-    assert!(git(&detached, &["clone", "-q", &origin.display().to_string(), "."]));
+    assert!(git(
+        &detached,
+        &["clone", "-q", &origin.display().to_string(), "."]
+    ));
     assert!(git(&detached, &["checkout", "-q", "--detach"]));
 
     let spelled = |dir: &PathBuf| dir.display().to_string();
@@ -165,13 +200,28 @@ fn git_says_how_each_project_s_folder_stands() {
         let statuses = host.host().git_statuses;
         (statuses.len() == 3).then_some(statuses)
     });
-    let stands =
-        |dir: &str| statuses.iter().find(|status| status.dir == dir).unwrap().stands.clone();
-    let every =
-        Changes { conflicted: 1, deleted: 1, renamed: 1, modified: 2, staged: 1, untracked: 1 };
+    let stands = |dir: &str| {
+        statuses
+            .iter()
+            .find(|status| status.dir == dir)
+            .unwrap()
+            .stands
+            .clone()
+    };
+    let every = Changes {
+        conflicted: 1,
+        deleted: 1,
+        renamed: 1,
+        modified: 2,
+        staged: 1,
+        untracked: 1,
+    };
     let main = Branch {
         name: "main".to_owned(),
-        upstream: Some(Upstream { ahead: 1, behind: 0 }),
+        upstream: Some(Upstream {
+            ahead: 1,
+            behind: 0,
+        }),
         changed: None,
     };
     let checkout = |dir: &str, head, changes, stashes| {
@@ -185,13 +235,19 @@ fn git_says_how_each_project_s_folder_stands() {
     };
     assert_eq!(stands(&tree), checkout(&tree, Head::Branch(main), every, 1));
     let none = Changes::default();
-    assert_eq!(stands(&detached), checkout(&detached, Head::Detached(()), none, 0));
+    assert_eq!(
+        stands(&detached),
+        checkout(&detached, Head::Detached(()), none, 0)
+    );
     assert_eq!(stands(&plain), Some(Stands::Outside(())));
 
     forgotten(&host, watching[1]);
     eventually("what git said of plain goes", || {
         let statuses = host.host().git_statuses;
-        statuses.iter().all(|status| status.dir != plain).then_some(())
+        statuses
+            .iter()
+            .all(|status| status.dir != plain)
+            .then_some(())
     });
 }
 
@@ -203,13 +259,26 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     let host = Host::new();
     let dirs = scratch();
     let dirs = dirs.path().canonicalize().unwrap();
-    let (origin, work, other) =
-        (dirs.join("origin.git"), dirs.join("work"), dirs.join("other"));
+    let (origin, work, other) = (
+        dirs.join("origin.git"),
+        dirs.join("work"),
+        dirs.join("other"),
+    );
     for dir in [&work, &other, &origin] {
         fs::create_dir(dir).unwrap();
     }
     assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
-    assert!(git(&work, &["clone", "-q", "--origin", "origin", &origin.display().to_string(), "."]));
+    assert!(git(
+        &work,
+        &[
+            "clone",
+            "-q",
+            "--origin",
+            "origin",
+            &origin.display().to_string(),
+            "."
+        ]
+    ));
     commit(&work, "README", "start\n");
     assert!(git(&work, &["push", "-q", "origin", "main"]));
     assert!(git(&work, &["remote", "set-head", "origin", "main"]));
@@ -222,7 +291,14 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     assert!(git(&work, &["add", "-N", "new"]));
     assert!(git(
         &other,
-        &["clone", "-q", "--origin", "origin", &origin.display().to_string(), "."],
+        &[
+            "clone",
+            "-q",
+            "--origin",
+            "origin",
+            &origin.display().to_string(),
+            "."
+        ],
     ));
     assert!(git(&other, &["remote", "set-head", "origin", "main"]));
 
@@ -234,22 +310,35 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     }
 
     let changed = |dir: &str| {
-        host.host().git_statuses.iter().find(|status| status.dir == dir).and_then(|status| {
-            match status.stands.as_ref()? {
-                Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. }) => {
+        host.host()
+            .git_statuses
+            .iter()
+            .find(|status| status.dir == dir)
+            .and_then(|status| match status.stands.as_ref()? {
+                Stands::Checkout(Checkout {
+                    head: Some(Head::Branch(branch)),
+                    ..
+                }) => {
                     let changed = branch.changed.as_ref()?;
                     Some((changed.added, changed.deleted))
-                },
+                }
                 _ => None,
-            }
-        })
+            })
     };
     eventually("git counts the lines changed on issue-299", || {
         (changed(&work) == Some((3, 2))).then_some(())
     });
-    let git_said = || daemon.said().iter().find(|line| names(line, "git")).cloned();
+    let git_said = || {
+        daemon
+            .said()
+            .iter()
+            .find(|line| names(line, "git"))
+            .cloned()
+    };
     lune_waits::never("git says something", git_said);
-    eventually("git counts none on main", || changed(&other).is_none().then_some(()));
+    eventually("git counts none on main", || {
+        changed(&other).is_none().then_some(())
+    });
 
     assert!(git(at(&other), &["switch", "-q", "-c", "fold"]));
     commit(at(&other), "new", "d\n");
@@ -257,7 +346,9 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
         (changed(&other) == Some((1, 0))).then_some(())
     });
     assert!(git(at(&other), &["switch", "-q", "main"]));
-    eventually("git counts none on main", || changed(&other).is_none().then_some(()));
+    eventually("git counts none on main", || {
+        changed(&other).is_none().then_some(())
+    });
 }
 
 #[test]
@@ -280,7 +371,11 @@ fn what_git_said_stands_once_it_will_not_read_the_repository() {
 }
 
 fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
-    let status = host.host().git_statuses.into_iter().find(|status| status.dir == cwd)?;
+    let status = host
+        .host()
+        .git_statuses
+        .into_iter()
+        .find(|status| status.dir == cwd)?;
     match status.stands? {
         Stands::Checkout(checkout) => Some(checkout),
         Stands::Outside(()) | Stands::NoCheckout(_) => None,
@@ -289,7 +384,11 @@ fn checkout(host: &Host, cwd: &str) -> Option<Checkout> {
 
 fn in_no_repository(host: &Host, cwd: &str) {
     eventually("git says the directory is in no repository", || {
-        let status = host.host().git_statuses.into_iter().find(|status| status.dir == cwd)?;
+        let status = host
+            .host()
+            .git_statuses
+            .into_iter()
+            .find(|status| status.dir == cwd)?;
         (status.stands == Some(Stands::Outside(()))).then_some(())
     });
 }
@@ -313,7 +412,8 @@ impl AtOnce<'_> {
         let before = self.daemon.said().iter().filter(|line| heard(line)).count();
         change();
         for times in before + 1..=before + HEARD_MAX {
-            self.daemon.says_at_least(&format!("the watch hears {what}"), times, heard);
+            self.daemon
+                .says_at_least(&format!("the watch hears {what}"), times, heard);
             if checkout(self.host, self.cwd).is_some_and(|it| shows(&it)) {
                 return;
             }
@@ -332,19 +432,43 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
         fs::create_dir(dir).unwrap();
     }
     let format = format!("--ref-format={format}");
-    assert!(git(&origin, &["init", "-q", "--bare", "-b", "main", &format]));
+    assert!(git(
+        &origin,
+        &["init", "-q", "--bare", "-b", "main", &format]
+    ));
     assert!(git(&repo, &["init", "-q", "-b", "main", &format]));
     fs::create_dir(repo.join("src")).unwrap();
     commit(&repo, "src/lib.rs", "start\n");
     let spelled = |dir: &Path| dir.display().to_string();
     assert!(git(&repo, &["remote", "add", "origin", &spelled(&origin)]));
     assert!(git(&repo, &["push", "-q", "-u", "origin", "main"]));
-    assert!(git(&repo, &["worktree", "add", "-q", "-b", "work", &spelled(&tree), "origin/main"]));
-    assert!(git(&repo, &["worktree", "add", "-q", "--detach", &spelled(&beside)]));
-    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    assert!(git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "work",
+            &spelled(&tree),
+            "origin/main"
+        ]
+    ));
+    assert!(git(
+        &repo,
+        &["worktree", "add", "-q", "--detach", &spelled(&beside)]
+    ));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", &spelled(&origin), "elsewhere"]
+    ));
     let mut daemon = start(host.vars()).unwrap();
     let (_, src) = watched(&host, &spelled(&tree.join("src")));
-    assert_eq!(src, spelled(&tree), "a folder in a checkout is its checkout's project");
+    assert_eq!(
+        src,
+        spelled(&tree),
+        "a folder in a checkout is its checkout's project"
+    );
     eventually("git says how the tree stands", || checkout(&host, &src));
 
     let edit = |file: &str, text: &str| fs::write(tree.join(file), text).unwrap();
@@ -356,7 +480,11 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
     };
     let upstream = |it: &Checkout| branch(it)?.upstream.map(|it| (it.ahead, it.behind));
     let clean = |it: &Checkout| changes(it) == Changes::default();
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &src };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &src,
+    };
 
     let edited = || edit("src/lib.rs", "edited\n");
     at_once.shows("an edit in src", edited, |it| changes(it).modified == 1);
@@ -364,11 +492,17 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
         fs::create_dir(tree.join("src/new")).unwrap();
         edit("src/new/mod.rs", "new\n");
     };
-    at_once.shows("a directory new in src", made, |it| changes(it).untracked == 1);
+    at_once.shows("a directory new in src", made, |it| {
+        changes(it).untracked == 1
+    });
     let staged = |it: &Checkout| changes(it).staged == 1 && changes(it).untracked == 0;
     at_once.shows("it staged", || in_tree(&["add", "src/new"]), staged);
     let committed = |it: &Checkout| clean(it) && upstream(it) == Some((1, 0));
-    at_once.shows("a commit", || in_tree(&["commit", "-q", "-am", "work"]), committed);
+    at_once.shows(
+        "a commit",
+        || in_tree(&["commit", "-q", "-am", "work"]),
+        committed,
+    );
     let modified = |it: &Checkout| changes(it).modified == 1;
     let edited = || edit("src/new/mod.rs", "edited\n");
     at_once.shows("an edit in the directory committed", edited, modified);
@@ -395,7 +529,11 @@ fn says_at_once_as_a_checkout_changes(format: &str) {
     let dropped = || in_tree(&["stash", "drop", "-q", "stash@{1}"]);
     at_once.shows("the first stash dropped", dropped, stashed(1));
     let other = |it: &Checkout| branch(it).is_some_and(|branch| branch.name == "other");
-    at_once.shows("a checkout", || in_tree(&["switch", "-q", "-c", "other"]), other);
+    at_once.shows(
+        "a checkout",
+        || in_tree(&["switch", "-q", "-c", "other"]),
+        other,
+    );
 }
 
 #[test]
@@ -422,7 +560,11 @@ fn git_says_at_once_as_a_repository_made_in_another_changes() {
     eventually("git says how the tree stands", || checkout(&host, &cwd));
 
     let made = || assert!(git(&src, &["init", "-q", "-b", "inner"]));
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &cwd,
+    };
     at_once.shows("a work tree made in src", made, on_branch("inner"));
     let switched = || assert!(git(&src, &["switch", "-q", "-c", "other"]));
     at_once.shows("a branch checked out in it", switched, on_branch("other"));
@@ -447,7 +589,11 @@ fn a_git_folder_that_does_not_read_leaves_the_checkout_it_is_in_watched() {
 
     let modified = |it: &Checkout| it.changes.unwrap_or_default().modified == 1;
     let edited = || fs::write(src.join("lib.rs"), "edited\n").unwrap();
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &cwd,
+    };
     at_once.shows("an edit beside it", edited, modified);
     mode(0o755);
 }
@@ -463,7 +609,11 @@ fn git_says_at_once_as_a_repository_begins_where_there_was_none() {
 
     let made = || assert!(git(dir.path(), &["init", "-q", "-b", "first"]));
     let first = on_branch("first");
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &cwd,
+    };
     at_once.shows("a work tree made where there was none", made, first);
     let switched = || assert!(git(dir.path(), &["switch", "-q", "-c", "other"]));
     at_once.shows("a branch checked out in it", switched, on_branch("other"));
@@ -484,9 +634,15 @@ fn git_says_at_once_as_a_repository_begins_in_a_directory_made_again() {
     let asked = noted.statuses();
     fs::remove_dir(&work).unwrap();
     fs::create_dir(&work).unwrap();
-    eventually("git is asked again", || (noted.statuses() > asked).then_some(()));
+    eventually("git is asked again", || {
+        (noted.statuses() > asked).then_some(())
+    });
     let made = || assert!(git(&work, &["init", "-q", "-b", "first"]));
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &cwd,
+    };
     at_once.shows("a work tree made in it", made, on_branch("first"));
 }
 
@@ -506,7 +662,10 @@ fn a_checkout_taken_away_is_said_of_no_more() {
     fs::remove_dir_all(&work).unwrap();
     eventually("git says nothing of it", || {
         let statuses = host.host().git_statuses;
-        statuses.iter().all(|status| status.dir != cwd).then_some(())
+        statuses
+            .iter()
+            .all(|status| status.dir != cwd)
+            .then_some(())
     });
 }
 
@@ -523,7 +682,11 @@ fn a_repository_folder_has_git_asked_nothing_as_git_writes_there() {
     let repository = fs::canonicalize(top).unwrap().display().to_string();
     let of_its_clone = Some(Stands::NoCheckout(NoCheckout { repository }));
     eventually("git says it is no checkout of its clone", || {
-        let status = host.host().git_statuses.into_iter().find(|status| status.dir == cwd)?;
+        let status = host
+            .host()
+            .git_statuses
+            .into_iter()
+            .find(|status| status.dir == cwd)?;
         (status.stands == of_its_clone).then_some(())
     });
 
@@ -558,7 +721,11 @@ fn git_says_at_once_as_a_directory_moved_into_a_checkout_changes() {
         fs::rename(path("came"), top.join("src")).unwrap();
     };
     let modified = |it: &Checkout| changes(it).modified == 1;
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &cwd,
+    };
     at_once.shows("a directory moved in", moved_in, modified);
     let edited = || fs::write(top.join("src/lib.rs"), "start\n").unwrap();
     let clean = |it: &Checkout| changes(it) == Changes::default();
@@ -583,10 +750,16 @@ fn a_build_in_what_git_ignores_has_git_asked_nothing() {
         let changes = |it: &Checkout| it.changes.unwrap_or_default();
         move |it: &Checkout| changes(it).untracked == count
     };
-    eventually("git says how the tree stands", || checkout(&host, &cwd).filter(untracked(0)));
+    eventually("git says how the tree stands", || {
+        checkout(&host, &cwd).filter(untracked(0))
+    });
 
     let turns_up = |name: &'static str| move || fs::write(top.join(name), "").unwrap();
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &cwd,
+    };
     at_once.shows("a file that turns up", turns_up("one"), untracked(1));
     let asked = noted.statuses();
     for step in 0..20 {
@@ -617,7 +790,10 @@ fn git_runs_no_command_a_repository_names() {
     eventually("git says how the tree stands", || checkout(&host, &cwd));
     assert!(!ran.exists(), "git ran the command the repository named");
     assert!(git(&top, &["ls-files"]));
-    assert!(ran.exists(), "git runs no command the repository names here");
+    assert!(
+        ran.exists(),
+        "git runs no command the repository names here"
+    );
 }
 
 #[test]
@@ -625,26 +801,48 @@ fn the_behind_count_is_of_what_the_remote_has() {
     let host = Host::new();
     let dirs = scratch();
     let path = |name: &str| dirs.path().join(name);
-    let (origin, tree, elsewhere, ran) =
-        (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
+    let (origin, tree, elsewhere, ran) = (
+        path("origin.git"),
+        path("tree"),
+        path("elsewhere"),
+        path("ran"),
+    );
     let (lost, lone, merged) = (path("lost.git"), path("lone"), path("merged"));
     fs::create_dir(&origin).unwrap();
     assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
     let spelled = |dir: &Path| dir.display().to_string();
-    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", &spelled(&origin), "elsewhere"]
+    ));
     commit(&elsewhere, "README", "start\n");
     assert!(git(&elsewhere, &["push", "-q", "-u", "origin", "main"]));
-    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "tree"]));
-    assert!(git(dirs.path(), &["clone", "-q", "--bare", &spelled(&origin), "lost.git"]));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", &spelled(&origin), "tree"]
+    ));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", "--bare", &spelled(&origin), "lost.git"]
+    ));
     assert!(git(dirs.path(), &["clone", "-q", &spelled(&lost), "lone"]));
     fs::remove_dir_all(&lost).unwrap();
     for file in ["one", "two", "three"] {
         commit(&elsewhere, file, "new\n");
     }
     assert!(git(&elsewhere, &["push", "-q"]));
-    assert!(git(&elsewhere, &["push", "-q", "origin", "HEAD:refs/heads/done"]));
-    assert!(git(dirs.path(), &["clone", "-q", "-b", "done", &spelled(&origin), "merged"]));
-    assert!(git(&elsewhere, &["push", "-q", "origin", "--delete", "done"]));
+    assert!(git(
+        &elsewhere,
+        &["push", "-q", "origin", "HEAD:refs/heads/done"]
+    ));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", "-b", "done", &spelled(&origin), "merged"]
+    ));
+    assert!(git(
+        &elsewhere,
+        &["push", "-q", "origin", "--delete", "done"]
+    ));
     let hook = tree.join(".git/hooks/reference-transaction");
     fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
     fs::set_permissions(&hook, Permissions::from_mode(0o755)).unwrap();
@@ -660,9 +858,14 @@ fn the_behind_count_is_of_what_the_remote_has() {
         _ => None,
     };
     eventually("the branch is three behind", || {
-        checkout(&host, &cwd).and_then(upstream).filter(|it| *it == (0, 3))
+        checkout(&host, &cwd)
+            .and_then(upstream)
+            .filter(|it| *it == (0, 3))
     });
-    assert_eq!(fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap(), here);
+    assert_eq!(
+        fs::read_to_string(tree.join(".git/refs/heads/main")).unwrap(),
+        here
+    );
     assert!(!ran.exists(), "the fetch ran the hook the repository names");
     assert!(git(&tree, &["update-ref", "refs/heads/moved", "HEAD"]));
     assert!(ran.exists(), "git runs no hook the repository names here");
@@ -670,15 +873,23 @@ fn the_behind_count_is_of_what_the_remote_has() {
     let log = host.home.path().join(".local/state/lune/lune.log");
     let failed = format!("git did not fetch the upstream of main in {alone}");
     let gone = "the remote no longer has the upstream of done in ";
-    eventually("the log says the fetches failed and the branch is gone", || {
-        fs::read_to_string(&log).ok().filter(|log| log.contains(&failed) && log.contains(gone))
-    });
+    eventually(
+        "the log says the fetches failed and the branch is gone",
+        || {
+            fs::read_to_string(&log)
+                .ok()
+                .filter(|log| log.contains(&failed) && log.contains(gone))
+        },
+    );
     lune_waits::never("the log says it twice", || {
         let said = fs::read_to_string(&log).unwrap();
         (said.matches(&failed).count() != 1 || said.matches(gone).count() != 1).then_some(said)
     });
     let said = fs::read_to_string(&log).unwrap();
-    assert!(!said.contains("git did not fetch the upstream of done"), "{said}");
+    assert!(
+        !said.contains("git did not fetch the upstream of done"),
+        "{said}"
+    );
 }
 
 #[test]
@@ -686,16 +897,29 @@ fn the_fetch_runs_no_command_a_repository_names() {
     let host = Host::new();
     let dirs = scratch();
     let path = |name: &str| dirs.path().join(name);
-    let (origin, tree, elsewhere, ran) =
-        (path("origin.git"), path("tree"), path("elsewhere"), path("ran"));
+    let (origin, tree, elsewhere, ran) = (
+        path("origin.git"),
+        path("tree"),
+        path("elsewhere"),
+        path("ran"),
+    );
     fs::create_dir(&origin).unwrap();
     assert!(git(&origin, &["init", "-q", "--bare", "-b", "main"]));
     let spelled = |dir: &Path| dir.display().to_string();
-    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", &spelled(&origin), "elsewhere"]
+    ));
     commit(&elsewhere, "README", "start\n");
     assert!(git(&elsewhere, &["push", "-q", "-u", "origin", "main"]));
-    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "tree"]));
-    assert!(git(&tree, &["config", "remote.origin.url", "ssh://nowhere.invalid/x"]));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", &spelled(&origin), "tree"]
+    ));
+    assert!(git(
+        &tree,
+        &["config", "remote.origin.url", "ssh://nowhere.invalid/x"]
+    ));
     let named = format!("touch '{}'; :", ran.display());
     assert!(git(&tree, &["config", "core.sshCommand", &named]));
 
@@ -706,32 +930,55 @@ fn the_fetch_runs_no_command_a_repository_names() {
     let refused = format!("git did not fetch the upstream of main in {cwd}");
     let why = |line: &str| line.contains(&refused) && line.contains("core.sshcommand");
     eventually("the log says why the branch was not fetched", || {
-        fs::read_to_string(&log).ok().filter(|log| log.lines().any(why))
+        fs::read_to_string(&log)
+            .ok()
+            .filter(|log| log.lines().any(why))
     });
-    assert!(!ran.exists(), "the fetch ran the command the repository named");
+    assert!(
+        !ran.exists(),
+        "the fetch ran the command the repository named"
+    );
     let said = fs::read_to_string(&log).unwrap();
     assert_eq!(said.matches(&refused).count(), 1, "{said}");
     let _ = git(&tree, &["ls-remote", "origin"]);
-    assert!(ran.exists(), "git runs no command the repository names here");
+    assert!(
+        ran.exists(),
+        "git runs no command the repository names here"
+    );
 }
 
 #[test]
 fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let host = Host::new();
     let dirs = scratch();
-    let (tree, twin, other) =
-        (dirs.path().join("tree"), dirs.path().join("twin"), dirs.path().join("other"));
+    let (tree, twin, other) = (
+        dirs.path().join("tree"),
+        dirs.path().join("twin"),
+        dirs.path().join("other"),
+    );
     fs::create_dir(&tree).unwrap();
     fs::create_dir(&other).unwrap();
     for dir in [&tree, &other] {
         assert!(git(dir, &["init", "-q", "-b", "main"]));
         commit(dir, "README", "start\n");
     }
-    assert!(git(&tree, &["worktree", "add", "-q", "-f", &twin.display().to_string(), "main"]));
+    assert!(git(
+        &tree,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-f",
+            &twin.display().to_string(),
+            "main"
+        ]
+    ));
     let page = |number| format!("https://github.com/owner/repo/pull/{number}");
-    let run = |conclusion: &str| json!({
-        "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": conclusion,
-    });
+    let run = |conclusion: &str| {
+        json!({
+            "__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": conclusion,
+        })
+    };
     let rollup = json!([run("FAILURE"), run("SUCCESS"), { "__typename": "StatusContext",
         "context": "ci", "state": "PENDING" }]);
     let main = json!({
@@ -739,7 +986,10 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
         "statusCheckRollup": rollup,
     });
     host.gh.open("main", &main);
-    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page(8) }));
+    host.gh.open(
+        "fold",
+        &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page(8) }),
+    );
     let spelled = |dir: &Path| dir.display().to_string();
     let (top, src, beside) = (spelled(&tree), spelled(&twin), spelled(&other));
     let mut daemon = start(host.vars()).unwrap();
@@ -748,7 +998,9 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     }
     let found = || -> BTreeMap<String, (u32, PullRequestState, String)> {
         let pull_requests = host.host().pull_requests.into_iter();
-        pull_requests.map(|it| (it.dir.clone(), (number(&it), it.state(), it.url))).collect()
+        pull_requests
+            .map(|it| (it.dir.clone(), (number(&it), it.state(), it.url)))
+            .collect()
     };
 
     let open = (7, PullRequestState::Open, page(7));
@@ -759,8 +1011,17 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     let wanted = [top.clone(), src.clone(), beside.clone()].map(|dir| (dir, open.clone()));
     assert_eq!(all, BTreeMap::from(wanted));
     assert_eq!(host.gh.asked(), ["main", "main"]);
-    let checks = host.host().pull_requests.into_iter().map(|it| it.checks).collect::<Vec<_>>();
-    let failing = Some(api::Checks { pending: 1, failed: 1, passed: 1 });
+    let checks = host
+        .host()
+        .pull_requests
+        .into_iter()
+        .map(|it| it.checks)
+        .collect::<Vec<_>>();
+    let failing = Some(api::Checks {
+        pending: 1,
+        failed: 1,
+        passed: 1,
+    });
     assert_eq!(checks, vec![failing; 3]);
 
     assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
@@ -768,7 +1029,10 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     eventually("gh finds fold's pull request in tree", || {
         (found().get(&top) == Some(&draft)).then_some(())
     });
-    assert_eq!((found().get(&src), found().get(&beside)), (Some(&open), Some(&open)));
+    assert_eq!(
+        (found().get(&src), found().get(&beside)),
+        (Some(&open), Some(&open))
+    );
     assert_eq!(host.gh.asked(), ["main", "main", "fold"]);
 
     assert!(git(&other, &["switch", "-q", "-c", "bare"]));
@@ -776,9 +1040,19 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
         (!found().contains_key(&beside)).then_some(())
     });
     eventually("gh is asked about bare", || {
-        host.gh.asked().iter().any(|branch| branch == "bare").then_some(())
+        host.gh
+            .asked()
+            .iter()
+            .any(|branch| branch == "bare")
+            .then_some(())
     });
-    let gh_said = || daemon.said().iter().find(|line| line.contains("gh pr view")).cloned();
+    let gh_said = || {
+        daemon
+            .said()
+            .iter()
+            .find(|line| line.contains("gh pr view"))
+            .cloned()
+    };
     lune_waits::never("gh says something", gh_said);
     assert!(!found().contains_key(&beside));
     assert_eq!(host.gh.asked(), ["main", "main", "fold", "bare"]);
@@ -796,7 +1070,10 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
     }
     host.gh.hang("stuck");
     let page = "https://github.com/owner/repo/pull/7";
-    host.gh.open("main", &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page }));
+    host.gh.open(
+        "main",
+        &json!({ "number": 7, "state": "OPEN", "isDraft": false, "url": page }),
+    );
     let (stuck, other) = (stuck.display().to_string(), other.display().to_string());
     let _daemon = start(host.vars()).unwrap();
     for dir in [&stuck, &other] {
@@ -804,11 +1081,18 @@ fn a_branch_gh_hangs_on_holds_up_no_other() {
     }
 
     eventually("gh is asked about stuck", || {
-        host.gh.asked().iter().any(|branch| branch == "stuck").then_some(())
+        host.gh
+            .asked()
+            .iter()
+            .any(|branch| branch == "stuck")
+            .then_some(())
     });
     eventually("main's pull request shows as gh hangs on stuck", || {
         let pull_requests = host.host().pull_requests;
-        pull_requests.iter().any(|it| it.dir == other && number(it) == 7).then_some(())
+        pull_requests
+            .iter()
+            .any(|it| it.dir == other && number(it) == 7)
+            .then_some(())
     });
     host.gh.answer("stuck");
 }
@@ -832,18 +1116,31 @@ fn pending_checks_are_asked_about_again_soon_and_stand_stale_where_gh_fails() {
     watched(&host, &cwd);
     let shown = || {
         let pull_requests = host.host().pull_requests;
-        pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (it.checks, it.stale))
+        pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| (it.checks, it.stale))
     };
     let soon = |what: &str, wanted| eventually(what, || (shown() == Some(wanted)).then_some(()));
-    let pending = Some(api::Checks { pending: 1, failed: 0, passed: 0 });
-    eventually("main's checks show pending", || (shown() == Some((pending, false))).then_some(()));
+    let pending = Some(api::Checks {
+        pending: 1,
+        failed: 0,
+        passed: 0,
+    });
+    eventually("main's checks show pending", || {
+        (shown() == Some((pending, false))).then_some(())
+    });
 
     host.gh.fail("main");
     soon("they stand stale as gh fails", (pending, true));
 
     host.gh.open("main", &checked("SUCCESS"));
     host.gh.mend("main");
-    let passed = Some(api::Checks { pending: 0, failed: 0, passed: 1 });
+    let passed = Some(api::Checks {
+        pending: 0,
+        failed: 0,
+        passed: 1,
+    });
     soon("they pass as gh answers again", (passed, false));
 
     let failed = format!("gh pr view in {cwd}: HTTP 401: Requires authentication");
@@ -863,13 +1160,31 @@ const PARENT: &str = "github.com/upstream/repo";
 
 fn forked_tree(dir: &Path) {
     assert!(git(dir, &["init", "-q", "-b", "main"]));
-    assert!(git(dir, &["remote", "add", "origin", "https://github.com/owner/repo.git"]));
+    assert!(git(
+        dir,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git"
+        ]
+    ));
     commit(dir, "README", "start\n");
 }
 
 fn tracks(dir: &Path, branch: &str, remote: &str, head: &str) {
-    assert!(git(dir, &["config", &format!("branch.{branch}.remote"), remote]));
-    assert!(git(dir, &["config", &format!("branch.{branch}.merge"), &format!("refs/heads/{head}")]));
+    assert!(git(
+        dir,
+        &["config", &format!("branch.{branch}.remote"), remote]
+    ));
+    assert!(git(
+        dir,
+        &[
+            "config",
+            &format!("branch.{branch}.merge"),
+            &format!("refs/heads/{head}")
+        ]
+    ));
 }
 
 fn pushes_to_origin(dir: &Path, branch: &str) {
@@ -886,14 +1201,28 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
     let host = Host::new();
     let tree = scratch();
     forked_tree(tree.path());
-    assert!(git(tree.path(), &["remote", "add", "upstream", "https://github.com/upstream/repo.git"]));
+    assert!(git(
+        tree.path(),
+        &[
+            "remote",
+            "add",
+            "upstream",
+            "https://github.com/upstream/repo.git"
+        ]
+    ));
     let unnamed = ["current", "from_parent", "from_local", "merge_only"];
-    for branch in unnamed.into_iter().chain(["tracked", "pushing", "defaulted"]) {
+    for branch in unnamed
+        .into_iter()
+        .chain(["tracked", "pushing", "defaulted"])
+    {
         assert!(git(tree.path(), &["branch", branch]));
     }
     tracks(tree.path(), "from_parent", "upstream", "main");
     tracks(tree.path(), "from_local", ".", "main");
-    assert!(git(tree.path(), &["config", "branch.merge_only.merge", "refs/heads/merge_only"]));
+    assert!(git(
+        tree.path(),
+        &["config", "branch.merge_only.merge", "refs/heads/merge_only"]
+    ));
     host.gh.fork_of("upstream", "repo");
     let branches = [
         "main",
@@ -913,7 +1242,10 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| number(&it))
     };
     let asked_of = |branch: &str| host.gh.asked().iter().any(|it| it == branch).then_some(());
 
@@ -934,15 +1266,27 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
 
     pushes_to_origin(tree.path(), "tracked");
     assert!(git(tree.path(), &["switch", "-q", "tracked"]));
-    eventually("the parent's pull request is tracked's", || (found() == Some(6)).then_some(()));
+    eventually("the parent's pull request is tracked's", || {
+        (found() == Some(6)).then_some(())
+    });
 
-    assert!(git(tree.path(), &["config", "branch.pushing.pushRemote", "origin"]));
+    assert!(git(
+        tree.path(),
+        &["config", "branch.pushing.pushRemote", "origin"]
+    ));
     assert!(git(tree.path(), &["switch", "-q", "pushing"]));
-    eventually("the parent's pull request is pushing's", || (found() == Some(7)).then_some(()));
+    eventually("the parent's pull request is pushing's", || {
+        (found() == Some(7)).then_some(())
+    });
 
-    assert!(git(tree.path(), &["config", "remote.pushDefault", "origin"]));
+    assert!(git(
+        tree.path(),
+        &["config", "remote.pushDefault", "origin"]
+    ));
     assert!(git(tree.path(), &["switch", "-q", "defaulted"]));
-    eventually("the parent's pull request is defaulted's", || (found() == Some(8)).then_some(()));
+    eventually("the parent's pull request is defaulted's", || {
+        (found() == Some(8)).then_some(())
+    });
 
     let in_parent = |branch: &str| format!("{PARENT} {branch}");
     assert_eq!(
@@ -989,21 +1333,36 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| number(&it))
     };
 
-    eventually("the parent's open one is main's", || (found() == Some(2)).then_some(()));
+    eventually("the parent's open one is main's", || {
+        (found() == Some(2)).then_some(())
+    });
 
     assert!(git(tree.path(), &["switch", "-q", "merged"]));
-    eventually("the fork's merged one stands", || (found() == Some(3)).then_some(()));
+    eventually("the fork's merged one stands", || {
+        (found() == Some(3)).then_some(())
+    });
 
     assert!(git(tree.path(), &["switch", "-q", "alone"]));
-    eventually("the fork's closed one stands alone", || (found() == Some(5)).then_some(()));
+    eventually("the fork's closed one stands alone", || {
+        (found() == Some(5)).then_some(())
+    });
 
     let in_parent = |branch: &str| format!("{PARENT} {branch}");
     assert_eq!(
         host.gh.asked(),
-        ["main", &in_parent("main"), "merged", "alone", &in_parent("alone")]
+        [
+            "main",
+            &in_parent("main"),
+            "merged",
+            "alone",
+            &in_parent("alone")
+        ]
     );
     lune_waits::never("gh or git says something", || {
         daemon.said().iter().find(|line| names(line, "gh")).cloned()
@@ -1027,10 +1386,15 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| number(&it))
     };
 
-    eventually("another branch's merged one shows", || (found() == Some(1)).then_some(()));
+    eventually("another branch's merged one shows", || {
+        (found() == Some(1)).then_some(())
+    });
 
     let trunk_in_parent = format!("{PARENT} trunk");
     assert!(git(tree.path(), &["switch", "-q", "trunk"]));
@@ -1057,10 +1421,15 @@ fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| number(&it))
     };
 
-    eventually("the fork's closed one stands", || (found() == Some(1)).then_some(()));
+    eventually("the fork's closed one stands", || {
+        (found() == Some(1)).then_some(())
+    });
 
     assert_eq!(host.gh.asked(), ["main", &format!("{PARENT} main")]);
 }
@@ -1068,10 +1437,16 @@ fn a_fork_s_default_branch_keeps_what_the_fork_says_over_its_parent_s_closed_one
 fn on_pull_ref(dir: &Path, branch: &str, remote: Option<&str>, number: u32) {
     assert!(git(dir, &["branch", branch]));
     if let Some(remote) = remote {
-        assert!(git(dir, &["config", &format!("branch.{branch}.remote"), remote]));
+        assert!(git(
+            dir,
+            &["config", &format!("branch.{branch}.remote"), remote]
+        ));
     }
     let merge = format!("refs/pull/{number}/head");
-    assert!(git(dir, &["config", &format!("branch.{branch}.merge"), &merge]));
+    assert!(git(
+        dir,
+        &["config", &format!("branch.{branch}.merge"), &merge]
+    ));
 }
 
 #[test]
@@ -1080,8 +1455,19 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     let tree = scratch();
     let dir = tree.path();
     forked_tree(dir);
-    assert!(git(dir, &["remote", "add", "theirs", "https://github.com/Upstream/Repo.git"]));
-    assert!(git(dir, &["config", "url.https://github.com/.insteadOf", "hub:"]));
+    assert!(git(
+        dir,
+        &[
+            "remote",
+            "add",
+            "theirs",
+            "https://github.com/Upstream/Repo.git"
+        ]
+    ));
+    assert!(git(
+        dir,
+        &["config", "url.https://github.com/.insteadOf", "hub:"]
+    ));
     let of_parent = [
         ("by_url", "https://github.com/upstream/repo.git"),
         ("by_ssh", "git@github.com:upstream/repo.git"),
@@ -1095,9 +1481,15 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     let third = "https://github.com/third/repo.git";
     on_pull_ref(dir, "of_a_third", Some(third), 11);
     on_pull_ref(dir, "of_a_third_pushing", Some(third), 12);
-    assert!(git(dir, &["config", "branch.of_a_third_pushing.pushRemote", "origin"]));
+    assert!(git(
+        dir,
+        &["config", "branch.of_a_third_pushing.pushRemote", "origin"]
+    ));
     on_pull_ref(dir, "of_no_remote", None, 13);
-    assert!(git(dir, &["config", "branch.of_no_remote.pushRemote", "origin"]));
+    assert!(git(
+        dir,
+        &["config", "branch.of_no_remote.pushRemote", "origin"]
+    ));
     let of_others = ["of_a_third", "of_a_third_pushing", "of_no_remote"];
     for (number, branch) in (11..).zip(of_others) {
         host.gh.open_in(PARENT, branch, &pull(number, "OPEN"));
@@ -1111,7 +1503,10 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| number(&it))
     };
     let asked_of = |branch: &str| host.gh.asked().iter().any(|it| it == branch).then_some(());
     let in_parent = |branch: &str| format!("{PARENT} {branch}");
@@ -1134,13 +1529,19 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
     }
 
     assert!(git(dir, &["switch", "-q", "of_the_fork"]));
-    eventually("the fork's closed one stands", || (found() == Some(14)).then_some(()));
+    eventually("the fork's closed one stands", || {
+        (found() == Some(14)).then_some(())
+    });
     asked.push("of_the_fork".to_owned());
 
     assert_eq!(host.gh.asked(), asked);
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| names(line, "gh") || names(line, "git")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| names(line, "gh") || names(line, "git"))
+            .cloned()
     });
 }
 
@@ -1156,34 +1557,57 @@ fn a_fork_s_parent_is_looked_up_again_as_its_remotes_change() {
         pushes_to_origin(tree.path(), branch);
     }
     host.gh.fork_of("first", "repo");
-    host.gh.open_in("github.com/first/repo", "main", &pull(1, "OPEN"));
-    host.gh.open_in("github.com/second/repo", "second", &pull(2, "OPEN"));
-    host.gh.open_in("github.com/third/repo", "third", &pull(3, "OPEN"));
-    host.gh.open_in("github.com/third/repo", "same", &pull(4, "OPEN"));
+    host.gh
+        .open_in("github.com/first/repo", "main", &pull(1, "OPEN"));
+    host.gh
+        .open_in("github.com/second/repo", "second", &pull(2, "OPEN"));
+    host.gh
+        .open_in("github.com/third/repo", "third", &pull(3, "OPEN"));
+    host.gh
+        .open_in("github.com/third/repo", "same", &pull(4, "OPEN"));
     let cwd = tree.path().display().to_string();
     let _daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| number(&it))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| number(&it))
     };
 
-    eventually("the first parent's pull request is main's", || (found() == Some(1)).then_some(()));
+    eventually("the first parent's pull request is main's", || {
+        (found() == Some(1)).then_some(())
+    });
 
     host.gh.fork_of("second", "repo");
-    let moved = ["remote", "set-url", "origin", "https://github.com/other/repo.git"];
+    let moved = [
+        "remote",
+        "set-url",
+        "origin",
+        "https://github.com/other/repo.git",
+    ];
     assert!(git(tree.path(), &moved));
     assert!(git(tree.path(), &["switch", "-q", "second"]));
-    eventually("a new url asks for the parent again", || (found() == Some(2)).then_some(()));
+    eventually("a new url asks for the parent again", || {
+        (found() == Some(2)).then_some(())
+    });
 
     host.gh.fork_of("third", "repo");
-    assert!(git(tree.path(), &["config", "remote.origin.gh-resolved", "base"]));
+    assert!(git(
+        tree.path(),
+        &["config", "remote.origin.gh-resolved", "base"]
+    ));
     assert!(git(tree.path(), &["switch", "-q", "third"]));
-    eventually("a new base asks for the parent again", || (found() == Some(3)).then_some(()));
+    eventually("a new base asks for the parent again", || {
+        (found() == Some(3)).then_some(())
+    });
 
     host.gh.fork_of("unasked", "repo");
     assert!(git(tree.path(), &["switch", "-q", "same"]));
-    eventually("the same remotes keep the parent", || (found() == Some(4)).then_some(()));
+    eventually("the same remotes keep the parent", || {
+        (found() == Some(4)).then_some(())
+    });
 
     assert_eq!(host.gh.repositories(), 3);
 }
@@ -1202,10 +1626,17 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
     let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     let in_parent = format!("{PARENT} fold");
-    let asked = ["fold", in_parent.as_str(), "fold"];
+    let parent_first = ["fold", in_parent.as_str(), "fold"];
+    let fold_first = ["fold", "fold", in_parent.as_str()];
 
-    eventually("gh asks about fold once git sees it", || {
-        (host.gh.asked() == asked).then_some(())
+    lune_waits::eventually_showing("gh asks about fold once git sees it", || {
+        let asked = host.gh.asked();
+        let matches = |expected: [&str; 3]| asked.iter().map(String::as_str).eq(expected);
+        if matches(parent_first) || matches(fold_first) {
+            Ok(())
+        } else {
+            Err(asked)
+        }
     });
 
     lune_waits::never("gh or git says something", || {
@@ -1227,7 +1658,9 @@ fn what_goes_wrong_in_a_fork_s_parent_names_it_and_leaves_what_the_fork_said() {
     watched(&host, &cwd);
 
     let named = format!("gh pr view of {PARENT} in {cwd} said what does not read");
-    daemon.says("the daemon says whose answer does not read", |line| line.contains(&named));
+    daemon.says("the daemon says whose answer does not read", |line| {
+        line.contains(&named)
+    });
     eventually("the fork's closed one shows", || {
         let host = host.host();
         let found = host.pull_requests.into_iter().find(|it| it.dir == cwd);
@@ -1247,19 +1680,25 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     }
     let in_parent = "https://github.com/upstream/repo/pull/2840";
     let in_fork = "https://github.com/owner/repo/pull/9";
-    let pull = |number, url| {
-        json!({ "number": number, "state": "OPEN", "isDraft": false, "url": url })
-    };
+    let pull =
+        |number, url| json!({ "number": number, "state": "OPEN", "isDraft": false, "url": url });
     host.gh.fork_of("upstream", "repo");
     host.gh.open_in(PARENT, "theirs", &pull(2840, in_parent));
-    host.gh.open_in(PARENT, "ours", &pull(2845, "https://github.com/upstream/repo/pull/2845"));
+    host.gh.open_in(
+        PARENT,
+        "ours",
+        &pull(2845, "https://github.com/upstream/repo/pull/2845"),
+    );
     host.gh.open("ours", &pull(9, in_fork));
     let cwd = tree.path().display().to_string();
     let mut daemon = start(host.vars()).unwrap();
     watched(&host, &cwd);
     let found = || {
         let host = host.host();
-        host.pull_requests.into_iter().find(|it| it.dir == cwd).map(|it| (number(&it), it.url))
+        host.pull_requests
+            .into_iter()
+            .find(|it| it.dir == cwd)
+            .map(|it| (number(&it), it.url))
     };
 
     let main_in_parent = format!("{PARENT} main");
@@ -1273,13 +1712,20 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
     });
 
     assert!(git(tree.path(), &["switch", "-q", "ours"]));
-    eventually("the fork's pull request is ours, though the parent has one too", || {
-        (found() == Some((9, in_fork.to_owned()))).then_some(())
-    });
+    eventually(
+        "the fork's pull request is ours, though the parent has one too",
+        || (found() == Some((9, in_fork.to_owned()))).then_some(()),
+    );
 
     assert_eq!(
         host.gh.asked(),
-        ["main", main_in_parent.as_str(), "theirs", &format!("{PARENT} theirs"), "ours"]
+        [
+            "main",
+            main_in_parent.as_str(),
+            "theirs",
+            &format!("{PARENT} theirs"),
+            "ours"
+        ]
     );
     assert_eq!(host.gh.repositories(), 1);
     lune_waits::never("gh or git says something", || {
@@ -1295,7 +1741,10 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
     commit(tree.path(), "README", "start\n");
     assert!(git(tree.path(), &["branch", "fold"]));
     let page = "https://github.com/owner/repo/pull/8";
-    host.gh.open("fold", &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page }));
+    host.gh.open(
+        "fold",
+        &json!({ "number": 8, "state": "OPEN", "isDraft": true, "url": page }),
+    );
     host.gh.switch("fold");
     let cwd = tree.path().display().to_string();
     let mut daemon = start(host.vars()).unwrap();
@@ -1304,23 +1753,39 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
         let host = host.host();
         let status = host.git_statuses.iter().find(|status| status.dir == cwd);
         let branch = match status.and_then(|status| status.stands.as_ref()) {
-            Some(Stands::Checkout(Checkout { head: Some(Head::Branch(branch)), .. })) => {
-                Some(branch.name.clone())
-            },
+            Some(Stands::Checkout(Checkout {
+                head: Some(Head::Branch(branch)),
+                ..
+            })) => Some(branch.name.clone()),
             _ => None,
         };
-        let number = host.pull_requests.iter().find(|it| it.dir == cwd).map(number);
+        let number = host
+            .pull_requests
+            .iter()
+            .find(|it| it.dir == cwd)
+            .map(number);
         (branch, number)
     };
 
-    eventually("git sees fold checked out, and gh finds its pull request", || {
-        let (branch, number) = seen();
-        let seen = (branch.as_deref(), number);
-        assert_ne!(seen, (Some("main"), Some(8)), "fold's pull request under main");
-        (seen == (Some("fold"), Some(8))).then_some(())
-    });
+    eventually(
+        "git sees fold checked out, and gh finds its pull request",
+        || {
+            let (branch, number) = seen();
+            let seen = (branch.as_deref(), number);
+            assert_ne!(
+                seen,
+                (Some("main"), Some(8)),
+                "fold's pull request under main"
+            );
+            (seen == (Some("fold"), Some(8))).then_some(())
+        },
+    );
     lune_waits::never("gh or git says something", || {
-        daemon.said().iter().find(|line| line.contains("gh pr view")).cloned()
+        daemon
+            .said()
+            .iter()
+            .find(|line| line.contains("gh pr view"))
+            .cloned()
     });
 }
 
@@ -1331,7 +1796,12 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
     let host = Host::new();
     let mut daemon = start(host.vars()).unwrap();
 
-    let zero_pid = host.vars().command(&LUNE).args(["watch", "--after=0:0"]).output().unwrap();
+    let zero_pid = host
+        .vars()
+        .command(&LUNE)
+        .args(["watch", "--after=0:0"])
+        .output()
+        .unwrap();
     assert!(!zero_pid.status.success(), "lune watch refuses --after=0:0");
 
     let (first_host, _) = host.watch(None);
@@ -1346,8 +1816,14 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
     daemon.says_at_least("the watch says it waits", 1, parked);
 
     let (same_changes, lasted) = host.watch_changes(Some(version));
-    assert_eq!(same_changes.answer, Some(Answer::Unchanged(version.to_api())));
-    lasted.at_least(WATCH, "lune watch --changes waits a whole watch for a change");
+    assert_eq!(
+        same_changes.answer,
+        Some(Answer::Unchanged(version.to_api()))
+    );
+    lasted.at_least(
+        WATCH,
+        "lune watch --changes waits a whole watch for a change",
+    );
     daemon.says_at_least("the changes watch says it waits", 2, parked);
 
     let play = scratch();
@@ -1365,8 +1841,13 @@ fn lune_watch_waits_for_the_host_to_change_but_not_for_long() {
     let changed_version = HostVersion::of_api(changed.version.unwrap()).unwrap();
     assert!(changed_version.seq() > version.seq());
     let kept = changed.projects.and_then(|projects| projects.held);
-    let Some(Held::Kept(kept)) = kept else { panic!("luned keeps no projects: {kept:?}") };
-    assert!(kept.projects.iter().any(|project| project.name == "play"), "{kept:?}");
+    let Some(Held::Kept(kept)) = kept else {
+        panic!("luned keeps no projects: {kept:?}")
+    };
+    assert!(
+        kept.projects.iter().any(|project| project.name == "play"),
+        "{kept:?}"
+    );
 
     let another = HostVersion::new(
         NonZeroU32::new(version.pid().get() + 1).unwrap(),
@@ -1395,13 +1876,38 @@ fn forgetting_one_worktree_leaves_another_of_the_same_repository_watched() {
     let spelled = |dir: &Path| dir.display().to_string();
     assert!(git(&repo, &["remote", "add", "origin", &spelled(&origin)]));
     assert!(git(&repo, &["push", "-q", "-u", "origin", "main"]));
-    assert!(git(&repo, &["worktree", "add", "-q", "-b", "first", &spelled(&first), "origin/main"]));
     assert!(git(
         &repo,
-        &["worktree", "add", "-q", "-b", "second", &spelled(&second), "origin/main"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "first",
+            &spelled(&first),
+            "origin/main"
+        ]
     ));
-    assert!(git(&repo, &["worktree", "add", "-q", "--detach", &spelled(&beside)]));
-    assert!(git(dirs.path(), &["clone", "-q", &spelled(&origin), "elsewhere"]));
+    assert!(git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "second",
+            &spelled(&second),
+            "origin/main"
+        ],
+    ));
+    assert!(git(
+        &repo,
+        &["worktree", "add", "-q", "--detach", &spelled(&beside)]
+    ));
+    assert!(git(
+        dirs.path(),
+        &["clone", "-q", &spelled(&origin), "elsewhere"]
+    ));
 
     let mut daemon = start(host.vars()).unwrap();
     let (first_id, first_cwd) = watched(&host, &spelled(&first));
@@ -1413,7 +1919,11 @@ fn forgetting_one_worktree_leaves_another_of_the_same_repository_watched() {
 
     forgotten(&host, first_id);
     eventually("what git said of the first worktree goes", || {
-        host.host().git_statuses.iter().all(|status| status.dir != first_cwd).then_some(())
+        host.host()
+            .git_statuses
+            .iter()
+            .all(|status| status.dir != first_cwd)
+            .then_some(())
     });
 
     let fetched = || {
@@ -1424,11 +1934,19 @@ fn forgetting_one_worktree_leaves_another_of_the_same_repository_watched() {
     let behind = |it: &Checkout| match &it.head {
         Some(Head::Branch(branch)) => {
             branch.upstream.map(|it| (it.ahead, it.behind)) == Some((0, 1))
-        },
+        }
         _ => false,
     };
-    let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &second_cwd };
-    at_once.shows("a fetch after the sibling worktree was forgotten", fetched, behind);
+    let mut at_once = AtOnce {
+        daemon: &mut daemon,
+        host: &host,
+        cwd: &second_cwd,
+    };
+    at_once.shows(
+        "a fetch after the sibling worktree was forgotten",
+        fetched,
+        behind,
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -1511,16 +2029,27 @@ mod linux_inotify {
         let cwd = repo.display().to_string();
         let mut daemon = start(host.vars()).unwrap();
         watched(&host, &cwd);
-        eventually("git says how the repository stands", || checkout(&host, &cwd));
+        eventually("git says how the repository stands", || {
+            checkout(&host, &cwd)
+        });
 
         let changes = |it: &Checkout| it.changes.unwrap_or_default();
         let clean = |it: &Checkout| changes(it) == Changes::default();
         let modified = |it: &Checkout| changes(it).modified == 1;
         let git_dir = repo.join(".git");
         let refs_dir = git_dir.join("refs");
-        let stable = [repo.as_path(), src.as_path(), git_dir.as_path(), refs_dir.as_path()];
+        let stable = [
+            repo.as_path(),
+            src.as_path(),
+            git_dir.as_path(),
+            refs_dir.as_path(),
+        ];
 
-        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &cwd };
+        let mut at_once = AtOnce {
+            daemon: &mut daemon,
+            host: &host,
+            cwd: &cwd,
+        };
         at_once.shows(
             "an edit in src",
             || fs::write(src.join("lib.rs"), "edited\n").unwrap(),
@@ -1528,7 +2057,9 @@ mod linux_inotify {
         );
         let before = watched_descriptors(at_once.daemon.pid(), &stable);
         assert!(
-            before.iter().all(|(_, entries)| entries.as_ref().is_some_and(|set| !set.is_empty()))
+            before
+                .iter()
+                .all(|(_, entries)| entries.as_ref().is_some_and(|set| !set.is_empty()))
         );
 
         at_once.shows(
@@ -1595,7 +2126,10 @@ mod linux_inotify {
         for index in 0..4 {
             let worktree = path(&format!("worktree-{index}"));
             let branch = format!("worktree-{index}");
-            assert!(git(&repo, &["worktree", "add", "-q", "-b", &branch, &spelled(&worktree)]));
+            assert!(git(
+                &repo,
+                &["worktree", "add", "-q", "-b", &branch, &spelled(&worktree)]
+            ));
             worktrees.push(worktree);
         }
         let mut others = Vec::new();
@@ -1616,7 +2150,9 @@ mod linux_inotify {
         let mut daemon = start(host.vars()).unwrap();
         let repo_cwd = spelled(&repo);
         watched(&host, &repo_cwd);
-        eventually("git says how the first checkout stands", || checkout(&host, &repo_cwd));
+        eventually("git says how the first checkout stands", || {
+            checkout(&host, &repo_cwd)
+        });
         let (before, _) = inotify_state(daemon.pid());
 
         for dir in worktrees.iter().chain(&others).chain(&plains) {
@@ -1631,7 +2167,11 @@ mod linux_inotify {
 
         let worktree_cwd = spelled(&worktrees[0]);
         let changes = |it: &Checkout| it.changes.unwrap_or_default();
-        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &worktree_cwd };
+        let mut at_once = AtOnce {
+            daemon: &mut daemon,
+            host: &host,
+            cwd: &worktree_cwd,
+        };
         at_once.shows(
             "an edit in a shared-watcher worktree",
             || fs::write(worktrees[0].join("README"), "edited\n").unwrap(),
@@ -1640,7 +2180,11 @@ mod linux_inotify {
 
         let plain_cwd = spelled(&plains[0]);
         in_no_repository(&host, &plain_cwd);
-        let mut at_once = AtOnce { daemon: &mut daemon, host: &host, cwd: &plain_cwd };
+        let mut at_once = AtOnce {
+            daemon: &mut daemon,
+            host: &host,
+            cwd: &plain_cwd,
+        };
         at_once.shows(
             "a repository started in a shared-watcher plain directory",
             || assert!(git(&plains[0], &["init", "-q", "-b", "fresh"])),

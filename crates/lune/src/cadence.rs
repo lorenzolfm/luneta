@@ -24,7 +24,10 @@ impl Cadence {
     pub fn every_second(&mut self, since: Instant, steady: Instant) {
         let seconds = steady.saturating_duration_since(since).as_secs();
         if let Some(at) = since.checked_add(Duration::from_secs(seconds.saturating_add(1))) {
-            assert!(at > steady, "the next steady second lands strictly after steady time");
+            assert!(
+                at > steady,
+                "the next steady second lands strictly after steady time"
+            );
             self.steady_next = Some(self.steady_next.map_or(at, |next| next.min(at)));
         }
     }
@@ -44,13 +47,15 @@ impl Cadence {
         let mut wait: Option<Duration> = None;
         let mut take = |left: Duration| wait = Some(wait.map_or(left, |best| best.min(left)));
         if self.spinning {
-            take(if now.system < drawn.system
-                || sidebar::frame(now.system) != sidebar::frame(drawn.system)
-            {
-                Duration::ZERO
-            } else {
-                sidebar::next_spin(now.system)
-            });
+            take(
+                if now.system < drawn.system
+                    || sidebar::frame(now.system) != sidebar::frame(drawn.system)
+                {
+                    Duration::ZERO
+                } else {
+                    sidebar::next_spin(now.system)
+                },
+            );
         }
         if let Some(at) = self.clock_next {
             take(if now.system < drawn.system {
@@ -83,17 +88,26 @@ mod tests {
     fn every_second_schedules_strictly_after_steady_clock() {
         let start = Instant::now();
         let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
-        let drawn = Moment { steady: start + Duration::from_millis(1250), system };
+        let drawn = Moment {
+            steady: start + Duration::from_millis(1250),
+            system,
+        };
         let mut cadence = Cadence::default();
         cadence.every_second(start, drawn.steady);
 
         assert_eq!(cadence.wait(drawn, drawn), Some(Duration::from_millis(750)));
         assert!(!cadence.due(drawn, drawn));
 
-        let before = Moment { steady: start + Duration::from_millis(1999), system };
+        let before = Moment {
+            steady: start + Duration::from_millis(1999),
+            system,
+        };
         assert!(!cadence.due(drawn, before));
 
-        let at = Moment { steady: start + Duration::from_secs(2), system };
+        let at = Moment {
+            steady: start + Duration::from_secs(2),
+            system,
+        };
         assert!(cadence.due(drawn, at));
         assert_eq!(cadence.wait(drawn, at), Some(Duration::ZERO));
     }
@@ -102,7 +116,10 @@ mod tests {
     fn age_and_spin_wake_immediately_when_wall_clock_steps_backward() {
         let start = Instant::now();
         let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
-        let drawn = Moment { steady: start, system };
+        let drawn = Moment {
+            steady: start,
+            system,
+        };
         let mut cadence = Cadence::default();
         cadence.age(system - Duration::from_secs(5), system);
 
@@ -146,6 +163,9 @@ mod tests {
             system: SystemTime::UNIX_EPOCH + Duration::from_millis(160_080),
         };
         assert!(!cadence.due(mid, same_frame));
-        assert_eq!(cadence.wait(mid, same_frame), Some(Duration::from_millis(20)));
+        assert_eq!(
+            cadence.wait(mid, same_frame),
+            Some(Duration::from_millis(20))
+        );
     }
 }

@@ -45,9 +45,16 @@ impl Seen {
     pub fn of(screen: &str) -> Seen {
         let lines: Vec<&str> = screen.lines().collect();
         let tail = &lines[lines.len().saturating_sub(SCREEN_LINES_MAX)..];
-        assert!(tail.len() <= SCREEN_LINES_MAX, "{} lines looked at", tail.len());
+        assert!(
+            tail.len() <= SCREEN_LINES_MAX,
+            "{} lines looked at",
+            tail.len()
+        );
         let live = past_input(tail);
-        assert!(live <= tail.len(), "the lines past the input are of the screen");
+        assert!(
+            live <= tail.len(),
+            "the lines past the input are of the screen"
+        );
         for (at, line) in tail.iter().enumerate().skip(live).rev() {
             if let Some((indent, chosen)) = cursor_on(line) {
                 return menu_at(tail, at, indent, chosen);
@@ -76,14 +83,27 @@ impl Choices {
     }
 
     pub fn moves_to(&self, index: usize, label: &str) -> Result<Moves, String> {
-        assert!(self.at < self.labels.len(), "the cursor is on one of the choices");
-        assert!(self.labels.len() <= CHOICES_MAX, "{} choices", self.labels.len());
+        assert!(
+            self.at < self.labels.len(),
+            "the cursor is on one of the choices"
+        );
+        assert!(
+            self.labels.len() <= CHOICES_MAX,
+            "{} choices",
+            self.labels.len()
+        );
         let Some(found) = self.labels.get(index) else {
             let shown = self.labels.len();
-            return Err(format!("choice {} is asked for, and the screen shows {shown}", index + 1));
+            return Err(format!(
+                "choice {} is asked for, and the screen shows {shown}",
+                index + 1
+            ));
         };
         if found != label {
-            return Err(format!("choice {} is now {found:?}, not {label:?}", index + 1));
+            return Err(format!(
+                "choice {} is now {found:?}, not {label:?}",
+                index + 1
+            ));
         }
         let moves = match index.cmp(&self.at) {
             Ordering::Less => Moves::Up(self.at - index),
@@ -91,7 +111,11 @@ impl Choices {
             Ordering::Equal => Moves::Stay,
         };
         if let Moves::Up(steps) | Moves::Down(steps) = moves {
-            assert!(steps < self.labels.len(), "{steps} moves among {}", self.labels.len());
+            assert!(
+                steps < self.labels.len(),
+                "{steps} moves among {}",
+                self.labels.len()
+            );
         }
         Ok(moves)
     }
@@ -107,8 +131,8 @@ fn menu_at(tail: &[&str], at: usize, indent: usize, chosen: &str) -> Seen {
             Row::Choice(label) => {
                 above.push(label);
                 first = on;
-            },
-            Row::Under => {},
+            }
+            Row::Under => {}
             Row::Apart => break,
         }
     }
@@ -116,7 +140,7 @@ fn menu_at(tail: &[&str], at: usize, indent: usize, chosen: &str) -> Seen {
     for line in &tail[at + 1..] {
         match row(line, sibling) {
             Row::Choice(label) => below.push(label),
-            Row::Under => {},
+            Row::Under => {}
             Row::Apart => break,
         }
     }
@@ -124,21 +148,38 @@ fn menu_at(tail: &[&str], at: usize, indent: usize, chosen: &str) -> Seen {
         return Seen::Alone(chosen.to_owned());
     }
     let shown = above.iter().rev().chain([&chosen]).chain(below.iter());
-    let labels: Vec<String> =
-        shown.enumerate().map(|(index, label)| unnumbered(index, label)).collect();
+    let labels: Vec<String> = shown
+        .enumerate()
+        .map(|(index, label)| unnumbered(index, label))
+        .collect();
     assert_eq!(labels.len(), above.len() + 1 + below.len());
     if labels.len() > CHOICES_MAX {
         return Seen::TooMany(labels.len());
     }
-    let asked = tail[..first].iter().map(|line| (*line).to_owned()).collect();
-    let choices = Choices { labels, at: above.len(), asked };
-    assert!(choices.labels.len() >= 2, "a menu offers a choice besides the cursor's");
-    assert!(choices.at < choices.labels.len(), "the cursor is on one of the choices");
+    let asked = tail[..first]
+        .iter()
+        .map(|line| (*line).to_owned())
+        .collect();
+    let choices = Choices {
+        labels,
+        at: above.len(),
+        asked,
+    };
+    assert!(
+        choices.labels.len() >= 2,
+        "a menu offers a choice besides the cursor's"
+    );
+    assert!(
+        choices.at < choices.labels.len(),
+        "the cursor is on one of the choices"
+    );
     Seen::Menu(choices)
 }
 
 fn past_input(lines: &[&str]) -> usize {
-    let input = (1..lines.len()).rev().find(|&at| is_rule(lines[at - 1]) && is_input(lines[at]));
+    let input = (1..lines.len())
+        .rev()
+        .find(|&at| is_rule(lines[at - 1]) && is_input(lines[at]));
     let Some(input) = input else {
         return 0;
     };
@@ -152,7 +193,8 @@ fn is_rule(line: &str) -> bool {
 }
 
 fn is_input(line: &str) -> bool {
-    line.strip_prefix(INPUT).is_some_and(|rest| !rest.starts_with(' '))
+    line.strip_prefix(INPUT)
+        .is_some_and(|rest| !rest.starts_with(' '))
 }
 
 fn cursor_on(line: &str) -> Option<(usize, &str)> {
@@ -256,7 +298,8 @@ mod tests {
     #[test]
     fn a_permission_prompt_reads_as_its_numbered_choices() {
         let choices = menu(PERMISSION);
-        let always = "Yes, and always allow access to /tmp/claude-1000/permprobe/work from this project";
+        let always =
+            "Yes, and always allow access to /tmp/claude-1000/permprobe/work from this project";
         let auto = "Yes, and switch to auto mode · auto mode handles these prompts for you";
         assert_eq!(labels(&choices), ["Yes", always, auto, "No"]);
         assert_eq!(choices.at(), 0);
@@ -276,7 +319,10 @@ mod tests {
                     breaks when the socket\n  is gone\n\n● It is the socket path.\n";
         let rule = "─".repeat(40);
         let below = format!("{rule}\n  Opus 5.5  ░░░░░░░░░░  4%  ctx\n");
-        assert_eq!(Seen::of(&format!("{sent}\n{rule}\n❯\u{a0}\n{below}")), Seen::Words);
+        assert_eq!(
+            Seen::of(&format!("{sent}\n{rule}\n❯\u{a0}\n{below}")),
+            Seen::Words
+        );
         let draft = format!("{sent}\n{rule}\n❯\u{a0}and this\n  and that\n{below}");
         assert_eq!(Seen::of(&draft), Seen::Words);
     }
@@ -284,7 +330,10 @@ mod tests {
     #[test]
     fn a_cursor_with_no_choices_beside_it_and_no_input_below_is_alone() {
         let asked = "\n❯ Run exactly this bash command\n\n● Bash(touch ./probe-file)\n";
-        assert_eq!(Seen::of(asked), Seen::Alone("Run exactly this bash command".to_owned()));
+        assert_eq!(
+            Seen::of(asked),
+            Seen::Alone("Run exactly this bash command".to_owned())
+        );
     }
 
     #[test]
@@ -293,7 +342,10 @@ mod tests {
                      2. Password, kept by\n      the app itself\n      Email and password\n   3. \
                      Type something.\n\n Enter to select · Esc to cancel\n";
         let choices = menu(asked);
-        assert_eq!(labels(&choices), ["OAuth", "Password, kept by", "Type something."]);
+        assert_eq!(
+            labels(&choices),
+            ["OAuth", "Password, kept by", "Type something."]
+        );
         assert_eq!(choices.at(), 0);
     }
 
@@ -304,11 +356,20 @@ mod tests {
                 let cursor = if index == chosen { "❯ " } else { "  " };
                 format!(" {cursor}{}. {label}\n", index + 1)
             });
-            menu(&format!("\n {asked}\n Do you want to proceed?\n{}", rows.collect::<String>()))
+            menu(&format!(
+                "\n {asked}\n Do you want to proceed?\n{}",
+                rows.collect::<String>()
+            ))
         };
         let shown = on(1, "touch ./probe-file");
-        assert!(on(0, "touch ./probe-file").asks_as(&shown), "the cursor moved alone");
-        assert!(!on(0, "rm -rf ./work").asks_as(&shown), "another command asks");
+        assert!(
+            on(0, "touch ./probe-file").asks_as(&shown),
+            "the cursor moved alone"
+        );
+        assert!(
+            !on(0, "rm -rf ./work").asks_as(&shown),
+            "another command asks"
+        );
         let fewer = menu(" Do you want to proceed?\n ❯ 1. Yes\n   2. Maybe\n");
         assert!(!fewer.asks_as(&shown), "other choices are offered");
     }
@@ -320,7 +381,10 @@ mod tests {
             format!(" Pick one\n ❯ 1. Option 1\n{}", rest.collect::<String>())
         };
         assert!(matches!(Seen::of(&numbered(CHOICES_MAX)), Seen::Menu(_)));
-        assert_eq!(Seen::of(&numbered(CHOICES_MAX + 1)), Seen::TooMany(CHOICES_MAX + 1));
+        assert_eq!(
+            Seen::of(&numbered(CHOICES_MAX + 1)),
+            Seen::TooMany(CHOICES_MAX + 1)
+        );
     }
 
     #[test]
@@ -335,8 +399,14 @@ mod tests {
     #[test]
     fn a_choice_that_changed_since_it_was_shown_is_refused() {
         let choices = menu(PERMISSION);
-        assert_eq!(choices.moves_to(1, "No").unwrap_err(), r#"choice 2 is now "Yes, and always allow access to /tmp/claude-1000/permprobe/work from this project", not "No""#);
-        assert_eq!(choices.moves_to(4, "No").unwrap_err(), "choice 5 is asked for, and the screen shows 4");
+        assert_eq!(
+            choices.moves_to(1, "No").unwrap_err(),
+            r#"choice 2 is now "Yes, and always allow access to /tmp/claude-1000/permprobe/work from this project", not "No""#
+        );
+        assert_eq!(
+            choices.moves_to(4, "No").unwrap_err(),
+            "choice 5 is asked for, and the screen shows 4"
+        );
     }
 
     #[test]

@@ -26,13 +26,16 @@ impl BlockedReason {
 
     #[must_use]
     pub fn to_api_waiting_for(&self) -> Option<v1::agent::WaitingFor> {
-        let known = |waits: v1::WaitingFor| Some(v1::agent::WaitingFor::KnownWaitingFor(waits.into()));
+        let known =
+            |waits: v1::WaitingFor| Some(v1::agent::WaitingFor::KnownWaitingFor(waits.into()));
         match self {
             BlockedReason::Permission => known(v1::WaitingFor::PermissionPrompt),
             BlockedReason::Question => known(v1::WaitingFor::InputNeeded),
             BlockedReason::Auth => known(v1::WaitingFor::Auth),
             BlockedReason::Dialog => known(v1::WaitingFor::DialogOpen),
-            BlockedReason::Other(word) => Some(v1::agent::WaitingFor::OtherWaitingFor(word.clone().into())),
+            BlockedReason::Other(word) => {
+                Some(v1::agent::WaitingFor::OtherWaitingFor(word.clone().into()))
+            }
             BlockedReason::Unspecified => None,
         }
     }
@@ -45,7 +48,9 @@ impl BlockedReason {
             BlockedReason::Question => known(v1::WaitingFor::InputNeeded),
             BlockedReason::Auth => known(v1::WaitingFor::Auth),
             BlockedReason::Dialog => known(v1::WaitingFor::DialogOpen),
-            BlockedReason::Other(word) => Some(v1::blocked_status::Reason::Other(word.clone().into())),
+            BlockedReason::Other(word) => {
+                Some(v1::blocked_status::Reason::Other(word.clone().into()))
+            }
             BlockedReason::Unspecified => None,
         }
     }
@@ -54,9 +59,8 @@ impl BlockedReason {
     pub fn of_api_reason(reason: Option<&v1::blocked_status::Reason>) -> Self {
         match reason {
             Some(v1::blocked_status::Reason::Known(known)) => of_known_waiting_for(*known),
-            Some(v1::blocked_status::Reason::Other(word)) => {
-                trimmed_said(Some(word.as_str())).map_or(BlockedReason::Unspecified, BlockedReason::Other)
-            },
+            Some(v1::blocked_status::Reason::Other(word)) => trimmed_said(Some(word.as_str()))
+                .map_or(BlockedReason::Unspecified, BlockedReason::Other),
             None => BlockedReason::Unspecified,
         }
     }
@@ -65,9 +69,8 @@ impl BlockedReason {
     pub fn of_api_waiting_for(waits: Option<&v1::agent::WaitingFor>) -> Self {
         match waits {
             Some(v1::agent::WaitingFor::KnownWaitingFor(known)) => of_known_waiting_for(*known),
-            Some(v1::agent::WaitingFor::OtherWaitingFor(word)) => {
-                trimmed_said(Some(word.as_str())).map_or(BlockedReason::Unspecified, BlockedReason::Other)
-            },
+            Some(v1::agent::WaitingFor::OtherWaitingFor(word)) => trimmed_said(Some(word.as_str()))
+                .map_or(BlockedReason::Unspecified, BlockedReason::Other),
             None => BlockedReason::Unspecified,
         }
     }
@@ -88,9 +91,16 @@ pub enum AgentStatus {
     Working,
     Idle,
     Stopped,
-    Done { message: Option<Message> },
-    Blocked { reason: BlockedReason, message: Option<Message> },
-    Error { message: Option<Message> },
+    Done {
+        message: Option<Message>,
+    },
+    Blocked {
+        reason: BlockedReason,
+        message: Option<Message>,
+    },
+    Error {
+        message: Option<Message>,
+    },
     Shell,
     Other(Said),
     Unreported,
@@ -104,20 +114,21 @@ impl AgentStatus {
                 v1::agent::ReportedStatus::Working(()) => AgentStatus::Working,
                 v1::agent::ReportedStatus::Idle(()) => AgentStatus::Idle,
                 v1::agent::ReportedStatus::Stopped(()) => AgentStatus::Stopped,
-                v1::agent::ReportedStatus::Done(done) => {
-                    AgentStatus::Done { message: bounded_message(done.message.as_deref()) }
+                v1::agent::ReportedStatus::Done(done) => AgentStatus::Done {
+                    message: bounded_message(done.message.as_deref()),
                 },
                 v1::agent::ReportedStatus::Blocked(blocked) => AgentStatus::Blocked {
                     reason: BlockedReason::of_api_reason(blocked.reason.as_ref()),
                     message: bounded_message(blocked.message.as_deref()),
                 },
-                v1::agent::ReportedStatus::Error(error) => {
-                    AgentStatus::Error { message: bounded_message(error.message.as_deref()) }
+                v1::agent::ReportedStatus::Error(error) => AgentStatus::Error {
+                    message: bounded_message(error.message.as_deref()),
                 },
                 v1::agent::ReportedStatus::Shell(()) => AgentStatus::Shell,
                 v1::agent::ReportedStatus::OtherReportedStatus(word) => {
-                    trimmed_said(Some(word.as_str())).map_or(AgentStatus::Unreported, AgentStatus::Other)
-                },
+                    trimmed_said(Some(word.as_str()))
+                        .map_or(AgentStatus::Unreported, AgentStatus::Other)
+                }
             };
         }
         match &agent.status {
@@ -129,7 +140,7 @@ impl AgentStatus {
                     } else {
                         AgentStatus::Idle
                     }
-                },
+                }
                 Ok(v1::Status::Stopped) => AgentStatus::Stopped,
                 Ok(v1::Status::Done) => AgentStatus::Done { message: None },
                 Ok(v1::Status::Waiting) => AgentStatus::Blocked {
@@ -140,9 +151,8 @@ impl AgentStatus {
                 Ok(v1::Status::Shell) => AgentStatus::Shell,
                 Ok(v1::Status::Unspecified) | Err(_) => AgentStatus::Unreported,
             },
-            Some(v1::agent::Status::OtherStatus(word)) => {
-                trimmed_said(Some(word.as_str())).map_or(AgentStatus::Unreported, AgentStatus::Other)
-            },
+            Some(v1::agent::Status::OtherStatus(word)) => trimmed_said(Some(word.as_str()))
+                .map_or(AgentStatus::Unreported, AgentStatus::Other),
             None => AgentStatus::Unreported,
         }
     }
@@ -184,7 +194,9 @@ mod tests {
         };
         assert_eq!(
             AgentStatus::of_api(&done),
-            AgentStatus::Done { message: Message::parse("message", "All good").ok() }
+            AgentStatus::Done {
+                message: Message::parse("message", "All good").ok()
+            }
         );
         assert!(AgentStatus::of_api(&done).is_finished_turn());
 
@@ -197,12 +209,18 @@ mod tests {
         };
         assert_eq!(
             AgentStatus::of_api(&empty_other),
-            AgentStatus::Blocked { reason: BlockedReason::Unspecified, message: None }
+            AgentStatus::Blocked {
+                reason: BlockedReason::Unspecified,
+                message: None
+            }
         );
 
         let untrusted = v1::Agent {
             reported_status: Some(v1::agent::ReportedStatus::Error(v1::ErrorStatus {
-                message: Some(format!("  \u{202e}{}  ", "x".repeat(MESSAGE_BYTES_MAX + 32))),
+                message: Some(format!(
+                    "  \u{202e}{}  ",
+                    "x".repeat(MESSAGE_BYTES_MAX + 32)
+                )),
             })),
             ..v1::Agent::default()
         };

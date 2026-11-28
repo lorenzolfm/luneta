@@ -10,7 +10,7 @@ use luned::links::Link;
 
 use crate::alerts::{Alert, Key, Sound};
 use crate::host::Event;
-use crate::peers::{self, Heard, Peers, Reaching, NO_READER};
+use crate::peers::{self, Heard, NO_READER, Peers, Reaching};
 
 pub fn elsewhere() -> bool {
     ["SSH_CONNECTION", "SSH_TTY"]
@@ -61,9 +61,11 @@ impl Told {
                 body: filed.title().to_owned(),
                 came: Came::Filed(filed.link().clone()),
             },
-            Err(Unfiled::Refused(why)) => {
-                unfiled(format!("No issue filed in {repository}"), why, "i has your words again")
-            },
+            Err(Unfiled::Refused(why)) => unfiled(
+                format!("No issue filed in {repository}"),
+                why,
+                "i has your words again",
+            ),
             Err(Unfiled::InDoubt(why)) => unfiled(
                 format!("An issue in {repository} may be filed"),
                 why,
@@ -83,7 +85,11 @@ enum Role {
     Undecided,
     Elsewhere,
     Peer(Reaching),
-    Holder { _lock: File, socket: Option<PathBuf>, peers: Peers },
+    Holder {
+        _lock: File,
+        socket: Option<PathBuf>,
+        peers: Peers,
+    },
 }
 
 const NO_SPEAKERS: &str = "this lune reads nothing aloud: it has no speakers of yours";
@@ -98,17 +104,29 @@ impl Desktop {
     pub fn start(events: &Sender<Event>, luned: Result<PathBuf, String>) -> Desktop {
         let events = events.clone();
         if elsewhere() {
-            return Desktop { serving: None, role: Role::Elsewhere, events };
+            return Desktop {
+                serving: None,
+                role: Role::Elsewhere,
+                events,
+            };
         }
         let (orders, taken) = channel::unbounded_channel();
         let serving = events.clone();
         let worker = thread::spawn(move || serve(taken, &serving));
         peers::wait(events.clone(), luned);
-        Desktop { serving: Some((orders, worker)), role: Role::Undecided, events }
+        Desktop {
+            serving: Some((orders, worker)),
+            role: Role::Undecided,
+            events,
+        }
     }
 
     pub fn unserved(events: &Sender<Event>) -> Desktop {
-        Desktop { serving: None, role: Role::Undecided, events: events.clone() }
+        Desktop {
+            serving: None,
+            role: Role::Undecided,
+            events: events.clone(),
+        }
     }
 
     pub fn post(&self, alert: Alert) {
@@ -142,24 +160,28 @@ impl Desktop {
                             "a click on a notification goes nowhere: {why}"
                         )));
                         None
-                    },
+                    }
                 };
                 self.order(Order::Hold(socket.clone()));
-                self.role = Role::Holder { _lock: lock, socket, peers: Peers::default() };
+                self.role = Role::Holder {
+                    _lock: lock,
+                    socket,
+                    peers: Peers::default(),
+                };
                 true
-            },
+            }
             Heard::Peering(socket) => {
                 if matches!(self.role, Role::Undecided) {
                     self.role = Role::Peer(Reaching::to(socket, focused, self.events.clone()));
                 }
                 false
-            },
+            }
             Heard::Peer(number, peered) => {
                 if let Role::Holder { peers, .. } = &mut self.role {
                     peers.heard(number, peered);
                 }
                 false
-            },
+            }
         }
     }
 
@@ -167,7 +189,7 @@ impl Desktop {
         match &mut self.role {
             Role::Peer(reaching) => reaching.focus(focused),
             Role::Holder { peers, .. } if focused => peers.here(),
-            Role::Holder { .. } | Role::Undecided | Role::Elsewhere => {},
+            Role::Holder { .. } | Role::Undecided | Role::Elsewhere => {}
         }
     }
 
@@ -229,7 +251,7 @@ impl Desktop {
             Role::Holder { peers, .. } => peers.nothing_to_read(number),
             Role::Peer(_) | Role::Undecided | Role::Elsewhere => {
                 unreachable!("only the lune that holds the lock hears another window's keys")
-            },
+            }
         }
     }
 }
@@ -240,7 +262,11 @@ impl Drop for Desktop {
             drop(orders);
             let _ = worker.join();
         }
-        if let Role::Holder { socket: Some(socket), .. } = &self.role {
+        if let Role::Holder {
+            socket: Some(socket),
+            ..
+        } = &self.role
+        {
             let _ = fs::remove_file(socket);
         }
     }
@@ -280,7 +306,7 @@ mod freedesktop {
     use zbus::names::UniqueName;
     use zbus::{Connection, Proxy, Variant};
 
-    use super::{say, Came, Order, Told};
+    use super::{Came, Order, Told, say};
     use crate::alerts::{Alert, Key, Kind, Sound};
     use crate::host::Event;
 
@@ -332,10 +358,10 @@ mod freedesktop {
                             if let Some(sound) = alert.sound {
                                 play(sound);
                             }
-                        },
+                        }
                         Err(error) => say(events, &mut said, &why(&error)),
                     }
-                },
+                }
                 Heard::Order(Order::Tell(telling)) => match tell(&proxy, &telling).await {
                     Ok(posted) => {
                         told.retain(|(was, _)| was.by == posted.by);
@@ -343,14 +369,14 @@ mod freedesktop {
                             play(sound);
                         }
                         told.push((posted, telling.came));
-                    },
+                    }
                     Err(error) => say(events, &mut said, &why(&error)),
                 },
                 Heard::Order(Order::Close(key)) => {
                     if let Some(posted) = up.remove(&key) {
                         let _ = close(proxy.connection(), &posted).await;
                     }
-                },
+                }
                 Heard::Clicked(posted, action) => {
                     if action != CLICK {
                         continue;
@@ -361,11 +387,11 @@ mod freedesktop {
                     } else if let Some(at) = told.iter().position(|(up, _)| *up == posted) {
                         let _ = events.send(Event::IssueClicked(told.swap_remove(at).1));
                     }
-                },
+                }
                 Heard::Closed(posted) => {
                     up.retain(|_, up| *up != posted);
                     told.retain(|(up, _)| *up != posted);
-                },
+                }
                 Heard::Ended => break,
             }
         }
@@ -386,12 +412,21 @@ mod freedesktop {
             match header.member()?.as_str() {
                 "ActionInvoked" => {
                     let (id, action) = body.deserialize::<(u32, String)>().ok()?;
-                    Some(Heard::Clicked(Posted { by, id: NonZeroU32::new(id)? }, action))
-                },
+                    Some(Heard::Clicked(
+                        Posted {
+                            by,
+                            id: NonZeroU32::new(id)?,
+                        },
+                        action,
+                    ))
+                }
                 "NotificationClosed" => {
                     let (id, _why) = body.deserialize::<(u32, u32)>().ok()?;
-                    Some(Heard::Closed(Posted { by, id: NonZeroU32::new(id)? }))
-                },
+                    Some(Heard::Closed(Posted {
+                        by,
+                        id: NonZeroU32::new(id)?,
+                    }))
+                }
                 _ => None,
             }
         });
@@ -431,10 +466,23 @@ mod freedesktop {
         let body = escaped(body);
         let actions = [CLICK, click];
         let asked = ("lune", 0_u32, icon.as_str(), title, body.as_str());
-        let told = (asked.0, asked.1, asked.2, asked.3, asked.4, &actions[..], hints, -1_i32);
+        let told = (
+            asked.0,
+            asked.1,
+            asked.2,
+            asked.3,
+            asked.4,
+            &actions[..],
+            hints,
+            -1_i32,
+        );
         let answer = proxy.call_method("Notify", &told).await?;
         let unsaid = |what: &str| zbus::Error::Failure(format!("the server's answer {what}"));
-        let by = answer.header().sender().ok_or_else(|| unsaid("names no sender"))?.to_owned();
+        let by = answer
+            .header()
+            .sender()
+            .ok_or_else(|| unsaid("names no sender"))?
+            .to_owned();
         let id = answer.body().deserialize::<u32>()?;
         let id = NonZeroU32::new(id).ok_or_else(|| unsaid("gives the notification no id"))?;
         Ok(Posted { by, id })
@@ -443,26 +491,37 @@ mod freedesktop {
     fn why(error: &zbus::Error) -> String {
         match error {
             zbus::Error::InputOutput(error) if error.kind() == io::ErrorKind::TimedOut => {
-                format!("the notification server did not answer in {}s", ANSWER.as_secs())
-            },
+                format!(
+                    "the notification server did not answer in {}s",
+                    ANSWER.as_secs()
+                )
+            }
             error => error.to_string(),
         }
     }
 
     async fn close(connection: &Connection, posted: &Posted) -> zbus::Result<()> {
         let (to, id) = (Some(&posted.by), (posted.id.get(),));
-        connection.call_method(to, PATH, Some(SERVER), "CloseNotification", &id).await?;
+        connection
+            .call_method(to, PATH, Some(SERVER), "CloseNotification", &id)
+            .await?;
         Ok(())
     }
 
     fn icon() -> String {
         let home = std::env::var_os("HOME").unwrap_or_default();
         let icon = Path::new(&home).join(".local/share/icons/notifications/claude.png");
-        if icon.is_file() { icon.to_string_lossy().into_owned() } else { String::new() }
+        if icon.is_file() {
+            icon.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        }
     }
 
     fn escaped(text: &str) -> String {
-        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
 
     fn play(sound: Sound) {
@@ -475,7 +534,10 @@ mod freedesktop {
             return;
         }
         let mut play = tokio::process::Command::new("pw-play");
-        play.arg(file).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        play.arg(file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         let _ = play.spawn();
     }
 }
@@ -488,13 +550,17 @@ pub fn raise(title: Option<&str>) {
         return;
     };
     thread::spawn(move || {
-        let clients = std::process::Command::new("hyprctl").args(["clients", "-j"]).output();
+        let clients = std::process::Command::new("hyprctl")
+            .args(["clients", "-j"])
+            .output();
         let Ok(clients) = clients else {
             return;
         };
         let clients: Vec<serde_json::Value> =
             serde_json::from_slice(&clients.stdout).unwrap_or_default();
-        let window = clients.iter().find(|client| client["title"].as_str() == Some(&title));
+        let window = clients
+            .iter()
+            .find(|client| client["title"].as_str() == Some(&title));
         let Some(address) = window.and_then(|window| window["address"].as_str()) else {
             return;
         };
@@ -519,9 +585,9 @@ mod notifier {
     use std::sync::mpsc::Sender;
 
     use super::{Came, Told};
-    use crate::alerts::{Alert, Sound};
     #[cfg(target_os = "macos")]
     use crate::alerts::Key;
+    use crate::alerts::{Alert, Sound};
     #[cfg(target_os = "macos")]
     use crate::host::Event;
     #[cfg(target_os = "macos")]
@@ -536,19 +602,34 @@ mod notifier {
             ("-message", guarded(&alert.body)),
             ("-activate", TERMINAL.to_owned()),
         ];
-        args.extend(alert.sound.map(|sound| ("-sound", sounded(sound).to_owned())));
+        args.extend(
+            alert
+                .sound
+                .map(|sound| ("-sound", sounded(sound).to_owned())),
+        );
         args.extend(clicked.map(|clicked| ("-execute", clicked.to_owned())));
-        args.into_iter().flat_map(|(flag, value)| [flag.to_owned(), value]).collect()
+        args.into_iter()
+            .flat_map(|(flag, value)| [flag.to_owned(), value])
+            .collect()
     }
 
     pub fn telling(told: &Told) -> Vec<String> {
-        let mut args = vec![("-title", guarded(&told.title)), ("-message", guarded(&told.body))];
+        let mut args = vec![
+            ("-title", guarded(&told.title)),
+            ("-message", guarded(&told.body)),
+        ];
         args.push(match &told.came {
             Came::Filed(link) => ("-open", link.url()),
             Came::Unfiled => ("-activate", TERMINAL.to_owned()),
         });
-        args.extend(told.came.sound().map(|sound| ("-sound", sounded(sound).to_owned())));
-        args.into_iter().flat_map(|(flag, value)| [flag.to_owned(), value]).collect()
+        args.extend(
+            told.came
+                .sound()
+                .map(|sound| ("-sound", sounded(sound).to_owned())),
+        );
+        args.into_iter()
+            .flat_map(|(flag, value)| [flag.to_owned(), value])
+            .collect()
     }
 
     fn sounded(sound: Sound) -> &'static str {
@@ -565,7 +646,12 @@ mod notifier {
     pub fn clicked(lune: &Path, socket: &Path, group: &str) -> String {
         let quoted = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
         let (lune, socket) = (lune.to_string_lossy(), socket.to_string_lossy());
-        format!("{} clicked --socket {} {}", quoted(&lune), quoted(&socket), quoted(group))
+        format!(
+            "{} clicked --socket {} {}",
+            quoted(&lune),
+            quoted(&socket),
+            quoted(group)
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -576,11 +662,16 @@ mod notifier {
             Ok(output) if output.status.success() => Ok(()),
             Ok(output) => {
                 let said = String::from_utf8_lossy(&output.stderr);
-                match said.lines().next().map(str::trim).filter(|line| !line.is_empty()) {
+                match said
+                    .lines()
+                    .next()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                {
                     Some(line) => Err(format!("terminal-notifier: {line}")),
                     None => Err(format!("terminal-notifier {}", output.status)),
                 }
-            },
+            }
             Err(error) => Err(format!("terminal-notifier: {error}")),
         }
     }
@@ -595,7 +686,7 @@ mod notifier {
         mut orders: tokio::sync::mpsc::UnboundedReceiver<super::Order>,
         events: &Sender<Event>,
     ) {
-        use super::{say, Order};
+        use super::{Order, say};
 
         let mut said = false;
         let mut held: Option<Option<PathBuf>> = None;
@@ -617,18 +708,18 @@ mod notifier {
                     if let Err(why) = run(&posting(&alert, &group, clicked.as_deref())) {
                         say(events, &mut said, &why);
                     }
-                },
+                }
                 Order::Tell(told) => {
                     if let Err(why) = run(&telling(&told)) {
                         say(events, &mut said, &why);
                     }
-                },
+                }
                 Order::Close(key) => {
                     if held.is_some() {
                         posted.remove(&key);
                         remove(&key);
                     }
-                },
+                }
             }
         }
         for key in &posted {
@@ -645,8 +736,20 @@ mod notifier {
         use crate::machines::Machine;
 
         fn alert(kind: Kind, body: &str, sound: Option<Sound>) -> Alert {
-            let (key, title) = (Key { on: Machine::Local, pid: 41 }, "fix — needs permission");
-            Alert { key, kind, title: title.to_owned(), body: body.to_owned(), sound }
+            let (key, title) = (
+                Key {
+                    on: Machine::Local,
+                    pid: 41,
+                },
+                "fix — needs permission",
+            );
+            Alert {
+                key,
+                kind,
+                title: title.to_owned(),
+                body: body.to_owned(),
+                sound,
+            }
         }
 
         #[test]
@@ -666,13 +769,26 @@ mod notifier {
             assert_eq!(said("-group"), "lune-41");
             assert_eq!(said("-message"), r"\-rf: rm");
             assert_eq!(said("-title"), r"\fix — needs permission");
-            assert_eq!((said("-sound").as_str(), said("-activate").as_str()), ("Ping", TERMINAL));
+            assert_eq!(
+                (said("-sound").as_str(), said("-activate").as_str()),
+                ("Ping", TERMINAL)
+            );
             assert_eq!(said("-execute"), clicked);
-            for text in ["[x] done", "(wip) fix", "{a = b;}", "<b>it</b>", "\"Done\" said", r"\n"] {
+            for text in [
+                "[x] done",
+                "(wip) fix",
+                "{a = b;}",
+                "<b>it</b>",
+                "\"Done\" said",
+                r"\n",
+            ] {
                 assert_eq!(guarded(text), format!("\\{text}"));
             }
             let again = posting(&alert(Kind::Done, "All done.", None), "lune-41", None);
-            assert_eq!((value(&again, "-sound"), value(&again, "-execute")), (None, None));
+            assert_eq!(
+                (value(&again, "-sound"), value(&again, "-execute")),
+                (None, None)
+            );
         }
 
         #[test]
@@ -686,10 +802,14 @@ mod notifier {
             };
             let pairs = |told: &Told| -> Vec<(String, String)> {
                 let args = telling(told);
-                args.chunks(2).map(|pair| (pair[0].clone(), pair[1].clone())).collect()
+                args.chunks(2)
+                    .map(|pair| (pair[0].clone(), pair[1].clone()))
+                    .collect()
             };
             let owned = |said: &[(&str, &str)]| -> Vec<(String, String)> {
-                said.iter().map(|(flag, value)| ((*flag).to_owned(), (*value).to_owned())).collect()
+                said.iter()
+                    .map(|(flag, value)| ((*flag).to_owned(), (*value).to_owned()))
+                    .collect()
             };
             let said = [
                 ("-title", r"\Filed #362 in owner/repo"),
@@ -697,7 +817,10 @@ mod notifier {
                 ("-open", url),
             ];
             assert_eq!(pairs(&filed), owned(&said));
-            let refused = Told { came: Came::Unfiled, ..filed };
+            let refused = Told {
+                came: Came::Unfiled,
+                ..filed
+            };
             let said = [("-activate", TERMINAL), ("-sound", "Ping")];
             assert_eq!(pairs(&refused)[2..], owned(&said));
         }
@@ -714,21 +837,40 @@ mod tests {
     fn the_keys_of_what_is_read_aloud_go_to_the_reader_and_only_ssh_blames_the_speakers() {
         let folder = tempfile::tempdir().expect("a folder");
         let (events, _heard) = mpsc::channel();
-        let desktop = |role| Desktop { serving: None, role, events: events.clone() };
+        let desktop = |role| Desktop {
+            serving: None,
+            role,
+            events: events.clone(),
+        };
 
         let lock = File::create(folder.path().join("lock")).expect("a lock");
-        let holder = desktop(Role::Holder { _lock: lock, socket: None, peers: Peers::default() });
+        let holder = desktop(Role::Holder {
+            _lock: lock,
+            socket: None,
+            peers: Peers::default(),
+        });
         assert!(matches!(holder.reader(), Reader::This));
         let socket = folder.path().join("nobody-hears.sock");
         let reaching = Reaching::to(socket, false, events.clone());
-        assert!(matches!(desktop(Role::Peer(reaching)).reader(), Reader::Another(_)));
+        assert!(matches!(
+            desktop(Role::Peer(reaching)).reader(),
+            Reader::Another(_)
+        ));
 
         let why = |role| match desktop(role).reader() {
             Reader::Nobody(why) => why,
             Reader::This | Reader::Another(_) => panic!("it says why nothing reads"),
         };
-        assert!(why(Role::Elsewhere).contains("speakers"), "{}", why(Role::Elsewhere));
-        assert!(!why(Role::Undecided).contains("speakers"), "{}", why(Role::Undecided));
+        assert!(
+            why(Role::Elsewhere).contains("speakers"),
+            "{}",
+            why(Role::Elsewhere)
+        );
+        assert!(
+            !why(Role::Undecided).contains("speakers"),
+            "{}",
+            why(Role::Undecided)
+        );
     }
 
     #[test]
@@ -737,14 +879,22 @@ mod tests {
         let socket = folder.path().join("alerts.sock");
         let (events, _heard) = mpsc::channel();
 
-        let mut desktop = Desktop { serving: None, role: Role::Undecided, events: events.clone() };
+        let mut desktop = Desktop {
+            serving: None,
+            role: Role::Undecided,
+            events: events.clone(),
+        };
         assert!(!desktop.heard(Heard::Peering(socket.clone()), false));
         assert!(matches!(desktop.reader(), Reader::Another(_)));
         let lock = File::create(folder.path().join("lock")).expect("a lock");
         assert!(desktop.heard(Heard::Holding(lock, Ok(socket.clone())), false));
         assert!(matches!(desktop.reader(), Reader::This));
 
-        let mut over_ssh = Desktop { serving: None, role: Role::Elsewhere, events };
+        let mut over_ssh = Desktop {
+            serving: None,
+            role: Role::Elsewhere,
+            events,
+        };
         assert!(!over_ssh.heard(Heard::Peering(socket), false));
         assert!(matches!(over_ssh.reader(), Reader::Nobody(NO_SPEAKERS)));
     }
@@ -773,7 +923,10 @@ mod tests {
         let doubt = Unfiled::InDoubt("gh: it did not answer in time".to_owned());
         let doubted = Told::issue("lune", &Err(doubt));
         assert_eq!(doubted.title, "An issue in lune may be filed");
-        assert_eq!(doubted.body, "gh: it did not answer in time; i has your words, look first");
+        assert_eq!(
+            doubted.body,
+            "gh: it did not answer in time; i has your words, look first"
+        );
         assert_eq!(doubted.came, Came::Unfiled);
     }
 
@@ -781,7 +934,11 @@ mod tests {
     fn a_lune_that_may_not_hear_in_the_folder_still_reads_aloud_and_says_why() {
         let folder = tempfile::tempdir().expect("a folder");
         let (events, heard) = mpsc::channel();
-        let mut desktop = Desktop { serving: None, role: Role::Undecided, events };
+        let mut desktop = Desktop {
+            serving: None,
+            role: Role::Undecided,
+            events,
+        };
 
         let lock = File::create(folder.path().join("lock")).expect("a lock");
         assert!(desktop.heard(Heard::Holding(lock, Err("why".to_owned())), false));

@@ -14,13 +14,11 @@ use lune_protocol::watch::HostVersion;
 use luned::api::projects::Held;
 use luned::api::remote::Reached;
 use luned::api::say::Does;
-use luned::api::{
-    Agent, InfoResponse, ListAgentsResponse, Say, SayRequest, Utterance,
-};
+use luned::api::{Agent, InfoResponse, ListAgentsResponse, Say, SayRequest, Utterance};
 use luned::folder::SOCKET;
 pub use luned::log::causes;
 use luned::sayings::BYTES_MAX;
-use luned::{release, Destination, LocalWatch, PeerPid, Shared};
+use luned::{Destination, LocalWatch, PeerPid, Shared, release};
 use prost::Message as _;
 
 use crate::agreed::{self, Agreed};
@@ -147,7 +145,10 @@ pub enum Command {
                  the rebase ended. Where it rebased nothing, it exits 1"
     )]
     Rebase {
-        #[arg(value_name = "DIR", help = "A directory of the worktree. Without one, this one")]
+        #[arg(
+            value_name = "DIR",
+            help = "A directory of the worktree. Without one, this one"
+        )]
         dir: Option<PathBuf>,
     },
     #[command(
@@ -192,7 +193,10 @@ pub enum Command {
                  for it to be read. It fails at once where no luned runs, and exits 5"
     )]
     Say {
-        #[arg(allow_hyphen_values = true, help = "What to read. Without it, what comes on stdin")]
+        #[arg(
+            allow_hyphen_values = true,
+            help = "What to read. Without it, what comes on stdin"
+        )]
         text: Option<String>,
         #[arg(long, help = "Read it first, and cut off what is being read")]
         now: bool,
@@ -244,24 +248,34 @@ pub fn run(command: &Command, folder: &Path) -> ExitCode {
                 let current = daemon::current(folder).await.map_err(Unreached::Failed)?;
                 Ok(current.daemon)
             };
-            let output = if *changes { WatchOutput::Changes } else { WatchOutput::Host };
+            let output = if *changes {
+                WatchOutput::Changes
+            } else {
+                WatchOutput::Host
+            };
             ask(folder, current, |daemon| watch(daemon, *after, output))
-        },
+        }
         Command::Bridge => bridge::run(folder),
         Command::Ssh { destination } => ssh(destination, folder),
         Command::Prune { repo, yes } => prune::run(repo.as_deref(), *yes, folder),
         Command::Rebase { dir } => rebase::run(dir.as_deref(), folder),
         Command::Say { text, now, stop } => say(text.as_deref(), *now, *stop, folder),
-        Command::Resume { rules, reload, terminal } => {
+        Command::Resume {
+            rules,
+            reload,
+            terminal,
+        } => {
             let action = if *rules {
                 resume::Action::Rules
             } else if *reload {
                 resume::Action::Reload
             } else {
-                resume::Action::List { terminal: *terminal }
+                resume::Action::List {
+                    terminal: *terminal,
+                }
             };
             resume::run(action, folder)
-        },
+        }
         Command::Terminate { yes, here, ending } => terminate::run(*yes, *here, *ending, folder),
         Command::Start { what } => start::run(what, folder),
         Command::Browse { url } => browse::run(url.as_deref(), folder),
@@ -280,10 +294,14 @@ where
         Err(unreached) => {
             eprintln!("lune: {unreached}");
             return unreached.exit_code();
-        },
+        }
     };
     if let Err(error) = tasks.block_on(asking(daemon)) {
-        eprintln!("lune: {}: {}", folder.join(SOCKET).display(), causes(&*error));
+        eprintln!(
+            "lune: {}: {}",
+            folder.join(SOCKET).display(),
+            causes(&*error)
+        );
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -298,10 +316,14 @@ fn say(text: Option<&str>, now: bool, stop: bool, folder: &Path) -> ExitCode {
             Err(why) => {
                 eprintln!("lune: {why}");
                 return ExitCode::FAILURE;
-            },
+            }
         };
         let utterance = Utterance { text };
-        if now { Does::Now(utterance) } else { Does::InTurn(utterance) }
+        if now {
+            Does::Now(utterance)
+        } else {
+            Does::InTurn(utterance)
+        }
     };
     let say = Some(Say { does: Some(does) });
     ask(folder, daemon::running(folder), |daemon| async move {
@@ -325,7 +347,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
         Err(why) => {
             eprintln!("lune: {why}");
             return ExitCode::FAILURE;
-        },
+        }
     }
     let tasks = luned::tasks::shared();
     let daemon = match tasks.block_on(daemon::running(folder)) {
@@ -333,7 +355,7 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
         Err(why) => {
             println!("{destination}: luned reaches it once it runs: {why}");
             return ExitCode::SUCCESS;
-        },
+        }
     };
     match tasks.block_on(first_reach(daemon, destination)) {
         Ok(Some(Reached::Host(host))) => {
@@ -345,26 +367,30 @@ fn ssh(destination: &Destination, folder: &Path) -> ExitCode {
                 Some(Held::Unkept(_)) | None => println!("{destination}: reached"),
             }
             ExitCode::SUCCESS
-        },
+        }
         Ok(Some(Reached::Unreached(unreached))) => {
             eprintln!("lune: {destination}: unreached: {}", unreached.why);
             if let Some(said) = &unreached.ssh_said {
                 eprintln!("lune: ssh said \"{said}\"");
             }
             ExitCode::FAILURE
-        },
+        }
         Ok(Some(Reached::Here(()))) => {
             eprintln!("lune: {destination}: {}", luned::THIS_MACHINE);
             ExitCode::FAILURE
-        },
+        }
         Ok(Some(Reached::Reaching(())) | None) => {
             println!("{destination}: luned reaches it still; the sidebar says how it went");
             ExitCode::SUCCESS
-        },
+        }
         Err(error) => {
-            eprintln!("lune: {}: {}", folder.join(SOCKET).display(), causes(&*error));
+            eprintln!(
+                "lune: {}: {}",
+                folder.join(SOCKET).display(),
+                causes(&*error)
+            );
             ExitCode::FAILURE
-        },
+        }
     }
 }
 
@@ -385,9 +411,12 @@ async fn first_reach(
             return Ok(None);
         };
         let host = watched?.host;
-        let named = host.remotes.into_iter().find(|remote| remote.destination == spelled);
+        let named = host
+            .remotes
+            .into_iter()
+            .find(|remote| remote.destination == spelled);
         match named.and_then(|remote| remote.reached) {
-            None | Some(Reached::Reaching(())) => {},
+            None | Some(Reached::Reaching(())) => {}
             reached => return Ok(reached),
         }
     }
@@ -397,7 +426,10 @@ async fn first_reach(
 pub fn listed_agents(folder: &Path) -> Result<ListAgentsResponse, String> {
     luned::tasks::shared().block_on(async {
         let daemon = daemon::running(folder).await?;
-        daemon.list_agents(luned::ANSWER).await.map_err(|error| causes(&error))
+        daemon
+            .list_agents(luned::ANSWER)
+            .await
+            .map_err(|error| causes(&error))
     })
 }
 
@@ -424,8 +456,11 @@ async fn agents(daemon: Shared) -> Result<(), Box<dyn Error>> {
             seat
         })
     };
-    let mut rows: Vec<(String, &Agent)> =
-        listed.agents.iter().map(|agent| (seated(agent), agent)).collect();
+    let mut rows: Vec<(String, &Agent)> = listed
+        .agents
+        .iter()
+        .map(|agent| (seated(agent), agent))
+        .collect();
     rows.sort_by(|(a, _), (b, _)| a.cmp(b));
     let width = rows.iter().map(|(seat, _)| seat.len()).max().unwrap_or(0);
     for (seat, agent) in rows {
@@ -463,7 +498,10 @@ fn line(seat: &str, width: usize, agent: &Agent) -> String {
         AgentStatus::Other(word) => word.as_str(),
         AgentStatus::Unreported => "?",
     };
-    let label = agent.name.as_ref().map_or(agent.cwd.as_str(), |name| name.text.as_str());
+    let label = agent
+        .name
+        .as_ref()
+        .map_or(agent.cwd.as_str(), |name| name.text.as_str());
     format!("{seat:<width$}  {status:<7}  {:>7}  {label}", agent.pid)
 }
 
@@ -485,14 +523,26 @@ async fn watch(
     let encoded = match output {
         WatchOutput::Host => {
             let host = match after {
-                None => daemon.snapshot_legacy(luned::ANSWER, LocalWatch::Client).await?,
-                Some(seen) => daemon.watching(luned::ANSWER, LocalWatch::Client)?.once(seen).await?,
+                None => {
+                    daemon
+                        .snapshot_legacy(luned::ANSWER, LocalWatch::Client)
+                        .await?
+                }
+                Some(seen) => {
+                    daemon
+                        .watching(luned::ANSWER, LocalWatch::Client)?
+                        .once(seen)
+                        .await?
+                }
             };
             host.into_host().encode_to_vec()
-        },
+        }
         WatchOutput::Changes => {
             let response = match after {
-                None => daemon.snapshot(luned::ANSWER, LocalWatch::Client).await?.into_response(),
+                None => daemon
+                    .snapshot(luned::ANSWER, LocalWatch::Client)
+                    .await?
+                    .into_response(),
                 Some(seen) => daemon
                     .watching(luned::ANSWER, LocalWatch::Client)?
                     .once_changes(seen)
@@ -500,9 +550,12 @@ async fn watch(
                     .into_response(seen),
             };
             response.encode_to_vec()
-        },
+        }
     };
-    assert!(!encoded.is_empty(), "a validated watch response encodes non-empty");
+    assert!(
+        !encoded.is_empty(),
+        "a validated watch response encodes non-empty"
+    );
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(&encoded)?;
     stdout.flush()?;

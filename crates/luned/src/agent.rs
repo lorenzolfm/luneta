@@ -8,11 +8,11 @@ use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
 use serde::Deserialize as _;
 
+use crate::Directory;
 use crate::api;
 use crate::process::{AgentId, AgentPid};
 use crate::statuses::{ActiveStatus, Decided, Subagent};
 use crate::watch::Troubles;
-use crate::Directory;
 
 pub const FILE_BYTES_MAX: u64 = 64 * 1024;
 
@@ -49,8 +49,24 @@ pub struct Sighting {
 impl Sighting {
     #[must_use]
     pub fn of(self, id: AgentId, harness: Harness) -> SeenAgent {
-        let Sighting { session_id, cwd, started_at, name, entrypoint, terminal } = self;
-        SeenAgent { id, harness, session_id, cwd, started_at, name, entrypoint, terminal }
+        let Sighting {
+            session_id,
+            cwd,
+            started_at,
+            name,
+            entrypoint,
+            terminal,
+        } = self;
+        SeenAgent {
+            id,
+            harness,
+            session_id,
+            cwd,
+            started_at,
+            name,
+            entrypoint,
+            terminal,
+        }
     }
 }
 
@@ -76,7 +92,10 @@ pub struct Name {
 impl Name {
     fn to_api(&self) -> api::Name {
         let source = self.source.map(|source| source.to_api().into());
-        api::Name { text: self.text.clone().into(), source }
+        api::Name {
+            text: self.text.clone().into(),
+            source,
+        }
     }
 
     #[must_use]
@@ -175,7 +194,7 @@ pub fn terminal_or_trouble(
         Err(why) => {
             troubles.say(format!("agent {pid} shows in no view, as {why}"));
             None
-        },
+        }
     }
 }
 
@@ -199,12 +218,19 @@ impl Agent {
     pub fn to_api(&self, topic: Option<Said>) -> api::Agent {
         let (status, waiting_for, reported_status) =
             match self.status.status().map(ActiveStatus::to_api) {
-                Some((legacy, waiting_for, reported)) => (Some(legacy), waiting_for, Some(reported)),
+                Some((legacy, waiting_for, reported)) => {
+                    (Some(legacy), waiting_for, Some(reported))
+                }
                 None => (None, None, None),
             };
         let status_since = self.status.since().map(Into::into);
         let status_rung = self.status.rung().map(|rung| rung.to_api().into());
-        let subagents = self.status.subagents().iter().map(Subagent::to_api).collect();
+        let subagents = self
+            .status
+            .subagents()
+            .iter()
+            .map(Subagent::to_api)
+            .collect();
         api::Agent {
             pid: self.pid.get(),
             harness: Some(self.harness.to_api().into()),
@@ -228,6 +254,9 @@ impl Agent {
 impl Unread {
     #[must_use]
     pub fn to_api(&self) -> api::UnreadFile {
-        api::UnreadFile { pid: self.pid, terminal: self.terminal.map(Into::into) }
+        api::UnreadFile {
+            pid: self.pid,
+            terminal: self.terminal.map(Into::into),
+        }
     }
 }

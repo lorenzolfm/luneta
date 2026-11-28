@@ -8,11 +8,11 @@ use std::sync::mpsc::SyncSender;
 use std::thread;
 use std::time::Duration;
 
-use lune_domain::projects::{parse, written, Change, Closing, Dir, Made, MoveTo, Parsed, Projects};
-use lune_domain::projects::{Refused, Relaid, Size, Spot, TerminalViewId, ViewId, WorktreeId};
+use lune_domain::projects::{Change, Closing, Dir, Made, MoveTo, Parsed, Projects, parse, written};
 use lune_domain::projects::{FILE_BYTES_MAX, PATH_BYTES_MAX};
+use lune_domain::projects::{Refused, Relaid, Size, Spot, TerminalViewId, ViewId, WorktreeId};
 
-use super::{gone, random_id, spot, SPOT_LOOK};
+use super::{SPOT_LOOK, gone, random_id, spot};
 use crate::api;
 use crate::core::Command;
 use crate::state::{self, Unset};
@@ -43,11 +43,18 @@ pub struct Revision(u64);
 impl Revision {
     #[must_use]
     pub fn to_api(self) -> api::Version {
-        api::Version { pid: std::process::id(), seq: self.0 }
+        api::Version {
+            pid: std::process::id(),
+            seq: self.0,
+        }
     }
 
     fn next(self) -> Revision {
-        Revision(self.0.checked_add(1).expect("projects change fewer than 2^64 times"))
+        Revision(
+            self.0
+                .checked_add(1)
+                .expect("projects change fewer than 2^64 times"),
+        )
     }
 }
 
@@ -74,7 +81,7 @@ impl Opened {
             Some(Said::View(view)) => {
                 let view = ViewId::of(view).ok_or("opened: it names view 0")?;
                 Ok(Some(Opened::View(view)))
-            },
+            }
             Some(Said::Unopened(why)) => Ok(Some(Opened::Unopened(why))),
         }
     }
@@ -90,7 +97,11 @@ impl Opened {
 }
 
 enum Keeping {
-    Kept { file: PathBuf, projects: Projects, written: Projects },
+    Kept {
+        file: PathBuf,
+        projects: Projects,
+        written: Projects,
+    },
     Unkept(String),
 }
 
@@ -207,8 +218,15 @@ impl Store {
             Ok(Lock { file, lock }) => (Keeping::of(file), Some(lock)),
             Err(why) => (Keeping::Unkept(why), None),
         };
-        let store = Store { keeping, revision: Revision::default(), core, _held: held };
-        store.tell().map_err(|_| io::Error::other("the daemon's core has stopped"))?;
+        let store = Store {
+            keeping,
+            revision: Revision::default(),
+            core,
+            _held: held,
+        };
+        store
+            .tell()
+            .map_err(|_| io::Error::other("the daemon's core has stopped"))?;
         Ok(store)
     }
 
@@ -234,7 +252,9 @@ impl Store {
     }
 
     pub fn fresh_terminal(&self) -> Result<TerminalViewId, Failed> {
-        self.kept()?.fresh_terminal(&mut random_id).map_err(Failed::Refused)
+        self.kept()?
+            .fresh_terminal(&mut random_id)
+            .map_err(Failed::Refused)
     }
 
     pub fn change(&mut self, change: Change) -> Result<Option<Made>, Failed> {
@@ -257,9 +277,15 @@ impl Store {
         size: Size,
         focused: bool,
     ) -> Result<WorktreeId, Failed> {
-        let (changed, to) =
-            self.kept()?.moved(terminal, to, size, focused, random_id).map_err(Failed::Refused)?;
-        assert_ne!(self.projects(), Some(&changed), "a terminal moved changes the projects");
+        let (changed, to) = self
+            .kept()?
+            .moved(terminal, to, size, focused, random_id)
+            .map_err(Failed::Refused)?;
+        assert_ne!(
+            self.projects(),
+            Some(&changed),
+            "a terminal moved changes the projects"
+        );
         self.written_as(&changed)?;
         self.took(changed)?;
         Ok(to)
@@ -279,7 +305,10 @@ impl Store {
 
     pub fn followed(&mut self, change: Change) -> Result<Option<String>, Failed> {
         let (changed, made) = self.applied(change)?;
-        assert!(made.is_none(), "a change that follows the mux or git hands back nothing made");
+        assert!(
+            made.is_none(),
+            "a change that follows the mux or git hands back nothing made"
+        );
         self.follows(changed)
     }
 
@@ -333,7 +362,10 @@ impl Store {
     }
 
     pub fn flush(&mut self) -> Result<(), Failed> {
-        let Keeping::Kept { projects, written, .. } = &self.keeping else {
+        let Keeping::Kept {
+            projects, written, ..
+        } = &self.keeping
+        else {
             return Ok(());
         };
         if projects == written {
@@ -353,7 +385,8 @@ impl Store {
             let _ = self.tell();
             return Err(Failed::NotKept(why));
         }
-        let unwritten = |error: io::Error| Failed::Unwritten(format!("{}: {error}", file.display()));
+        let unwritten =
+            |error: io::Error| Failed::Unwritten(format!("{}: {error}", file.display()));
         write(file, changed).map_err(unwritten)?;
         *written = changed.clone();
         Ok(())
@@ -364,7 +397,10 @@ impl Store {
             Keeping::Kept { projects, .. } => Ok(projects.clone()),
             Keeping::Unkept(why) => Err(why.clone()),
         };
-        let told = Command::Projects { projects: told, revision: self.revision };
+        let told = Command::Projects {
+            projects: told,
+            revision: self.revision,
+        };
         self.core.send(told).map_err(|_| Failed::KeptUntold)
     }
 }
@@ -372,18 +408,32 @@ impl Store {
 impl Keeping {
     fn of(file: PathBuf) -> Keeping {
         match read(&file) {
-            Ok(Parsed { projects, migrated: false }) => {
+            Ok(Parsed {
+                projects,
+                migrated: false,
+            }) => {
                 let written = projects.clone();
-                Keeping::Kept { file, projects, written }
-            },
-            Ok(Parsed { projects, migrated: true }) => match write(&file, &projects) {
+                Keeping::Kept {
+                    file,
+                    projects,
+                    written,
+                }
+            }
+            Ok(Parsed {
+                projects,
+                migrated: true,
+            }) => match write(&file, &projects) {
                 Ok(()) => {
                     let written = projects.clone();
-                    Keeping::Kept { file, projects, written }
-                },
+                    Keeping::Kept {
+                        file,
+                        projects,
+                        written,
+                    }
+                }
                 Err(error) => {
                     Keeping::Unkept(left(&file, &format!("migrated, it is unwritten: {error}")))
-                },
+                }
             },
             Err(why) => Keeping::Unkept(left(&file, &why)),
         }
@@ -391,21 +441,36 @@ impl Keeping {
 }
 
 fn locked(file: &Path, listens_in: &Path) -> Result<File, Unheld> {
-    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let folder = file
+        .parent()
+        .expect("a file of `state::path` is in a folder");
     let path = folder.join(LOCK);
     let failed = |at: &Path, error: io::Error| {
-        Unheld::Unkept(format!("{}: {error}, and so no projects are kept", at.display()))
+        Unheld::Unkept(format!(
+            "{}: {error}, and so no projects are kept",
+            at.display()
+        ))
     };
     fs::create_dir_all(folder).map_err(|error| failed(folder, error))?;
     let mut options = OpenOptions::new();
-    let opened = options.create(true).truncate(false).read(true).write(true).open(&path);
+    let opened = options
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path);
     let mut lock = opened.map_err(|error| failed(&path, error))?;
     if held(&lock).map_err(|error| failed(&path, error))? {
-        let said = lock.set_len(0).and_then(|()| lock.write_all(listens_in.as_os_str().as_bytes()));
+        let said = lock
+            .set_len(0)
+            .and_then(|()| lock.write_all(listens_in.as_os_str().as_bytes()));
         said.map_err(|error| failed(&path, error))?;
         return Ok(lock);
     }
-    Err(Unheld::Elsewhere(Elsewhere { folder: folder.to_owned(), holder: said_by(&lock) }))
+    Err(Unheld::Elsewhere(Elsewhere {
+        folder: folder.to_owned(),
+        holder: said_by(&lock),
+    }))
 }
 
 fn held(lock: &File) -> io::Result<bool> {
@@ -436,26 +501,36 @@ pub fn forget() -> Result<Forgotten, String> {
 }
 
 fn forget_at(file: &Path) -> Result<Forgotten, String> {
-    let folder = file.parent().expect("a file of `state::path` is in a folder");
+    let folder = file
+        .parent()
+        .expect("a file of `state::path` is in a folder");
     let path = folder.join(LOCK);
     let failed = |error: io::Error| format!("{}: {error}", path.display());
-    let lock = match OpenOptions::new().create(true).truncate(false).write(true).open(&path) {
+    let lock = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
         Ok(lock) => lock,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Ok(Forgotten::Read(Projects::default()));
-        },
+        }
         Err(error) => return Err(failed(error)),
     };
     if !held(&lock).map_err(failed)? {
-        return Err(format!("a luned keeps them still, as it holds {}", path.display()));
+        return Err(format!(
+            "a luned keeps them still, as it holds {}",
+            path.display()
+        ));
     }
     let held = match read(file) {
         Ok(Parsed { projects, .. }) => Forgotten::Read(projects),
         Err(why) => Forgotten::Unread(why),
     };
     match fs::remove_file(file) {
-        Ok(()) => {},
-        Err(error) if error.kind() == ErrorKind::NotFound => {},
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(format!("{}: {error}", file.display())),
     }
     crate::resume::store::forget_in(folder)?;
@@ -465,7 +540,10 @@ fn forget_at(file: &Path) -> Result<Forgotten, String> {
 
 fn unchanged(file: &Path, projects: &Projects) -> Result<(), String> {
     match read(file) {
-        Ok(Parsed { projects: now, migrated: false }) if now == *projects => Ok(()),
+        Ok(Parsed {
+            projects: now,
+            migrated: false,
+        }) if now == *projects => Ok(()),
         Ok(_) => Err(left(file, "it changed since luned read it")),
         Err(why) => Err(left(file, &why)),
     }
@@ -480,12 +558,18 @@ fn read(file: &Path) -> Result<Parsed, String> {
     let opened = match File::open(file) {
         Ok(opened) => opened,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return Ok(Parsed { projects: Projects::default(), migrated: false });
-        },
+            return Ok(Parsed {
+                projects: Projects::default(),
+                migrated: false,
+            });
+        }
         Err(error) => return Err(error.to_string()),
     };
     let limit = u64::try_from(FILE_BYTES_MAX).expect("FILE_BYTES_MAX fits a u64") + 1;
-    opened.take(limit).read_to_string(&mut text).map_err(|error| error.to_string())?;
+    opened
+        .take(limit)
+        .read_to_string(&mut text)
+        .map_err(|error| error.to_string())?;
     if text.len() > FILE_BYTES_MAX {
         return Err(format!("it is over {FILE_BYTES_MAX} bytes"));
     }
@@ -501,10 +585,16 @@ fn spot_of_kept(dir: &Dir) -> Result<Option<Spot>, String> {
 }
 
 fn write(file: &Path, projects: &Projects) -> io::Result<()> {
-    let folder = file.parent().expect("a file of `state::path` is in a folder");
-    let above = folder.parent().expect("a folder of `state::path` is in a folder");
+    let folder = file
+        .parent()
+        .expect("a file of `state::path` is in a folder");
+    let above = folder
+        .parent()
+        .expect("a folder of `state::path` is in a folder");
     fs::create_dir_all(folder)?;
-    let mut unfinished = tempfile::Builder::new().prefix(".projects.").tempfile_in(folder)?;
+    let mut unfinished = tempfile::Builder::new()
+        .prefix(".projects.")
+        .tempfile_in(folder)?;
     unfinished.write_all(written(projects).as_bytes())?;
     unfinished.as_file().sync_all()?;
     unfinished.persist(file).map_err(|error| error.error)?;
@@ -512,7 +602,9 @@ fn write(file: &Path, projects: &Projects) -> io::Result<()> {
     let synced = synced.and_then(|()| File::open(above)?.sync_all());
     if let Err(error) = synced {
         let folder = folder.display();
-        log::say(&format!("{folder}: {error}, and so a crash may take back the change kept"));
+        log::say(&format!(
+            "{folder}: {error}, and so a crash may take back the change kept"
+        ));
     }
     Ok(())
 }
@@ -522,20 +614,32 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     use std::sync::mpsc::{self, Receiver};
 
-    use lune_domain::projects::layout::Towards;
-    use lune_domain::projects::{Arranged, Id, Listed, Name, Opens, Placed, ProjectId, ProjectName};
     use lune_domain::projects::Runs;
-    use lune_domain::projects::{Size, Subfolder, Terminal, Used, View, USED_MILLIS_MAX};
+    use lune_domain::projects::layout::Towards;
+    use lune_domain::projects::{
+        Arranged, Id, Listed, Name, Opens, Placed, ProjectId, ProjectName,
+    };
+    use lune_domain::projects::{Size, Subfolder, Terminal, USED_MILLIS_MAX, Used, View};
     use lune_waits::{Gap, apart};
 
     use super::*;
 
     fn add_in(project: ProjectId, spot: Spot) -> Change {
-        Change::AddWorktree { project, spot, name: None, opens: Opens::Shell }
+        Change::AddWorktree {
+            project,
+            spot,
+            name: None,
+            opens: Opens::Shell,
+        }
     }
 
     fn add_named(project: ProjectId, spot: Spot, name: Option<Name>) -> Change {
-        Change::AddWorktree { project, spot, name, opens: Opens::Shell }
+        Change::AddWorktree {
+            project,
+            spot,
+            name,
+            opens: Opens::Shell,
+        }
     }
 
     fn dir(text: &str) -> Dir {
@@ -623,10 +727,20 @@ mod tests {
         let mut store = store_at(Ok(file.clone()), core.clone());
         assert_eq!(store.unkept(), None);
         let vault = Some(ProjectName::parse("bitwarden backup").unwrap());
-        store.change(Change::AddProject { spot: alone("/home/me/Vault"), name: vault }).unwrap();
-        let lune = Change::AddProject { spot: clone_of("/w/lune", &["main"]), name: None };
+        store
+            .change(Change::AddProject {
+                spot: alone("/home/me/Vault"),
+                name: vault,
+            })
+            .unwrap();
+        let lune = Change::AddProject {
+            spot: clone_of("/w/lune", &["main"]),
+            name: None,
+        };
         let made = store.change(lune);
-        let Some(Made::Project(lune)) = made.unwrap() else { panic!("lune is made") };
+        let Some(Made::Project(lune)) = made.unwrap() else {
+            panic!("lune is made")
+        };
         let named = Some(Name::parse("release").unwrap());
         let fix = add_named(lune, spot_at("/w/lune", "fix"), named);
         store.change(fix).unwrap();
@@ -654,13 +768,21 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let file = file_in(&scratch);
         assert_eq!(forget_at(&file), Ok(Forgotten::Read(Projects::default())));
-        assert!(!file.parent().unwrap().exists(), "nothing is made to forget nothing");
+        assert!(
+            !file.parent().unwrap().exists(),
+            "nothing is made to forget nothing"
+        );
 
         let (core, _commands) = channel();
         let mut store = store_at(Ok(file.clone()), core.clone());
-        let lune = Change::AddProject { spot: clone_of("/w/lune", &[]), name: None };
+        let lune = Change::AddProject {
+            spot: clone_of("/w/lune", &[]),
+            name: None,
+        };
         let made = store.change(lune);
-        let Some(Made::Project(lune)) = made.unwrap() else { panic!("lune is made") };
+        let Some(Made::Project(lune)) = made.unwrap() else {
+            panic!("lune is made")
+        };
         let spot = spot_at("/w/lune", "main");
         store.change(add_in(lune, spot)).unwrap();
         let held = store.projects().unwrap().clone();
@@ -694,7 +816,10 @@ mod tests {
                 r#"{"version": 14, "projects": []}"#,
                 "version 14, and this luned reads only 1 to 13",
             ),
-            (r#"{"version": 2, "projects": [], "views": []}"#, "unknown field `views`"),
+            (
+                r#"{"version": 2, "projects": [], "views": []}"#,
+                "unknown field `views`",
+            ),
             (r#"{"version": 1}"#, "missing field `projects`"),
             (
                 r#"{"version": 1, "projects": [
@@ -711,7 +836,10 @@ mod tests {
                 {"id": "0000000000000002", "name": "b", "dir": "/a/b"}]}"#,
                 "/a/b is inside /a",
             ),
-            (&format!(r#"{{"version": 1, "projects": [{project}, {project}]}}"#), "comes twice"),
+            (
+                &format!(r#"{{"version": 1, "projects": [{project}, {project}]}}"#),
+                "comes twice",
+            ),
             (
                 &format!(
                     r#"{{"version": 9, "projects": [{{"id": "0000000000000001", "name": "a",
@@ -789,7 +917,10 @@ mod tests {
             assert!(unkept.contains(why), "{unkept:?} for {text}");
             assert!(unkept.ends_with("and so it is left as it is"), "{unkept}");
             assert_eq!(heard(&commands), [Err(unkept.clone())]);
-            let change = Change::AddProject { spot: alone("/c"), name: None };
+            let change = Change::AddProject {
+                spot: alone("/c"),
+                name: None,
+            };
             assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
             assert_eq!(heard(&commands), []);
             assert_eq!(fs::read_to_string(&file).unwrap(), text);
@@ -805,7 +936,11 @@ mod tests {
         let store = store_at(Ok(file.clone()), channel().0);
         assert!(store.unkept().unwrap().contains("over 33554432 bytes"));
         let second = take_at(Ok(file), Path::new("/tmp/b"));
-        assert!(matches!(second, Err(Unheld::Elsewhere(_))), "{:?}", second.err());
+        assert!(
+            matches!(second, Err(Unheld::Elsewhere(_))),
+            "{:?}",
+            second.err()
+        );
     }
 
     #[test]
@@ -814,7 +949,10 @@ mod tests {
         let mut store = store_at(Err(Unset), core);
         let unkept = store.unkept().unwrap().to_owned();
         assert!(unkept.starts_with("projects are kept nowhere: neither XDG_STATE_HOME"));
-        let change = Change::AddProject { spot: alone("/c"), name: None };
+        let change = Change::AddProject {
+            spot: alone("/c"),
+            name: None,
+        };
         assert_eq!(store.change(change), Err(Failed::NotKept(unkept)));
     }
 
@@ -825,7 +963,10 @@ mod tests {
         let (core, commands) = channel();
         let mut store = store_at(Ok(file.clone()), core);
         drop(commands);
-        let change = Change::AddProject { spot: alone("/c"), name: None };
+        let change = Change::AddProject {
+            spot: alone("/c"),
+            name: None,
+        };
         assert_eq!(store.change(change), Err(Failed::KeptUntold));
 
         drop(store);
@@ -842,16 +983,27 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = store_at(Ok(file.clone()), core);
-        store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
+        store
+            .change(Change::AddProject {
+                spot: alone("/a"),
+                name: None,
+            })
+            .unwrap();
         let written = fs::read_to_string(&file).unwrap();
         assert_eq!(heard(&commands).len(), 2);
 
-        let inside = Change::AddProject { spot: alone("/a/b"), name: None };
+        let inside = Change::AddProject {
+            spot: alone("/a/b"),
+            name: None,
+        };
         let Err(Failed::Nests(why)) = store.change(inside) else {
             panic!("a project inside another is kept");
         };
         assert!(why.contains("/a/b is inside /a"), "{why}");
-        let (project, to) = (ProjectId::new(Id::of(9).unwrap()), ProjectName::parse("x").unwrap());
+        let (project, to) = (
+            ProjectId::new(Id::of(9).unwrap()),
+            ProjectName::parse("x").unwrap(),
+        );
         let Err(Failed::Refused(why)) = store.change(Change::RenameProject { project, to }) else {
             panic!("a rename of no project is kept");
         };
@@ -859,7 +1011,10 @@ mod tests {
 
         let folder = file.parent().unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o500)).unwrap();
-        let unwritten = store.change(Change::AddProject { spot: alone("/c"), name: None });
+        let unwritten = store.change(Change::AddProject {
+            spot: alone("/c"),
+            name: None,
+        });
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
         let Err(Failed::Unwritten(why)) = unwritten else {
             panic!("a change into a folder that refuses writes is kept: {unwritten:?}");
@@ -869,7 +1024,12 @@ mod tests {
         assert_eq!(store.unkept(), None);
         assert_eq!(heard(&commands), []);
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
-        store.change(Change::AddProject { spot: alone("/c"), name: None }).unwrap();
+        store
+            .change(Change::AddProject {
+                spot: alone("/c"),
+                name: None,
+            })
+            .unwrap();
         let [kept] = heard(&commands).try_into().unwrap();
         assert_eq!(kept.map(|kept| kept.all().len()), Ok(2));
     }
@@ -880,7 +1040,10 @@ mod tests {
         let file = file_in(&scratch);
         let (core, _commands) = channel();
         let mut store = store_at(Ok(file.clone()), core.clone());
-        let lune = Change::AddProject { spot: clone_of("/w/lune", &[]), name: None };
+        let lune = Change::AddProject {
+            spot: clone_of("/w/lune", &[]),
+            name: None,
+        };
         let Some(Made::Project(lune)) = store.change(lune).unwrap() else {
             panic!("lune is made");
         };
@@ -889,7 +1052,10 @@ mod tests {
             made => panic!("{at} is made: {made:?}"),
         };
         let (one, two) = (worktree("one"), worktree("two"));
-        let went = |worktree, millis| Change::Went { worktree, at: Used::of_millis(millis) };
+        let went = |worktree, millis| Change::Went {
+            worktree,
+            at: Used::of_millis(millis),
+        };
         store.change(went(one, USED_MILLIS_MAX - 1)).unwrap();
         store.flush().unwrap();
         store.change(went(two, 1)).unwrap();
@@ -914,8 +1080,15 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = store_at(Ok(file.clone()), core);
-        let made = store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
-        let Some(Made::Project(project)) = made else { panic!("/a is made") };
+        let made = store
+            .change(Change::AddProject {
+                spot: alone("/a"),
+                name: None,
+            })
+            .unwrap();
+        let Some(Made::Project(project)) = made else {
+            panic!("/a is made")
+        };
         let add = add_in(project, alone("/a/b"));
         let Some(Made::Found(worktree)) = store.change(add).unwrap() else {
             panic!("/a/b is in /a's own worktree");
@@ -923,7 +1096,14 @@ mod tests {
         let terminal = Terminal::new(store.fresh_terminal().unwrap(), dir("/a"), Runs::Shell);
         let (placed, size) = (Placed::Alone, Size::of(80, 24).unwrap());
         let view = View::Terminal(terminal);
-        store.change(Change::Open { worktree, view, placed, size }).unwrap();
+        store
+            .change(Change::Open {
+                worktree,
+                view,
+                placed,
+                size,
+            })
+            .unwrap();
         let written = fs::read_to_string(&file).unwrap();
         heard(&commands);
 
@@ -932,7 +1112,9 @@ mod tests {
         let unwritten = store.closed(Closing::Worktree(worktree));
         let flushed = store.flush();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
-        let why = unwritten.unwrap().expect("a folder that refuses writes writes nothing");
+        let why = unwritten
+            .unwrap()
+            .expect("a folder that refuses writes writes nothing");
         assert!(why.starts_with(&format!("{}: ", file.display())), "{why}");
         assert!(matches!(flushed, Err(Failed::Unwritten(_))), "{flushed:?}");
         assert_eq!(fs::read_to_string(&file).unwrap(), written);
@@ -942,8 +1124,15 @@ mod tests {
         assert!(emptied(store.projects().unwrap()));
 
         store.flush().unwrap();
-        assert!(emptied(&parse(&fs::read_to_string(&file).unwrap()).unwrap()), "a flush writes it");
-        assert_eq!(store.closed(Closing::Worktree(worktree)), Ok(None), "closed, it stays");
+        assert!(
+            emptied(&parse(&fs::read_to_string(&file).unwrap()).unwrap()),
+            "a flush writes it"
+        );
+        assert_eq!(
+            store.closed(Closing::Worktree(worktree)),
+            Ok(None),
+            "closed, it stays"
+        );
     }
 
     #[test]
@@ -960,16 +1149,36 @@ mod tests {
         };
         let folder = file.parent().unwrap().to_owned();
         let holder = Some(PathBuf::from(LISTENS_IN));
-        assert_eq!(elsewhere, Elsewhere { folder: folder.clone(), holder });
+        assert_eq!(
+            elsewhere,
+            Elsewhere {
+                folder: folder.clone(),
+                holder
+            }
+        );
         let said = elsewhere.to_string();
-        assert!(said.contains(&format!("listens in {LISTENS_IN}: `lune terminate`")), "{said}");
+        assert!(
+            said.contains(&format!("listens in {LISTENS_IN}: `lune terminate`")),
+            "{said}"
+        );
 
         fs::write(&lock, "").unwrap();
         let Err(Unheld::Elsewhere(older)) = take_at(Ok(file.clone()), Path::new("/tmp/b")) else {
             panic!("a second lock of one file is taken");
         };
-        assert_eq!(older, Elsewhere { folder, holder: None });
-        assert!(older.to_string().ends_with("one too old to say where it listens"), "{older}");
+        assert_eq!(
+            older,
+            Elsewhere {
+                folder,
+                holder: None
+            }
+        );
+        assert!(
+            older
+                .to_string()
+                .ends_with("one too old to say where it listens"),
+            "{older}"
+        );
 
         let released = thread::spawn(move || {
             apart(const { Gap::of(HELD_PAUSE.saturating_mul(4)) });
@@ -1001,13 +1210,21 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = store_at(Ok(file.clone()), core);
-        store.change(Change::AddProject { spot: alone("/a"), name: None }).unwrap();
+        store
+            .change(Change::AddProject {
+                spot: alone("/a"),
+                name: None,
+            })
+            .unwrap();
         let written = fs::read_to_string(&file).unwrap();
         let edited = written.replace(r#""name": "a""#, r#""name": "edited""#);
         assert_ne!(edited, written);
         fs::write(&file, &edited).unwrap();
 
-        let change = Change::AddProject { spot: alone("/b"), name: None };
+        let change = Change::AddProject {
+            spot: alone("/b"),
+            name: None,
+        };
         let Err(Failed::NotKept(why)) = store.change(change) else {
             panic!("a change over an edited file is kept");
         };
@@ -1016,7 +1233,11 @@ mod tests {
         assert_eq!(heard(&commands).last(), Some(&Err(why)));
         assert_eq!(fs::read_to_string(&file).unwrap(), edited);
         let second = take_at(Ok(file), Path::new("/tmp/b"));
-        assert!(matches!(second, Err(Unheld::Elsewhere(_))), "{:?}", second.err());
+        assert!(
+            matches!(second, Err(Unheld::Elsewhere(_))),
+            "{:?}",
+            second.err()
+        );
     }
 
     #[test]
@@ -1025,8 +1246,13 @@ mod tests {
         let file = file_in(&scratch);
         let (core, commands) = channel();
         let mut store = store_at(Ok(file.clone()), core);
-        let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
-        let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
+        let project = store.change(Change::AddProject {
+            spot: alone("/a"),
+            name: None,
+        });
+        let Some(Made::Project(project)) = project.unwrap() else {
+            panic!("/a is made")
+        };
         let add = add_in(project, alone("/a/b"));
         let Some(Made::Found(worktree)) = store.change(add).unwrap() else {
             panic!("/a/b is in /a's own worktree");
@@ -1036,18 +1262,36 @@ mod tests {
         let [one, two] = [first, second].map(TerminalViewId::view);
         let opened = |terminal, placed| {
             let terminal = Terminal::new(terminal, dir("/a"), Runs::Shell);
-            Change::Open { worktree, view: View::Terminal(terminal), placed, size }
+            Change::Open {
+                worktree,
+                view: View::Terminal(terminal),
+                placed,
+                size,
+            }
         };
         store.change(opened(first, Placed::Alone)).unwrap();
-        let beside = Placed::Beside { at: one, towards: Towards::Right };
+        let beside = Placed::Beside {
+            at: one,
+            towards: Towards::Right,
+        };
         store.change(opened(second, beside)).unwrap();
         let read = || parse(&fs::read_to_string(&file).unwrap()).unwrap();
         let full = |projects: &Projects| projects.find(worktree).unwrap().1.layout().full();
-        store.change(Change::Arrange { worktree, arranged: Arranged::Panes }).unwrap();
+        store
+            .change(Change::Arrange {
+                worktree,
+                arranged: Arranged::Panes,
+            })
+            .unwrap();
         let tabbed = |projects: &Projects| projects.find(worktree).unwrap().1.layout().tabbed();
         assert!(tabbed(&read()), "an arrangement too waits for the flush");
 
-        store.relaid(Relaid::Fill { worktree, full: Some(two) }).unwrap();
+        store
+            .relaid(Relaid::Fill {
+                worktree,
+                full: Some(two),
+            })
+            .unwrap();
         assert_eq!(full(store.projects().unwrap()), Some(two));
         assert_eq!(full(&read()), None, "a fill waits for the flush");
         let told = heard(&commands).pop().unwrap().unwrap();
@@ -1055,7 +1299,12 @@ mod tests {
         store.flush().unwrap();
         assert_eq!(full(&read()), Some(two));
 
-        store.relaid(Relaid::Fill { worktree, full: None }).unwrap();
+        store
+            .relaid(Relaid::Fill {
+                worktree,
+                full: None,
+            })
+            .unwrap();
         let to = ProjectName::parse("b").unwrap();
         store.change(Change::RenameProject { project, to }).unwrap();
         let kept = *store.projects().unwrap() == read();
@@ -1066,17 +1315,27 @@ mod tests {
 
     #[test]
     fn a_layout_relaid_sends_watchers_no_new_listing() {
-        use lune_domain::projects::layout::{Direction, Growth, Sides};
         use crate::core::{self, Wakes};
+        use lune_domain::projects::layout::{Direction, Growth, Sides};
 
         let scratch = tempfile::tempdir().unwrap();
         let (git, _git) = mpsc::sync_channel(1);
         let (github, _github) = mpsc::sync_channel(1);
         let (projects, _projects) = mpsc::sync_channel(1);
-        let core = core::start(Wakes { git, github, projects }).unwrap();
+        let core = core::start(Wakes {
+            git,
+            github,
+            projects,
+        })
+        .unwrap();
         let mut store = store_at(Ok(file_in(&scratch)), core.clone());
-        let project = store.change(Change::AddProject { spot: alone("/a"), name: None });
-        let Some(Made::Project(project)) = project.unwrap() else { panic!("/a is made") };
+        let project = store.change(Change::AddProject {
+            spot: alone("/a"),
+            name: None,
+        });
+        let Some(Made::Project(project)) = project.unwrap() else {
+            panic!("/a is made")
+        };
         let Some(Made::Found(worktree)) = store.change(add_in(project, alone("/a/b"))).unwrap()
         else {
             panic!("/a/b is in /a's own worktree");
@@ -1086,36 +1345,78 @@ mod tests {
         let [one, two] = [first, second].map(TerminalViewId::view);
         let opened = |terminal, placed| {
             let terminal = Terminal::new(terminal, dir("/a"), Runs::Shell);
-            Change::Open { worktree, view: View::Terminal(terminal), placed, size }
+            Change::Open {
+                worktree,
+                view: View::Terminal(terminal),
+                placed,
+                size,
+            }
         };
         store.change(opened(first, Placed::Alone)).unwrap();
-        store.change(opened(second, Placed::Beside { at: one, towards: Towards::Right })).unwrap();
+        store
+            .change(opened(
+                second,
+                Placed::Beside {
+                    at: one,
+                    towards: Towards::Right,
+                },
+            ))
+            .unwrap();
         let listing = || {
-            core::ask(&core, Command::HostAll).expect("the core answers").version()
+            core::ask(&core, Command::HostAll)
+                .expect("the core answers")
+                .version()
         };
         let tabbed = (listing(), store.revision());
-        store.change(Change::Arrange { worktree, arranged: Arranged::Panes }).unwrap();
+        store
+            .change(Change::Arrange {
+                worktree,
+                arranged: Arranged::Panes,
+            })
+            .unwrap();
         let before = (listing(), store.revision());
-        assert_ne!(before, tabbed, "watchers hear of panes, as a listing says it");
+        assert_ne!(
+            before, tabbed,
+            "watchers hear of panes, as a listing says it"
+        );
 
         let (sides, growth) = (Sides::One(Direction::Left), Growth::Grow);
         let relaid = [
             Relaid::Focus { view: one },
-            Relaid::Resize { view: two, sides, growth, size },
-            Relaid::Fill { worktree, full: Some(two) },
-            Relaid::Fill { worktree, full: None },
+            Relaid::Resize {
+                view: two,
+                sides,
+                growth,
+                size,
+            },
+            Relaid::Fill {
+                worktree,
+                full: Some(two),
+            },
+            Relaid::Fill {
+                worktree,
+                full: None,
+            },
         ];
         for relaid in relaid {
             let said = format!("{relaid:?}");
             let was = store.projects().unwrap().clone();
             store.relaid(relaid).unwrap();
             assert_ne!(store.projects(), Some(&was), "{said} changes the projects");
-            assert_eq!((listing(), store.revision()), before, "{said} sends no new listing");
+            assert_eq!(
+                (listing(), store.revision()),
+                before,
+                "{said} sends no new listing"
+            );
         }
 
         store.change(Change::Swap { one, other: two }).unwrap();
         let (version, revision) = (listing(), store.revision());
         assert_ne!(version, before.0, "a swap sends watchers a new listing");
-        assert_eq!(revision, before.1.next(), "a swap is a revision of the projects");
+        assert_eq!(
+            revision,
+            before.1.next(),
+            "a swap is a revision of the projects"
+        );
     }
 }

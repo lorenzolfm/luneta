@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;
 use std::path::Path;
-use std::pin::{pin, Pin};
+use std::pin::{Pin, pin};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -23,10 +23,10 @@ use luned::printed::{self, Kept, Printed};
 use luned::program::Wanted;
 use luned::prunes::{self, Deleting, Plan, Pruned};
 use luned::rebases::{self, Rebased, Unrebased};
-use luned::repositories::{Found, Repository, REPOSITORIES_MAX};
+use luned::repositories::{Found, REPOSITORIES_MAX, Repository};
 use luned::skills::{Name, Runs, Skill};
-use luned::transcripts::{Reading, SessionId, TailLines, TranscriptEnd, IDS_MAX, TAILS_BYTES};
-use luned::{log, said_by, told_by, Answer, Destination, Directory, Held, Shared, Unasked};
+use luned::transcripts::{IDS_MAX, Reading, SessionId, TAILS_BYTES, TailLines, TranscriptEnd};
+use luned::{Answer, Destination, Directory, Held, Shared, Unasked, log, said_by, told_by};
 use tokio::runtime::Handle;
 use tokio::time::timeout;
 use tokio_stream::Stream;
@@ -51,7 +51,7 @@ impl AnswerError {
         match self {
             AnswerError::Refused(why) | AnswerError::Asked(why, _) | AnswerError::InDoubt(why) => {
                 why
-            },
+            }
         }
     }
 }
@@ -78,44 +78,75 @@ impl Luned {
             Ok(reached) => reached?,
             Err(_) => return Err(format!("luned did not answer in {}s", wait.as_secs_f32())),
         };
-        Ok(Luned { tasks, daemon, on: on.clone(), patience })
+        Ok(Luned {
+            tasks,
+            daemon,
+            on: on.clone(),
+            patience,
+        })
     }
 
     pub fn repositories(&mut self) -> Result<Found, String> {
-        let request = ListRepositoriesRequest { on: self.asked_on() };
+        let request = ListRepositoriesRequest {
+            on: self.asked_on(),
+        };
         let listed = self.ask(|daemon, patience| async move {
             daemon.list_repositories(patience, request).await
         })?;
-        let Found { repositories, owned, unread } = repositories_of(listed);
+        let Found {
+            repositories,
+            owned,
+            unread,
+        } = repositories_of(listed);
         let on = self.on.destination();
         let unread = unread.into_iter().map(|note| told_by(on, &note)).collect();
-        Ok(Found { repositories, owned, unread })
+        Ok(Found {
+            repositories,
+            owned,
+            unread,
+        })
     }
 
     pub fn contents(&mut self, dir: &Directory) -> Result<String, String> {
-        let request = ListContentsRequest { on: self.asked_on(), dir: dir.to_string() };
-        let listed = self.ask(|daemon, patience| async move {
-            daemon.list_contents(patience, request).await
-        })?;
+        let request = ListContentsRequest {
+            on: self.asked_on(),
+            dir: dir.to_string(),
+        };
+        let listed = self
+            .ask(|daemon, patience| async move { daemon.list_contents(patience, request).await })?;
         Ok(listed.listed)
     }
 
     pub fn skills(&mut self, dir: &Directory, harness: Harness) -> Result<Vec<Skill>, String> {
         let harness = Some(harness.to_api().into());
         let dir = dir.as_str().to_owned();
-        let request = ListSkillsRequest { on: self.asked_on(), dir, harness };
-        let listed = self.ask(|daemon, patience| async move {
-            daemon.list_skills(patience, request).await
-        })?;
+        let request = ListSkillsRequest {
+            on: self.asked_on(),
+            dir,
+            harness,
+        };
+        let listed = self
+            .ask(|daemon, patience| async move { daemon.list_skills(patience, request).await })?;
         let skill = |skill: luned::api::list_skills_response::Skill| {
-            let runs = if skill.only_you { Runs::OnlyForYou } else { Runs::ForAnyone };
-            Some(Skill { name: Name::new(skill.name)?, description: skill.description, runs })
+            let runs = if skill.only_you {
+                Runs::OnlyForYou
+            } else {
+                Runs::ForAnyone
+            };
+            Some(Skill {
+                name: Name::new(skill.name)?,
+                description: skill.description,
+                runs,
+            })
         };
         Ok(listed.skills.into_iter().filter_map(skill).collect())
     }
 
     pub fn checks(&mut self, page: &PullPage) -> Result<Failing, String> {
-        let request = KeepChecksRequest { on: self.asked_on(), url: page.url().to_owned() };
+        let request = KeepChecksRequest {
+            on: self.asked_on(),
+            url: page.url().to_owned(),
+        };
         let answer = self.answer_of(checks::FETCHING, |daemon, patience| async move {
             daemon.keep_checks(patience, request).await
         })?;
@@ -131,17 +162,31 @@ impl Luned {
                 failed::Log::Unkept(why) => Log::Unkept(why),
             };
             let link = Some(check.link).filter(|link| !link.is_empty());
-            Ok(Failed { name: check.name, link, log })
+            Ok(Failed {
+                name: check.name,
+                link,
+                log,
+            })
         };
-        let failed = answer.failed.into_iter().map(read).collect::<Result<_, String>>()?;
-        Ok(Failing { head: answer.head, failed, pending: answer.pending, passed: answer.passed })
+        let failed = answer
+            .failed
+            .into_iter()
+            .map(read)
+            .collect::<Result<_, String>>()?;
+        Ok(Failing {
+            head: answer.head,
+            failed,
+            pending: answer.pending,
+            passed: answer.passed,
+        })
     }
 
     pub fn ends(&mut self, reading: &Reading) -> Result<HashMap<SessionId, TranscriptEnd>, String> {
         let request = reading.asked(self.asked_on());
-        let answer = self.ask(|daemon, patience| async move {
-            daemon.transcript_ends(patience, request).await
-        })?;
+        let answer =
+            self.ask(
+                |daemon, patience| async move { daemon.transcript_ends(patience, request).await },
+            )?;
         let (read, unread) = ends_of(answer, reading);
         if let Some(why) = unread.summary() {
             log::say(&told_by(self.on.destination(), &why));
@@ -151,9 +196,8 @@ impl Luned {
 
     pub fn printed(&mut self, terminal: TerminalKey, typed: &Said) -> Result<Printed, String> {
         let request = printed::asked(self.asked_on(), terminal, typed);
-        let kept = self.ask(|daemon, patience| async move {
-            daemon.keep_printed(patience, request).await
-        })?;
+        let kept = self
+            .ask(|daemon, patience| async move { daemon.keep_printed(patience, request).await })?;
         Printed::of_api(kept).map_err(|why| told_by(self.on.destination(), &why))
     }
 
@@ -181,16 +225,22 @@ impl Luned {
 
     pub fn paste(&mut self, pasted: &Pasted) -> Result<Ready<usize>, Unready> {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), self.on.destination());
-        self.tasks.block_on(pasted.ready_through(&daemon, on, patience))
+        self.tasks
+            .block_on(pasted.ready_through(&daemon, on, patience))
     }
 
     pub fn issue_remotes(&mut self, dir: &Directory) -> Result<Vec<Remote>, String> {
-        let request = IssueRepositoriesRequest { on: self.asked_on(), dir: dir.to_string() };
+        let request = IssueRepositoriesRequest {
+            on: self.asked_on(),
+            dir: dir.to_string(),
+        };
         let listed = self.ask(|daemon, patience| async move {
             daemon.issue_repositories(patience, request).await
         })?;
         let remotes = listed.repositories.into_iter().map(Remote::of);
-        remotes.collect::<Result<_, _>>().map_err(|why| told_by(self.on.destination(), &why))
+        remotes
+            .collect::<Result<_, _>>()
+            .map_err(|why| told_by(self.on.destination(), &why))
     }
 
     pub fn file_issue(&mut self, filing: &Filing) -> Result<Filed, Unfiled> {
@@ -220,10 +270,10 @@ impl Luned {
         agreed: &BTreeSet<Deleting>,
     ) -> Result<Pruned, String> {
         let request = prunes::told(self.asked_on(), dir, agreed);
-        let answer =
-            self.answer_of(prunes::PLANNING + prunes::DELETING, |daemon, patience| async move {
-                daemon.prune(patience, request).await
-            })?;
+        let answer = self.answer_of(
+            prunes::PLANNING + prunes::DELETING,
+            |daemon, patience| async move { daemon.prune(patience, request).await },
+        )?;
         prunes::pruned_of(answer)
     }
 
@@ -249,7 +299,8 @@ impl Luned {
     where
         F: Future<Output = Result<Held<Streaming<T>>, Unasked>>,
     {
-        self.answer_or_code(late, asking).map_err(AnswerError::into_string)
+        self.answer_or_code(late, asking)
+            .map_err(AnswerError::into_string)
     }
 
     fn answer_or_code<T, F>(
@@ -266,7 +317,9 @@ impl Luned {
             let told = |why: &str| AnswerError::InDoubt(told_by(on, why));
             let mut answer = match asking(daemon, patience).await {
                 Ok(answer) => answer,
-                Err(Unasked::Unsent(unsent)) => return Err(AnswerError::Refused(unsent.to_string())),
+                Err(Unasked::Unsent(unsent)) => {
+                    return Err(AnswerError::Refused(unsent.to_string()));
+                }
                 Err(Unasked::Asked(status)) => return Err(said(&status)),
             };
             match timeout(late, answer.message()).await {
@@ -295,7 +348,7 @@ impl Luned {
                     Ok(Ok(Some(kept))) if kept.path.starts_with('/') => Ok(kept.path),
                     Ok(Ok(Some(kept))) => {
                         told(&format!("luned kept the image at \"{}\"", kept.path))
-                    },
+                    }
                     Ok(Ok(None)) => told("luned's answer ended with nothing in it"),
                     Ok(Err(status)) => Err(said_by(on, &status)),
                     Err(_) => told(&format!("the image had not gone after {minutes} minutes")),
@@ -312,7 +365,9 @@ impl Luned {
 
     fn asked_on(&self) -> Option<On> {
         let on = self.on.destination()?;
-        Some(On { destination: on.to_string() })
+        Some(On {
+            destination: on.to_string(),
+        })
     }
 
     fn ask<T, F>(&mut self, asked: impl FnOnce(Shared, Answer) -> F) -> Result<T, String>
@@ -320,7 +375,9 @@ impl Luned {
         F: Future<Output = Result<T, Unasked>>,
     {
         let (patience, daemon, on) = (self.patience, self.daemon.clone(), self.on.destination());
-        self.tasks.block_on(asked(daemon, patience)).map_err(|unasked| unasked.said(on))
+        self.tasks
+            .block_on(asked(daemon, patience))
+            .map_err(|unasked| unasked.said(on))
     }
 }
 
@@ -359,7 +416,9 @@ async fn heard_up_to(
     }
     let minutes = asks::TURN.as_secs() / 60;
     let mut given_up = pin!(wanted.given_up());
-    let mut until = pin!(tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)));
+    let mut until = pin!(tokio::time::sleep_until(tokio::time::Instant::from_std(
+        deadline
+    )));
     for steps_read in 0..=steps_max {
         if !wanted.still() {
             return None;
@@ -386,7 +445,7 @@ async fn heard_up_to(
             Next::Late => {
                 let why = format!("the turn had not ended after {minutes} minutes");
                 return Some(Err(told_by(on, &why)));
-            },
+            }
             Next::Step(Some(Ok(_))) if steps_read == steps_max => break,
             Next::Step(Some(Ok(step))) => match Step::of(step) {
                 Ok(step) => step.into_iter().for_each(hear),
@@ -409,7 +468,10 @@ struct UnreadEnds {
 impl UnreadEnds {
     fn summary(&self) -> Option<String> {
         let first = self.notes.first()?;
-        Some(format!("{} transcript ends were not read, as {first}", self.count))
+        Some(format!(
+            "{} transcript ends were not read, as {first}",
+            self.count
+        ))
     }
 }
 
@@ -440,27 +502,39 @@ fn ends_of(
             .map(|(id, lines)| read(&id, TailLines::new(lines).map(TranscriptEnd::Claude)))
             .collect()
     } else {
-        typed_ends.into_iter().map(|(id, end)| read(&id, TranscriptEnd::of_api(end))).collect()
+        typed_ends
+            .into_iter()
+            .map(|(id, end)| read(&id, TranscriptEnd::of_api(end)))
+            .collect()
     };
     let (mut read, mut notes) = (HashMap::new(), Vec::new());
     for said in said {
         match said {
             Ok((id, end)) => {
                 read.insert(id, end);
-            },
+            }
             Err(why) => notes.push(why),
         }
     }
     let count = notes.len();
     notes.sort();
     notes.truncate(UNREAD_MAX);
-    assert!(read.len() <= IDS_MAX, "read transcript ends stop at the most");
+    assert!(
+        read.len() <= IDS_MAX,
+        "read transcript ends stop at the most"
+    );
     assert!(
         read.values().map(|end| end.lines().len()).sum::<usize>() <= TAILS_BYTES,
         "read transcript ends fit within the tail share"
     );
-    assert!(notes.len() <= UNREAD_MAX, "unread transcript notes stop at the most");
-    assert!(notes.len() <= count, "kept unread notes do not outnumber unread ends");
+    assert!(
+        notes.len() <= UNREAD_MAX,
+        "unread transcript notes stop at the most"
+    );
+    assert!(
+        notes.len() <= count,
+        "kept unread notes do not outnumber unread ends"
+    );
     (read, UnreadEnds { notes, count })
 }
 
@@ -471,19 +545,30 @@ fn session(id: &str) -> Result<SessionId, String> {
 const UNREAD_MAX: usize = 8;
 
 fn repositories_of(answer: ListRepositoriesResponse) -> Found {
-    let ListRepositoriesResponse { repositories: said, unread: mut unread_there, owned } = answer;
+    let ListRepositoriesResponse {
+        repositories: said,
+        unread: mut unread_there,
+        owned,
+    } = answer;
     let sent = said.len();
     let repository = |said: luned::api::list_repositories_response::Repository| {
-        projects::Dir::parse(&said.path).and_then(Repository::at).ok()
+        projects::Dir::parse(&said.path)
+            .and_then(Repository::at)
+            .ok()
     };
     let read: Vec<Repository> = said.into_iter().filter_map(repository).collect();
     let mut unread = Vec::new();
     let left_out = sent - read.len();
     if left_out > 0 {
-        unread.push(format!("left out {left_out} clones no project can be named for"));
+        unread.push(format!(
+            "left out {left_out} clones no project can be named for"
+        ));
     }
     if read.len() > REPOSITORIES_MAX {
-        unread.push(format!("listed the first {REPOSITORIES_MAX} of {} clones", read.len()));
+        unread.push(format!(
+            "listed the first {REPOSITORIES_MAX} of {} clones",
+            read.len()
+        ));
     }
     let repositories: Vec<Repository> = read.into_iter().take(REPOSITORIES_MAX).collect();
     let owned_sent = owned.len();
@@ -492,13 +577,25 @@ fn repositories_of(answer: ListRepositoriesResponse) -> Found {
     let owned_read = owned.iter().flat_map(OwnedFolder::folders).count();
     let owned_left_out = owned_sent - owned_read;
     if owned_left_out > 0 {
-        unread.push(format!("left out {owned_left_out} of the folders lune keeps clones in"));
+        unread.push(format!(
+            "left out {owned_left_out} of the folders lune keeps clones in"
+        ));
     }
     unread_there.truncate(UNREAD_MAX);
     unread.extend(unread_there);
-    assert!(repositories.len() <= REPOSITORIES_MAX, "another machine's clones stop at the most");
-    assert!(unread.len() <= UNREAD_MAX + 3, "another machine's notes stop at the most");
-    Found { repositories, owned, unread }
+    assert!(
+        repositories.len() <= REPOSITORIES_MAX,
+        "another machine's clones stop at the most"
+    );
+    assert!(
+        unread.len() <= UNREAD_MAX + 3,
+        "another machine's notes stop at the most"
+    );
+    Found {
+        repositories,
+        owned,
+        unread,
+    }
 }
 
 #[cfg(test)]
@@ -525,7 +622,10 @@ mod tests {
     }
 
     fn heard_of(steps: Steps, wanted: bool) -> (Vec<Step>, Option<Result<(), String>>) {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let on: Destination = "nixos".parse().unwrap();
         let told = RefCell::new(Vec::new());
         let hear = |step: Step| told.borrow_mut().push(step);
@@ -552,9 +652,13 @@ mod tests {
         let late = heard_of(stuck(vec![Ok(said.clone().answer())]), true);
         let why = "nixos: the turn had not ended after 10 minutes".to_owned();
         assert_eq!(late, (vec![said.clone()], Some(Err(why))));
-        started.lasted().at_least(DEADLINE, "a turn there is waited for to its deadline");
+        started
+            .lasted()
+            .at_least(DEADLINE, "a turn there is waited for to its deadline");
 
-        let unnamed = AskResponse { step: Some(ask_response::Step::Session("../x".to_owned())) };
+        let unnamed = AskResponse {
+            step: Some(ask_response::Step::Session("../x".to_owned())),
+        };
         let none = heard_of(stuck(vec![Ok(unnamed), Ok(said.answer())]), true);
         let why = "nixos: session: \"../x\" names no session".to_owned();
         assert_eq!(none, (Vec::new(), Some(Err(why))));
@@ -564,14 +668,19 @@ mod tests {
 
     #[test]
     fn a_turn_flooding_steps_respects_its_deadline_and_step_bound() {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let on: Destination = "nixos".parse().unwrap();
         let said = Step::Said("Looking.".to_owned());
         let always = Wanted::always();
 
         let flood_for_deadline = {
             let said = said.clone();
-            Box::pin(tokio_stream::iter(std::iter::repeat_with(move || Ok(said.clone().answer()))))
+            Box::pin(tokio_stream::iter(std::iter::repeat_with(move || {
+                Ok(said.clone().answer())
+            })))
         };
         let seen = RefCell::new(Vec::new());
         let late = runtime.block_on(heard(
@@ -587,7 +696,9 @@ mod tests {
 
         let flood_for_cap = {
             let said = said.clone();
-            Box::pin(tokio_stream::iter(std::iter::repeat_with(move || Ok(said.clone().answer()))))
+            Box::pin(tokio_stream::iter(std::iter::repeat_with(move || {
+                Ok(said.clone().answer())
+            })))
         };
         let capped = runtime.block_on(heard(
             Some(&on),
@@ -621,7 +732,10 @@ mod tests {
             3,
             &|_| {},
         ));
-        assert_eq!(refused, Some(Err("nixos: the turn sent more than 3 steps".to_owned())));
+        assert_eq!(
+            refused,
+            Some(Err("nixos: the turn sent more than 3 steps".to_owned()))
+        );
     }
 
     #[test]
@@ -632,14 +746,22 @@ mod tests {
         let unasked = "9e8d7c6b-5a4f-4e3d-2c1b-0a9f8e7d6c5b";
         let id = |id: &str| SessionId::parse(id).unwrap();
         let reading = Reading::new(vec![id(claude), id(pi)], TAILS_BYTES / 2).unwrap();
-        let typed =
-            |harness: luned::api::Harness| Typed { harness: harness.into(), lines: "l".to_owned() };
+        let typed = |harness: luned::api::Harness| Typed {
+            harness: harness.into(),
+            lines: "l".to_owned(),
+        };
         let typed_ends = HashMap::from([
             (claude.to_owned(), typed(luned::api::Harness::ClaudeCode)),
             (pi.to_owned(), typed(luned::api::Harness::Pi)),
             (unasked.to_owned(), typed(luned::api::Harness::ClaudeCode)),
             ("../x".to_owned(), typed(luned::api::Harness::ClaudeCode)),
-            (claude.replace('0', "1"), Typed { harness: 99, lines: "l".to_owned() }),
+            (
+                claude.replace('0', "1"),
+                Typed {
+                    harness: 99,
+                    lines: "l".to_owned(),
+                },
+            ),
         ]);
         let ends = HashMap::from([(claude.to_owned(), "l".to_owned())]);
         let (read, unread) = ends_of(TranscriptEndsResponse { ends, typed_ends }, &reading);
@@ -647,7 +769,10 @@ mod tests {
         assert_eq!(read, HashMap::from([(id(claude), one.clone())]));
         let unread_said = vec![
             "\"../x\" names no session".to_owned(),
-            format!("{}: harness 99 is one this lune does not know", claude.replace('0', "1")),
+            format!(
+                "{}: harness 99 is one this lune does not know",
+                claude.replace('0', "1")
+            ),
             format!("{pi}: pi keeps no transcript this lune reads"),
             format!("{unasked}: was not asked for"),
         ];
@@ -681,8 +806,13 @@ mod tests {
             (claude.to_owned(), "l".to_owned()),
             (pi.to_owned(), "x".repeat(TAILS_BYTES + 1)),
         ]);
-        let (read, unread) =
-            ends_of(TranscriptEndsResponse { ends, typed_ends: HashMap::new() }, &over_tails);
+        let (read, unread) = ends_of(
+            TranscriptEndsResponse {
+                ends,
+                typed_ends: HashMap::new(),
+            },
+            &over_tails,
+        );
         assert_eq!(read, HashMap::from([(id(claude), one)]));
         assert_eq!(
             unread.notes,
@@ -693,10 +823,14 @@ mod tests {
         );
         assert_eq!(unread.count, 1);
 
-        let many_bad: HashMap<String, String> =
-            (0..UNREAD_MAX + 3).map(|n| (format!("bad-{n}"), "l".to_owned())).collect();
+        let many_bad: HashMap<String, String> = (0..UNREAD_MAX + 3)
+            .map(|n| (format!("bad-{n}"), "l".to_owned()))
+            .collect();
         let (read, unread) = ends_of(
-            TranscriptEndsResponse { ends: many_bad, typed_ends: HashMap::new() },
+            TranscriptEndsResponse {
+                ends: many_bad,
+                typed_ends: HashMap::new(),
+            },
             &reading,
         );
         assert!(read.is_empty());
@@ -704,7 +838,10 @@ mod tests {
         assert_eq!(unread.count, UNREAD_MAX + 3);
         assert_eq!(
             unread.summary(),
-            Some(format!("{} transcript ends were not read, as bad-0: was not asked for", UNREAD_MAX + 3))
+            Some(format!(
+                "{} transcript ends were not read, as bad-0: was not asked for",
+                UNREAD_MAX + 3
+            ))
         );
 
         let (read, unread) = ends_of(
@@ -715,7 +852,13 @@ mod tests {
             &reading,
         );
         assert_eq!(read.len(), 1);
-        assert_eq!(unread, UnreadEnds { notes: Vec::new(), count: 0 });
+        assert_eq!(
+            unread,
+            UnreadEnds {
+                notes: Vec::new(),
+                count: 0
+            }
+        );
         assert_eq!(unread.summary(), None);
     }
 
@@ -724,7 +867,10 @@ mod tests {
         let dir = |path: &str| luned::api::list_repositories_response::Repository {
             path: path.to_owned(),
         };
-        let long = format!("/home/me/{}", "x".repeat(lune_domain::projects::NAME_CHARS_MAX + 1));
+        let long = format!(
+            "/home/me/{}",
+            "x".repeat(lune_domain::projects::NAME_CHARS_MAX + 1)
+        );
         let answer = ListRepositoriesResponse {
             repositories: vec![
                 dir("/home/me/api"),
@@ -735,31 +881,68 @@ mod tests {
                 dir("/home/me/-dash"),
             ],
             unread: vec!["zoxide is not on the PATH".to_owned()],
-            owned: vec!["/home/me/lune".to_owned(), "lune".to_owned(), "/srv/lune".to_owned()],
+            owned: vec![
+                "/home/me/lune".to_owned(),
+                "lune".to_owned(),
+                "/srv/lune".to_owned(),
+            ],
         };
         let made = |path: &str| Repository::at(projects::Dir::parse(path).unwrap()).unwrap();
         let repositories = vec![made("/home/me/api"), made("/home/me/-dash")];
         assert_eq!(repositories[1].name().as_str(), "-dash");
         let folder = |at: &str| projects::Dir::parse(at).unwrap();
-        let owned = Some(OwnedFolder::of(folder("/home/me/lune"), Some(folder("/srv/lune"))));
+        let owned = Some(OwnedFolder::of(
+            folder("/home/me/lune"),
+            Some(folder("/srv/lune")),
+        ));
         let unread = vec![
             "left out 4 clones no project can be named for".to_owned(),
             "left out 1 of the folders lune keeps clones in".to_owned(),
             "zoxide is not on the PATH".to_owned(),
         ];
-        assert_eq!(repositories_of(answer), Found { repositories, owned, unread });
+        assert_eq!(
+            repositories_of(answer),
+            Found {
+                repositories,
+                owned,
+                unread
+            }
+        );
 
         let many = (0..=REPOSITORIES_MAX).map(|at| dir(&format!("/w/c{at}")));
         let notes = (0..=UNREAD_MAX).map(|at| format!("note {at}"));
         let (repositories, unread) = (many.collect(), notes.collect());
-        let owned = ["/w/lune", "/srv/lune", "/w/lune-too"].map(str::to_owned).to_vec();
-        let answer = ListRepositoriesResponse { repositories, unread, owned };
-        let Found { repositories, owned, unread } = repositories_of(answer);
+        let owned = ["/w/lune", "/srv/lune", "/w/lune-too"]
+            .map(str::to_owned)
+            .to_vec();
+        let answer = ListRepositoriesResponse {
+            repositories,
+            unread,
+            owned,
+        };
+        let Found {
+            repositories,
+            owned,
+            unread,
+        } = repositories_of(answer);
         let folder = |at: &str| projects::Dir::parse(at).unwrap();
-        assert_eq!(owned, Some(OwnedFolder::of(folder("/w/lune"), Some(folder("/srv/lune")))));
+        assert_eq!(
+            owned,
+            Some(OwnedFolder::of(
+                folder("/w/lune"),
+                Some(folder("/srv/lune"))
+            ))
+        );
         assert_eq!(repositories.len(), REPOSITORIES_MAX);
-        assert_eq!(unread.len(), 2 + UNREAD_MAX, "the cuts are said, and the notes stop");
-        let cut = format!("listed the first {REPOSITORIES_MAX} of {} clones", REPOSITORIES_MAX + 1);
+        assert_eq!(
+            unread.len(),
+            2 + UNREAD_MAX,
+            "the cuts are said, and the notes stop"
+        );
+        let cut = format!(
+            "listed the first {REPOSITORIES_MAX} of {} clones",
+            REPOSITORIES_MAX + 1
+        );
         assert_eq!(unread[0], cut);
     }
 }

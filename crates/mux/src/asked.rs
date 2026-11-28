@@ -46,12 +46,18 @@ impl Size {
                 .ok_or_else(|| refused(&field, format_args!("is over {SIDE_MAX}")))?;
             NonZeroU16::new(count).ok_or_else(|| refused(&field, "is 0"))
         };
-        Ok(Size { columns: count("columns", size.columns)?, rows: count("rows", size.rows)? })
+        Ok(Size {
+            columns: count("columns", size.columns)?,
+            rows: count("rows", size.rows)?,
+        })
     }
 
     #[must_use]
     pub fn said(self) -> api::Size {
-        api::Size { columns: self.columns.get().into(), rows: self.rows.get().into() }
+        api::Size {
+            columns: self.columns.get().into(),
+            rows: self.rows.get().into(),
+        }
     }
 
     #[must_use]
@@ -109,8 +115,16 @@ pub struct SpawnSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Launch {
-    Direct { program: String, args: Vec<String>, ends: Ends },
-    ResumeInShell { shell: String, kind: ShellKind, resume: ResumeArgv },
+    Direct {
+        program: String,
+        args: Vec<String>,
+        ends: Ends,
+    },
+    ResumeInShell {
+        shell: String,
+        kind: ShellKind,
+        resume: ResumeArgv,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,11 +167,14 @@ impl Opens {
                 .ok_or_else(|| refused(&shell_field, "is not a supported shell"))?;
             let argv_field = format!("{field}.resume_in_shell.argv");
             let api::Program { argv } = present(&argv_field, resume.argv)?;
-            let resume_argv =
-                ResumeArgv::parse(argv).map_err(|why| refused(&argv_field, why))?;
+            let resume_argv = ResumeArgv::parse(argv).map_err(|why| refused(&argv_field, why))?;
             return Ok(Opens {
                 cwd,
-                launch: Launch::ResumeInShell { shell: resume.shell, kind, resume: resume_argv },
+                launch: Launch::ResumeInShell {
+                    shell: resume.shell,
+                    kind,
+                    resume: resume_argv,
+                },
             });
         }
         let api::Program { argv } = present(&format!("{field}.program"), opens.program)?;
@@ -176,10 +193,20 @@ impl Opens {
             Ok(api::Ends::Closes) => Ends::Closes,
             Ok(api::Ends::Holds) => Ends::Holds,
             Ok(api::Ends::Unspecified) | Err(_) => {
-                return Err(refused(&format!("{field}.ends"), "is not one of CLOSES or HOLDS"));
-            },
+                return Err(refused(
+                    &format!("{field}.ends"),
+                    "is not one of CLOSES or HOLDS",
+                ));
+            }
         };
-        Ok(Opens { cwd, launch: Launch::Direct { program, args, ends } })
+        Ok(Opens {
+            cwd,
+            launch: Launch::Direct {
+                program,
+                args,
+                ends,
+            },
+        })
     }
 }
 
@@ -196,7 +223,7 @@ impl Dumped {
             Ok(api::Dumped::Text) => Ok(Dumped::Text),
             Ok(api::Dumped::Unspecified) | Err(_) => {
                 Err(refused(field, "is not one of SCREEN or TEXT"))
-            },
+            }
         }
     }
 }
@@ -210,7 +237,11 @@ pub struct Press {
 
 impl Press {
     pub fn parse(request: api::PressRequest) -> Result<Press, Status> {
-        let api::PressRequest { terminal, shown, pressed } = request;
+        let api::PressRequest {
+            terminal,
+            shown,
+            pressed,
+        } = request;
         let terminal = TerminalKey::parse("terminal", terminal)?;
         let shown = present("shown", shown)?;
         if pressed.is_empty() {
@@ -226,8 +257,16 @@ impl Press {
             })
         });
         let inputs = inputs.collect::<Result<Vec<Input>, Status>>()?;
-        assert!((1..=PRESSED_MAX).contains(&inputs.len()), "{} inputs", inputs.len());
-        Ok(Press { terminal, shown, inputs })
+        assert!(
+            (1..=PRESSED_MAX).contains(&inputs.len()),
+            "{} inputs",
+            inputs.len()
+        );
+        Ok(Press {
+            terminal,
+            shown,
+            inputs,
+        })
     }
 }
 
@@ -274,13 +313,17 @@ impl TerminalKey {
         let key = present(field, key)?;
         let id = TerminalId::parse(&format!("{field}.id"), key.id)?;
         let made_at = format!("{field}.made_at");
-        let made = Made::read(present(&made_at, key.made_at)?).map_err(|why| refused(&made_at, why))?;
+        let made =
+            Made::read(present(&made_at, key.made_at)?).map_err(|why| refused(&made_at, why))?;
         Ok(TerminalKey { id, made })
     }
 
     #[must_use]
     pub fn said(self) -> api::TerminalKey {
-        api::TerminalKey { id: self.id.said(), made_at: Some(self.made.into()) }
+        api::TerminalKey {
+            id: self.id.said(),
+            made_at: Some(self.made.into()),
+        }
     }
 }
 
@@ -293,7 +336,10 @@ impl Tag {
             return Err(refused(field, "is empty"));
         }
         if tag.len() > TAG_BYTES_MAX {
-            return Err(refused(field, format_args!("is over {TAG_BYTES_MAX} bytes")));
+            return Err(refused(
+                field,
+                format_args!("is over {TAG_BYTES_MAX} bytes"),
+            ));
         }
         Ok(Tag(tag))
     }
@@ -320,7 +366,9 @@ pub fn greeting(api::FromViewer { event }: api::FromViewer) -> Result<Greeting, 
     let Some(api::from_viewer::Event::Hello(hello)) = event else {
         return Err(refused("event", "is not hello, as the first must be"));
     };
-    let runs_in = hello.runs_in.map(|key| TerminalKey::parse("hello.runs_in", Some(key)));
+    let runs_in = hello
+        .runs_in
+        .map(|key| TerminalKey::parse("hello.runs_in", Some(key)));
     Ok(Greeting {
         colours: Colours::parse("hello.colours", hello.colours)?,
         runs_in: runs_in.transpose()?,
@@ -333,17 +381,23 @@ pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
         Event::Hello(_) => return Err(refused("event", "is hello, which only the first may be")),
         Event::Showing(api::Showing { terminals }) => {
             if terminals.len() > SHOWN_MAX {
-                return Err(refused("showing.terminals", format_args!("are over {SHOWN_MAX}")));
+                return Err(refused(
+                    "showing.terminals",
+                    format_args!("are over {SHOWN_MAX}"),
+                ));
             }
             let mut keys = BTreeSet::new();
             for key in terminals {
                 let key = TerminalKey::parse("showing.terminals", Some(key))?;
                 if !keys.insert(key) {
-                    return Err(refused("showing.terminals", format_args!("repeat {}", key.id)));
+                    return Err(refused(
+                        "showing.terminals",
+                        format_args!("repeat {}", key.id),
+                    ));
                 }
             }
             ViewerHeard::Showing(keys)
-        },
+        }
         Event::Typed(api::Typed { terminal, event }) => {
             use api::typed::Event as Typed;
             let input = match present("typed.event", event)? {
@@ -354,7 +408,7 @@ pub fn viewer_heard(message: api::FromViewer) -> Result<ViewerHeard, Status> {
                 Typed::Scroll(api::Scroll { back }) => Input::Scroll(back),
             };
             ViewerHeard::Typed(TerminalKey::parse("typed.terminal", terminal)?, input)
-        },
+        }
     })
 }
 
@@ -408,7 +462,7 @@ fn key_heard(key: api::Key) -> Result<Input, Status> {
         Ok(api::Press::Up) => keys::Action::Release,
         Ok(api::Press::Unspecified) | Err(_) => {
             return Err(refused("key.press", "is not one of DOWN, REPEAT or UP"));
-        },
+        }
     };
     let (code, unshifted) = match present("key.key", key.key)? {
         api::key::Key::Named(named) => (named_key(named)?, None),
@@ -416,13 +470,19 @@ fn key_heard(key: api::Key) -> Result<Input, Status> {
             let character = char::from_u32(character)
                 .ok_or_else(|| refused("key.character", "is not a Unicode scalar value"))?;
             (character_key(character), Some(character))
-        },
+        }
     };
     if key.text.chars().any(char::is_control) {
         return Err(refused("key.text", "has a control character"));
     }
     let text = (!key.text.is_empty()).then_some(key.text);
-    Ok(Input::Key { action, key: code, mods: mods(key.modifiers), text, unshifted })
+    Ok(Input::Key {
+        action,
+        key: code,
+        mods: mods(key.modifiers),
+        text,
+        unshifted,
+    })
 }
 
 fn named_key(named: i32) -> Result<keys::Key, Status> {
@@ -544,7 +604,7 @@ fn button(field: &str, button: i32) -> Result<mouse::Button, Status> {
         Ok(api::Button::Right) => Ok(mouse::Button::Right),
         Ok(api::Button::Unspecified) | Err(_) => {
             Err(refused(field, "is not one of LEFT, MIDDLE or RIGHT"))
-        },
+        }
     }
 }
 
@@ -556,8 +616,11 @@ fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
     let (column, row) = (at("column", heard.column)?, at("row", heard.row)?);
     let mods = mods(heard.modifiers);
     Ok(match present("mouse.does", heard.does)? {
-        Does::Press(pressed) => {
-            Input::Mouse { click: Click::Press(button("mouse.press", pressed)?), mods, column, row }
+        Does::Press(pressed) => Input::Mouse {
+            click: Click::Press(button("mouse.press", pressed)?),
+            mods,
+            column,
+            row,
         },
         Does::Release(released) => Input::Mouse {
             click: Click::Release(button("mouse.release", released)?),
@@ -566,9 +629,16 @@ fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
             row,
         },
         Does::Motion(api::Motion { held }) => {
-            let held = held.map(|held| button("mouse.motion.held", held)).transpose()?;
-            Input::Mouse { click: Click::Motion(held), mods, column, row }
-        },
+            let held = held
+                .map(|held| button("mouse.motion.held", held))
+                .transpose()?;
+            Input::Mouse {
+                click: Click::Motion(held),
+                mods,
+                column,
+                row,
+            }
+        }
         Does::Wheel(wheel) => {
             let wheel = match api::Wheel::try_from(wheel) {
                 Ok(api::Wheel::Up) => Wheel::Up,
@@ -576,11 +646,19 @@ fn mouse_heard(heard: api::Mouse) -> Result<Input, Status> {
                 Ok(api::Wheel::Left) => Wheel::Left,
                 Ok(api::Wheel::Right) => Wheel::Right,
                 Ok(api::Wheel::Unspecified) | Err(_) => {
-                    return Err(refused("mouse.wheel", "is not one of UP, DOWN, LEFT or RIGHT"));
-                },
+                    return Err(refused(
+                        "mouse.wheel",
+                        "is not one of UP, DOWN, LEFT or RIGHT",
+                    ));
+                }
             };
-            Input::Wheel { wheel, mods, column, row }
-        },
+            Input::Wheel {
+                wheel,
+                mods,
+                column,
+                row,
+            }
+        }
     })
 }
 
@@ -597,8 +675,14 @@ mod tests {
         assert_eq!(size(80, 24).unwrap().columns.get(), 80);
         assert_eq!(size(1000, 1000).unwrap().rows.get(), 1000);
         assert_eq!(size(80, 0).unwrap_err().message(), "resize.rows is 0");
-        assert_eq!(size(1001, 1).unwrap_err().message(), "resize.columns is over 1000");
-        assert_eq!(size(1, 65536).unwrap_err().message(), "resize.rows is over 1000");
+        assert_eq!(
+            size(1001, 1).unwrap_err().message(),
+            "resize.columns is over 1000"
+        );
+        assert_eq!(
+            size(1, 65536).unwrap_err().message(),
+            "resize.rows is over 1000"
+        );
         let missing = Size::parse("hello.size", None).unwrap_err();
         assert_eq!(missing.message(), "hello.size is missing");
     }
@@ -609,7 +693,12 @@ mod tests {
             let ends = ends.into();
             Opens::parse(
                 "opens",
-                Some(api::Opens { cwd: cwd.to_owned(), program, ends, resume_in_shell: None }),
+                Some(api::Opens {
+                    cwd: cwd.to_owned(),
+                    program,
+                    ends,
+                    resume_in_shell: None,
+                }),
             )
         };
         let program = |argv: &[&str]| {
@@ -627,13 +716,34 @@ mod tests {
             }
         );
         let refused = [
-            (opens("tmp", shell.clone(), api::Ends::Holds), "opens.cwd is not an absolute path"),
-            (opens("/", None, api::Ends::Holds), "opens.program is missing"),
-            (opens("/", program(&[]), api::Ends::Holds), "opens.program.argv is empty"),
-            (opens("/", program(&[""]), api::Ends::Holds), "opens.program.argv names no program"),
-            (opens("/", program(&["ls", "a\0"]), api::Ends::Holds), "opens.program.argv has a NUL"),
-            (opens("/\0", shell.clone(), api::Ends::Holds), "opens.cwd has a NUL"),
-            (opens("/", shell.clone(), api::Ends::Unspecified), "opens.ends is not one of CLOSES or HOLDS"),
+            (
+                opens("tmp", shell.clone(), api::Ends::Holds),
+                "opens.cwd is not an absolute path",
+            ),
+            (
+                opens("/", None, api::Ends::Holds),
+                "opens.program is missing",
+            ),
+            (
+                opens("/", program(&[]), api::Ends::Holds),
+                "opens.program.argv is empty",
+            ),
+            (
+                opens("/", program(&[""]), api::Ends::Holds),
+                "opens.program.argv names no program",
+            ),
+            (
+                opens("/", program(&["ls", "a\0"]), api::Ends::Holds),
+                "opens.program.argv has a NUL",
+            ),
+            (
+                opens("/\0", shell.clone(), api::Ends::Holds),
+                "opens.cwd has a NUL",
+            ),
+            (
+                opens("/", shell.clone(), api::Ends::Unspecified),
+                "opens.ends is not one of CLOSES or HOLDS",
+            ),
         ];
         for (opens, message) in refused {
             assert_eq!(opens.unwrap_err().message(), message);
@@ -653,8 +763,13 @@ mod tests {
                 }),
             )
         };
-        let parsed_resume =
-            resume("/bin/bash", program(&["nvim"]), None, api::Ends::Unspecified).unwrap();
+        let parsed_resume = resume(
+            "/bin/bash",
+            program(&["nvim"]),
+            None,
+            api::Ends::Unspecified,
+        )
+        .unwrap();
         assert_eq!(
             parsed_resume.launch,
             Launch::ResumeInShell {
@@ -664,9 +779,14 @@ mod tests {
             }
         );
         assert_eq!(
-            resume("/bin/bash", program(&["nvim"]), shell, api::Ends::Unspecified)
-                .unwrap_err()
-                .message(),
+            resume(
+                "/bin/bash",
+                program(&["nvim"]),
+                shell,
+                api::Ends::Unspecified
+            )
+            .unwrap_err()
+            .message(),
             "opens.program cannot be set with resume_in_shell"
         );
         assert_eq!(
@@ -676,9 +796,14 @@ mod tests {
             "opens.ends cannot be set with resume_in_shell"
         );
         assert_eq!(
-            resume("/bin/tcsh", program(&["nvim"]), None, api::Ends::Unspecified)
-                .unwrap_err()
-                .message(),
+            resume(
+                "/bin/tcsh",
+                program(&["nvim"]),
+                None,
+                api::Ends::Unspecified
+            )
+            .unwrap_err()
+            .message(),
             "opens.resume_in_shell.shell is not a supported shell"
         );
     }
@@ -688,26 +813,43 @@ mod tests {
         let key = |press: api::Press, key, text: &str| {
             key_heard(api::Key {
                 press: press.into(),
-                modifiers: Some(api::Modifiers { ctrl: true, ..api::Modifiers::default() }),
+                modifiers: Some(api::Modifiers {
+                    ctrl: true,
+                    ..api::Modifiers::default()
+                }),
                 key,
                 text: text.to_owned(),
             })
         };
         let a = Some(api::key::Key::Character('a'.into()));
-        let Input::Key { action, key: code, mods, text, unshifted } =
-            key(api::Press::Down, a, "").unwrap()
+        let Input::Key {
+            action,
+            key: code,
+            mods,
+            text,
+            unshifted,
+        } = key(api::Press::Down, a, "").unwrap()
         else {
             panic!("not a key");
         };
         assert_eq!(
             (action, code, mods, text, unshifted),
-            (keys::Action::Press, keys::Key::A, Mods::CTRL, None, Some('a'))
+            (
+                keys::Action::Press,
+                keys::Key::A,
+                Mods::CTRL,
+                None,
+                Some('a')
+            )
         );
         assert_eq!(
             key(api::Press::Unspecified, a, "").unwrap_err().message(),
             "key.press is not one of DOWN, REPEAT or UP",
         );
-        assert_eq!(key(api::Press::Down, None, "").unwrap_err().message(), "key.key is missing");
+        assert_eq!(
+            key(api::Press::Down, None, "").unwrap_err().message(),
+            "key.key is missing"
+        );
         let surrogate = Some(api::key::Key::Character(0xd800));
         assert_eq!(
             key(api::Press::Down, surrogate, "").unwrap_err().message(),
@@ -721,19 +863,34 @@ mod tests {
 
     #[test]
     fn only_the_first_message_is_a_hello() {
-        let made_at = Some(prost_types::Timestamp { seconds: 60, nanos: 0 });
+        let made_at = Some(prost_types::Timestamp {
+            seconds: 60,
+            nanos: 0,
+        });
         let runs_in = Some(api::TerminalKey { id: 3, made_at });
-        let hello = api::Greeting { colours: None, runs_in };
-        let hello_said = api::FromViewer { event: Some(api::from_viewer::Event::Hello(hello)) };
-        let showing = api::Showing { terminals: Vec::new() };
-        let shows = api::FromViewer { event: Some(api::from_viewer::Event::Showing(showing)) };
+        let hello = api::Greeting {
+            colours: None,
+            runs_in,
+        };
+        let hello_said = api::FromViewer {
+            event: Some(api::from_viewer::Event::Hello(hello)),
+        };
+        let showing = api::Showing {
+            terminals: Vec::new(),
+        };
+        let shows = api::FromViewer {
+            event: Some(api::from_viewer::Event::Showing(showing)),
+        };
         let runs_in = greeting(hello_said.clone()).unwrap().runs_in.unwrap();
         assert_eq!(runs_in.id.said(), 3);
         assert_eq!(
             greeting(shows.clone()).unwrap_err().message(),
             "event is not hello, as the first must be"
         );
-        assert_eq!(viewer_heard(shows).unwrap(), ViewerHeard::Showing(BTreeSet::new()));
+        assert_eq!(
+            viewer_heard(shows).unwrap(),
+            ViewerHeard::Showing(BTreeSet::new())
+        );
         assert_eq!(
             viewer_heard(hello_said).unwrap_err().message(),
             "event is hello, which only the first may be"
@@ -742,18 +899,37 @@ mod tests {
 
     #[test]
     fn the_mouse_says_what_it_did() {
-        let mouse = |does| mouse_heard(api::Mouse { modifiers: None, column: 3, row: 4, does });
+        let mouse = |does| {
+            mouse_heard(api::Mouse {
+                modifiers: None,
+                column: 3,
+                row: 4,
+                does,
+            })
+        };
         let wheel = mouse(Some(api::mouse::Does::Wheel(api::Wheel::Up.into()))).unwrap();
         assert_eq!(
             wheel,
-            Input::Wheel { wheel: Wheel::Up, mods: Mods::empty(), column: 3, row: 4 }
+            Input::Wheel {
+                wheel: Wheel::Up,
+                mods: Mods::empty(),
+                column: 3,
+                row: 4
+            }
         );
         let still = mouse(Some(api::mouse::Does::Motion(api::Motion { held: None }))).unwrap();
         assert_eq!(
             still,
-            Input::Mouse { click: Click::Motion(None), mods: Mods::empty(), column: 3, row: 4 }
+            Input::Mouse {
+                click: Click::Motion(None),
+                mods: Mods::empty(),
+                column: 3,
+                row: 4
+            }
         );
-        let unspecified = mouse(Some(api::mouse::Does::Press(api::Button::Unspecified.into())));
+        let unspecified = mouse(Some(api::mouse::Does::Press(
+            api::Button::Unspecified.into(),
+        )));
         assert_eq!(
             unspecified.unwrap_err().message(),
             "mouse.press is not one of LEFT, MIDDLE or RIGHT"

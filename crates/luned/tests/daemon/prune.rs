@@ -1,19 +1,19 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 
 use lune_waits::eventually;
+use luned::Directory;
 use luned::api::daemon_client::DaemonClient;
 use luned::api::projects::Held;
 use luned::api::{On, PrunesRequest};
 use luned::prunes::{self, Came, Deleting, Goes, Plan, Pruned, Pushed, RemoteBranch};
-use luned::Directory;
 use serde_json::json;
 use tonic::Code;
 
-use crate::host::{Daemon, Host, LUNE, LUNED, answered, folder_in, start, start_as, PATIENT};
+use crate::host::{Daemon, Host, LUNE, LUNED, PATIENT, answered, folder_in, start, start_as};
 use crate::projects::{project, worktree};
 use crate::remote::{FakeSsh, hosts, reached};
 use crate::worktree::{cloned_as_wt, git};
@@ -24,7 +24,11 @@ fn said_by(dir: &Path, args: &[&str]) -> String {
     let mut git = std::process::Command::new("git");
     luned::local_git(&mut git);
     let said = git.arg("-C").arg(dir).args(args).output().unwrap();
-    assert!(said.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&said.stderr));
+    assert!(
+        said.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&said.stderr)
+    );
     String::from_utf8(said.stdout).unwrap().trim().to_owned()
 }
 
@@ -40,10 +44,27 @@ impl Repository {
         let bare = clone.join(".bare");
         let github = "git@github.com:o/n.git";
         git(&bare, &["config", "remote.origin.url", github]);
-        git(&bare, &["config", &format!("url.{}.insteadOf", up.display()), github]);
-        git(&bare, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+        git(
+            &bare,
+            &["config", &format!("url.{}.insteadOf", up.display()), github],
+        );
+        git(
+            &bare,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        );
         git(&bare, &["fetch", "-q", "origin"]);
-        git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(
+            &bare,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
         Repository { clone, up }
     }
 
@@ -53,7 +74,18 @@ impl Repository {
 
     pub fn pushed(&self, name: &str) -> String {
         let (bare, at) = (self.clone.join(".bare"), self.at(name));
-        git(&bare, &["worktree", "add", "-q", "-b", name, &at.display().to_string(), "main"]);
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                name,
+                &at.display().to_string(),
+                "main",
+            ],
+        );
         git(&at, &["commit", "-q", "--allow-empty", "-m", name]);
         git(&at, &["push", "-q", "-u", "origin", name]);
         said_by(&at, &["rev-parse", "HEAD"])
@@ -66,8 +98,13 @@ impl Repository {
 
     fn on_clone(&self, name: &str) -> bool {
         let bare = self.clone.join(".bare");
-        let heads = said_by(&bare, &["for-each-ref", "--format=%(refname)", "refs/heads"]);
-        heads.lines().any(|line| line == format!("refs/heads/{name}"))
+        let heads = said_by(
+            &bare,
+            &["for-each-ref", "--format=%(refname)", "refs/heads"],
+        );
+        heads
+            .lines()
+            .any(|line| line == format!("refs/heads/{name}"))
     }
 }
 
@@ -98,25 +135,39 @@ fn serving_as(host: &Host, dir: &Path, luned: Command) -> (Daemon, u64) {
 }
 
 fn terminals(host: &luned::api::Host) -> usize {
-    let held = host.projects.as_ref().and_then(|projects| projects.held.as_ref());
+    let held = host
+        .projects
+        .as_ref()
+        .and_then(|projects| projects.held.as_ref());
     let Some(Held::Kept(kept)) = held else {
         return 0;
     };
-    let worktrees = kept.projects.iter().flat_map(|project| project.worktrees().unwrap_or(&[]));
+    let worktrees = kept
+        .projects
+        .iter()
+        .flat_map(|project| project.worktrees().unwrap_or(&[]));
     worktrees.map(|worktree| worktree.terminals.len()).sum()
 }
 
 fn prune(host: &Host, from: &Path, repo: &Path, more: &[&str]) -> Output {
     let mut command = host.vars().command(&LUNE);
-    command.current_dir(from).args(["prune", "--repo"]).arg(repo).args(more);
+    command
+        .current_dir(from)
+        .args(["prune", "--repo"])
+        .arg(repo)
+        .args(more);
     answered(&mut command)
 }
 
 fn planned(said: &Output) -> (String, String) {
     let why = String::from_utf8_lossy(&said.stderr);
     assert_eq!(said.status.code(), Some(PLANNED), "{why}");
-    let plan = why.split_once("--yes ").and_then(|(_, after)| after.split_whitespace().next());
-    let plan = plan.unwrap_or_else(|| panic!("a plan tells --yes its word: {why}")).to_owned();
+    let plan = why
+        .split_once("--yes ")
+        .and_then(|(_, after)| after.split_whitespace().next());
+    let plan = plan
+        .unwrap_or_else(|| panic!("a plan tells --yes its word: {why}"))
+        .to_owned();
     (String::from_utf8(said.stdout.clone()).unwrap(), plan)
 }
 
@@ -132,20 +183,33 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     host.gh.open("mine", &merged(1, &mine, "me"));
     fs::create_dir_all(repository.at("mine").join("target/debug")).unwrap();
     fs::write(repository.at("mine").join("target/debug/built"), "binary").unwrap();
-    fs::write(repository.at("mine").join(".gitignore"), "target\n.gitignore\n").unwrap();
+    fs::write(
+        repository.at("mine").join(".gitignore"),
+        "target\n.gitignore\n",
+    )
+    .unwrap();
 
     let theirs = repository.pushed("theirs");
     host.gh.open("theirs", &merged(2, &theirs, "them"));
 
     let moved_on = repository.pushed("moved-on");
     host.gh.open("moved-on", &merged(3, &moved_on, "me"));
-    git(&repository.at("moved-on"), &["commit", "-q", "--allow-empty", "-m", "since"]);
+    git(
+        &repository.at("moved-on"),
+        &["commit", "-q", "--allow-empty", "-m", "since"],
+    );
     let since = said_by(&repository.at("moved-on"), &["rev-parse", "HEAD"]);
     git(&repository.at("moved-on"), &["push", "-q"]);
-    git(&repository.at("moved-on"), &["reset", "-q", "--hard", &moved_on]);
+    git(
+        &repository.at("moved-on"),
+        &["reset", "-q", "--hard", &moved_on],
+    );
 
     let renamed = repository.pushed("renamed");
-    host.gh.open("renamed", &merged(4, "0000000000000000000000000000000000000000", "me"));
+    host.gh.open(
+        "renamed",
+        &merged(4, "0000000000000000000000000000000000000000", "me"),
+    );
     assert_ne!(renamed, "0000000000000000000000000000000000000000");
 
     let changed = repository.pushed("changed");
@@ -170,7 +234,11 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     host.gh.open("locked", &merged(9, &locked, "me"));
     git(
         &repository.clone.join(".bare"),
-        &["worktree", "lock", &repository.at("locked").display().to_string()],
+        &[
+            "worktree",
+            "lock",
+            &repository.at("locked").display().to_string(),
+        ],
     );
 
     let main = said_by(&repository.at("main"), &["rev-parse", "HEAD"]);
@@ -199,7 +267,10 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     for keep in wanted {
         assert!(lines.contains(&keep), "{keep:?} in {said}");
     }
-    let goes: Vec<&&str> = lines.iter().filter(|line| line.starts_with("delete ")).collect();
+    let goes: Vec<&&str> = lines
+        .iter()
+        .filter(|line| line.starts_with("delete "))
+        .collect();
     assert_eq!(goes.len(), 4, "{said}");
     let line_of = |name: &str| {
         let starts = format!("delete {name:<8}");
@@ -208,7 +279,10 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
             .find(|line| line.starts_with(&starts))
             .unwrap_or_else(|| panic!("{name} in {said}"))
     };
-    assert!(line_of("mine").ends_with("branch mine, and mine on origin"), "{said}");
+    assert!(
+        line_of("mine").ends_with("branch mine, and mine on origin"),
+        "{said}"
+    );
     assert!(line_of("mine").contains(" #1  "), "{said}");
     assert!(
         line_of("theirs")
@@ -226,10 +300,22 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
     );
     assert!(!said.contains("open"), "{said}");
     assert!(!said.contains("no-pull"), "{said}");
-    assert!(repository.at("mine").exists(), "it deleted before it was told yes");
+    assert!(
+        repository.at("mine").exists(),
+        "it deleted before it was told yes"
+    );
 
-    let told = prune(&host, &repository.at("from"), &repository.at("main"), &["--yes", &plan]);
-    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    let told = prune(
+        &host,
+        &repository.at("from"),
+        &repository.at("main"),
+        &["--yes", &plan],
+    );
+    assert!(
+        told.status.success(),
+        "{}",
+        String::from_utf8_lossy(&told.stderr)
+    );
     let printed = String::from_utf8(told.stdout).unwrap();
     for name in ["mine", "theirs", "moved-on", "lasting"] {
         assert!(printed.contains(&format!("deleted {name}\n")), "{printed}");
@@ -237,21 +323,31 @@ fn it_lists_what_is_merged_at_its_head_and_deletes_only_that_once_told_yes() {
         assert!(!repository.on_clone(name), "{name}'s branch stays");
     }
     assert!(!repository.on_origin("mine"));
-    assert!(repository.on_origin("theirs"), "it deleted someone else's branch");
-    assert!(repository.on_origin("lasting"), "it deleted a branch another was merged into");
+    assert!(
+        repository.on_origin("theirs"),
+        "it deleted someone else's branch"
+    );
+    assert!(
+        repository.on_origin("lasting"),
+        "it deleted a branch another was merged into"
+    );
     assert_eq!(
         said_by(&repository.up, &["rev-parse", "refs/heads/moved-on"]),
         since,
         "it deleted a branch origin moved on from"
     );
-    for name in
-        ["changed", "from", "locked", "main", "viewed", "renamed", "based", "open", "no-pull"]
-    {
+    for name in [
+        "changed", "from", "locked", "main", "viewed", "renamed", "based", "open", "no-pull",
+    ] {
         assert!(repository.at(name).join(".git").is_file(), "{name} went");
         assert!(repository.on_clone(name), "{name}'s branch went");
     }
     let once_more = prune(&host, &repository.at("from"), &repository.at("main"), &[]);
-    assert!(once_more.status.success(), "{}", String::from_utf8_lossy(&once_more.stderr));
+    assert!(
+        once_more.status.success(),
+        "{}",
+        String::from_utf8_lossy(&once_more.stderr)
+    );
     let why = String::from_utf8_lossy(&once_more.stderr);
     assert!(why.contains("n has no merged worktree to delete"), "{why}");
 }
@@ -280,7 +376,10 @@ fn a_plan_that_changed_deletes_nothing_and_says_the_new_one() {
     assert!(said.contains("delete two"), "{said}");
     let why = String::from_utf8_lossy(&told.stderr);
     assert!(why.contains("told yes to another plan"), "{why}");
-    assert!(repository.at("one").exists() && repository.at("two").exists(), "it deleted");
+    assert!(
+        repository.at("one").exists() && repository.at("two").exists(),
+        "it deleted"
+    );
 }
 
 #[test]
@@ -294,7 +393,10 @@ fn it_deletes_nothing_while_no_luned_says_where_the_views_are() {
     let said = prune(&host, &scratch, &repository.at("main"), &["--yes", "0"]);
     let why = String::from_utf8_lossy(&said.stderr);
     assert_eq!(said.status.code(), Some(1), "{why}");
-    assert!(why.contains("cannot tell where the views are, so it deletes nothing"), "{why}");
+    assert!(
+        why.contains("cannot tell where the views are, so it deletes nothing"),
+        "{why}"
+    );
     assert_eq!(host.gh.asked(), [] as [String; 0]);
     assert!(repository.at("one").exists());
 }
@@ -371,15 +473,28 @@ fn a_far_branch_it_could_not_delete_keeps_its_worktree_to_try_again() {
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
     let why = String::from_utf8_lossy(&told.stderr);
     assert_eq!(told.status.code(), Some(1), "{why}");
-    assert!(why.contains("one stays: its branch on origin stays: "), "{why}");
-    assert!(repository.at("one").join(".git").is_file(), "the worktree went: {why}");
+    assert!(
+        why.contains("one stays: its branch on origin stays: "),
+        "{why}"
+    );
+    assert!(
+        repository.at("one").join(".git").is_file(),
+        "the worktree went: {why}"
+    );
     assert!(repository.on_clone("one") && repository.on_origin("one"));
 
     let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
     assert!(said.contains("branch one, and one on origin"), "{said}");
-    git(&repository.up, &["config", "--unset", "receive.denyDeletes"]);
+    git(
+        &repository.up,
+        &["config", "--unset", "receive.denyDeletes"],
+    );
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
-    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    assert!(
+        told.status.success(),
+        "{}",
+        String::from_utf8_lossy(&told.stderr)
+    );
     assert!(!repository.at("one").exists());
     assert!(!repository.on_clone("one") && !repository.on_origin("one"));
 }
@@ -407,7 +522,10 @@ fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
         answered(&mut command)
     };
     let first = [("LUNE_TURN", "00000000000000aa")];
-    let second = [("LUNE_TURN", "00000000000000bb"), ("LUNE_TURN_BEFORE", "00000000000000aa")];
+    let second = [
+        ("LUNE_TURN", "00000000000000bb"),
+        ("LUNE_TURN_BEFORE", "00000000000000aa"),
+    ];
     let (_, plan) = planned(&in_turn(&first, &[]));
     let same_turn = in_turn(&first, &["--yes", &plan]);
     assert_eq!(same_turn.status.code(), Some(PLANNED));
@@ -415,7 +533,11 @@ fn in_the_ask_box_a_plan_takes_its_yes_only_in_the_next_turn() {
     assert!(why.contains("only in the turn after"), "{why}");
     assert!(repository.at("one").exists());
     let next = in_turn(&second, &["--yes", &plan]);
-    assert!(next.status.success(), "{}", String::from_utf8_lossy(&next.stderr));
+    assert!(
+        next.status.success(),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
     assert!(!repository.at("one").exists());
 }
 
@@ -433,22 +555,45 @@ fn a_branch_that_pushes_to_the_default_under_another_name_stays() {
         git(&bare, &["worktree", "add", "-q", "-b", branch, &at, "main"]);
         let refspec = format!("refs/heads/{branch}:refs/heads/{there}");
         git(&bare, &["config", "--add", "remote.origin.push", &refspec]);
-        git(&bare, &["config", &format!("branch.{branch}.remote"), "origin"]);
+        git(
+            &bare,
+            &["config", &format!("branch.{branch}.remote"), "origin"],
+        );
         let merge = format!("refs/heads/{there}");
-        git(&bare, &["config", &format!("branch.{branch}.merge"), &merge]);
+        git(
+            &bare,
+            &["config", &format!("branch.{branch}.merge"), &merge],
+        );
     };
     pushes_to("my-main", "main");
     pushes_to("my-dev", "dev");
-    git(&bare, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/dev"]);
+    git(
+        &bare,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/dev",
+        ],
+    );
     host.gh.open("my-main", &merged(1, &head, "me"));
     host.gh.open("my-dev", &merged(2, &head, "me"));
     let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
-    assert!(said.status.success(), "{listed}{}", String::from_utf8_lossy(&said.stderr));
-    assert!(listed.contains("keep my-main #1: it is the default branch"), "{listed}");
-    assert!(listed.contains("keep my-dev #2: it is the default branch"), "{listed}");
+    assert!(
+        said.status.success(),
+        "{listed}{}",
+        String::from_utf8_lossy(&said.stderr)
+    );
+    assert!(
+        listed.contains("keep my-main #1: it is the default branch"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("keep my-dev #2: it is the default branch"),
+        "{listed}"
+    );
     assert!(!listed.contains("delete "), "{listed}");
 }
 
@@ -463,13 +608,23 @@ fn a_branch_that_is_the_default_of_a_remote_never_fetched_stays() {
     let head = repository.pushed("dev");
     host.gh.open("dev", &merged(1, &head, "me"));
     git(&repository.up, &["symbolic-ref", "HEAD", "refs/heads/dev"]);
-    git(&bare, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+    git(
+        &bare,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    );
     let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
-    assert!(said.status.success(), "{listed}{}", String::from_utf8_lossy(&said.stderr));
-    assert!(listed.contains("keep dev #1: it is the default branch"), "{listed}");
+    assert!(
+        said.status.success(),
+        "{listed}{}",
+        String::from_utf8_lossy(&said.stderr)
+    );
+    assert!(
+        listed.contains("keep dev #1: it is the default branch"),
+        "{listed}"
+    );
 
     git(&bare, &["config", "remote.origin.url", "/nowhere"]);
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
@@ -490,13 +645,23 @@ fn an_untracked_file_keeps_its_worktree_whatever_git_is_set_to_show() {
     let head = repository.pushed("one");
     host.gh.open("one", &merged(1, &head, "me"));
     fs::write(repository.at("one").join("new"), "not yet added").unwrap();
-    git(&repository.clone.join(".bare"), &["config", "status.showUntrackedFiles", "no"]);
+    git(
+        &repository.clone.join(".bare"),
+        &["config", "status.showUntrackedFiles", "no"],
+    );
     let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
-    assert!(listed.contains("keep one #1: it has modified or untracked files"), "{listed}");
-    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+    assert!(
+        listed.contains("keep one #1: it has modified or untracked files"),
+        "{listed}"
+    );
+    assert!(
+        said.status.success(),
+        "{}",
+        String::from_utf8_lossy(&said.stderr)
+    );
 }
 
 #[test]
@@ -512,14 +677,32 @@ fn a_worktree_with_another_in_it_stays_until_that_one_has_gone() {
     fs::create_dir_all(bare.join("info")).unwrap();
     fs::write(bare.join("info/exclude"), ".claude/\n").unwrap();
     let inner = repository.at("outer").join(".claude/worktrees/inner");
-    git(&bare, &["worktree", "add", "-q", "-b", "inner", &inner.display().to_string(), "main"]);
+    git(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "inner",
+            &inner.display().to_string(),
+            "main",
+        ],
+    );
     fs::write(inner.join("new"), "not yet added").unwrap();
     let _serving = serving(&host, &repository.at("main"));
 
     let said = prune(&host, &scratch, &repository.at("main"), &[]);
     let listed = String::from_utf8_lossy(&said.stdout);
-    assert!(listed.contains("keep outer #1: another worktree is in it"), "{listed}");
-    assert!(said.status.success(), "{}", String::from_utf8_lossy(&said.stderr));
+    assert!(
+        listed.contains("keep outer #1: another worktree is in it"),
+        "{listed}"
+    );
+    assert!(
+        said.status.success(),
+        "{}",
+        String::from_utf8_lossy(&said.stderr)
+    );
 
     fs::remove_dir_all(&inner).unwrap();
     let (said, _) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
@@ -544,12 +727,21 @@ fn a_plan_does_not_need_the_directory_it_runs_in() {
     fs::remove_dir(&gone).unwrap();
 
     let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(main).unwrap();
         let asked = prunes::asked(None, &main);
-        let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
+        let answer = daemon
+            .prunes(asked)
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await;
         let plan: Plan = answer.unwrap().unwrap().into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one"]);
@@ -558,10 +750,19 @@ fn a_plan_does_not_need_the_directory_it_runs_in() {
 
 fn a_lune_in(host: &Host, dir: &Path) -> Child {
     let mut command = host.vars().command(&LUNE);
-    command.current_dir(dir).arg("bridge").stdin(Stdio::piped()).stdout(Stdio::piped());
+    command
+        .current_dir(dir)
+        .arg("bridge")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
     let mut child = command.spawn().unwrap();
     let mut said = [0; 6];
-    child.stdout.as_mut().unwrap().read_exact(&mut said).expect("the lune says luned answers");
+    child
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut said)
+        .expect("the lune says luned answers");
     assert_eq!(&said, b"luned\n");
     child
 }
@@ -582,27 +783,53 @@ fn a_plan_keeps_each_worktree_a_lune_runs_from_and_not_luned_s() {
     let _serving = serving_as(&host, &repository.at("main"), from_one);
 
     let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let answer = daemon.prunes(prunes::asked(None, &main)).await;
-        let all: Plan = answer.unwrap().into_inner().message().await.unwrap().unwrap().into();
+        let all: Plan = answer
+            .unwrap()
+            .into_inner()
+            .message()
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
         let goes: Vec<&str> = all.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one", "two"], "luned's own directory keeps nothing");
 
         let mut lune = a_lune_in(&host, &repository.at("two"));
         let answer = daemon.prunes(prunes::asked(None, &main)).await;
-        let plan: Plan = answer.unwrap().into_inner().message().await.unwrap().unwrap().into();
+        let plan: Plan = answer
+            .unwrap()
+            .into_inner()
+            .message()
+            .await
+            .unwrap()
+            .unwrap()
+            .into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one"]);
-        let kept: Vec<(&str, &str)> =
-            plan.kept.iter().map(|kept| (kept.folder.as_str(), kept.why.as_str())).collect();
+        let kept: Vec<(&str, &str)> = plan
+            .kept
+            .iter()
+            .map(|kept| (kept.folder.as_str(), kept.why.as_str()))
+            .collect();
         let two = repository.at("two").display().to_string();
         assert_eq!(kept, [(two.as_str(), "a lune runs from it")]);
 
         let told = prunes::told(None, &main, &all.deletes());
-        let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+        let answer = daemon
+            .prune(told)
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await;
         let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
         lune.kill().unwrap();
         lune.wait().unwrap();
@@ -623,7 +850,10 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
     let repository = Repository::new(&scratch);
     host.gh.api("me\n");
     repository.pushed("wip");
-    git(&repository.at("wip"), &["commit", "-q", "--allow-empty", "-m", "unpushed"]);
+    git(
+        &repository.at("wip"),
+        &["commit", "-q", "--allow-empty", "-m", "unpushed"],
+    );
     let unpushed = said_by(&repository.at("wip"), &["rev-parse", "HEAD"]);
     let head = repository.pushed("one");
     host.gh.open("one", &merged(1, &head, "me"));
@@ -631,7 +861,10 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
     let _serving = serving(&host, &repository.at("main"));
 
     let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
@@ -648,20 +881,38 @@ fn the_daemon_deletes_only_what_it_would_plan_itself() {
         for agreed in [
             vec![deleting("wip", &unpushed, None)],
             vec![deleting("one", &head, Some("other"))],
-            vec![deleting("one", &head, Some("one")), deleting("wip", &unpushed, None)],
+            vec![
+                deleting("one", &head, Some("one")),
+                deleting("wip", &unpushed, None),
+            ],
         ] {
             let agreed: BTreeSet<Deleting> = agreed.into_iter().collect();
             let told = prunes::told(None, &main, &agreed);
-            let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+            let answer = daemon
+                .prune(told)
+                .await
+                .unwrap()
+                .into_inner()
+                .message()
+                .await;
             let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
             let Pruned::Changed(plan) = pruned else {
                 panic!("it deleted {agreed:?}: {pruned:?}");
             };
-            assert_eq!(plan.deletes(), BTreeSet::from([deleting("one", &head, Some("one"))]));
+            assert_eq!(
+                plan.deletes(),
+                BTreeSet::from([deleting("one", &head, Some("one"))])
+            );
         }
     });
-    assert!(repository.at("wip").join(".git").is_file(), "it deleted a worktree it did not list");
-    assert!(repository.on_clone("wip"), "it deleted a branch with an unpushed commit");
+    assert!(
+        repository.at("wip").join(".git").is_file(),
+        "it deleted a worktree it did not list"
+    );
+    assert!(
+        repository.on_clone("wip"),
+        "it deleted a branch with an unpushed commit"
+    );
     assert!(repository.at("one").join(".git").is_file());
     assert!(repository.on_origin("one") && repository.on_origin("other"));
 }
@@ -696,13 +947,23 @@ fn a_branch_on_a_remote_that_is_not_where_its_head_is_stays() {
     assert!(said.contains("branch own, and own on origin"), "{said}");
 
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
-    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    assert!(
+        told.status.success(),
+        "{}",
+        String::from_utf8_lossy(&told.stderr)
+    );
     for name in ["on-fork", "fork-gone", "own"] {
         assert!(!repository.at(name).exists(), "{name} stays");
         assert!(!repository.on_clone(name), "{name}'s branch stays");
     }
-    assert!(repository.on_origin("on-fork"), "it deleted another repository's branch");
-    assert!(repository.on_origin("fork-gone"), "it deleted another repository's branch");
+    assert!(
+        repository.on_origin("on-fork"),
+        "it deleted another repository's branch"
+    );
+    assert!(
+        repository.on_origin("fork-gone"),
+        "it deleted another repository's branch"
+    );
     assert!(!repository.on_origin("own"));
 }
 
@@ -720,21 +981,39 @@ fn what_was_agreed_goes_in_whatever_order_it_is_told() {
     let _serving = serving(&host, &repository.at("main"));
 
     let folder = folder_in(host.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let asked = prunes::asked(None, &main);
-        let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
+        let answer = daemon
+            .prunes(asked)
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await;
         let plan: Plan = answer.unwrap().unwrap().into();
         let mut told = prunes::told(None, &main, &plan.deletes());
         told.agreed.reverse();
-        let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+        let answer = daemon
+            .prune(told)
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await;
         let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
         let Pruned::Went(outcomes) = pruned else {
             panic!("it took the same plan for another: {pruned:?}");
         };
-        assert!(outcomes.iter().all(|outcome| outcome.came == Came::Gone), "{outcomes:?}");
+        assert!(
+            outcomes.iter().all(|outcome| outcome.came == Came::Gone),
+            "{outcomes:?}"
+        );
     });
     assert!(!repository.at("one").exists() && !repository.at("two").exists());
 }
@@ -756,7 +1035,8 @@ fn a_pull_request_open_on_the_parent_keeps_a_worktree_merged_on_the_fork() {
     };
     let open = repository.pushed("open-there");
     host.gh.open("open-there", &merged(1, &open, "me"));
-    host.gh.open_in(parent, "open-there", &on_parent(10, "OPEN", &open));
+    host.gh
+        .open_in(parent, "open-there", &on_parent(10, "OPEN", &open));
     let draft = repository.pushed("draft-there");
     host.gh.open("draft-there", &merged(2, &draft, "me"));
     let mut said = on_parent(20, "OPEN", &draft);
@@ -764,22 +1044,40 @@ fn a_pull_request_open_on_the_parent_keeps_a_worktree_merged_on_the_fork() {
     host.gh.open_in(parent, "draft-there", &said);
     let closed = repository.pushed("closed-there");
     host.gh.open("closed-there", &merged(3, &closed, "me"));
-    host.gh.open_in(parent, "closed-there", &on_parent(30, "CLOSED", &closed));
+    host.gh
+        .open_in(parent, "closed-there", &on_parent(30, "CLOSED", &closed));
     let merged_there = repository.pushed("merged-there");
-    host.gh.open_in(parent, "merged-there", &on_parent(40, "MERGED", &merged_there));
+    host.gh.open_in(
+        parent,
+        "merged-there",
+        &on_parent(40, "MERGED", &merged_there),
+    );
     let _serving = serving(&host, &repository.at("main"));
 
     let (said, plan) = planned(&prune(&host, &scratch, &repository.at("main"), &[]));
-    assert!(said.contains("keep open-there #1: #10 is open on its parent"), "{said}");
-    assert!(said.contains("keep draft-there #2: #20 is open on its parent"), "{said}");
+    assert!(
+        said.contains("keep open-there #1: #10 is open on its parent"),
+        "{said}"
+    );
+    assert!(
+        said.contains("keep draft-there #2: #20 is open on its parent"),
+        "{said}"
+    );
     assert!(said.contains("delete closed-there"), "{said}");
     assert!(said.contains("delete merged-there"), "{said}");
 
     let told = prune(&host, &scratch, &repository.at("main"), &["--yes", &plan]);
-    assert!(told.status.success(), "{}", String::from_utf8_lossy(&told.stderr));
+    assert!(
+        told.status.success(),
+        "{}",
+        String::from_utf8_lossy(&told.stderr)
+    );
     for name in ["open-there", "draft-there"] {
         assert!(repository.at(name).join(".git").is_file(), "{name} went");
-        assert!(repository.on_clone(name) && repository.on_origin(name), "{name}'s branch went");
+        assert!(
+            repository.on_clone(name) && repository.on_origin(name),
+            "{name}'s branch went"
+        );
     }
     for name in ["closed-there", "merged-there"] {
         assert!(!repository.at(name).exists(), "{name} stays");
@@ -803,40 +1101,70 @@ fn a_far_row_lists_and_deletes_on_its_own_machine() {
     hosts(&here, "far\n");
     let _here = start(here.vars()).unwrap();
     reached(&here, "far", |far| {
-        let kept = far.projects.as_ref().and_then(|projects| projects.held.as_ref());
+        let kept = far
+            .projects
+            .as_ref()
+            .and_then(|projects| projects.held.as_ref());
         matches!(kept, Some(Held::Kept(kept)) if !kept.projects.is_empty())
     });
 
     let folder = folder_in(here.runtime.path()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let mut daemon: DaemonClient<_> = luned::connect(&folder, PATIENT).await.unwrap();
-        let on = || Some(On { destination: "far".to_owned() });
+        let on = || {
+            Some(On {
+                destination: "far".to_owned(),
+            })
+        };
         let main = Directory::parse(repository.at("main").display().to_string()).unwrap();
         let asked = prunes::asked(on(), &main);
-        let answer = daemon.prunes(asked).await.unwrap().into_inner().message().await;
+        let answer = daemon
+            .prunes(asked)
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await;
         let plan: Plan = answer.unwrap().unwrap().into();
         let goes: Vec<&str> = plan.goes.iter().map(|goes| goes.branch.as_str()).collect();
         assert_eq!(goes, ["one"]);
         assert_eq!(plan.kept[0].why, "it has a view");
         let Goes { pushed, .. } = &plan.goes[0];
-        let origin =
-            Pushed::Goes(RemoteBranch { remote: "origin".to_owned(), branch: "one".to_owned() });
+        let origin = Pushed::Goes(RemoteBranch {
+            remote: "origin".to_owned(),
+            branch: "one".to_owned(),
+        });
         assert_eq!(pushed, &origin);
         assert_eq!(here.gh.asked(), [] as [String; 0]);
 
         let told = prunes::told(on(), &main, &plan.deletes());
-        let answer = daemon.prune(told).await.unwrap().into_inner().message().await;
+        let answer = daemon
+            .prune(told)
+            .await
+            .unwrap()
+            .into_inner()
+            .message()
+            .await;
         let pruned = prunes::pruned_of(answer.unwrap().unwrap()).unwrap();
         let Pruned::Went(outcomes) = pruned else {
             panic!("it deleted nothing: {pruned:?}");
         };
-        assert!(outcomes.iter().all(|outcome| outcome.came == Came::Gone), "{outcomes:?}");
+        assert!(
+            outcomes.iter().all(|outcome| outcome.came == Came::Gone),
+            "{outcomes:?}"
+        );
         assert!(!repository.at("one").exists());
         assert!(!repository.on_origin("one"));
         assert!(repository.at("viewed").exists());
 
-        let relative = PrunesRequest { on: on(), dir: "n/main".to_owned() };
+        let relative = PrunesRequest {
+            on: on(),
+            dir: "n/main".to_owned(),
+        };
         let refused = daemon.prunes(relative).await.unwrap_err();
         assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
     });
