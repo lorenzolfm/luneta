@@ -266,23 +266,23 @@ jobs:
         env:
           TAILSCALE: ${{ steps.tailscale.outcome }}
         run: |
-          set -u
+          set -euo pipefail
           if [[ $TAILSCALE != success ]]; then
-            untested="$(nix eval --json .#ciRunners | jq -ce 'if type == "object" and length > 0 then [.[]] else error("ciRunners must be a non-empty object") end')"
+            untested="$(nix eval --json .#ciRunners | jq -ce 'if type == "object" and length > 0 then to_entries | map(if (.key | type == "string" and length > 0) and (.value | type == "string" and length > 0) then {runner: .value, system: .key} else error("invalid ciRunners entry") end) else error("ciRunners must be a non-empty object") end')"
             echo "untested=$untested" | tee -a "$GITHUB_OUTPUT"
             exit 0
           fi
           targets="$(nix eval --json .#testedTargets)"
           rows="$(jq -er 'to_entries | if length > 0 then .[] | [.key, .value.runner, .value.path] | @tsv else error("testedTargets must be non-empty") end' <<<"$targets")"
-          untested=()
+          untested='[]'
           while IFS=$'\t' read -r system runner check; do
             if nix store verify --no-contents --store https://attic.tail174781.ts.net/main "$check"; then
               echo "attic holds $system's tested $check"
             else
-              untested+=("$runner")
+              untested="$(jq -cn --argjson list "$untested" --arg runner "$runner" --arg system "$system" '$list + [{runner: $runner, system: $system}]')"
             fi
           done <<<"$rows"
-          echo "untested=$(jq -cn '$ARGS.positional' --args "${untested[@]}")" | tee -a "$GITHUB_OUTPUT"
+          echo "untested=$untested" | tee -a "$GITHUB_OUTPUT"
 
   daemon:
     needs: [code, tested]
@@ -295,9 +295,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: >-
+        include: >-
           ${{ fromJSON(needs.tested.result == 'skipped'
-          && '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"]'
+          && '[{"runner":"ubuntu-latest","system":"x86_64-linux"},{"runner":"ubuntu-24.04-arm","system":"aarch64-linux"},{"runner":"macos-latest","system":"aarch64-darwin"}]'
           || needs.tested.outputs.untested) }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -354,15 +354,7 @@ jobs:
           | xargs -r nix build --out-link "$RUNNER_TEMP/inputs"
 
       - name: Build and test the daemon
-        shell: bash
-        run: |
-          set -euo pipefail
-          system="$(nix eval --impure --raw --expr builtins.currentSystem)"
-          if [[ -z $system ]]; then
-            echo "::error::nix eval returned an empty system name" >&2
-            exit 1
-          fi
-          nix build -L ".#checks.$system.luned"
+        run: nix build -L ".#checks.${{ matrix.system }}.luned"
 
       - *attic-push
 

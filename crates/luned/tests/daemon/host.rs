@@ -921,17 +921,29 @@ struct QuickProfile {
     overrides: Vec<NextestOverride>,
 }
 
+struct DisabledRetries;
+
+impl<'de> serde::Deserialize<'de> for DisabledRetries {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        if value != 0 {
+            return Err(serde::de::Error::custom(format!(
+                "retries must be 0 so flaky races are not masked, got {value}"
+            )));
+        }
+        Ok(Self)
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CiProfile {
-    #[serde(default)]
-    retries: Option<u32>,
+    #[serde(rename = "retries")]
+    _retries: DisabledRetries,
     #[serde(default, rename = "slow-timeout")]
     _slow_timeout: Option<toml::Value>,
     #[serde(default, rename = "failure-output")]
     _failure_output: Option<String>,
-    #[serde(default, rename = "junit")]
-    _junit: Option<toml::Value>,
     #[serde(default)]
     overrides: Vec<NextestOverride>,
 }
@@ -942,8 +954,6 @@ struct NextestOverride {
     filter: ExactUnionFilter,
     #[serde(default)]
     priority: Option<NextestPriority>,
-    #[serde(default)]
-    retries: Option<u32>,
     #[serde(default, rename = "slow-timeout")]
     _slow_timeout: Option<toml::Value>,
 }
@@ -1132,11 +1142,6 @@ fn nextest_toml_names_only_existing_daemon_tests() {
     let text = fs::read_to_string(&path).expect("nextest.toml is in the source tree");
     let config: NextestConfig = toml::from_str(&text).expect("nextest.toml matches typed schema");
 
-    assert_eq!(
-        config.profile.ci.retries,
-        Some(0),
-        "nextest.toml [profile.ci] sets retries = 0 so flaky races are not masked"
-    );
     let active = active_daemon_tests();
     let profile_overrides: [(&str, &[NextestOverride]); 3] = [
         ("default", &config.profile.default.overrides),
@@ -1149,11 +1154,6 @@ fn nextest_toml_names_only_existing_daemon_tests() {
             "profile {profile_name} override count exceeds NEXTEST_OVERRIDES_MAX ({NEXTEST_OVERRIDES_MAX})"
         );
         for entry in overrides {
-            assert_eq!(
-                entry.retries.unwrap_or(0),
-                0,
-                "nextest.toml [profile.{profile_name}.overrides] must not enable retries"
-            );
             for name in &entry.filter.0 {
                 assert!(
                     active.contains(name),
@@ -1215,6 +1215,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1224,6 +1225,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1233,6 +1235,7 @@ priority = 101
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1242,6 +1245,7 @@ priority = 100
 [profile.quick]
 default-filter = "test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1251,6 +1255,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one) or not test(=b::two)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1260,6 +1265,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 test-threads = 4
 "#,
         r#"
@@ -1270,7 +1276,82 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 final-status-level = "flaky"
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 1
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = { backoff = "fixed", count = 0 }
+"#,
+        r#"
+[profile.default]
+retries = 1
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+retries = 1
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+retries = 0
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+[profile.ci.junit]
+path = "junit.xml"
 "#,
     ];
     for raw in invalid_configs {
@@ -1289,6 +1370,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 [[profile.ci.overrides]]
 filter = "test(=a::one)"
 priority = 0

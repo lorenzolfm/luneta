@@ -675,6 +675,7 @@
                   touch "$out"
                 '';
             deadnix = nixLint pkgs.deadnix "--hidden --fail .";
+            nextest-cleanup = nextest.check;
             profiles =
               let
                 failures = import ./nix/profiles.nix {

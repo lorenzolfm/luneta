@@ -457,8 +457,8 @@ fn screen_shows(screen: &[String], text: &str) -> bool {
 }
 
 enum MenuWait {
-    Opening,
-    Closing,
+    Opening { retries_left: u32 },
+    Closing { retries_left: u32 },
 }
 
 fn open_menu_and_rebase(window: &mut Window) {
@@ -467,14 +467,15 @@ fn open_menu_and_rebase(window: &mut Window) {
         !screen_shows(&before, MENU_CLOSES),
         "no menu or overlay is open before triggering rebase"
     );
-    let mut state = MenuWait::Opening;
-    let mut attempts: u32 = 1;
+    let mut state = MenuWait::Opening {
+        retries_left: MENU_ATTEMPTS_MAX - 1,
+    };
     window.send(MENU);
     eventually("lune opens the menu offering Git", || {
         let screen = window.screen();
         let open = screen_shows(&screen, MENU_CLOSES);
         match state {
-            MenuWait::Opening => {
+            MenuWait::Opening { retries_left } => {
                 if !open {
                     return None;
                 }
@@ -485,26 +486,25 @@ fn open_menu_and_rebase(window: &mut Window) {
                     );
                     return Some(());
                 }
-                assert!(
-                    attempts < MENU_ATTEMPTS_MAX,
-                    "menu opened {attempts} times without offering Git: {screen:?}"
-                );
-                attempts += 1;
+                let Some(next) = retries_left.checked_sub(1) else {
+                    panic!(
+                        "menu opened {MENU_ATTEMPTS_MAX} times without offering Git: {screen:?}"
+                    );
+                };
                 window.send(ESC);
-                state = MenuWait::Closing;
+                state = MenuWait::Closing { retries_left: next };
                 None
             }
-            MenuWait::Closing => {
+            MenuWait::Closing { retries_left } => {
                 if open {
                     return None;
                 }
                 window.send(MENU);
-                state = MenuWait::Opening;
+                state = MenuWait::Opening { retries_left };
                 None
             }
         }
     });
-    assert!(attempts <= MENU_ATTEMPTS_MAX);
     window.send("gr");
     eventually("lune closes the menu after gr", || {
         let screen = window.screen();
