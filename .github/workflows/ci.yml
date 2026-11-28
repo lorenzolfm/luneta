@@ -396,8 +396,9 @@ jobs:
         run: |
           set -euo pipefail
           rm -f "$RUNNER_TEMP/luned-check"
-          if [[ -e $ATTIC_SKIP_PATH ]]; then
-            nix store delete "$ATTIC_SKIP_PATH"
+          target="$ATTIC_SKIP_PATH"
+          if [[ -e $target ]]; then
+            exec env -u ATTIC_SKIP_PATH nix store delete -- "$target"
           fi
 
   release:
