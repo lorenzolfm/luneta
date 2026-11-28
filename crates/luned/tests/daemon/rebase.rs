@@ -23,7 +23,19 @@ use crate::worktree::{cloned_as_wt, git};
 
 const UNFINISHED: i32 = 4;
 
-const REBASE: &str = "\x1b[97;3ugr";
+const MENU: &str = "\x1b[97;3u";
+
+const ESC: &str = "\x1b[27u";
+
+const MENU_ROOT: &str = "n  New ▸";
+
+const MENU_GIT: &str = "g  Git ▸";
+
+const MENU_CLOSES: &str = "<ESC> - Close";
+
+const MENU_ATTEMPTS_MAX: u32 = 128;
+
+const _: () = assert!(MENU_ATTEMPTS_MAX > 0);
 
 const SAYS_WHERE: &str = "printf '\\033]7;file://localhost%s\\007' \"$PWD\"\r";
 
@@ -503,6 +515,68 @@ fn a_far_worktree_is_rebased_on_its_own_machine() {
     );
 }
 
+fn screen_shows(screen: &[String], text: &str) -> bool {
+    assert!(!screen.is_empty(), "screen snapshot has rows");
+    assert!(!text.is_empty(), "search text is non-empty");
+    screen.iter().any(|line| line.contains(text))
+}
+
+enum MenuWait {
+    Opening { retries_left: u32 },
+    Closing { retries_left: u32 },
+}
+
+fn open_menu_and_rebase(window: &mut Window) {
+    let before = window.screen();
+    assert!(
+        !screen_shows(&before, MENU_CLOSES),
+        "no menu or overlay is open before triggering rebase"
+    );
+    let mut state = MenuWait::Opening {
+        retries_left: MENU_ATTEMPTS_MAX - 1,
+    };
+    window.send(MENU);
+    eventually("lune opens the menu offering Git", || {
+        let screen = window.screen();
+        let open = screen_shows(&screen, MENU_CLOSES);
+        match state {
+            MenuWait::Opening { retries_left } => {
+                if !open {
+                    return None;
+                }
+                if screen_shows(&screen, MENU_GIT) {
+                    assert!(
+                        screen_shows(&screen, MENU_ROOT),
+                        "root menu is open when Git is offered"
+                    );
+                    return Some(());
+                }
+                let Some(next) = retries_left.checked_sub(1) else {
+                    panic!(
+                        "menu opened {MENU_ATTEMPTS_MAX} times without offering Git: {screen:?}"
+                    );
+                };
+                window.send(ESC);
+                state = MenuWait::Closing { retries_left: next };
+                None
+            }
+            MenuWait::Closing { retries_left } => {
+                if open {
+                    return None;
+                }
+                window.send(MENU);
+                state = MenuWait::Opening { retries_left };
+                None
+            }
+        }
+    });
+    window.send("gr");
+    eventually("lune closes the menu after gr", || {
+        let screen = window.screen();
+        (!screen_shows(&screen, MENU_CLOSES)).then_some(())
+    });
+}
+
 #[test]
 fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflicts() {
     if !makes_shells() {
@@ -526,12 +600,16 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
 
     let mut window = Window::open(host, &dir, &[]);
     eventually("lune shows work", || shown(&owned, &dir.path));
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
+    });
     window.send(SAYS_WHERE);
     window.seated("work/main");
-    eventually("the view's row says its branch", || {
-        window.shows(" fix").then_some(())
+    eventually("the view's row says its branch and folder", || {
+        let screen = window.screen();
+        (screen_shows(&screen, " fix") && screen_shows(&screen, " work/main")).then_some(())
     });
-    window.send(REBASE);
+    open_menu_and_rebase(&mut window);
     let clean = "fix is rebased onto origin/main, one commit on top";
     eventually("a note says it is rebased", || {
         window.shows(clean).then_some(())
@@ -558,7 +636,7 @@ fn g_r_over_a_view_rebases_its_worktree_and_starts_an_agent_beside_it_on_conflic
     eventually("the view's row sees the commit on fix", || {
         window.shows(" fix +2 -1").then_some(())
     });
-    window.send(REBASE);
+    open_menu_and_rebase(&mut window);
     let agent = eventually("an agent starts on the conflicts", || {
         fs::read_to_string(&asked).ok()
     });
