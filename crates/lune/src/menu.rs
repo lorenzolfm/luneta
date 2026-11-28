@@ -2908,6 +2908,15 @@ pub fn wrap_joined(text: &str, width: usize, style: Style) -> Vec<(Line<'static>
             lines.push((wrapped, join));
         }
     }
+    assert!(
+        lines.first().is_none_or(|(_, join)| join.is_none()),
+        "the first wrapped line never joins onto a prior line"
+    );
+    assert_eq!(
+        lines.is_empty(),
+        text.trim_matches(' ').is_empty(),
+        "non-blank text wraps into at least one line"
+    );
     lines
 }
 

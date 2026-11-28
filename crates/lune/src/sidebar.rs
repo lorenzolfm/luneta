@@ -69,7 +69,7 @@ use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, SidebarBottom, Spots};
-use crate::sweep::{Continuation, Join, Page, Sweep, cells};
+use crate::sweep::{Continuation, CutAt, Join, Page, Sweep, cells};
 
 pub const COLUMNS: u16 = 32;
 
@@ -5360,7 +5360,12 @@ impl Sidebar {
                 return Asked::Nothing;
             }
             Moving::Sweeping(sweep) => {
-                sweep.reach(pointer, inside(area));
+                let inside = inside(area);
+                if inside.is_empty() {
+                    self.moving = Moving::Still;
+                } else {
+                    sweep.reach(pointer, inside);
+                }
                 return Asked::Nothing;
             }
             Moving::Down { at, lifts } => (*at, lifts.clone().filter(|_| mouse.row != at.y)),
@@ -5379,8 +5384,10 @@ impl Sidebar {
             });
             return Asked::Take;
         }
-        if from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1 {
-            self.moving = Moving::Sweeping(Sweep::new(from, pointer, inside(area)));
+        let inside = inside(area);
+        if !inside.is_empty() && (from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1)
+        {
+            self.moving = Moving::Sweeping(Sweep::new(from, pointer, inside));
         }
         Asked::Nothing
     }
@@ -5404,8 +5411,12 @@ impl Sidebar {
                 }
             }
             Moving::Sweeping(mut sweep) => {
-                sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
-                let Some(excerpt) = Excerpt::of(sweep.text(&self.page, inside(area))) else {
+                let inside = inside(area);
+                if inside.is_empty() {
+                    return Asked::Nothing;
+                }
+                sweep.reach(Position::new(mouse.column, mouse.row), inside);
+                let Some(excerpt) = Excerpt::of(sweep.text(&self.page, inside)) else {
                     return Asked::Nothing;
                 };
                 self.moving = Moving::Swept(sweep, self.laid.clone());
@@ -6534,35 +6545,58 @@ struct NumberAt<'a> {
     link: &'a Link,
 }
 
-struct CutAt {
-    line: usize,
-    column: usize,
-    took: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elided {
+    pub cell_offset: usize,
+    pub took: String,
 }
 
-pub fn cut_tail(text: &str, room: usize) -> (String, Option<(usize, String)>) {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutTail {
+    pub shown: String,
+    pub elided: Option<Elided>,
+}
+
+pub fn cut_tail(text: &str, room: usize) -> CutTail {
     let shown = cut(text, room);
+    assert!(
+        cells(&shown) <= room,
+        "cut text fits within its column room"
+    );
     if shown == text {
-        return (shown, None);
+        return CutTail {
+            shown,
+            elided: None,
+        };
     }
     let Some(kept) = shown.strip_suffix('…') else {
-        return (shown, None);
+        assert_eq!(room, 0, "only zero room drops the ellipsis on cut text");
+        return CutTail {
+            shown,
+            elided: None,
+        };
     };
-    let Some(rest) = text.strip_prefix(kept) else {
-        return (shown, None);
-    };
+    let rest = text
+        .strip_prefix(kept)
+        .expect("cut keeps a prefix of its input");
     let took = rest.chars().filter(|c| !c.is_control()).collect();
-    let offset = cells(kept);
-    (shown, Some((offset, took)))
+    let cell_offset = cells(kept);
+    assert!(
+        cell_offset < room,
+        "the ellipsis lands inside the column room"
+    );
+    CutTail {
+        shown,
+        elided: Some(Elided { cell_offset, took }),
+    }
 }
 
 fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> {
-    let (_, tail) = cut_tail(text, room);
-    let (offset, took) = tail?;
+    let elided = cut_tail(text, room).elided?;
     Some(CutAt {
         line,
-        column: column + offset,
-        took,
+        column: column + elided.cell_offset,
+        took: elided.took,
     })
 }
 

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
@@ -11,7 +12,7 @@ use luned::{Destination, Directory};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 
 use crate::brief::{self, Asking};
 use crate::cadence::Cadence;
@@ -24,13 +25,23 @@ use crate::moonlight;
 use crate::reach::{self, Luned};
 use crate::sidebar::{self, ACCENT};
 use crate::spots::Spots;
-use crate::sweep::{self, Continuation, Join, Page, Sweep};
+use crate::sweep::{self, Continuation, CutAt, Join, Page, Sweep};
 
 const TITLE: &str = "Ask";
 
 const STOPPED: &str = "stopped: the agent was ended where it was";
 
 const RAN_PREFIX_CELLS: usize = 4;
+
+const TALK_MAX: usize = 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Mouse {
+    Ignored,
+    Started,
+    Active,
+    Copied(Excerpt),
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Keyed {
@@ -75,7 +86,7 @@ enum Selecting {
     Sweeping(Sweep),
     Swept {
         sweep: Sweep,
-        under: Snapshot,
+        snapshot: Snapshot,
     },
 }
 
@@ -90,6 +101,11 @@ struct Snapshot {
 
 impl Snapshot {
     fn of(sweep: Sweep, shown: &ShownBody) -> Snapshot {
+        assert_eq!(
+            shown.page.lines.len(),
+            usize::from(shown.text.height),
+            "each shown row has a page line"
+        );
         let (first, last) = sweep.ends();
         assert!(
             first.y >= shown.text.y,
@@ -101,7 +117,12 @@ impl Snapshot {
         );
         let first_line = usize::from(first.y - shown.text.y);
         let last_line = usize::from(last.y - shown.text.y);
+        assert!(
+            last_line < shown.page.lines.len(),
+            "sweep rows exist in page lines"
+        );
         let lines = shown.page.lines[first_line..=last_line].to_vec();
+        assert!(!lines.is_empty(), "a snapshot covers at least one line");
         Snapshot {
             text_x: shown.text.x,
             text_y: shown.text.y,
@@ -112,6 +133,11 @@ impl Snapshot {
     }
 
     fn keeps(&self, shown: &ShownBody) -> bool {
+        assert!(
+            !self.lines.is_empty(),
+            "a snapshot covers at least one line"
+        );
+        assert!(self.text_width > 0, "a snapshot has positive width");
         if (self.text_x, self.text_y, self.text_width)
             != (shown.text.x, shown.text.y, shown.text.width)
         {
@@ -139,60 +165,24 @@ enum DrawnAsk {
     },
 }
 
-struct CutAt {
-    line: usize,
-    column: usize,
-    took: String,
+struct BodyRow {
+    line: Line<'static>,
+    join: Option<Join>,
 }
 
-struct Body {
-    lines: Vec<Line<'static>>,
-    joins: Vec<Option<Join>>,
+struct BodyChunk {
+    rows: Vec<BodyRow>,
     cuts: Vec<CutAt>,
     spinner: Option<usize>,
 }
 
-impl Body {
-    fn truncate(&mut self, room: usize, inner: usize) -> bool {
-        assert_eq!(
-            self.lines.len(),
-            self.joins.len(),
-            "each line carries its join"
-        );
-        let mut kept_spinner = inner > 0 && self.spinner.is_some_and(|at| at < room);
-        if self.lines.len() > room {
-            let kept = room.saturating_sub(1);
-            let drained = self.lines.len() - kept;
-            kept_spinner = inner > 0 && self.spinner.is_some_and(|at| at >= drained);
-            self.lines.drain(..drained);
-            self.joins.drain(..drained);
-            self.cuts.retain_mut(|cut| {
-                let Some(line) = cut.line.checked_sub(drained) else {
-                    return false;
-                };
-                cut.line = line + usize::from(room > 0);
-                true
-            });
-            if room > 0 {
-                if let Some(first_kept) = self.joins.first_mut() {
-                    *first_kept = None;
-                }
-                self.lines.insert(
-                    0,
-                    Line::styled(" …", Style::new().add_modifier(Modifier::DIM)),
-                );
-                self.joins.insert(0, None);
-            }
-        }
-        assert_eq!(
-            self.lines.len(),
-            self.joins.len(),
-            "truncated lines and joins match"
-        );
-        assert!(self.lines.len() <= room, "truncated body fits its room");
-        kept_spinner
-    }
+struct BodyParts {
+    lines: Vec<Line<'static>>,
+    joins: Vec<Option<Join>>,
+    cuts: Vec<CutAt>,
+}
 
+impl BodyParts {
     fn into_page(self, text: Rect) -> Page {
         assert_eq!(
             self.lines.len(),
@@ -204,7 +194,7 @@ impl Body {
             usize::from(text.height),
             "each body row has a line"
         );
-        let lines: Vec<Line<'static>> = self.lines.iter().map(unpad).collect();
+        let lines: Vec<Line<'static>> = self.lines.into_iter().map(unpad).collect();
         let joins = self
             .joins
             .into_iter()
@@ -228,6 +218,71 @@ impl Body {
             lines,
             joins,
             cuts: cuts.placed(text),
+        }
+    }
+}
+
+struct Body {
+    rows: Vec<BodyRow>,
+    cuts: Vec<CutAt>,
+    spinner: Option<usize>,
+}
+
+impl Body {
+    fn truncate(&mut self, rows_max: usize) -> bool {
+        let mut kept_spinner = self.spinner.is_some_and(|at| at < rows_max);
+        if self.rows.len() > rows_max {
+            let kept = rows_max.saturating_sub(1);
+            let drained = self.rows.len() - kept;
+            kept_spinner = self.spinner.is_some_and(|at| at >= drained);
+            self.rows.drain(..drained);
+            self.cuts.retain_mut(|cut| {
+                let Some(line) = cut.line.checked_sub(drained) else {
+                    return false;
+                };
+                cut.line = line + usize::from(rows_max > 0);
+                true
+            });
+            if rows_max > 0 {
+                if let Some(first_kept) = self.rows.first_mut() {
+                    first_kept.join = None;
+                }
+                self.rows.insert(
+                    0,
+                    BodyRow {
+                        line: Line::styled(" …", Style::new().add_modifier(Modifier::DIM)),
+                        join: None,
+                    },
+                );
+            }
+        }
+        assert!(
+            self.rows.len() <= rows_max,
+            "truncated body fits its row budget"
+        );
+        assert!(
+            self.rows.first().is_none_or(|row| row.join.is_none()),
+            "the first visible body row never joins upward"
+        );
+        assert!(
+            self.cuts.iter().all(|cut| cut.line < self.rows.len()),
+            "every retained cut falls on a visible body row"
+        );
+        kept_spinner
+    }
+
+    fn into_parts(self) -> BodyParts {
+        let mut lines = Vec::with_capacity(self.rows.len());
+        let mut joins = Vec::with_capacity(self.rows.len());
+        for row in self.rows {
+            lines.push(row.line);
+            joins.push(row.join);
+        }
+        assert_eq!(lines.len(), joins.len(), "split body lines and joins match");
+        BodyParts {
+            lines,
+            joins,
+            cuts: self.cuts,
         }
     }
 }
@@ -440,10 +495,10 @@ impl Ask {
             };
             (on, asked)
         });
-        self.talk.push(Said::You(words));
+        self.push_talk(Said::You(words));
         let (on, asked) = match asked {
             Ok(asked) => asked,
-            Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
+            Err(why) => return self.push_talk(Said::Wrong(format!("ask: {why}"))),
         };
         self.context = None;
         self.turned = Some(turn.key());
@@ -478,7 +533,7 @@ impl Ask {
         match heard {
             Heard::Step(Step::Session(session)) => self.session = Some(session),
             Heard::Step(Step::Ran { id, command }) => {
-                self.talk.push(Said::Ran {
+                self.push_talk(Said::Ran {
                     id,
                     command,
                     denied: false,
@@ -495,10 +550,10 @@ impl Ask {
                     }
                 }
             }
-            Heard::Step(Step::Said(said)) => self.talk.push(Said::Agent(said)),
+            Heard::Step(Step::Said(said)) => self.push_talk(Said::Agent(said)),
             Heard::Ended(Ok(())) => self.turn = None,
             Heard::Ended(Err(why)) => {
-                self.talk.push(Said::Wrong(why));
+                self.push_talk(Said::Wrong(why));
                 self.turn = None;
             }
         }
@@ -515,51 +570,73 @@ impl Ask {
         );
         self.clear_selection();
         if self.turn.take().is_some() {
-            self.talk.push(Said::Wrong(STOPPED.to_owned()));
+            self.push_talk(Said::Wrong(STOPPED.to_owned()));
             self.turned = None;
         }
         self.number = number;
     }
 
-    pub fn selects(&self, at: Position) -> bool {
-        matches!(&self.drawn, DrawnAsk::Shown { body, .. } if body.hit.contains(at))
+    fn push_talk(&mut self, said: Said) {
+        if self.talk.len() >= TALK_MAX {
+            let drop_count = self.talk.len() + 1 - TALK_MAX;
+            self.talk.drain(..drop_count);
+        }
+        self.talk.push(said);
+        assert!(self.talk.len() <= TALK_MAX, "ask talk stays within its cap");
     }
 
-    pub fn select_from(&mut self, at: Position) {
+    fn select_from(&mut self, at: Position) -> bool {
         let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
-            return;
+            return false;
         };
-        *selecting = if body.hit.contains(at) {
-            Selecting::Pressed(sweep::clamp(at, body.text))
+        if body.hit.contains(at) {
+            let clamped = sweep::clamp(at, body.text);
+            assert!(
+                body.text.contains(clamped),
+                "a press inside hit clamps into text"
+            );
+            *selecting = Selecting::Pressed(clamped);
+            true
         } else {
-            Selecting::Still
-        };
+            *selecting = Selecting::Still;
+            false
+        }
     }
 
-    pub fn select_to(&mut self, at: Position) {
+    fn select_to(&mut self, at: Position) -> bool {
         let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
-            return;
+            return false;
         };
         match selecting {
             Selecting::Pressed(from) => {
+                assert!(
+                    body.text.contains(*from),
+                    "an active press starts inside text"
+                );
                 let to = sweep::clamp(at, body.text);
                 if to != *from {
                     *selecting = Selecting::Sweeping(Sweep::new(*from, to, body.text));
                 }
+                true
             }
             Selecting::Sweeping(sweep) => {
                 sweep.reach(at, body.text);
+                true
             }
-            Selecting::Still | Selecting::Swept { .. } => {}
+            Selecting::Still | Selecting::Swept { .. } => false,
         }
     }
 
-    pub fn selected_at(&mut self, at: Position) -> Option<Excerpt> {
+    fn selected_at(&mut self, at: Position) -> Option<Excerpt> {
         let DrawnAsk::Shown { body, selecting } = &mut self.drawn else {
             return None;
         };
         let sweep = match std::mem::take(selecting) {
             Selecting::Pressed(from) => {
+                assert!(
+                    body.text.contains(from),
+                    "a released press starts inside text"
+                );
                 let to = sweep::clamp(at, body.text);
                 (to != from).then(|| Sweep::new(from, to, body.text))?
             }
@@ -574,33 +651,59 @@ impl Ask {
             }
             Selecting::Still => return None,
         };
+        let (first, last) = sweep.ends();
+        assert!(
+            body.text.contains(first),
+            "a completed sweep starts inside text"
+        );
+        assert!(
+            body.text.contains(last),
+            "a completed sweep ends inside text"
+        );
         let excerpt = Excerpt::of(sweep.text(&body.page, body.text))?;
-        let under = Snapshot::of(sweep, body);
-        *selecting = Selecting::Swept { sweep, under };
+        let snapshot = Snapshot::of(sweep, body);
+        *selecting = Selecting::Swept { sweep, snapshot };
         Some(excerpt)
     }
 
-    pub fn mouse(&mut self, mouse: MouseEvent) -> Option<Excerpt> {
+    pub fn mouse(&mut self, mouse: MouseEvent) -> Mouse {
         let at = Position::new(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.select_from(at);
-                None
+                if self.select_from(at) {
+                    Mouse::Started
+                } else {
+                    Mouse::Ignored
+                }
             }
             MouseEventKind::Down(_) => {
                 self.clear_selection();
-                None
+                Mouse::Ignored
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                self.select_to(at);
-                None
+                if self.select_to(at) {
+                    Mouse::Active
+                } else {
+                    Mouse::Ignored
+                }
             }
-            MouseEventKind::Up(MouseButton::Left) => self.selected_at(at),
+            MouseEventKind::Up(MouseButton::Left) => {
+                if !self.pressed() {
+                    return Mouse::Ignored;
+                }
+                match self.selected_at(at) {
+                    Some(excerpt) => Mouse::Copied(excerpt),
+                    None => Mouse::Active,
+                }
+            }
             MouseEventKind::Up(_) | MouseEventKind::Moved => {
-                self.let_go();
-                None
+                if self.let_go() {
+                    Mouse::Active
+                } else {
+                    Mouse::Ignored
+                }
             }
-            _ => None,
+            _ => Mouse::Ignored,
         }
     }
 
@@ -650,7 +753,6 @@ impl Ask {
             self.unshown();
             return cadence;
         };
-        let mut body = self.body(inner, sidebar::frame(wall));
         let keys: &[(Hint, &str)] = match self.turn {
             Some(_) => &[(Hint::Esc, "Close")],
             None => &[
@@ -660,10 +762,18 @@ impl Ask {
             ],
         };
         let footer = [Line::default(), menu::keys_line(inner, keys)];
-        let lines_room = room.saturating_sub(footer.len());
-        let kept_spinner = body.truncate(lines_room, inner);
-        let mut lines = body.lines.clone();
-        lines.extend(footer);
+        let body_rows_max = room.saturating_sub(footer.len());
+        let mut body = self.body(inner, body_rows_max, sidebar::frame(wall));
+        let kept_spinner = inner > 0 && body.truncate(body_rows_max);
+        let mut parts = body.into_parts();
+        let body_rows = parts.lines.len();
+        parts.lines.extend(footer);
+        if room >= 2 {
+            assert!(
+                parts.lines.len() <= room,
+                "ask overlay body and footer fit in room"
+            );
+        }
         let right = match &self.works {
             Works::Here(cwd) => sidebar::short_cwd(&cwd.to_string_lossy()),
             Works::There { on, cwd: Some(cwd) } => {
@@ -671,8 +781,11 @@ impl Ask {
             }
             Works::There { on, cwd: None } => format!("~ on {on}"),
         };
-        if let Some(box_area) = brief::boxed(buffer, over, TITLE, &right, &lines) {
-            self.finish_draw(buffer, box_area, body);
+        if let Some(box_area) = brief::boxed(buffer, over, TITLE, &right, &parts.lines) {
+            assert!(box_area.width >= 2, "a drawn ask box has border columns");
+            assert!(box_area.height >= 2, "a drawn ask box has border rows");
+            parts.lines.truncate(body_rows);
+            self.finish_draw(buffer, box_area, parts);
         } else {
             self.unshown();
         }
@@ -691,6 +804,10 @@ impl Ask {
         hints: &[(Hint, &str)],
         wall: SystemTime,
     ) -> (u16, Cadence) {
+        assert!(
+            most <= area.height,
+            "docked ask row budget fits in the home area"
+        );
         let mut cadence = Cadence::default();
         let Some(inner) = area
             .width
@@ -701,24 +818,36 @@ impl Ask {
             self.unshown();
             return (0, cadence);
         };
-        let room = usize::from(most.saturating_sub(3));
-        let mut body = self.body(inner, sidebar::frame(wall));
-        let kept_spinner = body.truncate(room, inner);
-        let mut lines = body.lines.clone();
-        lines.push(menu::keys_line(inner, hints));
-        let rows = u16::try_from(lines.len() + 2).map_or(most, |rows| rows.min(most));
+        let body_rows_max = usize::from(most.saturating_sub(3));
+        let mut body = self.body(inner, body_rows_max, sidebar::frame(wall));
+        let kept_spinner = body.truncate(body_rows_max);
+        let mut parts = body.into_parts();
+        let body_rows = parts.lines.len();
+        parts.lines.push(menu::keys_line(inner, hints));
+        assert_eq!(
+            parts.lines.len(),
+            body_rows + 1,
+            "docked ask adds one hint footer row"
+        );
+        let rows = u16::try_from(parts.lines.len() + 2).map_or(most, |rows| rows.min(most));
         assert!(rows <= area.height, "the prompt's box fits in the home");
         let asked = Rect::new(area.x, area.bottom() - rows, area.width, rows);
-        menu::boxed(buffer, asked, &menu::rule(TITLE, right, inner), &lines);
-        self.finish_draw(buffer, asked, body);
+        menu::boxed(
+            buffer,
+            asked,
+            &menu::rule(TITLE, right, inner),
+            &parts.lines,
+        );
+        parts.lines.truncate(body_rows);
+        self.finish_draw(buffer, asked, parts);
         if kept_spinner {
             cadence.spin();
         }
         (rows, cadence)
     }
 
-    fn finish_draw(&mut self, buffer: &mut Buffer, box_area: Rect, body: Body) {
-        let body_rows = u16::try_from(body.lines.len()).expect("body lines fit in box height");
+    fn finish_draw(&mut self, buffer: &mut Buffer, box_area: Rect, parts: BodyParts) {
+        let body_rows = u16::try_from(parts.lines.len()).expect("body lines fit in box height");
         let inner = box_area.width.saturating_sub(2);
         if body_rows == 0 || inner < 2 {
             self.unshown();
@@ -732,19 +861,21 @@ impl Ask {
         let text = Rect::new(box_area.x + 2, box_area.y + 1, inner - 1, body_rows);
         assert!(!hit.is_empty(), "a shown body has cells to hit");
         assert!(!text.is_empty(), "a shown body has cells to read");
-        let page = body.into_page(text);
+        let page = parts.into_page(text);
         let shown = ShownBody { hit, text, page };
         let selecting = match std::mem::take(&mut self.drawn) {
             DrawnAsk::Unshown => Selecting::Still,
             DrawnAsk::Shown {
-                body: prev,
+                body: previous,
                 selecting,
             } => match selecting {
                 Selecting::Still => Selecting::Still,
-                Selecting::Pressed(_) | Selecting::Sweeping(_) if prev.text != shown.text => {
+                Selecting::Pressed(_) | Selecting::Sweeping(_) if previous.text != shown.text => {
                     Selecting::Still
                 }
-                Selecting::Swept { ref under, .. } if !under.keeps(&shown) => Selecting::Still,
+                Selecting::Swept { ref snapshot, .. } if !snapshot.keeps(&shown) => {
+                    Selecting::Still
+                }
                 kept @ (Selecting::Pressed(_)
                 | Selecting::Sweeping(_)
                 | Selecting::Swept { .. }) => kept,
@@ -759,145 +890,188 @@ impl Ask {
         };
     }
 
-    fn body(&self, inner: usize, frame: usize) -> Body {
-        let dim = Style::new().add_modifier(Modifier::DIM);
-        let yours = Style::new().fg(ACCENT);
-        let mut lines = Vec::new();
-        let mut joins = Vec::new();
-        let mut cuts = Vec::new();
-        let push_joined = |lines: &mut Vec<Line<'static>>,
-                           joins: &mut Vec<Option<Join>>,
-                           added: Vec<(Line<'static>, Option<Join>)>| {
-            for (line, join) in added {
-                lines.push(line);
-                joins.push(join);
-            }
-        };
-        for (at, said) in self.talk.iter().enumerate() {
-            match said {
-                Said::You(words) => {
-                    if at > 0 {
-                        lines.push(Line::default());
-                        joins.push(None);
-                    }
-                    push_joined(
-                        &mut lines,
-                        &mut joins,
-                        menu::wrap_joined(&format!("› {words}"), inner, yours),
-                    );
-                }
-                Said::Ran {
-                    command, denied, ..
-                } => {
-                    let command = plain(command);
-                    let (shown, tail) = sidebar::cut_tail(&command, inner.saturating_sub(5));
-                    let line_index = lines.len();
-                    if let Some((offset, took)) = tail {
-                        assert_eq!(sweep::cells("  $ "), RAN_PREFIX_CELLS);
-                        cuts.push(CutAt {
-                            line: line_index,
-                            column: RAN_PREFIX_CELLS + offset,
-                            took,
-                        });
-                    }
-                    lines.push(match denied {
-                        false => Line::styled(format!("   $ {shown}"), dim),
-                        true => {
-                            Line::styled(format!("   ✗ {shown}"), Style::new().fg(moonlight::RED))
-                        }
-                    });
-                    joins.push(None);
-                }
-                Said::Agent(said) => {
-                    push_joined(
-                        &mut lines,
-                        &mut joins,
-                        brief::paragraphs_joined(said, inner, Style::new()),
-                    );
-                }
-                Said::Wrong(why) => {
-                    push_joined(
-                        &mut lines,
-                        &mut joins,
-                        brief::paragraphs_joined(why, inner, Style::new().fg(moonlight::RED)),
-                    );
-                }
-            }
-        }
-        if self.turn.is_some() {
-            let start = lines.len();
-            for line in menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame) {
-                lines.push(line);
-                joins.push(None);
-            }
-            let spinner = (lines.len() > start).then_some(start);
-            assert_eq!(
-                lines.len(),
-                joins.len(),
-                "each waiting line carries its join"
-            );
+    fn body(&self, inner: usize, rows_max: usize, frame: usize) -> Body {
+        if rows_max == 0 {
             return Body {
-                lines,
-                joins,
-                cuts,
-                spinner,
+                rows: Vec::new(),
+                cuts: Vec::new(),
+                spinner: None,
             };
         }
-        if !self.talk.is_empty() {
-            lines.push(Line::default());
-            joins.push(None);
-        }
-        push_joined(
-            &mut lines,
-            &mut joins,
-            menu::wrap_joined(&format!("› {}_", self.typed), inner, yours),
-        );
-        if let Some(last_index) = lines.len().checked_sub(1) {
-            let last_line = unpad(&lines[last_index]);
-            if let Some(last_grapheme) = last_line.styled_graphemes(Style::new()).last()
-                && let Some(without_cursor) = last_grapheme.symbol.strip_suffix('_')
-            {
-                let width = sweep::line_cells(&last_line);
-                let cursor_cells = sweep::cells(last_grapheme.symbol);
-                if let Some(column) = width.checked_sub(cursor_cells) {
-                    cuts.push(CutAt {
-                        line: last_index,
-                        column,
-                        took: without_cursor.to_owned(),
-                    });
-                }
+        let dim = Style::new().add_modifier(Modifier::DIM);
+        let yours = Style::new().fg(ACCENT);
+        let tail = if self.turn.is_some() {
+            let rows: Vec<BodyRow> =
+                menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame)
+                    .into_iter()
+                    .map(|line| BodyRow { line, join: None })
+                    .collect();
+            let spinner = (!rows.is_empty()).then_some(0);
+            BodyChunk {
+                rows,
+                cuts: Vec::new(),
+                spinner,
             }
+        } else {
+            let mut rows = Vec::new();
+            if !self.talk.is_empty() {
+                rows.push(BodyRow {
+                    line: Line::default(),
+                    join: None,
+                });
+            }
+            for (line, join) in menu::wrap_joined(&format!("› {}_", self.typed), inner, yours) {
+                rows.push(BodyRow { line, join });
+            }
+            let last_index = rows
+                .len()
+                .checked_sub(1)
+                .expect("wrapped prompt has at least one line");
+            let last_line = unpad(rows[last_index].line.clone());
+            let last_grapheme = last_line
+                .styled_graphemes(Style::new())
+                .last()
+                .expect("wrapped prompt line has at least one grapheme");
+            let without_cursor = last_grapheme
+                .symbol
+                .strip_suffix('_')
+                .expect("wrapped prompt ends with the input cursor");
+            let width = sweep::line_cells(&last_line);
+            let cursor_cells = sweep::cells(last_grapheme.symbol);
+            assert!(
+                width >= cursor_cells,
+                "prompt line width covers its cursor glyph"
+            );
+            BodyChunk {
+                rows,
+                cuts: vec![CutAt {
+                    line: last_index,
+                    column: width - cursor_cells,
+                    took: without_cursor.to_owned(),
+                }],
+                spinner: None,
+            }
+        };
+        let mut total_rows = tail.rows.len();
+        let mut chunks = vec![tail];
+        for (at, said) in self.talk.iter().enumerate().rev().take(TALK_MAX) {
+            if total_rows > rows_max {
+                break;
+            }
+            let chunk = said_chunk(at, said, inner, dim, yours);
+            total_rows += chunk.rows.len();
+            chunks.push(chunk);
         }
-        assert_eq!(
-            lines.len(),
-            joins.len(),
-            "each prompt line carries its join"
-        );
+        let mut rows = Vec::with_capacity(total_rows);
+        let mut cuts = Vec::new();
+        let mut spinner = None;
+        for chunk in chunks.into_iter().rev() {
+            let base = rows.len();
+            if let Some(offset) = chunk.spinner {
+                assert!(spinner.is_none(), "at most one waiting spinner exists");
+                spinner = Some(base + offset);
+            }
+            for mut cut in chunk.cuts {
+                cut.line += base;
+                cuts.push(cut);
+            }
+            rows.extend(chunk.rows);
+        }
+        assert_eq!(rows.len(), total_rows, "assembled rows match chunk total");
         Body {
-            lines,
-            joins,
+            rows,
             cuts,
-            spinner: None,
+            spinner,
         }
     }
 }
 
-fn unpad(line: &Line<'static>) -> Line<'static> {
-    let mut spans = line.spans.iter();
-    let Some(first) = spans.next() else {
-        return Line::default();
+fn said_chunk(at: usize, said: &Said, inner: usize, dim: Style, yours: Style) -> BodyChunk {
+    let mut rows = Vec::new();
+    let mut cuts = Vec::new();
+    let push_joined = |rows: &mut Vec<BodyRow>, added: Vec<(Line<'static>, Option<Join>)>| {
+        for (line, join) in added {
+            rows.push(BodyRow { line, join });
+        }
+    };
+    match said {
+        Said::You(words) => {
+            if at > 0 {
+                rows.push(BodyRow {
+                    line: Line::default(),
+                    join: None,
+                });
+            }
+            push_joined(
+                &mut rows,
+                menu::wrap_joined(&format!("› {words}"), inner, yours),
+            );
+        }
+        Said::Ran {
+            command, denied, ..
+        } => {
+            let command = plain(command);
+            let cut = sidebar::cut_tail(&command, inner.saturating_sub(5));
+            let (prefix, style) = if *denied {
+                ("  ✗ ", Style::new().fg(moonlight::RED))
+            } else {
+                ("  $ ", dim)
+            };
+            assert_eq!(
+                sweep::cells(prefix),
+                RAN_PREFIX_CELLS,
+                "command prefix width matches constant"
+            );
+            if let Some(elided) = cut.elided {
+                cuts.push(CutAt {
+                    line: 0,
+                    column: RAN_PREFIX_CELLS + elided.cell_offset,
+                    took: elided.took,
+                });
+            }
+            rows.push(BodyRow {
+                line: Line::styled(format!(" {prefix}{}", cut.shown), style),
+                join: None,
+            });
+        }
+        Said::Agent(said) => {
+            push_joined(
+                &mut rows,
+                brief::paragraphs_joined(said, inner, Style::new()),
+            );
+        }
+        Said::Wrong(why) => {
+            push_joined(
+                &mut rows,
+                brief::paragraphs_joined(why, inner, Style::new().fg(moonlight::RED)),
+            );
+        }
+    }
+    BodyChunk {
+        rows,
+        cuts,
+        spinner: None,
+    }
+}
+
+fn unpad(mut line: Line<'static>) -> Line<'static> {
+    let Some(first) = line.spans.first_mut() else {
+        return line;
     };
     assert!(
         first.content.starts_with(' '),
         "every non-empty ask box line starts with a one-cell margin"
     );
-    let mut out = Vec::with_capacity(line.spans.len());
-    let rest = &first.content[1..];
-    if !rest.is_empty() {
-        out.push(Span::styled(rest.to_owned(), first.style));
+    match &mut first.content {
+        Cow::Borrowed(text) => *text = &text[1..],
+        Cow::Owned(text) => {
+            text.remove(0);
+        }
     }
-    out.extend(spans.cloned());
-    Line::from(out).style(line.style)
+    if first.content.is_empty() {
+        line.spans.remove(0);
+    }
+    line
 }
 
 fn backtick_fence(text: &str) -> String {
@@ -1060,13 +1234,17 @@ mod tests {
         let left = MouseButton::Left;
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Down(left), from.0, from.1)),
-            None
+            Mouse::Started
         );
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Drag(left), to.0, to.1)),
-            None
+            Mouse::Active
         );
-        ask.mouse(mouse(MouseEventKind::Up(left), to.0, to.1))
+        match ask.mouse(mouse(MouseEventKind::Up(left), to.0, to.1)) {
+            Mouse::Copied(excerpt) => Some(excerpt),
+            Mouse::Active => None,
+            other => panic!("unexpected mouse result on release: {other:?}"),
+        }
     }
 
     fn at_a_turn() -> Asking {
@@ -1492,31 +1670,31 @@ mod tests {
         let left = MouseButton::Left;
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y)),
-            None
+            Mouse::Started
         );
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Drag(left), text.x + 4, text.y)),
-            None
+            Mouse::Active
         );
         assert!(ask.pressed());
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Moved, text.x + 4, text.y)),
-            None
+            Mouse::Active
         );
         assert!(!ask.pressed());
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Up(left), text.x + 4, text.y)),
-            None
+            Mouse::Ignored
         );
         assert_eq!(reversed_cells(&mut ask, area, t1), []);
 
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Down(left), text.x, text.y)),
-            None
+            Mouse::Started
         );
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Drag(left), text.x + 4, text.y)),
-            None
+            Mouse::Active
         );
         assert!(ask.pressed());
         let taller = Rect::new(0, 0, 44, 20);
@@ -1528,7 +1706,7 @@ mod tests {
         assert!(!ask.pressed());
         assert_eq!(
             ask.mouse(mouse(MouseEventKind::Up(left), text.x + 4, text.y)),
-            None
+            Mouse::Ignored
         );
     }
 
@@ -1566,6 +1744,39 @@ mod tests {
             sweep(&mut ask, (text.x + 4, ran_y), (text.right() - 1, ran_y)).as_deref(),
             Some(long_command),
             "cut offset shifts with top truncation so the full command still copies"
+        );
+    }
+
+    #[test]
+    fn denied_elided_command_copies_uncut_and_talk_stays_capped() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        let long_command = "rm -rf /tmp/very-long-command-path-for-testing-elision";
+        for n in 0..(TALK_MAX + 12) {
+            ask.heard(Heard::Step(Step::Said(format!("turn {n}"))));
+        }
+        assert_eq!(ask.talk.len(), TALK_MAX);
+        ask.heard(Heard::Step(Step::Ran {
+            id: "toolu_denied".to_owned(),
+            command: long_command.to_owned(),
+        }));
+        ask.heard(Heard::Step(Step::Denied("toolu_denied".to_owned())));
+        assert_eq!(ask.talk.len(), TALK_MAX);
+        let area = Rect::new(0, 0, 36, 9);
+        let mut buffer = Buffer::empty(area);
+        ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
+        let text = drawn_body(&ask).text;
+        let denied_y = (text.y..text.bottom())
+            .find(|&y| buffer[(text.x + 2, y)].symbol() == "✗")
+            .expect("denied elided command line is visible");
+        assert_eq!(
+            sweep(
+                &mut ask,
+                (text.x + 4, denied_y),
+                (text.right() - 1, denied_y)
+            )
+            .as_deref(),
+            Some(long_command),
+            "dragging over a denied elided command restores the uncut command"
         );
     }
 }

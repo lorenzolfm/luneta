@@ -3,19 +3,18 @@ use std::num::NonZeroU32;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use lune_domain::projects::{Dir, ProjectId};
 use luned::asks::Marked;
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::ask::{self, Ask};
 use crate::cadence::Cadence;
-use crate::copied::Excerpt;
 use crate::host::Event;
 use crate::machines::Machine;
 use crate::menu::{self, Hint};
@@ -335,27 +334,11 @@ impl Home {
         matches!(&self.named, Named::As { ask, .. } if ask.turning())
     }
 
-    pub fn selects(&self, at: Position) -> bool {
-        matches!(&self.named, Named::As { ask, .. } if ask.selects(at))
-    }
-
-    pub fn select_from(&mut self, at: Position) {
-        if let Named::As { ask, .. } = &mut self.named {
-            ask.select_from(at);
-        }
-    }
-
-    pub fn select_to(&mut self, at: Position) {
-        if let Named::As { ask, .. } = &mut self.named {
-            ask.select_to(at);
-        }
-    }
-
-    pub fn selected_at(&mut self, at: Position) -> Option<Excerpt> {
+    pub fn mouse(&mut self, mouse: MouseEvent) -> ask::Mouse {
         let Named::As { ask, .. } = &mut self.named else {
-            return None;
+            return ask::Mouse::Ignored;
         };
-        ask.selected_at(at)
+        ask.mouse(mouse)
     }
 
     pub fn pressed(&self) -> bool {
@@ -368,11 +351,16 @@ impl Home {
         }
     }
 
-    pub fn let_go(&mut self) -> bool {
-        let Named::As { ask, .. } = &mut self.named else {
-            return false;
-        };
-        ask.let_go()
+    pub fn let_go(&mut self) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.let_go();
+        }
+    }
+
+    pub fn unshown(&mut self) {
+        if let Named::As { ask, .. } = &mut self.named {
+            ask.unshown();
+        }
     }
 
     pub fn draw(&mut self, buffer: &mut Buffer, area: Rect, wall: SystemTime) -> Cadence {
@@ -384,10 +372,8 @@ impl Home {
                 }
             }
         }
-        if area.width.checked_sub(2).is_none_or(|inner| inner == 0) {
-            if let Named::As { ask, .. } = &mut self.named {
-                ask.unshown();
-            }
+        if area.width < 3 {
+            self.unshown();
             return cadence;
         }
         let hints = self.hints();
@@ -397,11 +383,13 @@ impl Home {
             return cadence;
         };
         let most = (area.height / 2).max(ASK_ROWS_MIN).min(area.height);
+        assert!(most <= area.height, "docked ask budget fits in home area");
         let right = match on {
             Machine::Local => sidebar::short_cwd(dir.as_str()),
             Machine::Remote(on) => format!("{} on {on}", sidebar::short_cwd(dir.as_str())),
         };
         let (rows, ask_cadence) = ask.draw_docked(buffer, area, most, &right, &hints, wall);
+        assert!(rows <= area.height, "docked ask height fits in home area");
         cadence.merge(ask_cadence);
         let lists = Rect::new(area.x, area.y, area.width, area.height - rows);
         self.draw_lists(buffer, lists);
@@ -1119,6 +1107,14 @@ mod tests {
 
     #[test]
     fn text_in_a_home_s_ask_box_can_be_selected_and_copied_while_the_lists_above_cannot() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let event = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
         let mut home = home();
         home.ask_numbered(1)
             .expect("named home holds ask")
@@ -1128,8 +1124,10 @@ mod tests {
         let area = Rect::new(10, 0, 50, 16);
         let mut buffer = Buffer::empty(area);
         home.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
-        assert!(
-            !home.selects(Position::new(12, 0)),
+        let left = MouseButton::Left;
+        assert_eq!(
+            home.mouse(event(MouseEventKind::Down(left), 12, 0)),
+            ask::Mouse::Ignored,
             "lists above the ask box do not start ask selection"
         );
 
@@ -1141,25 +1139,32 @@ mod tests {
                 row.contains("Ready to merge #524.")
             })
             .expect("answer row drawn inside home ask box");
-        let start = Position::new(area.x + 2, answer_y);
-        let end = Position::new(area.x + 21, answer_y);
-        assert!(home.selects(start));
-        home.select_from(start);
-        home.select_to(end);
+        let start_x = area.x + 2;
+        let end_x = area.x + 21;
         assert_eq!(
-            home.selected_at(end).as_deref(),
-            Some("Ready to merge #524.")
+            home.mouse(event(MouseEventKind::Down(left), start_x, answer_y)),
+            ask::Mouse::Started
         );
+        assert_eq!(
+            home.mouse(event(MouseEventKind::Drag(left), end_x, answer_y)),
+            ask::Mouse::Active
+        );
+        let ask::Mouse::Copied(excerpt) =
+            home.mouse(event(MouseEventKind::Up(left), end_x, answer_y))
+        else {
+            panic!("releasing drag inside home ask box copies excerpt");
+        };
+        assert_eq!(&*excerpt, "Ready to merge #524.");
 
         let mut redrawn = Buffer::empty(area);
         home.draw(&mut redrawn, area, SystemTime::UNIX_EPOCH);
         assert!(
-            redrawn[(start.x, answer_y)]
+            redrawn[(start_x, answer_y)]
                 .modifier
                 .contains(Modifier::REVERSED)
         );
         assert!(
-            redrawn[(end.x, answer_y)]
+            redrawn[(end_x, answer_y)]
                 .modifier
                 .contains(Modifier::REVERSED)
         );
@@ -1167,7 +1172,7 @@ mod tests {
         let mut cleared = Buffer::empty(area);
         home.draw(&mut cleared, area, SystemTime::UNIX_EPOCH);
         assert!(
-            !cleared[(start.x, answer_y)]
+            !cleared[(start_x, answer_y)]
                 .modifier
                 .contains(Modifier::REVERSED)
         );

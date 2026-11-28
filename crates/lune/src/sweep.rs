@@ -20,6 +20,13 @@ pub struct Continuation {
     pub indent: u16,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutAt {
+    pub line: usize,
+    pub column: usize,
+    pub took: String,
+}
+
 #[derive(Debug, Default)]
 pub struct Page {
     pub lines: Vec<Line<'static>>,
@@ -35,14 +42,23 @@ pub struct Sweep {
 
 impl Sweep {
     pub fn new(from: Position, to: Position, within: Rect) -> Sweep {
-        Sweep {
+        assert!(!within.is_empty(), "a sweep starts inside a non-empty area");
+        let sweep = Sweep {
             from: clamp(from, within),
             to: clamp(to, within),
-        }
+        };
+        assert!(within.contains(sweep.from), "sweep start falls inside area");
+        assert!(within.contains(sweep.to), "sweep end falls inside area");
+        sweep
     }
 
     pub fn reach(&mut self, to: Position, within: Rect) {
+        assert!(
+            !within.is_empty(),
+            "a sweep reaches inside a non-empty area"
+        );
         self.to = clamp(to, within);
+        assert!(within.contains(self.to), "sweep end falls inside area");
     }
 
     pub fn last_y(self) -> u16 {
@@ -50,11 +66,16 @@ impl Sweep {
     }
 
     pub fn ends(self) -> (Position, Position) {
-        if (self.from.y, self.from.x) <= (self.to.y, self.to.x) {
+        let ends = if (self.from.y, self.from.x) <= (self.to.y, self.to.x) {
             (self.from, self.to)
         } else {
             (self.to, self.from)
-        }
+        };
+        assert!(
+            (ends.0.y, ends.0.x) <= (ends.1.y, ends.1.x),
+            "sweep ends are ordered top-left to bottom-right"
+        );
+        ends
     }
 
     fn columns(self, y: u16, within: Rect) -> Range<u16> {
@@ -84,7 +105,9 @@ impl Sweep {
     }
 
     pub fn text(self, page: &Page, within: Rect) -> String {
+        assert!(!within.is_empty(), "a swept page has cells");
         let (first, last) = self.ends();
+        assert!(first.y <= last.y, "sweep rows are ordered");
         let join = |line: usize| page.joins.get(&line).copied();
         let mut text = String::new();
         for y in first.y..=last.y {
@@ -93,6 +116,10 @@ impl Sweep {
             if y > first.y
                 && let Some(continuation) = join(line)
             {
+                assert!(
+                    continuation.indent <= within.width,
+                    "a continuation indent fits within the page width"
+                );
                 columns.start = columns.start.saturating_add(continuation.indent);
             }
             let said = page.lines.get(line).map_or_else(String::new, |drawn| {
@@ -100,22 +127,23 @@ impl Sweep {
                     page.cuts.at(Position::new(x, y))
                 })
             });
-            match (y < last.y)
-                .then(|| join(line + 1))
-                .flatten()
-                .map(|it| it.join)
-            {
-                Some(Join::Tight) => text.push_str(&said),
-                Some(Join::Space) => {
-                    text.push_str(&said);
-                    if !said.is_empty() {
-                        text.push(' ');
+            if y < last.y {
+                match join(line + 1).map(|continuation| continuation.join) {
+                    Some(Join::Tight) => text.push_str(&said),
+                    Some(Join::Space) => {
+                        text.push_str(&said);
+                        if !said.is_empty() {
+                            text.push(' ');
+                        }
+                    }
+                    None => {
+                        text.push_str(said.trim_end());
+                        text.push('\n');
                     }
                 }
-                None => {
-                    text.push_str(said.trim_end());
-                    text.push('\n');
-                }
+            } else {
+                text.push_str(said.trim_end());
+                text.push('\n');
             }
         }
         text.trim_start_matches('\n').trim_end().to_owned()
@@ -123,11 +151,17 @@ impl Sweep {
 }
 
 pub fn clamp(at: Position, within: Rect) -> Position {
+    assert!(!within.is_empty(), "a sweep area has at least one cell");
     let last = |start: u16, length: u16| start.saturating_add(length.saturating_sub(1));
-    Position::new(
+    let clamped = Position::new(
         at.x.clamp(within.x, last(within.x, within.width)),
         at.y.clamp(within.y, last(within.y, within.height)),
-    )
+    );
+    assert!(
+        within.contains(clamped),
+        "a clamped position falls inside its area"
+    );
+    clamped
 }
 
 fn read<'a>(

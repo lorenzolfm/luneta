@@ -2360,7 +2360,7 @@ impl App {
 
     fn drop_shown(&mut self) {
         if let Some(Right::Home(shown)) = &self.right {
-            self.homes.shown_mut(shown).let_go();
+            self.homes.shown_mut(shown).unshown();
         }
         if self.held == Held::Selecting {
             self.held = Held::Nothing;
@@ -2381,10 +2381,13 @@ impl App {
         );
     }
 
+    fn home_pressed(&self) -> bool {
+        self.home().is_some_and(Home::pressed)
+    }
+
     fn ask_pressed(&self) -> bool {
         let over = matches!(&self.focus.over, Some(Over::Ask(ask)) if ask.pressed());
-        let home = self.home().is_some_and(Home::pressed);
-        over || home
+        over || self.home_pressed()
     }
 
     fn unsweep_ask(&mut self) {
@@ -2401,10 +2404,13 @@ impl App {
             ask.let_go();
         }
         if let Some(Right::Home(shown)) = &self.right {
-            let home = self.homes.shown_mut(shown);
-            if home.let_go() && self.held == Held::Selecting {
-                self.held = Held::Nothing;
-            }
+            self.homes.shown_mut(shown).let_go();
+        }
+    }
+
+    fn copy_excerpt(&self, excerpt: Excerpt) {
+        if let Err(error) = self.events.send(Event::Copy(Clip::Excerpt(excerpt))) {
+            log::say(&format!("copy event dropped on closed channel: {error}"));
         }
     }
 
@@ -2486,7 +2492,7 @@ impl App {
         let at = Position::new(mouse.column, mouse.row);
         self.pointer = Some(at);
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
-        let under = matches!(self.held, Held::Session | Held::Selecting);
+        let under = matches!(self.held, Held::Session | Held::Selecting) || self.home_pressed();
         if self.covered() && under && !down {
             if !self.select(mouse) {
                 if let MouseEventKind::Up(_) = mouse.kind {
@@ -2521,6 +2527,7 @@ impl App {
         {
             self.let_go();
             self.sidebar.let_go();
+            self.let_go_ask();
             self.held = Held::Taken;
             self.burst = Some(Burst::new(at, now.steady));
             self.hit(hit, now);
@@ -2552,8 +2559,8 @@ impl App {
         }
         match &mut self.focus.over {
             Some(Over::Ask(ask)) => {
-                if let Some(excerpt) = ask.mouse(mouse) {
-                    let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
+                if let ask::Mouse::Copied(excerpt) = ask.mouse(mouse) {
+                    self.copy_excerpt(excerpt);
                 }
                 return;
             }
@@ -2602,7 +2609,7 @@ impl App {
             return;
         }
         let over_session = mouse.column >= right.x;
-        let held = matches!(self.held, Held::Session | Held::Selecting);
+        let held = matches!(self.held, Held::Session | Held::Selecting) || self.home_pressed();
         if held || (over_session && !self.sidebar.pressed()) {
             let of_a_press = matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
             if of_a_press && self.last_press != LastPress::Session {
@@ -2736,42 +2743,26 @@ impl App {
     }
 
     fn select_home(&mut self, mouse: MouseEvent) -> bool {
-        let at = Position::new(mouse.column, mouse.row);
         let Some(Right::Home(shown)) = &self.right else {
             return false;
         };
-        match (mouse.kind, self.held) {
-            (MouseEventKind::Down(MouseButton::Left), _) if self.homes.shown(shown).selects(at) => {
-                self.homes.shown_mut(shown).select_from(at);
-                self.held = Held::Selecting;
+        assert_ne!(
+            self.held,
+            Held::Selecting,
+            "home selection lives in Ask rather than App::held"
+        );
+        match self.homes.shown_mut(shown).mouse(mouse) {
+            ask::Mouse::Ignored => false,
+            ask::Mouse::Started => {
                 self.last_press = LastPress::Session;
                 self.leave();
                 true
             }
-            (MouseEventKind::Down(_), _) => {
-                self.homes.shown_mut(shown).unsweep();
-                false
-            }
-            (MouseEventKind::Drag(MouseButton::Left), Held::Selecting) => {
-                self.homes.shown_mut(shown).select_to(at);
+            ask::Mouse::Active => true,
+            ask::Mouse::Copied(excerpt) => {
+                self.copy_excerpt(excerpt);
                 true
             }
-            (MouseEventKind::Up(MouseButton::Left), Held::Selecting) => {
-                self.held = Held::Nothing;
-                if let Some(excerpt) = self.homes.shown_mut(shown).selected_at(at) {
-                    let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
-                }
-                true
-            }
-            (MouseEventKind::Up(_) | MouseEventKind::Moved, Held::Selecting) => {
-                self.held = Held::Nothing;
-                self.homes.shown_mut(shown).let_go();
-                true
-            }
-            (
-                _,
-                Held::Nothing | Held::Session | Held::Selecting | Held::Edge { .. } | Held::Taken,
-            ) => false,
         }
     }
 
@@ -3455,7 +3446,10 @@ impl App {
     fn dictate(&mut self, now: Instant) -> bool {
         let on_session = matches!(self.holder(), Holder::Terminal);
         let under = match self.focus.over.take() {
-            None if on_session => Where::Session(self.sidebar.here_agent()),
+            None if on_session => {
+                self.unsweep_ask();
+                Where::Session(self.sidebar.here_agent())
+            }
             Some(Over::Ask(mut ask)) if !ask.turning() => {
                 ask.clear_selection();
                 Where::Ask(ask)
@@ -4084,6 +4078,7 @@ impl App {
         if focus.side == Side::Collapsed || focus.over.is_some() {
             self.let_go();
             self.sidebar.let_go();
+            self.let_go_ask();
         }
         if let Some(right) = self.viewed_mut() {
             right.forget_step();
@@ -5581,12 +5576,176 @@ mod tests {
             at(220),
         )
         .unwrap();
-        assert_eq!(app.held, Held::Selecting);
+        assert!(app.ask_pressed());
+        assert_eq!(app.held, Held::Nothing);
         app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None);
-        assert_eq!(
-            app.held,
-            Held::Nothing,
+        assert!(
+            !app.ask_pressed(),
             "leaving home clears an active selection drag"
+        );
+        assert_eq!(app.held, Held::Nothing);
+    }
+
+    #[test]
+    fn home_ask_drag_stays_in_sync_across_resize_right_click_overlay_and_view_switch() {
+        let (mut terminal, _written) = test_terminal(100, 24);
+        let (mut app, mut inbox, _state) = test_app(100, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            at(0),
+        )
+        .unwrap();
+        let project = ProjectId::of(1).unwrap();
+        app.go_home(&Machine::Local, project);
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Step(luned::asks::Step::Said("sync drag text".to_owned())),
+            },
+            &mut terminal,
+            at(20),
+        )
+        .unwrap();
+        app.draw_due(&mut terminal, at(40)).unwrap();
+        let initial = painted_buffer(&mut app, 100, 24, at(40));
+        let (x, y) = find_text(&initial, "sync drag text");
+        let left = MouseButton::Left;
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(60),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(80),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        let _ = painted_buffer(&mut app, 100, 30, at(100));
+        assert!(!app.ask_pressed(), "resize clears active ask drag");
+        app.handle_at(Event::Input(Input::FocusLost), &mut terminal, at(120))
+            .unwrap();
+        assert_eq!(app.held, Held::Nothing);
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), 2, 1),
+            &mut terminal,
+            at(140),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), 2, 1),
+            &mut terminal,
+            at(160),
+        )
+        .unwrap();
+        assert_eq!(
+            app.focus.side,
+            Side::Sidebar,
+            "sidebar click after cancelled home drag is not swallowed"
+        );
+
+        let redrawn = painted_buffer(&mut app, 100, 24, at(180));
+        let (x, y) = find_text(&redrawn, "sync drag text");
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(200),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(220),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(MouseButton::Right), x + 2, y),
+            &mut terminal,
+            at(240),
+        )
+        .unwrap();
+        assert!(
+            !app.ask_pressed(),
+            "right-click during left-drag clears the drag instead of stranding it"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x + 4, y),
+            &mut terminal,
+            at(260),
+        )
+        .unwrap();
+        let after_right = painted_buffer(&mut app, 100, 24, at(280));
+        assert!(!after_right[(x, y)].modifier.contains(Modifier::REVERSED));
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(300),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(320),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.give(Focus {
+            side: Side::Sidebar,
+            over: Some(Over::Ask(Ask::new(
+                99,
+                &menu::Target::Machine(Machine::Local),
+                Path::new("/w"),
+            ))),
+        });
+        assert!(
+            !app.home_pressed(),
+            "opening an overlay cancels an active home drag"
+        );
+        app.give(Focus::on(Side::Session));
+
+        let restored = painted_buffer(&mut app, 100, 24, at(340));
+        let (x, y) = find_text(&restored, "sync drag text");
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(360),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(380),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x + 4, y),
+            &mut terminal,
+            at(400),
+        )
+        .unwrap();
+        drain_copies(&mut app, &mut inbox, &mut terminal, at(400));
+        let swept = painted_buffer(&mut app, 100, 24, at(420));
+        assert!(swept[(x, y)].modifier.contains(Modifier::REVERSED));
+
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None);
+        app.go_home(&Machine::Local, project);
+        let returned = painted_buffer(&mut app, 100, 24, at(440));
+        assert!(
+            !returned[(x, y)].modifier.contains(Modifier::REVERSED),
+            "switching away via keyboard clears the kept home highlight"
         );
     }
 }

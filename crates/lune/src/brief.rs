@@ -640,9 +640,22 @@ pub fn boxed(
     let lines = &lines[..lines.len().min(room)];
     let width = width(over);
     let height = u16::try_from(lines.len() + 2).map_or(over.height, |tall| tall.min(over.height));
+    assert!(width <= over.width, "a boxed overlay fits within its width");
+    assert!(
+        height <= over.height,
+        "a boxed overlay fits within its height"
+    );
     let x = over.x + (over.width - width) / 2;
     let y = over.y + (over.height - height) / 2;
     let area = Rect::new(x, y, width, height);
+    assert!(
+        area.right() <= over.right(),
+        "a boxed overlay stays within its horizontal bounds"
+    );
+    assert!(
+        area.bottom() <= over.bottom(),
+        "a boxed overlay stays within its vertical bounds"
+    );
     menu::boxed(buffer, area, &menu::rule(title, right, inner), lines);
     Some(area)
 }
@@ -672,6 +685,14 @@ pub fn paragraphs_joined(
             lines.extend(menu::wrap_joined(line, width, style));
         }
     }
+    assert!(
+        lines.first().is_none_or(|(_, join)| join.is_none()),
+        "the first paragraph line never joins onto a prior line"
+    );
+    assert!(
+        lines.len() >= text.lines().count(),
+        "each source line produces at least one drawn line"
+    );
     lines
 }
 
