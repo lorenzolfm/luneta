@@ -502,24 +502,23 @@ fn agent_of(seat: &Seat<'_>, held: &Held, agent: &api::Agent) -> Agent {
 }
 
 fn name_of(agent: &api::Agent) -> String {
-    let named = agent
-        .name
-        .as_ref()
-        .map(|name| name.text.trim())
-        .filter(|text| !text.is_empty());
-    let topic = || {
-        agent
-            .topic
-            .as_deref()
-            .map(str::trim)
-            .filter(|topic| !topic.is_empty())
-    };
+    let given = agent.name.as_ref().and_then(api::Name::given);
+    let topic = || agent.live_topic();
+    let auto = || agent.name.as_ref().and_then(api::Name::auto);
     let folder = || agent.cwd.rsplit('/').find(|part| !part.is_empty());
-    named
+    let name = given
         .or_else(topic)
+        .or_else(auto)
         .or_else(folder)
         .unwrap_or(agent.cwd.as_str())
-        .to_owned()
+        .to_owned();
+    if !agent.cwd.is_empty() {
+        assert!(
+            !name.is_empty(),
+            "an agent with a cwd gets a non-empty name"
+        );
+    }
+    name
 }
 
 fn status_of(agent: &api::Agent) -> Status {
@@ -659,6 +658,34 @@ mod tests {
                 message: None
             }
         );
+    }
+
+    #[test]
+    fn an_agent_name_prefers_given_then_topic_then_auto_then_folder() {
+        let named = |text: &str, source: api::NameSource| {
+            Some(api::Name {
+                text: text.to_owned(),
+                source: Some(source.into()),
+            })
+        };
+        let mut given = agent(1, api::Status::Idle, 1, None);
+        given.name = named("fold", api::NameSource::User);
+        given.topic = Some("Session folds".to_owned());
+        assert_eq!(name_of(&given), "fold");
+
+        let mut auto_with_topic = agent(2, api::Status::Idle, 2, None);
+        auto_with_topic.name = named("Initial title", api::NameSource::Auto);
+        auto_with_topic.topic = Some("View tabs".to_owned());
+        assert_eq!(name_of(&auto_with_topic), "View tabs");
+
+        let mut auto_only = agent(3, api::Status::Idle, 3, None);
+        auto_only.name = named("Initial title", api::NameSource::Auto);
+        auto_only.topic = Some("   ".to_owned());
+        assert_eq!(name_of(&auto_only), "Initial title");
+
+        let mut derived_only = agent(4, api::Status::Idle, 4, None);
+        derived_only.name = named("lune-main", api::NameSource::Derived);
+        assert_eq!(name_of(&derived_only), "agent-4");
     }
 
     #[test]

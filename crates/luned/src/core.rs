@@ -34,7 +34,8 @@ use crate::remote::{Destination, Named, Reached};
 use crate::sayings::{Sayings, ToSay};
 use crate::statuses::{ActiveStatus, Proof, Report, ReportedAgent, Statuses, Subagent};
 use crate::titles::{self, Titled};
-use crate::transcripts::SessionId;
+use crate::topics::TopicKey;
+use crate::transcripts::{SessionId, TranscriptHarness};
 use crate::watch::Troubles;
 use crate::{agy, osc_7501, pi};
 
@@ -211,7 +212,7 @@ pub enum Command {
         answer: oneshot::Sender<Option<String>>,
     },
     PullRequests(BTreeMap<Dir, Found>),
-    Topics(HashMap<SessionId, Said>),
+    Topics(HashMap<TopicKey, Said>),
     Hosts(Named),
     Projects {
         projects: Result<Projects, String>,
@@ -234,7 +235,6 @@ pub enum Command {
     Plain(oneshot::Sender<BTreeSet<Dir>>),
     Branches(oneshot::Sender<BTreeMap<Dir, String>>),
     Tracking(oneshot::Sender<BTreeMap<String, Branch>>),
-    Claudes(oneshot::Sender<Vec<Agent>>),
     AllAgents(oneshot::Sender<Vec<Agent>>),
     List(oneshot::Sender<api::ListAgentsResponse>),
     HostAll(oneshot::Sender<AllSnapshot>),
@@ -685,7 +685,7 @@ struct Known {
     terminals: BTreeMap<ViewId, Located>,
     statuses: BTreeMap<Dir, GitStatus>,
     pull_requests: BTreeMap<Dir, Found>,
-    topics: HashMap<SessionId, Said>,
+    topics: [HashMap<SessionId, Said>; TranscriptHarness::ALL.len()],
     remotes: KnownRemotes,
     projects: Result<Projects, String>,
     revision: Revision,
@@ -725,7 +725,7 @@ impl Known {
             terminals: BTreeMap::new(),
             statuses: BTreeMap::new(),
             pull_requests: BTreeMap::new(),
-            topics: HashMap::new(),
+            topics: std::array::from_fn(|_| HashMap::new()),
             remotes: KnownRemotes::new(),
             projects: Err(initial_projects.to_owned()),
             revision: Revision::default(),
@@ -815,7 +815,20 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 }
             }
             Command::PullRequests(now) => known.pull_requests = now,
-            Command::Topics(now) => known.topics = now,
+            Command::Topics(now) => {
+                assert!(
+                    now.len() <= crate::statuses::AGENTS_MAX,
+                    "topics stay bounded by AGENTS_MAX"
+                );
+                let mut by_harness: [HashMap<SessionId, Said>; TranscriptHarness::ALL.len()] =
+                    std::array::from_fn(|_| HashMap::new());
+                for (key, topic) in now {
+                    let slot = key.harness().index();
+                    let replaced = by_harness[slot].insert(key.into_id(), topic);
+                    assert!(replaced.is_none(), "each topic key appears once");
+                }
+                known.topics = by_harness;
+            }
             Command::Hosts(now) => {
                 if known.remotes.named(now) {
                     known.publish_remotes();
@@ -880,15 +893,6 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
             }
             Command::Tracking(answer) => {
                 let _ = answer.send(known.tracking());
-                continue;
-            }
-            Command::Claudes(answer) => {
-                let claudes = known
-                    .all_agents()
-                    .into_iter()
-                    .filter(|agent| agent.harness == Harness::ClaudeCode)
-                    .collect();
-                let _ = answer.send(claudes);
                 continue;
             }
             Command::AllAgents(answer) => {
@@ -1164,15 +1168,10 @@ impl Known {
             .all_agents()
             .into_iter()
             .map(|agent| {
-                let topic = (agent.harness == Harness::ClaudeCode)
-                    .then(|| {
-                        agent
-                            .session_id
-                            .as_ref()
-                            .and_then(|id| self.topics.get(id.as_str()))
-                            .cloned()
-                    })
-                    .flatten();
+                let topic = TranscriptHarness::of(agent.harness).and_then(|harness| {
+                    let id = agent.session_id.as_ref()?.as_str();
+                    self.topics[harness.index()].get(id).cloned()
+                });
                 agent.to_api(topic)
             })
             .collect();

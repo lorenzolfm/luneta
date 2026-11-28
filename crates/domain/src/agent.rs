@@ -106,6 +106,15 @@ impl Harness {
         }
     }
 
+    #[must_use]
+    pub const fn topics(self) -> TopicSource {
+        match self {
+            Harness::ClaudeCode => CLAUDE_CODE_TOPICS,
+            Harness::Pi => PI_TOPICS,
+            Harness::Antigravity => ANTIGRAVITY_TOPICS,
+        }
+    }
+
     pub fn rungs(self) -> impl Iterator<Item = Rung> {
         Rung::ALL
             .into_iter()
@@ -178,6 +187,37 @@ impl Step {
     #[must_use]
     pub fn named(name: &str) -> Option<Step> {
         Step::ALL.into_iter().find(|step| step.name() == name)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopicSource {
+    Transcript { terminal_title: bool },
+    TerminalTitle,
+    No { why: &'static str },
+}
+
+impl TopicSource {
+    #[must_use]
+    pub const fn has_transcript(self) -> bool {
+        matches!(self, TopicSource::Transcript { .. })
+    }
+
+    #[must_use]
+    pub const fn has_terminal_title(self) -> bool {
+        matches!(
+            self,
+            TopicSource::Transcript {
+                terminal_title: true
+            } | TopicSource::TerminalTitle
+        )
+    }
+
+    const fn gap_explained(self) -> bool {
+        match self {
+            TopicSource::Transcript { .. } | TopicSource::TerminalTitle => true,
+            TopicSource::No { why } => !why.trim_ascii().is_empty(),
+        }
     }
 }
 
@@ -491,6 +531,29 @@ const ANTIGRAVITY: Ladder = Ladder {
     screen: None,
 };
 
+const CLAUDE_CODE_TOPICS: TopicSource = TopicSource::Transcript {
+    terminal_title: true,
+};
+
+const PI_TOPICS: TopicSource = TopicSource::No {
+    why: "pi's session transcripts are not read by luned yet",
+};
+
+const ANTIGRAVITY_TOPICS: TopicSource = TopicSource::Transcript {
+    terminal_title: false,
+};
+
+const fn every_topic_gap_explained() -> bool {
+    let mut index = 0;
+    while index < Harness::ALL.len() {
+        if !Harness::ALL[index].topics().gap_explained() {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 const fn every_ladder(sound: Sound) -> bool {
     let mut index = 0;
     while index < Harness::ALL.len() {
@@ -565,6 +628,11 @@ const _: () = assert!(
     "no two harnesses share an OSC 7501 app"
 );
 
+const _: () = assert!(
+    every_topic_gap_explained(),
+    "each harness with no topic source says why in TopicSource::No"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +694,28 @@ mod tests {
         }
         assert!(Step::ALL.windows(2).all(|pair| pair[0] < pair[1]));
         assert_eq!(Step::named("nap"), None);
+    }
+
+    #[test]
+    fn each_harness_declares_its_topic_source_or_explains_its_gap() {
+        for harness in Harness::ALL {
+            match harness.topics() {
+                TopicSource::Transcript { .. } | TopicSource::TerminalTitle => {}
+                TopicSource::No { why } => {
+                    assert!(
+                        !why.trim().is_empty(),
+                        "{harness:?}: gap has no explanation"
+                    );
+                }
+            }
+        }
+        assert!(Harness::ClaudeCode.topics().has_transcript());
+        assert!(Harness::ClaudeCode.topics().has_terminal_title());
+        assert!(Harness::Antigravity.topics().has_transcript());
+        assert!(!Harness::Antigravity.topics().has_terminal_title());
+        assert!(!Harness::Pi.topics().has_transcript());
+        assert!(!Harness::Pi.topics().has_terminal_title());
+        assert!(!TopicSource::No { why: "" }.gap_explained());
+        assert!(!TopicSource::No { why: "   \t\n" }.gap_explained());
     }
 }

@@ -167,6 +167,70 @@ fn changed_every_way(dir: &Path, origin: &Path) {
     fs::write(dir.join("untracked"), "new\n").unwrap();
 }
 
+#[derive(Clone, Copy)]
+enum Tool {
+    Git,
+    Gh,
+}
+
+impl Tool {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Gh => "gh",
+        }
+    }
+}
+
+fn line_names_tool(line: &str, tool: Tool) -> bool {
+    line.split_ascii_whitespace().any(|word| {
+        let base = word
+            .strip_suffix("'s")
+            .or_else(|| word.strip_suffix(':'))
+            .unwrap_or(word);
+        base == tool.word()
+    })
+}
+
+fn never_says_from(daemon: &mut Daemon, what: &str, tools: &[Tool]) {
+    lune_waits::never(what, || {
+        daemon
+            .said()
+            .iter()
+            .find(|line| tools.iter().any(|tool| line_names_tool(line, *tool)))
+            .cloned()
+    });
+}
+
+#[test]
+fn line_names_tool_matches_words_and_possessives_without_matching_paths() {
+    assert!(line_names_tool(
+        "luned: gh pr view in /tmp/.tmp123: error",
+        Tool::Gh
+    ));
+    assert!(line_names_tool(
+        "luned: gh's ask about main panicked",
+        Tool::Gh
+    ));
+    assert!(line_names_tool("luned: gh: Not Found", Tool::Gh));
+    assert!(line_names_tool(
+        "luned: git in /tmp/work did not count main's lines",
+        Tool::Git
+    ));
+    assert!(!line_names_tool(
+        "luned: the watch on /tmp/.tmpABgh heard it change",
+        Tool::Gh
+    ));
+    assert!(!line_names_tool(
+        "luned: the watch on /tmp/.tmp123/origin.git heard it change",
+        Tool::Git
+    ));
+    assert!(!line_names_tool(
+        "luned: listening on /tmp/gh/luned.sock",
+        Tool::Gh
+    ));
+}
+
 #[test]
 fn git_says_how_each_project_s_folder_stands() {
     let host = Host::new();
@@ -324,14 +388,7 @@ fn git_counts_the_lines_changed_on_a_branch_against_the_default() {
     eventually("git counts the lines changed on issue-299", || {
         (changed(&work) == Some((3, 2))).then_some(())
     });
-    let git_said = || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("git "))
-            .cloned()
-    };
-    lune_waits::never("git says something", git_said);
+    never_says_from(&mut daemon, "git says something", &[Tool::Git]);
     eventually("git counts none on main", || {
         changed(&other).is_none().then_some(())
     });
@@ -1069,14 +1126,7 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
             .any(|branch| branch == "bare")
             .then_some(())
     });
-    let gh_said = || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh pr view"))
-            .cloned()
-    };
-    lune_waits::never("gh says something", gh_said);
+    never_says_from(&mut daemon, "gh says something", &[Tool::Gh]);
     assert!(!found().contains_key(&beside));
     assert_eq!(host.gh.asked(), ["main", "main", "fold", "bare"]);
 }
@@ -1329,13 +1379,11 @@ fn only_a_branch_git_names_a_head_of_is_asked_about_in_a_fork_s_parent() {
         ]
     );
     assert_eq!(host.gh.repositories(), 1);
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh "))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
 }
 
 #[test]
@@ -1391,13 +1439,11 @@ fn a_closed_pull_request_in_a_fork_gives_way_to_its_parent_s() {
             &in_parent("alone")
         ]
     );
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh "))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
 }
 
 #[test]
@@ -1432,13 +1478,11 @@ fn a_fork_s_default_branch_shows_no_merged_pull_request_of_its_parent() {
     eventually("gh asks the parent about trunk", || {
         host.gh.asked().contains(&trunk_in_parent).then_some(())
     });
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh "))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
     assert_eq!(found(), None);
 }
 
@@ -1571,13 +1615,11 @@ fn a_pull_ref_is_asked_about_in_a_fork_s_parent_only_where_its_remote_is_the_par
 
     assert_eq!(host.gh.asked(), asked);
     assert_eq!(host.gh.repositories(), 1);
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh ") || line.contains("git "))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
 }
 
 #[test]
@@ -1674,13 +1716,11 @@ fn a_checkout_during_an_ask_of_a_fork_s_parent_is_no_trouble() {
         }
     });
 
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh "))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
 }
 
 #[test]
@@ -1767,13 +1807,11 @@ fn a_branch_with_no_pull_request_in_a_fork_is_asked_about_in_its_parent() {
         ]
     );
     assert_eq!(host.gh.repositories(), 1);
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh "))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
 }
 
 #[test]
@@ -1823,13 +1861,11 @@ fn a_checkout_git_has_yet_to_see_keeps_its_pull_request_off_the_branch_before() 
             (seen == (Some("fold"), Some(8))).then_some(())
         },
     );
-    lune_waits::never("gh or git says something", || {
-        daemon
-            .said()
-            .iter()
-            .find(|line| line.contains("gh pr view"))
-            .cloned()
-    });
+    never_says_from(
+        &mut daemon,
+        "gh or git says something",
+        &[Tool::Gh, Tool::Git],
+    );
 }
 
 #[test]
