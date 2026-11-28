@@ -937,6 +937,7 @@ impl KnownTerminal {
                     .and_then(|titled| titled.topic.as_ref())
                     .map(|said| said.as_str().to_owned()),
                 told: told.clone(),
+                ended: false,
             }),
             rows::Found::Ended { key, titled } => KnownTerminal::Found(KnownView {
                 id: terminal.id,
@@ -948,6 +949,7 @@ impl KnownTerminal {
                     .and_then(|titled| titled.topic.as_ref())
                     .map(|said| said.as_str().to_owned()),
                 told: Told::Unhooked,
+                ended: true,
             }),
             rows::Found::Unlisted(key) => KnownTerminal::Found(KnownView {
                 id: terminal.id,
@@ -956,6 +958,7 @@ impl KnownTerminal {
                 command: None,
                 topic: None,
                 told: Told::Unhooked,
+                ended: false,
             }),
             rows::Found::Lost | rows::Found::Looking => KnownTerminal::Unfound(terminal.id),
         }
@@ -984,6 +987,7 @@ struct KnownView {
     command: Option<String>,
     topic: Option<String>,
     told: Told,
+    ended: bool,
 }
 
 impl Known {
@@ -2890,7 +2894,9 @@ impl Sidebar {
                             }
                         }
                         let (marked, ran) = shell.unzip();
-                        let label = ran.flatten().unwrap_or_else(|| label(None, view));
+                        let ran = ran.flatten().filter(|command| !command.trim().is_empty());
+                        let label = ran.unwrap_or_else(|| label(None, view));
+                        assert!(!label.trim().is_empty(), "a view label is non-empty");
                         by_view.push(Shows { view, marked, label, unread });
                     }
                     let mut titles = BTreeMap::new();
@@ -5431,11 +5437,16 @@ fn transcript(agent: &Agent) -> Transcript {
 }
 
 fn label(agent: Option<&Agent>, view: &KnownView) -> String {
+    let view_topic = view.topic.as_deref().map(str::trim).filter(|topic| !topic.is_empty());
     let label = if let Some(agent) = agent {
-        let view_topic = view.topic.as_deref().map(str::trim).filter(|topic| !topic.is_empty());
+        let uses_terminal_title =
+            agents::of(agent).is_some_and(|harness| harness.topics().has_terminal_title());
+        let view_topic = view_topic.filter(|_| uses_terminal_title);
         let topic = agent.live_topic().or(view_topic).or_else(|| auto_name(agent));
         let name = given_name(agent).or(topic);
-        name.map_or_else(|| short_cwd(view.cwd.as_str()), str::to_owned)
+        name.map_or_else(|| cwd_label(&view.cwd), str::to_owned)
+    } else if view.ended {
+        view_topic.map_or_else(|| cwd_label(&view.cwd), str::to_owned)
     } else {
         let mut words = view.command.iter().flat_map(|command| command.split_whitespace());
         let program = words
@@ -5445,14 +5456,28 @@ fn label(agent: Option<&Agent>, view: &KnownView) -> String {
                 program.strip_prefix('-').unwrap_or(program)
             })
             .filter(|program| !program.is_empty());
-        match program {
-            Some(program) if !icons::SHELLS.contains(&program) => {
-                [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
-            },
-            _ => short_cwd(view.cwd.as_str()),
+        let uses_terminal_title = program
+            .and_then(agents::named)
+            .is_some_and(|harness| harness.topics().has_terminal_title());
+        if uses_terminal_title && let Some(topic) = view_topic {
+            topic.to_owned()
+        } else {
+            match program {
+                Some(program) if !icons::SHELLS.contains(&program) => {
+                    [program].into_iter().chain(words).collect::<Vec<_>>().join(" ")
+                },
+                _ => cwd_label(&view.cwd),
+            }
         }
     };
     assert!(!label.trim().is_empty(), "a view label is non-empty");
+    label
+}
+
+fn cwd_label(cwd: &Dir) -> String {
+    let short = short_cwd(cwd.as_str());
+    let label = if short.trim().is_empty() { cwd.as_str().to_owned() } else { short };
+    assert!(!label.trim().is_empty(), "a cwd label is non-empty");
     label
 }
 
@@ -6284,6 +6309,7 @@ mod tests {
             command: view.command.clone(),
             topic: view.titled.as_ref().and_then(|titled| titled.topic.clone()),
             told: Told::of(view.shell.as_ref()),
+            ended: view.held,
         }
     }
 
@@ -7620,6 +7646,52 @@ mod tests {
         assert_eq!(label(Some(&blank_topic(&auto)), &titled(None)), "Feature parity");
         assert_eq!(label(Some(&blank_topic(&auto)), &topic), "Fix the fold");
         assert_eq!(label(Some(&blank_topic(&unnamed)), &titled(None)), "w/x");
+
+        let mut agy_auto = auto.clone();
+        agy_auto.harness = Some(Harness::Antigravity.into());
+        assert_eq!(label(Some(&agy_auto), &topic), "Feature parity");
+        assert_eq!(label(Some(&kept(&agy_auto)), &topic), "Session folds");
+
+        let mut pi_unnamed = unnamed.clone();
+        pi_unnamed.harness = Some(Harness::Pi.into());
+        assert_eq!(label(Some(&pi_unnamed), &topic), "w/x");
+
+        let ended_titled = known(&View {
+            command: None,
+            held: true,
+            titled: Some(api::Titled { topic: Some("Fix the fold".to_owned()) }),
+            ..view(2, 0, "/w/x", "claude")
+        });
+        assert_eq!(label(None, &ended_titled), "Fix the fold");
+        let ended_untitled = known(&View {
+            command: None,
+            held: true,
+            titled: None,
+            ..view(2, 0, "/w/x", "claude")
+        });
+        assert_eq!(label(None, &ended_untitled), "w/x");
+        assert_eq!(label(None, &topic), "Fix the fold");
+        let stale_shell = known(&View {
+            titled: Some(api::Titled { topic: Some("Fix the fold".to_owned()) }),
+            ..view(3, 0, "/w/x", "-fish")
+        });
+        assert_eq!(label(None, &stale_shell), "w/x");
+        let stale_nvim = known(&View {
+            titled: Some(api::Titled { topic: Some("Fix the fold".to_owned()) }),
+            ..view(4, 0, "/w/x", "nvim a")
+        });
+        assert_eq!(label(None, &stale_nvim), "nvim a");
+        let stale_agy = known(&View {
+            titled: Some(api::Titled { topic: Some("Fix the fold".to_owned()) }),
+            ..view(5, 0, "/w/x", "agy")
+        });
+        assert_eq!(label(None, &stale_agy), "agy");
+
+        for weird_dir in ["/ ", "/   ", "/\u{00a0}"] {
+            let weird_view = known(&view(6, 0, weird_dir, "-fish"));
+            assert_eq!(label(None, &weird_view), weird_dir);
+            assert_eq!(label(Some(&unnamed), &weird_view), weird_dir);
+        }
     }
 
     #[test]
@@ -7648,13 +7720,36 @@ mod tests {
             }),
             ..view(6, 0, "/w/lune/main", "-fish")
         };
+        let blank_ran = View {
+            shell: Some(Shell {
+                doing: Some(Doing::Ended(Ended {
+                    command: Some("   ".to_owned()),
+                    at: Some(Timestamp { seconds: 100, nanos: 0 }),
+                    ending: Some(ended::Ending::Status(0)),
+                    took: Some(prost_types::Duration { seconds: 6, nanos: 0 }),
+                })),
+            }),
+            ..view(7, 0, "/ ", "-fish")
+        };
+        let ended = View {
+            command: None,
+            held: true,
+            titled: Some(api::Titled { topic: Some("Finished session".to_owned()) }),
+            ..view(8, 0, "/w/lune/main", "claude")
+        };
+        let agy_with_stale_osc = View {
+            titled: Some(api::Titled { topic: Some("Stale claude topic".to_owned()) }),
+            ..view(2, 0, "/w/lune/main", "agy")
+        };
         let views = vec![
             view(1, 0, "/w/lune/main", "claude"),
-            view(2, 0, "/w/lune/main", "agy"),
+            agy_with_stale_osc,
             view(3, 0, "/w/lune/main", "agy"),
             view(4, 0, "/w/lune/main", "nvim Cargo.toml"),
             view(5, 0, "/w/lune/main", "-fish"),
             ran,
+            blank_ran,
+            ended,
         ];
         sidebar.hear(host(
             vec![session("s", 10, views)],
@@ -7669,6 +7764,8 @@ mod tests {
         assert_eq!(at(4), Some("nvim Cargo.toml"));
         assert_eq!(at(5), Some("lune/main"));
         assert_eq!(at(6), Some("cargo test"));
+        assert_eq!(at(7), Some("/ "));
+        assert_eq!(at(8), Some("Finished session"));
     }
 
     #[test]
