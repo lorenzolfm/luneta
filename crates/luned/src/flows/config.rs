@@ -229,7 +229,7 @@ fn parse_stage(value: &Value) -> Result<StageSpec, String> {
         .ok_or_else(|| "each stage must be a string or table".to_owned())?;
     let kind_name = table.get("kind").and_then(Value::as_str);
     let skill = table.get("skill").and_then(Value::as_str);
-    let label = table.get("label").and_then(Value::as_str);
+    let label = table.get("label").and_then(Value::as_str).map(str::trim);
     match (kind_name, skill) {
         (Some("implement"), None) => Ok(StageSpec {
             label: label.unwrap_or("implement").to_owned(),
@@ -425,5 +425,16 @@ merge_method = "fast-forward"
         let loaded = parse_flows_toml(&overflow_toml);
         assert!(loaded.get("big").is_none());
         assert_eq!(loaded.warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_stage_label_is_kept_trimmed() {
+        let toml = r#"
+[flows.padded]
+stages = [{ skill = "tigerstyle", label = "  style pass                                                    " }, "land"]
+"#;
+        let loaded = parse_flows_toml(toml);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.get("padded").unwrap().stages[0].label, "style pass");
     }
 }

@@ -3,6 +3,7 @@ use std::io::{ErrorKind, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use lune_domain::flows::{FLOWS_MAX, FlowRegistry, SESSION_ID_BYTES_MAX};
+use lune_domain::projects::WorktreeId;
 
 use crate::log;
 use crate::state;
@@ -10,6 +11,12 @@ use crate::state;
 pub const FILE: &str = "flows.json";
 
 pub const RUN_DIR: &str = "flows-run";
+
+pub const PI_DIR: &str = "flows-pi";
+
+const PI_PREFIX: &str = "pi-";
+
+const PI_SUFFIX: &str = ".jsonl";
 
 pub const UNREADABLE_SUFFIX: &str = "unreadable";
 
@@ -24,6 +31,7 @@ const _: () = assert!(SESSION_ID_BYTES_MAX > 0);
 pub struct FlowStore {
     file: Option<PathBuf>,
     run_dir: Option<PathBuf>,
+    pi_dir: Option<PathBuf>,
 }
 
 impl FlowStore {
@@ -34,6 +42,7 @@ impl FlowStore {
                 FlowStore {
                     file: Some(folder.join(FILE)),
                     run_dir: Some(folder.join(RUN_DIR)),
+                    pi_dir: Some(folder.join(PI_DIR)),
                 },
                 None,
             ),
@@ -41,6 +50,7 @@ impl FlowStore {
                 FlowStore {
                     file: None,
                     run_dir: None,
+                    pi_dir: None,
                 },
                 Some(format!("flows are kept nowhere: {unset}")),
             ),
@@ -53,6 +63,7 @@ impl FlowStore {
         FlowStore {
             file: Some(folder.join(FILE)),
             run_dir: Some(folder.join(RUN_DIR)),
+            pi_dir: Some(folder.join(PI_DIR)),
         }
     }
 
@@ -154,20 +165,70 @@ impl FlowStore {
         let Some(dir) = &self.run_dir else {
             return Ok(0);
         };
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(format!("{}: {error}", dir.display())),
-        };
-        let mut stale = Vec::new();
-        for entry in entries.take(RUN_FILES_MAX) {
-            let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
-            stale.push(entry.path());
-        }
-        assert!(stale.len() <= RUN_FILES_MAX);
+        let stale = listed(dir)?;
         remove_run_files(&stale);
         Ok(stale.len())
     }
+
+    pub fn pi_session_file(&self, stamp: &str) -> Result<PathBuf, String> {
+        assert!(!stamp.is_empty(), "a step stamp is non-empty");
+        let Some(dir) = &self.pi_dir else {
+            return Err("pi sessions have no state folder to be kept in".to_owned());
+        };
+        fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        Ok(dir.join(format!("{PI_PREFIX}{stamp}{PI_SUFFIX}")))
+    }
+
+    pub fn clear_pi_sessions_except(&self, kept: &[PathBuf]) -> Result<usize, String> {
+        let Some(dir) = &self.pi_dir else {
+            return Ok(0);
+        };
+        let mut stale = listed(dir)?;
+        stale.retain(|path| !kept.contains(path));
+        remove_run_files(&stale);
+        Ok(stale.len())
+    }
+
+    pub fn remove_pi_sessions_of(&self, worktree: WorktreeId) -> Result<usize, String> {
+        let Some(dir) = &self.pi_dir else {
+            return Ok(0);
+        };
+        let mut owned = listed(dir)?;
+        owned.retain(|path| pi_session_worktree(path) == Some(worktree.get()));
+        remove_run_files(&owned);
+        Ok(owned.len())
+    }
+}
+
+#[must_use]
+pub fn step_stamp(pid: u32, worktree: WorktreeId, opened: u64) -> String {
+    format!("{pid}-{}-{opened}", worktree.get())
+}
+
+fn pi_session_worktree(path: &Path) -> Option<u64> {
+    let name = path.file_name()?.to_str()?;
+    let stamp = name.strip_prefix(PI_PREFIX)?.strip_suffix(PI_SUFFIX)?;
+    let mut parts = stamp.split('-');
+    let (_pid, worktree, _opened) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    worktree.parse().ok()
+}
+
+fn listed(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("{}: {error}", dir.display())),
+    };
+    let mut paths = Vec::new();
+    for entry in entries.take(RUN_FILES_MAX) {
+        let entry = entry.map_err(|error| format!("{}: {error}", dir.display()))?;
+        paths.push(entry.path());
+    }
+    assert!(paths.len() <= RUN_FILES_MAX);
+    Ok(paths)
 }
 
 pub fn forget_in(folder: &Path) -> Result<(), String> {
@@ -177,11 +238,13 @@ pub fn forget_in(folder: &Path) -> Result<(), String> {
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(format!("{}: {error}", file.display())),
     }
-    let run_dir = folder.join(RUN_DIR);
-    match fs::remove_dir_all(&run_dir) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("{}: {error}", run_dir.display())),
+    for dir in [RUN_DIR, PI_DIR] {
+        let dir = folder.join(dir);
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", dir.display())),
+        }
     }
     Ok(())
 }
@@ -269,5 +332,33 @@ mod tests {
         let oversized = dir.path().join("oversized.id");
         fs::write(&oversized, "a".repeat(SESSION_ID_BYTES_MAX + 1)).unwrap();
         assert!(read_session_out(&oversized).is_err());
+    }
+
+    #[test]
+    fn pi_sessions_outlive_the_run_folder_until_their_flow_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FlowStore::at(dir.path());
+        let (one, two) = (WorktreeId::of(1).unwrap(), WorktreeId::of(2).unwrap());
+        let paused = store.pi_session_file(&step_stamp(7, one, 1)).unwrap();
+        let unkept = store.pi_session_file(&step_stamp(7, one, 2)).unwrap();
+        let other = store.pi_session_file(&step_stamp(7, two, 3)).unwrap();
+        for path in [&paused, &unkept, &other] {
+            fs::write(path, b"{}\n").unwrap();
+        }
+        fs::create_dir_all(store.run_dir().unwrap()).unwrap();
+        store.clear_run_dir().unwrap();
+        assert!(paused.exists(), "a daemon start keeps the pi sessions");
+
+        assert_eq!(
+            store
+                .clear_pi_sessions_except(&[paused.clone(), other.clone()])
+                .unwrap(),
+            1
+        );
+        assert!(paused.exists() && other.exists() && !unkept.exists());
+
+        assert_eq!(store.remove_pi_sessions_of(one).unwrap(), 1);
+        assert!(!paused.exists(), "an ended flow's pi sessions go");
+        assert!(other.exists(), "another worktree's pi sessions stay");
     }
 }

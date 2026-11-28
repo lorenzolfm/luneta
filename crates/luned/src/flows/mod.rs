@@ -5,7 +5,7 @@ pub mod store;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
@@ -24,7 +24,6 @@ use tokio::sync::oneshot;
 
 use crate::api;
 use crate::core;
-use crate::git;
 use crate::layouts;
 use crate::log;
 use crate::panics::{self, Panicked};
@@ -99,10 +98,10 @@ struct WorkerDone {
     event: Option<FlowEvent>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkerKind {
     PrPoll,
     Operation,
+    OpenStep { stop: PathBuf },
 }
 
 struct WorkerSlot {
@@ -166,6 +165,13 @@ pub fn start(
         Err(why) => log::say(&format!("flows could not clear earlier step files: {why}")),
     }
     let restart_effects = registry.on_daemon_restarted();
+    match store.clear_pi_sessions_except(&pi_sessions_kept(&registry)) {
+        Ok(0) => {}
+        Ok(cleared) => log::say(&format!(
+            "flows cleared {cleared} pi sessions no flow holds"
+        )),
+        Err(why) => log::say(&format!("flows could not clear old pi sessions: {why}")),
+    }
     let restarted = !restart_effects.is_empty();
     log_alerts(restart_effects);
     let mut actor = Actor::new(registry, store, loaded_config, core, layouts, wake_github);
@@ -176,6 +182,19 @@ pub fn start(
         .name("flows".to_owned())
         .spawn(move || run(actor, &commands))?;
     Ok(send)
+}
+
+fn pi_sessions_kept(registry: &FlowRegistry) -> Vec<PathBuf> {
+    registry
+        .iter()
+        .filter(|(_, run)| run.harness == Harness::Pi)
+        .filter_map(|(_, run)| run.resume_session())
+        .map(|session| PathBuf::from(session.as_str()))
+        .collect()
+}
+
+fn write_stop(stop: &Path) -> Result<(), String> {
+    fs::write(stop, b"").map_err(|error| format!("{}: {error}", stop.display()))
 }
 
 struct Loaded {
@@ -410,6 +429,15 @@ impl Actor {
         }
     }
 
+    fn forget_flow_files(&mut self, worktree: WorktreeId) {
+        self.cleanup_step_files(worktree);
+        if let Err(why) = self.store.remove_pi_sessions_of(worktree) {
+            log::say(&format!(
+                "flow worktree {worktree}: pi sessions not removed: {why}"
+            ));
+        }
+    }
+
     fn step_running(&self, view: ViewId) -> bool {
         layouts::ask(&self.layouts, |answer| layouts::Command::StepRunning {
             view,
@@ -498,7 +526,7 @@ impl Actor {
             .get(worktree)
             .is_none_or(|run| !run.is_active())
         {
-            self.cleanup_step_files(worktree);
+            self.forget_flow_files(worktree);
             self.last_pr_poll.remove(&worktree);
         }
         self.flush_dirty();
@@ -596,14 +624,17 @@ impl Actor {
             Command::WorktreesKnown(known) => {
                 let before = self.registry.len();
                 self.worktree_dirs = known;
-                let removed_files: Vec<WorktreeId> = self
+                let mut removed_files: Vec<WorktreeId> = self
                     .step_files
                     .keys()
                     .copied()
+                    .chain(self.registry.iter().map(|(id, _)| id))
                     .filter(|id| !self.worktree_dirs.contains_key(id))
                     .collect();
+                removed_files.sort_unstable();
+                removed_files.dedup();
                 for worktree in removed_files {
-                    self.cleanup_step_files(worktree);
+                    self.forget_flow_files(worktree);
                 }
                 let known_dirs = &self.worktree_dirs;
                 self.stop_files.retain(|id, _| known_dirs.contains_key(id));
@@ -653,12 +684,13 @@ impl Actor {
     }
 
     fn handle_worker_done(&mut self, done: WorkerDone, worker_tx: &SyncSender<WorkerDone>) {
-        if done.kind == WorkerKind::PrPoll
+        if matches!(done.kind, WorkerKind::PrPoll)
             && self.pr_poll_in_flight.get(&done.worktree) == Some(&done.generation)
         {
             self.pr_poll_in_flight.remove(&done.worktree);
         }
         if done.generation != self.generation(done.worktree) {
+            self.abandoned(done);
             return;
         }
         let Some(event) = done.event else {
@@ -675,7 +707,7 @@ impl Actor {
             .get(done.worktree)
             .is_none_or(|run| !run.is_active())
         {
-            self.cleanup_step_files(done.worktree);
+            self.forget_flow_files(done.worktree);
             self.last_pr_poll.remove(&done.worktree);
         }
         self.dispatch(effects, worker_tx);
@@ -689,6 +721,27 @@ impl Actor {
         {
             self.exited(done.worktree, view, exit, worker_tx);
         }
+    }
+
+    fn abandoned(&mut self, done: WorkerDone) {
+        let WorkerKind::OpenStep { stop } = done.kind else {
+            return;
+        };
+        let Some(FlowEvent::ViewOpened { view }) = done.event else {
+            return;
+        };
+        if let Err(why) = write_stop(&stop) {
+            log::say(&format!(
+                "flow worktree {}: the step in view {view} opened after the flow moved on, and \
+                 could not be told to stop: {why}",
+                done.worktree
+            ));
+        }
+        let effects = self
+            .registry
+            .handle(done.worktree, FlowEvent::AbandonedViewOpened { view });
+        log_alerts(effects);
+        self.dirty = true;
     }
 
     fn exited(
@@ -821,7 +874,14 @@ impl Actor {
                 let generation = self.generation(worktree);
                 let argv =
                     move || ops::interactive_stage_argv(&dir, harness, &stage, pr_url.as_ref());
-                self.spawn_open_terminal(worktree, generation, view_name, argv, worker_tx)
+                self.spawn_open_terminal(
+                    worktree,
+                    generation,
+                    WorkerKind::Operation,
+                    view_name,
+                    argv,
+                    worker_tx,
+                )
             }
             FlowEffect::OpenUnattendedStage {
                 worktree,
@@ -918,7 +978,7 @@ impl Actor {
                     WorkerKind::Operation,
                     worker_tx,
                     move || {
-                        let result = dir.and_then(|dir| git::push_if_ahead(&dir));
+                        let result = dir.and_then(|dir| ops::push_if_ahead(&dir));
                         FlowEvent::PushFinished {
                             result,
                             now_secs: unix_now_secs(),
@@ -939,7 +999,7 @@ impl Actor {
                     worker_tx,
                     move || {
                         let result =
-                            dir.and_then(|dir| git::push_force_with_lease(&dir, &expected_head));
+                            dir.and_then(|dir| ops::push_force_with_lease(&dir, &expected_head));
                         FlowEvent::LeasePushFinished {
                             result,
                             now_secs: unix_now_secs(),
@@ -1107,39 +1167,37 @@ impl Actor {
         worker_tx: &SyncSender<WorkerDone>,
     ) -> Vec<FlowEffect> {
         self.cleanup_step_files(worktree);
-        if let Some(stop) = self.stop_files.remove(&worktree) {
-            store::remove_run_files(&[stop]);
-        }
         self.steps_opened_count = self.steps_opened_count.wrapping_add(1);
-        let stamp = format!(
-            "{}-{}-{}",
-            std::process::id(),
-            worktree.get(),
-            self.steps_opened_count
-        );
-        let run_dir = match self.store.run_dir() {
-            Ok(dir) => dir,
-            Err(why) => {
-                self.dirty = true;
-                return self
-                    .registry
-                    .handle(worktree, FlowEvent::ViewOpenFailed { why });
-            }
+        let stamp = store::step_stamp(std::process::id(), worktree, self.steps_opened_count);
+        let pi_session = match harness {
+            Harness::Pi => self.store.pi_session_file(&stamp).map(Some),
+            Harness::ClaudeCode | Harness::Antigravity => Ok(None),
         };
+        let (run_dir, pi_session) =
+            match self.store.run_dir().and_then(|dir| Ok((dir, pi_session?))) {
+                Ok(found) => found,
+                Err(why) => {
+                    self.dirty = true;
+                    return self
+                        .registry
+                        .handle(worktree, FlowEvent::ViewOpenFailed { why });
+                }
+            };
         let files = ops::StepFiles {
             prompt: run_dir.join(format!("prompt-{stamp}.txt")),
             followup: Some(run_dir.join(format!("followup-{stamp}.txt"))),
-            pi_session: (harness == Harness::Pi).then(|| run_dir.join(format!("pi-{stamp}.jsonl"))),
+            pi_session,
             session_out: run_dir.join(format!("session-{stamp}.id")),
             stop: run_dir.join(format!("stop-{stamp}")),
         };
-        self.step_files.insert(worktree, files.all());
+        self.step_files.insert(worktree, files.transient());
         self.session_files
             .insert(worktree, files.session_out.clone());
         self.stop_files.insert(worktree, files.stop.clone());
         let lune_bin = ops::lune_binary();
         let generation = self.generation(worktree);
         let stage_label = view_name.clone();
+        let stop = files.stop.clone();
         let argv = move || -> Result<Argv, String> {
             let (prompt, followup) = prompt.texts(harness);
             let written = |path: &PathBuf, text: &str| {
@@ -1159,7 +1217,8 @@ impl Actor {
             };
             ops::unattended_step_argv(&lune_bin, harness, &stage_label, &files, timeout_secs)
         };
-        self.spawn_open_terminal(worktree, generation, view_name, argv, worker_tx)
+        let kind = WorkerKind::OpenStep { stop };
+        self.spawn_open_terminal(worktree, generation, kind, view_name, argv, worker_tx)
     }
 
     fn stop_step(&mut self, worktree: WorktreeId, view: ViewId) {
@@ -1171,11 +1230,8 @@ impl Actor {
             self.control_failure = Some(why);
             return;
         };
-        if let Err(error) = fs::write(stop, b"") {
-            let why = format!(
-                "the step in view {view} could not be told to stop ({}: {error})",
-                stop.display()
-            );
+        if let Err(error) = write_stop(stop) {
+            let why = format!("the step in view {view} could not be told to stop ({error})");
             log::say(&format!("flow worktree {worktree}: {why}"));
             self.control_failure = Some(why);
         }
@@ -1228,36 +1284,31 @@ impl Actor {
         &mut self,
         worktree: WorktreeId,
         generation: u64,
+        kind: WorkerKind,
         view_name: String,
         argv: impl FnOnce() -> Result<Argv, String> + Send + 'static,
         worker_tx: &SyncSender<WorkerDone>,
     ) -> Vec<FlowEffect> {
         let layouts = self.layouts.clone();
-        self.spawn_worker(
-            worktree,
-            generation,
-            WorkerKind::Operation,
-            worker_tx,
-            move || {
-                let argv = match argv() {
-                    Ok(argv) => argv,
-                    Err(why) => return FlowEvent::ViewOpenFailed { why },
-                };
-                let opened = layouts::ask(&layouts, |answer| layouts::Command::OpenNamedTerminal {
-                    worktree,
-                    name: view_name,
-                    opens: Opens::Command(argv),
-                    answer,
-                });
-                match opened {
-                    Some(Ok(view)) => FlowEvent::ViewOpened { view },
-                    Some(Err(why)) => FlowEvent::ViewOpenFailed { why },
-                    None => FlowEvent::ViewOpenFailed {
-                        why: "layouts actor stopped".to_owned(),
-                    },
-                }
-            },
-        )
+        self.spawn_worker(worktree, generation, kind, worker_tx, move || {
+            let argv = match argv() {
+                Ok(argv) => argv,
+                Err(why) => return FlowEvent::ViewOpenFailed { why },
+            };
+            let opened = layouts::ask(&layouts, |answer| layouts::Command::OpenNamedTerminal {
+                worktree,
+                name: view_name,
+                opens: Opens::Command(argv),
+                answer,
+            });
+            match opened {
+                Some(Ok(view)) => FlowEvent::ViewOpened { view },
+                Some(Err(why)) => FlowEvent::ViewOpenFailed { why },
+                None => FlowEvent::ViewOpenFailed {
+                    why: "layouts actor stopped".to_owned(),
+                },
+            }
+        })
     }
 
     fn spawn_worker(
@@ -1665,5 +1716,78 @@ mod tests {
         assert_eq!(summary, None);
         assert!(h.actor.registry.get(wt(1)).is_none());
         assert!(h.actor.registry.is_empty());
+    }
+
+    #[test]
+    fn aborting_tells_the_running_step_to_stop() {
+        let spec = FlowSpec::default_spec();
+        let mut h = harnessed(spec.clone());
+        h.start(&spec, FlowMode::Unattended);
+        let opened = h.next_worker_event();
+        let done = worker_done(&h, opened);
+        h.actor.handle_worker_done(done, &h.worker_tx);
+        let stop = h.actor.stop_files.get(&wt(1)).cloned().unwrap();
+        h.actor
+            .control_flow(wt(1), FlowControl::Abort, &h.worker_tx)
+            .unwrap();
+        assert!(h.actor.registry.get(wt(1)).is_none());
+        assert!(stop.exists(), "abort leaves the step its stop file");
+    }
+
+    #[test]
+    fn a_step_that_opens_after_its_pause_is_stopped_and_held() {
+        let spec = FlowSpec::default_spec();
+        let mut h = harnessed(spec.clone());
+        h.start(&spec, FlowMode::Unattended);
+        let stop = h.actor.stop_files.get(&wt(1)).cloned().unwrap();
+        h.actor
+            .control_flow(wt(1), FlowControl::Pause, &h.worker_tx)
+            .unwrap();
+        let opened = lune_waits::heard("the step's view opens", &h.worker_rx);
+        h.actor.handle_worker_done(opened, &h.worker_tx);
+        assert!(stop.exists(), "the late step is told to stop");
+        let FlowPhase::Paused(paused) = h.phase() else {
+            panic!("the flow stays paused: {:?}", h.phase());
+        };
+        assert!(
+            paused.view.is_some(),
+            "the pause holds the late step's view"
+        );
+
+        h.step_running.store(true, Ordering::SeqCst);
+        let refused = h
+            .actor
+            .control_flow(wt(1), FlowControl::Resume, &h.worker_tx);
+        assert!(refused.unwrap_err().contains("still running"));
+        h.step_running.store(false, Ordering::SeqCst);
+        h.actor
+            .control_flow(wt(1), FlowControl::Resume, &h.worker_tx)
+            .unwrap();
+        assert!(matches!(h.phase(), FlowPhase::RunningStage(_)));
+    }
+
+    #[test]
+    fn a_pi_step_keeps_its_session_out_of_the_run_folder() {
+        let spec = FlowSpec::default_spec();
+        let mut h = harnessed(spec.clone());
+        h.actor
+            .start_flow(
+                wt(1),
+                Some(&spec.name),
+                FlowMode::Unattended,
+                Harness::Pi,
+                FlowEntry::PullRequest,
+                &h.worker_tx,
+            )
+            .unwrap();
+        let run_dir = h.folder.path().join(store::RUN_DIR);
+        let files = h.actor.step_files.get(&wt(1)).cloned().unwrap();
+        assert!(files.iter().all(|file| file.starts_with(&run_dir)));
+        assert!(
+            files
+                .iter()
+                .all(|file| !file.to_string_lossy().contains("pi-")),
+            "the pi session is not a step's transient file: {files:?}"
+        );
     }
 }

@@ -1492,6 +1492,8 @@ impl Daemon for Host {
         let flows = self.flows.clone();
         let started = task::spawn_blocking(move || {
             let dir = worktree_folder(&layouts, worktree_id)?;
+            flows::ops::check_start(dir.as_str(), &parsed_entry)
+                .map_err(Status::failed_precondition)?;
             let result = flows::ask(&flows, |answer| flows::Command::Start {
                 worktree: worktree_id,
                 dir: dir.as_str().to_owned(),

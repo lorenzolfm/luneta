@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use lune_domain::agent::Harness;
 use lune_domain::flows::{
-    AgentStage, FixChecksGateFailure, GitOid, MergeMethod, MergeOutcome, PrSnapshot, PrState,
-    RebaseOutcome, SessionId, StageGateFailure,
+    AgentStage, FixChecksGateFailure, FlowEntry, GitOid, MergeMethod, MergeOutcome, PrSnapshot,
+    PrState, RebaseOutcome, SessionId, StageGateFailure,
 };
 use lune_domain::projects::Argv;
 use lune_protocol::github::{PullPage, State};
@@ -21,7 +21,7 @@ use crate::rebases::{self, Came};
 
 const MERGE_LIMIT: Duration = Duration::from_mins(2);
 
-pub const STEP_FILES_MAX: usize = 5;
+pub const STEP_FILES_TRANSIENT_MAX: usize = 3;
 
 const DEFAULT_BRANCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -82,6 +82,46 @@ pub fn check_stage_post_conditions(
         }
     }
     Ok(())
+}
+
+pub fn check_start(dir: &str, entry: &FlowEntry) -> Result<(), String> {
+    let branch = refuse_default_branch(dir)?;
+    if *entry == FlowEntry::PullRequest {
+        let pr = poll_pr(dir)?;
+        let open = pr.is_some_and(|pr| matches!(pr.state, PrState::Open | PrState::Draft));
+        if !open {
+            return Err(format!(
+                "{branch} has no open pull request; give the flow a prompt to implement and \
+                 open one"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn refuse_default_branch(dir: &str) -> Result<String, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    let Some(branch) = git::branch(dir)? else {
+        return Err(format!("{dir} is on no branch, and a flow lands a branch"));
+    };
+    let default = git::default_branch(dir, DEFAULT_BRANCH_TIMEOUT)
+        .map_err(|why| format!("no telling whether {branch} is the default branch: {why}"))?;
+    if default.branch() == branch {
+        return Err(format!(
+            "{dir} is on {branch}, the default branch; a flow runs on a branch of its own"
+        ));
+    }
+    Ok(branch)
+}
+
+pub fn push_if_ahead(dir: &str) -> Result<GitOid, String> {
+    refuse_default_branch(dir)?;
+    git::push_if_ahead(dir)
+}
+
+pub fn push_force_with_lease(dir: &str, expected_head: &GitOid) -> Result<(), String> {
+    refuse_default_branch(dir)?;
+    git::push_force_with_lease(dir, expected_head)
 }
 
 pub fn check_rebase_post_conditions(dir: &str, onto_ref: &str) -> Result<GitOid, String> {
@@ -357,15 +397,10 @@ pub struct StepFiles {
 
 impl StepFiles {
     #[must_use]
-    pub fn all(&self) -> Vec<PathBuf> {
-        let mut files = vec![
-            self.prompt.clone(),
-            self.session_out.clone(),
-            self.stop.clone(),
-        ];
+    pub fn transient(&self) -> Vec<PathBuf> {
+        let mut files = vec![self.prompt.clone(), self.session_out.clone()];
         files.extend(self.followup.clone());
-        files.extend(self.pi_session.clone());
-        assert!(files.len() <= STEP_FILES_MAX);
+        assert!(files.len() <= STEP_FILES_TRANSIENT_MAX);
         files
     }
 }
@@ -461,5 +496,29 @@ mod tests {
         ));
         assert!(is_merge_race("Pull request head branch is out of date"));
         assert!(!is_merge_race("Pull request is not approved"));
+    }
+
+    #[test]
+    fn a_flow_refuses_the_default_branch_and_takes_a_branch_of_its_own() {
+        let scratch_dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(scratch_dir.path()).unwrap();
+        let (bare, work) = (root.join("origin.git"), root.join("work"));
+        std::fs::create_dir(&bare).unwrap();
+        git::scratch(&bare, &["init", "--bare", "-q", "-b", "main"]).unwrap();
+        let (bare_str, work_str) = (bare.to_str().unwrap(), work.to_str().unwrap());
+        git::scratch(&root, &["clone", "-q", bare_str, work_str]).unwrap();
+        git::scratch(&work, &["commit", "-q", "--allow-empty", "-m", "initial"]).unwrap();
+        git::scratch(&work, &["push", "-q", "-u", "origin", "main"]).unwrap();
+
+        let refused = refuse_default_branch(work_str).unwrap_err();
+        assert!(refused.contains("default branch"), "{refused}");
+        assert!(push_if_ahead(work_str).is_err(), "Land never pushes main");
+
+        git::scratch(&work, &["switch", "-q", "-c", "feat"]).unwrap();
+        assert_eq!(refuse_default_branch(work_str).unwrap(), "feat");
+        let implement = FlowEntry::Implement {
+            prompt: "add a feature".to_owned(),
+        };
+        check_start(work_str, &implement).unwrap();
     }
 }

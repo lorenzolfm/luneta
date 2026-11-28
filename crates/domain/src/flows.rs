@@ -378,14 +378,16 @@ fn validate_run_stages(flow_name: &str, stages: &[RunStage]) -> Result<(), Strin
 }
 
 fn validate_label(field: &str, value: &str) -> Result<(), String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
+    if value.trim().is_empty() {
         return Err(format!("{field} must not be empty"));
     }
-    if trimmed.len() > NAME_BYTES_MAX {
+    if value.trim() != value {
+        return Err(format!("{field} must not start or end with whitespace"));
+    }
+    if value.len() > NAME_BYTES_MAX {
         return Err(format!("{field} exceeds {NAME_BYTES_MAX} bytes"));
     }
-    if trimmed.chars().any(char::is_control) {
+    if value.chars().any(char::is_control) {
         return Err(format!("{field} must not contain control characters"));
     }
     Ok(())
@@ -660,6 +662,9 @@ pub enum MergeOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlowEvent {
     ViewOpened {
+        view: ViewId,
+    },
+    AbandonedViewOpened {
         view: ViewId,
     },
     ViewOpenFailed {
@@ -1518,6 +1523,7 @@ impl FlowRun {
         let mut effects = Vec::new();
         match event {
             FlowEvent::ViewOpened { view } => self.on_view_opened(view),
+            FlowEvent::AbandonedViewOpened { view } => self.on_abandoned_view_opened(view),
             FlowEvent::ViewOpenFailed { why } => self.on_view_open_failed(&why, &mut effects),
             FlowEvent::SessionCaptured { view, session_id } => {
                 self.on_session_captured(view, &session_id, &mut effects);
@@ -1670,6 +1676,14 @@ impl FlowRun {
                 step.view = Some(view);
             }
             _ => {}
+        }
+    }
+
+    fn on_abandoned_view_opened(&mut self, view: ViewId) {
+        if let FlowPhase::Paused(paused) = &mut self.phase
+            && paused.view.is_none()
+        {
+            paused.view = Some(view);
         }
     }
 
@@ -4191,5 +4205,43 @@ mod tests {
         let mut rebasing = land_only(FlowMode::Unattended);
         rebasing.phase = FlowPhase::Landing(LandState::Rebasing);
         assert!(rebasing.validate().is_err());
+    }
+
+    #[test]
+    fn a_step_view_that_opens_after_its_pause_is_kept_on_the_pause() {
+        let (mut run, _) = FlowRun::start(
+            wt(1),
+            FlowSpec::default_spec(),
+            FlowMode::Unattended,
+            Harness::ClaudeCode,
+            FlowEntry::PullRequest,
+        )
+        .unwrap();
+        run.control(FlowControl::Pause).unwrap();
+        let FlowPhase::Paused(paused) = &run.phase else {
+            panic!("pause pauses: {:?}", run.phase);
+        };
+        assert_eq!(paused.view, None);
+        assert_eq!(
+            run.handle(FlowEvent::AbandonedViewOpened { view: view(7) }),
+            Vec::new()
+        );
+        assert_eq!(run.active_view(), Some(view(7)));
+        run.handle(FlowEvent::AbandonedViewOpened { view: view(8) });
+        assert_eq!(
+            run.active_view(),
+            Some(view(7)),
+            "a pause keeps its first view"
+        );
+    }
+
+    #[test]
+    fn a_label_padded_with_whitespace_is_refused() {
+        let mut spec = FlowSpec::default_spec();
+        spec.stages[1].label = format!("tigerstyle{}", " ".repeat(80));
+        assert!(spec.validate().unwrap_err().contains("whitespace"));
+        let mut named = FlowSpec::default_spec();
+        named.name = " default".to_owned();
+        assert!(named.validate().unwrap_err().contains("whitespace"));
     }
 }
