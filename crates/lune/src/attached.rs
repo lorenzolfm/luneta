@@ -393,6 +393,13 @@ impl Pointer {
         }
     }
 
+    pub(crate) fn let_go(self) -> Pointer {
+        match self {
+            Pointer::Sending | Pointer::Pressed(_) | Pointer::Selecting(_) => Pointer::Free,
+            Pointer::Free | Pointer::Shown(_) => self,
+        }
+    }
+
     pub(crate) fn selection(self) -> Option<Selection> {
         match self {
             Pointer::Pressed(at) => Some(Selection { from: at, to: at }),

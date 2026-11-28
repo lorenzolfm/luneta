@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::num::NonZeroU16;
 use std::ops::Range;
 
 use ratatui::buffer::{Buffer, CellWidth};
@@ -7,11 +9,133 @@ use ratatui::text::{Line, Span};
 
 use crate::spots::Spots;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonEmptyRect {
+    x: u16,
+    y: u16,
+    width: NonZeroU16,
+    height: NonZeroU16,
+}
+
+impl NonEmptyRect {
+    #[must_use]
+    pub fn of(rect: Rect) -> Option<Self> {
+        let width = NonZeroU16::new(rect.right().saturating_sub(rect.x))?;
+        let height = NonZeroU16::new(rect.bottom().saturating_sub(rect.y))?;
+        Some(Self {
+            x: rect.x,
+            y: rect.y,
+            width,
+            height,
+        })
+    }
+
+    #[must_use]
+    pub const fn x(self) -> u16 {
+        self.x
+    }
+
+    #[must_use]
+    pub const fn y(self) -> u16 {
+        self.y
+    }
+
+    #[must_use]
+    pub const fn width(self) -> NonZeroU16 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(self) -> NonZeroU16 {
+        self.height
+    }
+
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        Rect {
+            x: self.x,
+            y: self.y,
+            width: self.width.get(),
+            height: self.height.get(),
+        }
+    }
+
+    #[must_use]
+    pub fn clamp(self, at: Position) -> Position {
+        let rect = self.rect();
+        let last_x = self.x + (self.width.get() - 1);
+        let last_y = self.y + (self.height.get() - 1);
+        let clamped = Position::new(at.x.clamp(self.x, last_x), at.y.clamp(self.y, last_y));
+        assert!(
+            rect.contains(clamped),
+            "a clamped position falls inside its area"
+        );
+        clamped
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Join {
+    Tight,
+    Space,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Continuation {
+    pub join: Join,
+    pub indent: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutAt {
+    pub line: usize,
+    pub column: usize,
+    pub took: String,
+}
+
+#[derive(Debug)]
 pub struct Page {
-    pub lines: Vec<Line<'static>>,
-    pub goes_on: Vec<usize>,
-    pub cuts: Spots<String>,
+    area: NonEmptyRect,
+    lines: Vec<Line<'static>>,
+    joins: BTreeMap<usize, Continuation>,
+    cuts: Spots<String>,
+}
+
+impl Page {
+    #[must_use]
+    pub fn new(
+        area: NonEmptyRect,
+        lines: Vec<Line<'static>>,
+        joins: BTreeMap<usize, Continuation>,
+        cuts: Spots<String>,
+    ) -> Self {
+        for (&line, &continuation) in &joins {
+            assert!(
+                line > 0 && line < lines.len(),
+                "a continuation joins an existing row onto a prior row"
+            );
+            assert!(
+                continuation.indent <= area.width().get(),
+                "a continuation indent fits within the page width"
+            );
+        }
+        Self {
+            area,
+            lines,
+            joins,
+            cuts: cuts.placed(area.rect()),
+        }
+    }
+
+    #[must_use]
+    pub const fn area(&self) -> NonEmptyRect {
+        self.area
+    }
+
+    #[must_use]
+    pub fn lines(&self) -> &[Line<'static>] {
+        &self.lines
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,27 +145,45 @@ pub struct Sweep {
 }
 
 impl Sweep {
-    pub fn new(from: Position, to: Position, within: Rect) -> Sweep {
-        Sweep {
-            from: kept(from, within),
-            to: kept(to, within),
-        }
+    pub fn new(from: Position, to: Position, within: NonEmptyRect) -> Sweep {
+        let sweep = Sweep {
+            from: within.clamp(from),
+            to: within.clamp(to),
+        };
+        assert!(
+            within.rect().contains(sweep.from),
+            "sweep start falls inside area"
+        );
+        assert!(
+            within.rect().contains(sweep.to),
+            "sweep end falls inside area"
+        );
+        sweep
     }
 
-    pub fn reach(&mut self, to: Position, within: Rect) {
-        self.to = kept(to, within);
+    pub fn reach(&mut self, to: Position, within: NonEmptyRect) {
+        self.to = within.clamp(to);
+        assert!(
+            within.rect().contains(self.to),
+            "sweep end falls inside area"
+        );
     }
 
     pub fn last_y(self) -> u16 {
         self.ends().1.y
     }
 
-    fn ends(self) -> (Position, Position) {
-        if (self.from.y, self.from.x) <= (self.to.y, self.to.x) {
+    pub fn ends(self) -> (Position, Position) {
+        let ends = if (self.from.y, self.from.x) <= (self.to.y, self.to.x) {
             (self.from, self.to)
         } else {
             (self.to, self.from)
-        }
+        };
+        assert!(
+            (ends.0.y, ends.0.x) <= (ends.1.y, ends.1.x),
+            "sweep ends are ordered top-left to bottom-right"
+        );
+        ends
     }
 
     fn columns(self, y: u16, within: Rect) -> Range<u16> {
@@ -55,7 +197,8 @@ impl Sweep {
         start..end
     }
 
-    pub fn draw(self, buffer: &mut Buffer, within: Rect) {
+    pub fn draw(self, buffer: &mut Buffer, within: NonEmptyRect) {
+        let within = within.rect();
         let (first, last) = self.ends();
         for y in first.y..=last.y {
             let columns = self.columns(y, within);
@@ -70,23 +213,39 @@ impl Sweep {
         }
     }
 
-    pub fn text(self, page: &Page, within: Rect) -> String {
+    pub fn text(self, page: &Page) -> String {
+        let within = page.area.rect();
         let (first, last) = self.ends();
-        let goes_on = |line: usize| page.goes_on.contains(&line);
+        assert!(first.y <= last.y, "sweep rows are ordered");
+        let join = |line: usize| page.joins.get(&line).copied();
         let mut text = String::new();
         for y in first.y..=last.y {
             let line = usize::from(y.saturating_sub(within.y));
             let mut columns = self.columns(y, within);
-            if y > first.y && goes_on(line) {
-                columns.start = columns.start.saturating_add(1);
+            if y > first.y
+                && let Some(continuation) = join(line)
+            {
+                columns.start = columns.start.saturating_add(continuation.indent);
             }
             let said = page.lines.get(line).map_or_else(String::new, |drawn| {
                 read(drawn, within.x, columns, |x| {
                     page.cuts.at(Position::new(x, y))
                 })
             });
-            if y < last.y && goes_on(line + 1) {
-                text.push_str(&said);
+            if y < last.y {
+                match join(line + 1).map(|continuation| continuation.join) {
+                    Some(Join::Tight) => text.push_str(&said),
+                    Some(Join::Space) => {
+                        text.push_str(&said);
+                        if !said.is_empty() {
+                            text.push(' ');
+                        }
+                    }
+                    None => {
+                        text.push_str(said.trim_end());
+                        text.push('\n');
+                    }
+                }
             } else {
                 text.push_str(said.trim_end());
                 text.push('\n');
@@ -94,14 +253,6 @@ impl Sweep {
         }
         text.trim_start_matches('\n').trim_end().to_owned()
     }
-}
-
-fn kept(at: Position, within: Rect) -> Position {
-    let last = |start: u16, length: u16| start.saturating_add(length.saturating_sub(1));
-    Position::new(
-        at.x.clamp(within.x, last(within.x, within.width)),
-        at.y.clamp(within.y, last(within.y, within.height)),
-    )
 }
 
 fn read<'a>(
@@ -132,6 +283,12 @@ pub fn cells(text: &str) -> usize {
         .sum()
 }
 
+pub fn line_cells(line: &Line<'_>) -> usize {
+    line.styled_graphemes(Style::new())
+        .map(|it| usize::from(it.symbol.cell_width()))
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,19 +300,33 @@ mod tests {
         height: 6,
     };
 
+    fn within() -> NonEmptyRect {
+        NonEmptyRect::of(WITHIN).expect("test area is non-empty")
+    }
+
     fn at(x: u16, y: u16) -> Position {
         Position::new(x, y)
     }
 
     fn page(lines: &[&'static str]) -> Page {
-        Page {
-            lines: lines.iter().map(|line| Line::raw(*line)).collect(),
-            ..Page::default()
-        }
+        page_with(lines, BTreeMap::new(), Spots::default())
+    }
+
+    fn page_with(
+        lines: &[&'static str],
+        joins: BTreeMap<usize, Continuation>,
+        cuts: Spots<String>,
+    ) -> Page {
+        Page::new(
+            within(),
+            lines.iter().map(|line| Line::raw(*line)).collect(),
+            joins,
+            cuts,
+        )
     }
 
     fn swept(from: Position, to: Position, page: &Page) -> String {
-        Sweep::new(from, to, WITHIN).text(page, WITHIN)
+        Sweep::new(from, to, page.area()).text(page)
     }
 
     #[test]
@@ -179,7 +350,7 @@ mod tests {
     #[test]
     fn a_sweep_shows_reversed_on_the_cells_it_takes() {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 16, 8));
-        Sweep::new(at(9, 2), at(4, 4), WITHIN).draw(&mut buffer, WITHIN);
+        Sweep::new(at(9, 2), at(4, 4), within()).draw(&mut buffer, within());
         let reversed = |y: u16| -> Vec<u16> {
             let on = |x: &u16| buffer[(*x, y)].modifier.contains(Modifier::REVERSED);
             (0..16).filter(on).collect()
@@ -201,10 +372,15 @@ mod tests {
 
     #[test]
     fn a_note_wrapped_comes_out_as_one_line() {
-        let page = Page {
-            goes_on: vec![1, 2],
-            ..page(&[" luned: ", " stopped a", " nswering", " next note"])
+        let tight = Continuation {
+            join: Join::Tight,
+            indent: 1,
         };
+        let page = page_with(
+            &[" luned: ", " stopped a", " nswering", " next note"],
+            BTreeMap::from([(1, tight), (2, tight)]),
+            Spots::default(),
+        );
         assert_eq!(
             swept(at(2, 1), at(11, 4), &page),
             " luned: stopped answering\n next note"
@@ -214,13 +390,33 @@ mod tests {
     }
 
     #[test]
+    fn word_and_hard_wrapped_lines_join_with_space_or_tight() {
+        let space = Continuation {
+            join: Join::Space,
+            indent: 0,
+        };
+        let tight = Continuation {
+            join: Join::Tight,
+            indent: 0,
+        };
+        let page = page_with(
+            &["see", "https://ex", "ample.com", "now", "next"],
+            BTreeMap::from([(1, space), (2, tight), (3, space)]),
+            Spots::default(),
+        );
+        assert_eq!(
+            swept(at(2, 1), at(5, 5), &page),
+            "see https://example.com now\nnext"
+        );
+        assert_eq!(swept(at(2, 2), at(10, 3), &page), "https://example.com");
+        assert_eq!(swept(at(8, 1), at(6, 2), &page), "https");
+    }
+
+    #[test]
     fn the_end_of_a_cut_comes_out_as_what_it_took() {
         let mut cuts = Spots::default();
         cuts.add(1, 6..7, "-branch-name".to_owned());
-        let page = Page {
-            cuts: cuts.placed(WITHIN),
-            ..page(&["", "  long…", ""])
-        };
+        let page = page_with(&["", "  long…", ""], BTreeMap::new(), cuts);
         assert_eq!(swept(at(4, 2), at(8, 2), &page), "long-branch-name");
         assert_eq!(swept(at(6, 2), at(11, 2), &page), "ng-branch-name");
         assert_eq!(swept(at(4, 2), at(7, 2), &page), "long");
@@ -240,7 +436,7 @@ mod tests {
     fn a_sweep_reads_each_cell_as_ratatui_drew_it() {
         let page = page(&["\u{ff8a}\u{ff9e}xy日z"]);
         let mut buffer = Buffer::empty(WITHIN);
-        buffer.set_line(WITHIN.x, WITHIN.y, &page.lines[0], WITHIN.width);
+        buffer.set_line(WITHIN.x, WITHIN.y, &page.lines()[0], WITHIN.width);
         for x in WITHIN.left()..WITHIN.right() {
             let drawn = buffer[(x, WITHIN.y)].symbol().trim_end().to_owned();
             assert_eq!(
@@ -249,5 +445,13 @@ mod tests {
                 "cell {x}"
             );
         }
+    }
+
+    #[test]
+    fn empty_and_saturated_rects_reject_non_empty_rect() {
+        assert_eq!(NonEmptyRect::of(Rect::new(0, 0, 0, 5)), None);
+        assert_eq!(NonEmptyRect::of(Rect::new(0, 0, 5, 0)), None);
+        assert_eq!(NonEmptyRect::of(Rect::new(u16::MAX, 0, 1, 1)), None);
+        assert_eq!(NonEmptyRect::of(Rect::new(0, u16::MAX, 1, 1)), None);
     }
 }

@@ -26,6 +26,7 @@ use crate::menu::{self, Hint};
 use crate::moonlight;
 use crate::reach::{self, Luned};
 use crate::sidebar;
+use crate::sweep::Join;
 
 const MODEL: &str = "haiku";
 
@@ -612,9 +613,73 @@ impl Briefing {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct BoxRoom {
+    over: Rect,
+    width: u16,
+    inner: usize,
+    room: usize,
+}
+
+impl BoxRoom {
+    #[must_use]
+    pub fn of(over: Rect) -> Option<Self> {
+        let width = width(over);
+        let (inner, room) = (width.checked_sub(2)?, over.height.checked_sub(2)?);
+        Some(Self {
+            over,
+            width,
+            inner: usize::from(inner),
+            room: usize::from(room),
+        })
+    }
+
+    #[must_use]
+    pub const fn inner(self) -> usize {
+        self.inner
+    }
+
+    #[must_use]
+    pub const fn room(self) -> usize {
+        self.room
+    }
+
+    pub fn draw<'a, 'b: 'a>(
+        self,
+        buffer: &mut Buffer,
+        title: &str,
+        right: &str,
+        lines: impl IntoIterator<Item = &'a Line<'b>>,
+    ) -> Rect {
+        let lines: Vec<&Line<'b>> = lines.into_iter().take(self.room).collect();
+        let height = u16::try_from(lines.len() + 2)
+            .map_or(self.over.height, |tall| tall.min(self.over.height));
+        assert!(
+            self.width <= self.over.width,
+            "a boxed overlay fits within its width"
+        );
+        assert!(
+            height <= self.over.height,
+            "a boxed overlay fits within its height"
+        );
+        let x = self.over.x + (self.over.width - self.width) / 2;
+        let y = self.over.y + (self.over.height - height) / 2;
+        let area = Rect::new(x, y, self.width, height);
+        assert!(
+            area.right() <= self.over.right(),
+            "a boxed overlay stays within its horizontal bounds"
+        );
+        assert!(
+            area.bottom() <= self.over.bottom(),
+            "a boxed overlay stays within its vertical bounds"
+        );
+        menu::boxed_lines(buffer, area, &menu::rule(title, right, self.inner), &lines);
+        area
+    }
+}
+
 pub fn room(over: Rect) -> Option<(usize, usize)> {
-    let (inner, room) = (width(over).checked_sub(2)?, over.height.checked_sub(2)?);
-    Some((usize::from(inner), usize::from(room)))
+    BoxRoom::of(over).map(|box_room| (box_room.inner(), box_room.room()))
 }
 
 fn width(over: Rect) -> u16 {
@@ -622,20 +687,28 @@ fn width(over: Rect) -> u16 {
     share.max(WIDTH_MIN).min(over.width)
 }
 
-pub fn boxed(buffer: &mut Buffer, over: Rect, title: &str, right: &str, lines: &[Line<'_>]) {
-    let Some((inner, room)) = room(over) else {
-        return;
-    };
-    let lines = &lines[..lines.len().min(room)];
-    let width = width(over);
-    let height = u16::try_from(lines.len() + 2).map_or(over.height, |tall| tall.min(over.height));
-    let x = over.x + (over.width - width) / 2;
-    let y = over.y + (over.height - height) / 2;
-    let area = Rect::new(x, y, width, height);
-    menu::boxed(buffer, area, &menu::rule(title, right, inner), lines);
+pub fn boxed(
+    buffer: &mut Buffer,
+    over: Rect,
+    title: &str,
+    right: &str,
+    lines: &[Line<'_>],
+) -> Option<Rect> {
+    Some(BoxRoom::of(over)?.draw(buffer, title, right, lines))
 }
 
 pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    paragraphs_joined(text, width, style)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+pub fn paragraphs_joined(
+    text: &str,
+    width: usize,
+    style: Style,
+) -> Vec<(Line<'static>, Option<Join>)> {
     let mut lines = Vec::new();
     for line in text.lines() {
         let line: String = line
@@ -644,11 +717,19 @@ pub fn paragraphs(text: &str, width: usize, style: Style) -> Vec<Line<'static>> 
             .collect();
         let line = line.trim_end();
         if line.is_empty() {
-            lines.push(Line::default());
+            lines.push((Line::default(), None));
         } else {
-            lines.extend(menu::wrap(line, width, style));
+            lines.extend(menu::wrap_joined(line, width, style));
         }
     }
+    assert!(
+        lines.first().is_none_or(|(_, join)| join.is_none()),
+        "the first paragraph line never joins onto a prior line"
+    );
+    assert!(
+        lines.len() >= text.lines().count(),
+        "each source line produces at least one drawn line"
+    );
     lines
 }
 

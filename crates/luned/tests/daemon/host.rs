@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::{BufRead, BufReader, Write as _};
-use std::os::unix::fs::{PermissionsExt as _, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::LazyLock;
@@ -135,21 +135,19 @@ pub fn script(path: &Path, text: &str) {
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let mut staged = tempfile::Builder::new()
+    let mut source = tempfile::Builder::new()
         .prefix(".script-")
         .tempfile_in(parent)
         .unwrap();
-    assert_ne!(
-        staged.path(),
-        path,
-        "staged script path is distinct from target"
-    );
-    write!(staged, "#!/bin/sh\n{text}").unwrap();
-    staged
-        .as_file()
-        .set_permissions(fs::Permissions::from_mode(0o755))
+    write!(source, "#!/bin/sh\n{text}").unwrap();
+    let stage = tempfile::Builder::new()
+        .prefix(".script-")
+        .tempdir_in(parent)
         .unwrap();
-    staged.into_temp_path().persist(path).unwrap();
+    let staged = stage.path().join("script");
+    assert_ne!(staged, path, "staged script path is distinct from target");
+    install(source.path(), &staged);
+    fs::rename(&staged, path).unwrap();
     assert!(path.is_file(), "script is installed at {}", path.display());
 }
 

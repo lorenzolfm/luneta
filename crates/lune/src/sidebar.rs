@@ -72,7 +72,7 @@ use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, SidebarBottom, Spots};
-use crate::sweep::{Page, Sweep, cells};
+use crate::sweep::{Continuation, CutAt, Join, NonEmptyRect, Page, Sweep, cells};
 
 pub const COLUMNS: u16 = 32;
 
@@ -2346,9 +2346,18 @@ struct NotesAt {
 }
 
 struct Rendered {
-    page: Page,
+    lines: Vec<Line<'static>>,
+    joins: BTreeMap<usize, Continuation>,
+    cuts: Spots<String>,
     drawn: Drawn,
     cadence: Cadence,
+}
+
+impl Rendered {
+    fn page(self, area: Rect) -> Option<Page> {
+        let within = NonEmptyRect::of(inside(area))?;
+        Some(Page::new(within, self.lines, self.joins, self.cuts))
+    }
 }
 
 impl Layout {
@@ -6586,7 +6595,9 @@ impl SidebarState {
                 return Asked::Nothing;
             }
             Some(Moving::Sweeping(sweep)) => {
-                sweep.reach(pointer, inside(area));
+                if let Some(within) = NonEmptyRect::of(inside(area)) {
+                    sweep.reach(pointer, within);
+                }
                 return Asked::Nothing;
             }
             Some(Moving::Down { at, on }) => {
@@ -6613,8 +6624,10 @@ impl SidebarState {
             }));
             return Asked::Take;
         }
-        if from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1 {
-            self.set_moving(Moving::Sweeping(Sweep::new(from, pointer, inside(area))));
+        if let Some(within) = NonEmptyRect::of(inside(area))
+            && (from.x.abs_diff(pointer.x) > 1 || from.y.abs_diff(pointer.y) > 1)
+        {
+            self.set_moving(Moving::Sweeping(Sweep::new(from, pointer, within)));
         }
         Asked::Nothing
     }
@@ -6641,12 +6654,14 @@ impl SidebarState {
                 }
             }
             Moving::Sweeping(mut sweep) => {
-                sweep.reach(Position::new(mouse.column, mouse.row), inside(area));
                 let Viewport::Expanded { laid, .. } = &self.viewport else {
                     unreachable!("a sweeping sidebar is expanded");
                 };
-                let page = self.rendered(laid, &Moving::Still, wall).page;
-                let Some(excerpt) = Excerpt::of(sweep.text(&page, inside(area))) else {
+                let Some(page) = self.rendered(laid, &Moving::Still, wall).page(laid.area) else {
+                    return Asked::Nothing;
+                };
+                sweep.reach(Position::new(mouse.column, mouse.row), page.area());
+                let Some(excerpt) = Excerpt::of(sweep.text(&page)) else {
                     return Asked::Nothing;
                 };
                 let under = laid.clone();
@@ -7085,10 +7100,18 @@ impl SidebarState {
         );
         lines.extend(drawn.into_iter().skip(top).take(room));
         lines.resize(geometry.notes_from, Line::default());
-        let goes_on = notes
+        let joins = notes
             .goes_on
             .iter()
-            .map(|line| geometry.notes_from + line)
+            .map(|line| {
+                (
+                    geometry.notes_from + line,
+                    Continuation {
+                        join: Join::Tight,
+                        indent: 1,
+                    },
+                )
+            })
             .collect();
         let spinners = notes.spinners;
         lines.extend(notes.lines);
@@ -7130,17 +7153,14 @@ impl SidebarState {
                 cut_spots.add(HEADER + line - top, column..column + 1, took);
             }
         }
-        let page = Page {
-            lines,
-            goes_on,
-            cuts: cut_spots.placed(inside),
-        };
         let drawn = Drawn::Sidebar {
             numbers: spots.placed(inside),
             bottom: spotted.placed(geometry.notes_from, inside),
         };
         Rendered {
-            page,
+            lines,
+            joins,
+            cuts: cut_spots,
             drawn,
             cadence,
         }
@@ -7155,9 +7175,11 @@ impl SidebarState {
     ) -> (Drawn, Cadence) {
         let area = laid.area;
         let rendered = self.rendered(laid, moving, wall);
-        put(buffer, area, &rendered.page.lines, self.framing());
-        if let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = moving {
-            sweep.draw(buffer, inside(area));
+        put(buffer, area, &rendered.lines, self.framing());
+        if let Some(within) = NonEmptyRect::of(inside(area))
+            && let Moving::Sweeping(sweep) | Moving::Swept(sweep, _) = moving
+        {
+            sweep.draw(buffer, within);
         }
         (rendered.drawn, rendered.cadence)
     }
@@ -8012,27 +8034,58 @@ struct NumberAt<'a> {
     link: &'a Link,
 }
 
-struct CutAt {
-    line: usize,
-    column: usize,
-    took: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elided {
+    pub cell_offset: usize,
+    pub took: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CutTail {
+    pub shown: String,
+    pub elided: Option<Elided>,
+}
+
+pub fn cut_tail(text: &str, room: usize) -> CutTail {
+    let shown = cut(text, room);
+    assert!(
+        cells(&shown) <= room,
+        "cut text fits within its column room"
+    );
+    if shown == text {
+        return CutTail {
+            shown,
+            elided: None,
+        };
+    }
+    let Some(kept) = shown.strip_suffix('…') else {
+        assert_eq!(room, 0, "only zero room drops the ellipsis on cut text");
+        return CutTail {
+            shown,
+            elided: None,
+        };
+    };
+    let rest = text
+        .strip_prefix(kept)
+        .expect("cut keeps a prefix of its input");
+    let took = rest.chars().filter(|c| !c.is_control()).collect();
+    let cell_offset = cells(kept);
+    assert!(
+        cell_offset < room,
+        "the ellipsis lands inside the column room"
+    );
+    CutTail {
+        shown,
+        elided: Some(Elided { cell_offset, took }),
+    }
 }
 
 fn cut_at(line: usize, column: usize, text: &str, room: usize) -> Option<CutAt> {
-    let shown = cut(text, room);
-    if shown == text {
-        return None;
-    }
-    let kept = shown.strip_suffix('…')?;
-    let took = text
-        .strip_prefix(kept)?
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    let elided = cut_tail(text, room).elided?;
     Some(CutAt {
         line,
-        column: column + cells(kept),
-        took,
+        column: column + elided.cell_offset,
+        took: elided.took,
     })
 }
 

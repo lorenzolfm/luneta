@@ -531,7 +531,7 @@ enum LastPress {
 enum Held {
     Nothing,
     Session,
-    Selecting,
+    WorktreeSelecting,
     Edge { dragged: bool },
     Taken,
 }
@@ -2130,7 +2130,9 @@ impl App {
             Input::Mouse(mouse) => {
                 let moved = mouse.kind == MouseEventKind::Moved;
                 let hover_before = moved.then(|| self.hover());
-                let was_pressed = self.sidebar.pressed() || matches!(self.held, Held::Edge { .. });
+                let was_pressed = self.sidebar.pressed()
+                    || matches!(self.held, Held::Edge { .. })
+                    || self.ask_pressed();
                 self.mouse(mouse, now);
                 !moved || was_pressed || Some(self.hover()) != hover_before
             }
@@ -2326,7 +2328,7 @@ impl App {
 
     fn chord(&mut self, chord: Chord, now: SystemTime) -> bool {
         if chord == MENU {
-            self.let_go();
+            self.let_go_chrome();
             if matches!(self.pane.right(), Some(Right::Home(_))) {
                 self.sidebar.float_note(HOME_MENU.to_owned());
             } else if self.viewed().is_some_and(Viewed::welcomes) {
@@ -2497,6 +2499,7 @@ impl App {
         if matches!(self.pane.right(), Some(Right::Home(shown)) if *shown == key) {
             return;
         }
+        self.unshow_right();
         let (luned, events, asks) = (&self.luned, &self.events, &mut self.asks);
         let dropped = self.homes.show(&key, |number| {
             *asks += 1;
@@ -2542,8 +2545,18 @@ impl App {
     }
 
     fn drop_shown(&mut self) {
+        self.unshow_right();
         let old = mem::replace(&mut self.pane, Pane::SidebarOnly);
         self.finish_dropped(old);
+    }
+
+    fn unshow_right(&mut self) {
+        if let Some(Right::Home(shown)) = self.pane.right() {
+            self.homes.shown_mut(shown).unshown();
+        }
+        if matches!(self.held, Held::Session | Held::WorktreeSelecting) {
+            self.held = Held::Nothing;
+        }
     }
 
     fn finish_dropped(&mut self, old: Pane) {
@@ -2560,6 +2573,39 @@ impl App {
                 "a shown number grows past the last dropped"
             );
             self.shown_number_dropped = number;
+        }
+    }
+
+    fn home_pressed(&self) -> bool {
+        self.home().is_some_and(Home::pressed)
+    }
+
+    fn ask_pressed(&self) -> bool {
+        let over = matches!(&self.over, Some(Over::Ask(ask)) if ask.pressed());
+        over || self.home_pressed()
+    }
+
+    fn unsweep_ask(&mut self) {
+        if let Some(Over::Ask(ask)) = &mut self.over {
+            ask.unsweep();
+        }
+        if let Some(Right::Home(shown)) = self.pane.right() {
+            self.homes.shown_mut(shown).unsweep();
+        }
+    }
+
+    fn let_go_ask(&mut self) {
+        if let Some(Over::Ask(ask)) = &mut self.over {
+            ask.let_go();
+        }
+        if let Some(Right::Home(shown)) = self.pane.right() {
+            self.homes.shown_mut(shown).let_go();
+        }
+    }
+
+    fn copy_excerpt(&self, excerpt: Excerpt) {
+        if let Err(error) = self.events.send(Event::Copy(Clip::Excerpt(excerpt))) {
+            log::say(&format!("copy event dropped on closed channel: {error}"));
         }
     }
 
@@ -2720,7 +2766,8 @@ impl App {
         let at = Position::new(mouse.column, mouse.row);
         self.pointer = Some(at);
         let down = matches!(mouse.kind, MouseEventKind::Down(_));
-        let under = matches!(self.held, Held::Session | Held::Selecting);
+        let under =
+            matches!(self.held, Held::Session | Held::WorktreeSelecting) || self.home_pressed();
         if self.covered() && under && !down {
             if !self.select(mouse, now.system) {
                 if let MouseEventKind::Up(_) = mouse.kind {
@@ -2731,8 +2778,10 @@ impl App {
             return;
         }
         if down {
+            let _ = self.cancel_capture();
             self.last_press = LastPress::Elsewhere;
             self.sidebar.unsweep();
+            self.unsweep_ask();
             if self
                 .burst
                 .as_mut()
@@ -2752,11 +2801,9 @@ impl App {
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && let Some(hit) = self.drawn.at(at).or_else(button)
         {
-            self.let_go();
-            self.sidebar.let_go();
-            self.held = Held::Taken;
             self.burst = Some(Burst::new(at, now.steady));
             self.hit(hit, now);
+            self.held = Held::Taken;
             return;
         }
         let wheel = match mouse.kind {
@@ -2770,26 +2817,40 @@ impl App {
             self.sidebar.scroll_menu(menu, by);
             return;
         }
+        if !down && self.held == Held::Taken {
+            match mouse.kind {
+                MouseEventKind::Drag(_) => return,
+                MouseEventKind::Up(_) => {
+                    self.held = Held::Nothing;
+                    return;
+                }
+                _ => self.held = Held::Nothing,
+            }
+        }
         let off = !self.drawn.boxed().is_some_and(|area| area.contains(at));
         if let Some(Over::Picker(picker)) = &mut self.over {
             match (mouse.kind, wheel) {
                 (_, Some(by)) => picker.scroll(by),
                 (MouseEventKind::Down(_), _) if off => {
-                    self.let_go();
-                    self.held = Held::Taken;
                     self.give(self.pane.side(), None, now.system);
+                    self.held = Held::Taken;
                 }
                 _ => {}
             }
             return;
         }
-        match &self.over {
-            Some(Over::Ask(_) | Over::Issue(_) | Over::Picker(_) | Over::Dictation(..)) => return,
+        match &mut self.over {
+            Some(Over::Ask(ask)) => {
+                if let ask::Mouse::Copied(excerpt) = ask.mouse(mouse) {
+                    self.copy_excerpt(excerpt);
+                }
+                return;
+            }
+            Some(Over::Issue(_) | Over::Picker(_) | Over::Dictation(..)) => return,
             Some(Over::Brief(briefing)) => {
                 if down && briefing.clicked() {
-                    self.let_go();
-                    self.held = Held::Taken;
                     self.give(self.pane.side(), None, now.system);
+                    self.held = Held::Taken;
                 }
                 return;
             }
@@ -2813,57 +2874,57 @@ impl App {
             }
             Some(Floating::Menu(_)) => {
                 if down && off {
-                    self.let_go();
-                    self.held = Held::Taken;
                     self.sidebar.close_menu();
+                    self.held = Held::Taken;
                 }
                 return;
             }
             Some(Floating::Note(_)) => {
                 if down {
-                    self.let_go();
-                    self.held = Held::Taken;
                     self.sidebar.close_note();
+                    self.held = Held::Taken;
                 }
                 return;
             }
             None => {}
-        }
-        if self.held == Held::Taken {
-            match mouse.kind {
-                MouseEventKind::Drag(_) => return,
-                MouseEventKind::Up(_) => {
-                    self.held = Held::Nothing;
-                    return;
-                }
-                _ => self.held = Held::Nothing,
-            }
         }
         let (sidebar, right) = self.areas();
         if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
             return;
         }
         let over_session = mouse.column >= right.x;
-        let held = matches!(self.held, Held::Session | Held::Selecting);
+        let held =
+            matches!(self.held, Held::Session | Held::WorktreeSelecting) || self.home_pressed();
         if held || (over_session && !self.sidebar.pressed()) {
             let of_a_press = matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
             if of_a_press && self.last_press != LastPress::Session {
                 return;
             }
-            if self.select(mouse, now.system) {
-                return;
-            }
-            match mouse.kind {
-                MouseEventKind::Down(_) => {
-                    self.held = Held::Session;
-                    self.last_press = LastPress::Session;
-                    self.leave(now.system);
+            match self.pane.right() {
+                Some(Right::Home(_)) => {
+                    if !self.select_home(mouse, now.system) && down {
+                        self.leave(now.system);
+                    }
+                    return;
                 }
-                MouseEventKind::Up(_) => self.held = Held::Nothing,
-                _ => {}
+                Some(Right::Worktree(_)) => {
+                    if self.select_worktree(mouse, now.system) {
+                        return;
+                    }
+                    match mouse.kind {
+                        MouseEventKind::Down(_) => {
+                            self.held = Held::Session;
+                            self.last_press = LastPress::Session;
+                            self.leave(now.system);
+                        }
+                        MouseEventKind::Up(_) => self.held = Held::Nothing,
+                        _ => {}
+                    }
+                    self.session_mouse(mouse, now.system);
+                    return;
+                }
+                None => return,
             }
-            self.session_mouse(mouse, now.system);
-            return;
         }
         if self.pane.collapsed() {
             if down {
@@ -2935,6 +2996,14 @@ impl App {
     }
 
     fn select(&mut self, mouse: MouseEvent, now: SystemTime) -> bool {
+        match self.pane.right() {
+            Some(Right::Worktree(_)) => self.select_worktree(mouse, now),
+            Some(Right::Home(_)) => self.select_home(mouse, now),
+            None => false,
+        }
+    }
+
+    fn select_worktree(&mut self, mouse: MouseEvent, now: SystemTime) -> bool {
         let at = self.session_cell(mouse);
         let Some(Right::Worktree(own)) = self.pane.right_mut() else {
             return false;
@@ -2942,7 +3011,7 @@ impl App {
         match (mouse.kind, self.held) {
             (MouseEventKind::Down(_), _) if own.selects(mouse, at) => {
                 own.select_from(at);
-                self.held = Held::Selecting;
+                self.held = Held::WorktreeSelecting;
                 self.last_press = LastPress::Session;
                 self.leave(now);
                 true
@@ -2951,11 +3020,11 @@ impl App {
                 let _ = own.unselect();
                 false
             }
-            (MouseEventKind::Drag(_), Held::Selecting) => {
+            (MouseEventKind::Drag(_), Held::WorktreeSelecting) => {
                 own.select_to(at);
                 true
             }
-            (MouseEventKind::Up(_), Held::Selecting) => {
+            (MouseEventKind::Up(_), Held::WorktreeSelecting) => {
                 self.held = Held::Nothing;
                 if let Some(excerpt) = own.selected() {
                     let _ = self.events.send(Event::Copy(Clip::Excerpt(excerpt)));
@@ -2964,8 +3033,35 @@ impl App {
             }
             (
                 _,
-                Held::Nothing | Held::Session | Held::Selecting | Held::Edge { .. } | Held::Taken,
+                Held::Nothing
+                | Held::Session
+                | Held::WorktreeSelecting
+                | Held::Edge { .. }
+                | Held::Taken,
             ) => false,
+        }
+    }
+
+    fn select_home(&mut self, mouse: MouseEvent, now: SystemTime) -> bool {
+        let Some(Right::Home(shown)) = self.pane.right() else {
+            return false;
+        };
+        assert!(
+            !matches!(self.held, Held::Session | Held::WorktreeSelecting),
+            "worktree captures never coexist with a home view"
+        );
+        match self.homes.shown_mut(shown).mouse(mouse) {
+            ask::Mouse::Ignored => false,
+            ask::Mouse::Started => {
+                self.last_press = LastPress::Session;
+                self.leave(now);
+                true
+            }
+            ask::Mouse::Active => true,
+            ask::Mouse::Copied(excerpt) => {
+                self.copy_excerpt(excerpt);
+                true
+            }
         }
     }
 
@@ -2979,11 +3075,28 @@ impl App {
             self.sync_areas();
             return true;
         }
-        self.let_go();
+        self.let_go_edge();
         matches!(mouse.kind, MouseEventKind::Up(_))
     }
 
-    fn let_go(&mut self) {
+    fn let_go_chrome(&mut self) {
+        self.let_go_edge();
+        if self.held == Held::Taken {
+            self.held = Held::Nothing;
+        }
+        self.sidebar.let_go();
+        self.let_go_ask();
+    }
+
+    fn cancel_capture(&mut self) -> bool {
+        self.let_go_edge();
+        self.held = Held::Nothing;
+        self.sidebar.let_go();
+        self.let_go_ask();
+        self.viewed_mut().is_some_and(Viewed::let_go)
+    }
+
+    fn let_go_edge(&mut self) {
         let Held::Edge { dragged } = self.held else {
             return;
         };
@@ -3668,9 +3781,13 @@ impl App {
                     matches!(self.holder(), Holder::Terminal),
                     "session dictation starts with the terminal holding focus"
                 );
+                self.unsweep_ask();
                 Some(Where::Session(self.sidebar.here_agent()))
             }
-            Some(Over::Ask(ask)) if !ask.turning() => Some(Where::Ask(ask)),
+            Some(Over::Ask(mut ask)) if !ask.turning() => {
+                ask.clear_selection();
+                Some(Where::Ask(ask))
+            }
             Some(Over::Issue(issue)) => Some(Where::Issue(issue)),
             other => {
                 self.over = other;
@@ -3963,6 +4080,7 @@ impl App {
             let deletes = right.go(on, worktree);
             self.pending_graphics.extend(deletes);
         } else {
+            self.unshow_right();
             let (size, greeting) = (layout_size(self.areas().1), greeting(self.colours));
             let (folder, events) = (self.luned.clone(), &self.events);
             let (number, on) = (self.shown_number_dropped + 1, on.clone());
@@ -4325,8 +4443,7 @@ impl App {
         self.over = over;
         let collapsed = self.pane.collapsed();
         if collapsed || self.over.is_some() {
-            self.let_go();
-            self.sidebar.let_go();
+            self.let_go_chrome();
         }
         if let Some(right) = self.viewed_mut() {
             right.forget_step();
@@ -4370,10 +4487,12 @@ impl App {
         }
         if !focused {
             let hover_before = self.hover();
-            let was_pressed = self.sidebar.pressed();
+            let was_pressed = self.sidebar.pressed()
+                || matches!(self.held, Held::Edge { .. })
+                || self.ask_pressed();
             self.pointer = None;
-            self.sidebar.let_go();
-            if was_pressed || self.hover() != hover_before {
+            let unselected = self.cancel_capture();
+            if was_pressed || unselected || self.hover() != hover_before {
                 dirty = true;
             }
         }
@@ -4646,7 +4765,7 @@ impl App {
             Some(Right::Worktree(shown)) => shown.draw(right_clean, hover, kitty_cell_px),
             Some(Right::Home(shown)) => {
                 let (buffer, right) = right_clean.into_buffer();
-                let home = self.homes.shown(shown);
+                let home = self.homes.shown_mut(shown);
                 cadence.merge(home.draw(buffer, right, now.system));
                 (None, Vec::new())
             }
@@ -4658,7 +4777,7 @@ impl App {
         };
         self.ribbons.set_pending(overlays);
         let buffer = frame.buffer_mut();
-        let drawn = match &self.over {
+        let drawn = match &mut self.over {
             Some(Over::Brief(briefing)) => {
                 cadence.merge(briefing.draw(buffer, right, now.system));
                 Drawn::Nothing
@@ -5655,13 +5774,13 @@ mod tests {
             .unwrap();
     }
 
-    fn home_prompt_text(app: &App, system: SystemTime) -> String {
+    fn home_prompt_text(app: &mut App, system: SystemTime) -> String {
         let area = Rect::new(0, 0, 50, 14);
         let mut buffer = Buffer::empty(area);
-        let _ = app
-            .home()
-            .expect("home is shown")
-            .draw(&mut buffer, area, system);
+        let Some(Right::Home(shown)) = app.pane.right() else {
+            panic!("home is shown");
+        };
+        let _ = app.homes.shown_mut(shown).draw(&mut buffer, area, system);
         (0..area.height)
             .map(|y| {
                 (0..area.width)
@@ -5849,7 +5968,7 @@ mod tests {
         )
         .unwrap();
         assert!(app.sidebar.floating().is_none());
-        assert!(home_prompt_text(&app, system).contains("abcd"));
+        assert!(home_prompt_text(&mut app, system).contains("abcd"));
 
         start_test_pull(
             &mut app,
@@ -5867,7 +5986,7 @@ mod tests {
         );
         assert!(app.sidebar.floating().is_none());
         assert_eq!(app.pane.side(), SplitSide::Session);
-        assert!(home_prompt_text(&app, system).contains("abcd"));
+        assert!(home_prompt_text(&mut app, system).contains("abcd"));
     }
 
     #[test]
@@ -6252,6 +6371,750 @@ mod tests {
         assert!(
             app.sidebar.floating().is_some(),
             "pasting while an interactive floating menu is open stays in the menu"
+        );
+    }
+
+    fn drain_copies(app: &mut App, inbox: &mut Inbox, terminal: &mut TestTerminal, now: Moment) {
+        while let Some(event) = inbox.try_next() {
+            if matches!(event, Event::Copy(_)) {
+                app.handle_at(event, terminal, now).unwrap();
+            }
+        }
+    }
+
+    fn painted_buffer(app: &mut App, columns: u16, rows: u16, now: Moment) -> Buffer {
+        let mut view = Terminal::new(ratatui::backend::TestBackend::new(columns, rows)).unwrap();
+        view.draw(|frame| {
+            let _ = app.paint_at(frame, now);
+        })
+        .unwrap();
+        view.backend().buffer().clone()
+    }
+
+    fn find_text(buffer: &Buffer, needle: &str) -> (u16, u16) {
+        let area = buffer.area;
+        for y in area.top()..area.bottom() {
+            let row: String = (area.left()..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(byte) = row.find(needle) {
+                let col = row[..byte].chars().count();
+                return (u16::try_from(col).unwrap(), y);
+            }
+        }
+        panic!("{needle:?} not found on terminal");
+    }
+
+    fn osc52_texts(written: &Written) -> Vec<String> {
+        use base64::Engine as _;
+        let bytes: Vec<u8> = written.borrow().iter().flatten().copied().collect();
+        let raw = String::from_utf8_lossy(&bytes);
+        raw.split("\x1b]52;c;")
+            .skip(1)
+            .filter_map(|part| part.split('\x07').next())
+            .map(|encoded| {
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap();
+                String::from_utf8(decoded).unwrap()
+            })
+            .collect()
+    }
+
+    fn mouse_input(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Input(Input::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }))
+    }
+
+    #[test]
+    fn dragging_in_the_overlay_ask_box_copies_via_osc52_and_focus_loss_cancels_active_drag() {
+        let (mut terminal, written) = test_terminal(100, 24);
+        let (mut app, mut inbox, _state) = test_app(100, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+
+        let mut ask = Ask::new(1, &menu::Target::Machine(Machine::Local), Path::new("/w"));
+        ask.heard(ask::Heard::Step(luned::asks::Step::Said(
+            "copy this answer".to_owned(),
+        )));
+        app.give(SplitSide::Sidebar, Some(Over::Ask(ask)), system);
+        app.draw_due(&mut terminal, at(0)).unwrap();
+        let initial = painted_buffer(&mut app, 100, 24, at(0));
+        written.borrow_mut().clear();
+
+        let (x, y) = find_text(&initial, "copy this answer");
+        let left = MouseButton::Left;
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(20),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 8, y),
+            &mut terminal,
+            at(40),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x + 8, y),
+            &mut terminal,
+            at(60),
+        )
+        .unwrap();
+        drain_copies(&mut app, &mut inbox, &mut terminal, at(60));
+        app.draw_due(&mut terminal, at(80)).unwrap();
+        let after_copy = painted_buffer(&mut app, 100, 24, at(80));
+
+        assert_eq!(osc52_texts(&written), ["copy this"]);
+        assert_eq!(app.copies.excerpt(), Some("copy this"));
+        assert!(after_copy[(x, y)].modifier.contains(Modifier::REVERSED));
+        let _ = find_text(&after_copy, "copied \"copy this\"");
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), 1, 1),
+            &mut terminal,
+            at(100),
+        )
+        .unwrap();
+        app.draw_due(&mut terminal, at(120)).unwrap();
+        let after_click = painted_buffer(&mut app, 100, 24, at(120));
+        assert!(
+            !after_click[(x, y)].modifier.contains(Modifier::REVERSED),
+            "clicking outside clears the ask highlight"
+        );
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(140),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(160),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.handle_at(Event::Input(Input::FocusLost), &mut terminal, at(180))
+            .unwrap();
+        assert!(!app.ask_pressed());
+        written.borrow_mut().clear();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x + 4, y),
+            &mut terminal,
+            at(200),
+        )
+        .unwrap();
+        drain_copies(&mut app, &mut inbox, &mut terminal, at(200));
+        assert!(
+            osc52_texts(&written).is_empty(),
+            "a drag dropped by focus loss copies nothing"
+        );
+    }
+
+    #[test]
+    fn dragging_in_the_home_ask_box_copies_via_osc52_even_past_the_sidebar_edge() {
+        let (mut terminal, written) = test_terminal(100, 24);
+        let (mut app, mut inbox, _state) = test_app(100, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            at(0),
+        )
+        .unwrap();
+        let project = ProjectId::of(1).unwrap();
+        app.go_home(&Machine::Local, project, system);
+        app.give(SplitSide::Sidebar, None, system);
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Step(luned::asks::Step::Said("home box text".to_owned())),
+            },
+            &mut terminal,
+            at(20),
+        )
+        .unwrap();
+        app.draw_due(&mut terminal, at(40)).unwrap();
+        let initial = painted_buffer(&mut app, 100, 24, at(40));
+        written.borrow_mut().clear();
+
+        let (x, y) = find_text(&initial, "home box text");
+        let left = MouseButton::Left;
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x + 7, y),
+            &mut terminal,
+            at(60),
+        )
+        .unwrap();
+        assert_eq!(
+            app.pane.side(),
+            SplitSide::Session,
+            "pressing in the home ask box focuses it"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), 1, y),
+            &mut terminal,
+            at(80),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), 1, y),
+            &mut terminal,
+            at(100),
+        )
+        .unwrap();
+        drain_copies(&mut app, &mut inbox, &mut terminal, at(100));
+        app.draw_due(&mut terminal, at(120)).unwrap();
+        let after_copy = painted_buffer(&mut app, 100, 24, at(120));
+
+        assert_eq!(osc52_texts(&written), ["home box"]);
+        assert_eq!(app.copies.excerpt(), Some("home box"));
+        assert!(after_copy[(x, y)].modifier.contains(Modifier::REVERSED));
+        let _ = find_text(&after_copy, "copied \"home box\"");
+        assert_eq!(app.held, Held::Nothing);
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, 0),
+            &mut terminal,
+            at(140),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x, 0),
+            &mut terminal,
+            at(160),
+        )
+        .unwrap();
+        app.draw_due(&mut terminal, at(180)).unwrap();
+        let after_click = painted_buffer(&mut app, 100, 24, at(180));
+        assert!(
+            !after_click[(x, y)].modifier.contains(Modifier::REVERSED),
+            "clicking in the home lists clears the ask highlight"
+        );
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(200),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(220),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        assert_eq!(app.held, Held::Nothing);
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None, system);
+        assert!(
+            !app.ask_pressed(),
+            "leaving home clears an active selection drag"
+        );
+        assert_eq!(app.held, Held::Nothing);
+    }
+
+    #[test]
+    fn home_ask_drag_stays_in_sync_across_resize_right_click_overlay_and_view_switch() {
+        let (mut terminal, _written) = test_terminal(100, 24);
+        let (mut app, mut inbox, _state) = test_app(100, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            at(0),
+        )
+        .unwrap();
+        let project = ProjectId::of(1).unwrap();
+        app.go_home(&Machine::Local, project, system);
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Step(luned::asks::Step::Said("sync drag text".to_owned())),
+            },
+            &mut terminal,
+            at(20),
+        )
+        .unwrap();
+        app.draw_due(&mut terminal, at(40)).unwrap();
+        let initial = painted_buffer(&mut app, 100, 24, at(40));
+        let (x, y) = find_text(&initial, "sync drag text");
+        let left = MouseButton::Left;
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(60),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(80),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.handle_at(Event::Input(Input::Resize(100, 30)), &mut terminal, at(90))
+            .unwrap();
+        let _ = painted_buffer(&mut app, 100, 30, at(100));
+        assert!(!app.ask_pressed(), "resize clears active ask drag");
+        app.handle_at(Event::Input(Input::FocusLost), &mut terminal, at(120))
+            .unwrap();
+        assert_eq!(app.held, Held::Nothing);
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), 2, 1),
+            &mut terminal,
+            at(140),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), 2, 1),
+            &mut terminal,
+            at(160),
+        )
+        .unwrap();
+        assert_eq!(
+            app.pane.side(),
+            SplitSide::Sidebar,
+            "sidebar click after cancelled home drag is not swallowed"
+        );
+
+        app.handle_at(Event::Input(Input::Resize(100, 24)), &mut terminal, at(170))
+            .unwrap();
+        let redrawn = painted_buffer(&mut app, 100, 24, at(180));
+        let (x, y) = find_text(&redrawn, "sync drag text");
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(200),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(220),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(MouseButton::Right), x + 2, y),
+            &mut terminal,
+            at(240),
+        )
+        .unwrap();
+        assert!(
+            !app.ask_pressed(),
+            "right-click during left-drag clears the drag instead of stranding it"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x + 4, y),
+            &mut terminal,
+            at(260),
+        )
+        .unwrap();
+        let after_right = painted_buffer(&mut app, 100, 24, at(280));
+        assert!(!after_right[(x, y)].modifier.contains(Modifier::REVERSED));
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(300),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(320),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.give(
+            SplitSide::Sidebar,
+            Some(Over::Ask(Ask::new(
+                99,
+                &menu::Target::Machine(Machine::Local),
+                Path::new("/w"),
+            ))),
+            system,
+        );
+        assert!(
+            !app.home_pressed(),
+            "opening an overlay cancels an active home drag"
+        );
+        app.give(SplitSide::Session, None, system);
+
+        let restored = painted_buffer(&mut app, 100, 24, at(340));
+        let (x, y) = find_text(&restored, "sync drag text");
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(360),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 4, y),
+            &mut terminal,
+            at(380),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x + 4, y),
+            &mut terminal,
+            at(400),
+        )
+        .unwrap();
+        drain_copies(&mut app, &mut inbox, &mut terminal, at(400));
+        let swept = painted_buffer(&mut app, 100, 24, at(420));
+        assert!(swept[(x, y)].modifier.contains(Modifier::REVERSED));
+
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None, system);
+        app.go_home(&Machine::Local, project, system);
+        let returned = painted_buffer(&mut app, 100, 24, at(440));
+        assert!(
+            !returned[(x, y)].modifier.contains(Modifier::REVERSED),
+            "switching away via keyboard clears the kept home highlight"
+        );
+    }
+
+    #[test]
+    fn home_ask_drag_cancels_on_menu_note_sidebar_click_and_never_sets_held_session() {
+        let (mut terminal, written) = test_terminal(100, 24);
+        let (mut app, mut inbox, _state) = test_app(100, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            at(0),
+        )
+        .unwrap();
+        let project = ProjectId::of(1).unwrap();
+        app.go_home(&Machine::Local, project, system);
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Step(luned::asks::Step::Said("capture sync text".to_owned())),
+            },
+            &mut terminal,
+            at(20),
+        )
+        .unwrap();
+        app.draw_due(&mut terminal, at(40)).unwrap();
+        let initial = painted_buffer(&mut app, 100, 24, at(40));
+        let (x, y) = find_text(&initial, "capture sync text");
+        let left = MouseButton::Left;
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(MouseButton::Right), x, y),
+            &mut terminal,
+            at(60),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Nothing);
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, 0),
+            &mut terminal,
+            at(80),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Nothing);
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(100),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 6, y),
+            &mut terminal,
+            at(120),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        assert!(app.chord(MENU, system));
+        assert!(
+            !app.ask_pressed(),
+            "floating home menu note cancels an active home drag"
+        );
+        assert_eq!(app.held, Held::Nothing);
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(140),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Taken);
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), x, y),
+            &mut terminal,
+            at(160),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Nothing);
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), x, y),
+            &mut terminal,
+            at(180),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), x + 6, y),
+            &mut terminal,
+            at(200),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), 2, 1),
+            &mut terminal,
+            at(220),
+        )
+        .unwrap();
+        assert!(!app.ask_pressed());
+        assert_eq!(app.held, Held::Nothing);
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), 2, 1),
+            &mut terminal,
+            at(240),
+        )
+        .unwrap();
+        assert_eq!(
+            app.pane.side(),
+            SplitSide::Sidebar,
+            "sidebar click after a missed home release focuses the sidebar instead of being swallowed"
+        );
+        assert_eq!(app.held, Held::Nothing);
+
+        let mut ask = Ask::new(99, &menu::Target::Machine(Machine::Local), Path::new("/w"));
+        ask.heard(ask::Heard::Step(luned::asks::Step::Said(
+            "overlay burst text".to_owned(),
+        )));
+        app.give(SplitSide::Sidebar, Some(Over::Ask(ask)), system);
+        let overlay = painted_buffer(&mut app, 100, 24, at(260));
+        let (ox, oy) = find_text(&overlay, "overlay burst text");
+        written.borrow_mut().clear();
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), ox, oy),
+            &mut terminal,
+            at(280),
+        )
+        .unwrap();
+        app.handle_at(
+            mouse_input(MouseEventKind::Drag(left), ox + 7, oy),
+            &mut terminal,
+            at(300),
+        )
+        .unwrap();
+        assert!(app.ask_pressed());
+        app.burst = Some(Burst::new(Position::new(ox + 7, oy), at(300).steady));
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), ox + 7, oy),
+            &mut terminal,
+            at(320),
+        )
+        .unwrap();
+        assert!(
+            !app.ask_pressed(),
+            "burst capture cancels active overlay ask drag"
+        );
+        assert_eq!(app.held, Held::Taken);
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), ox + 7, oy),
+            &mut terminal,
+            at(340),
+        )
+        .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "Up after burst hit releases Held::Taken even while Over::Ask is open"
+        );
+        drain_copies(&mut app, &mut inbox, &mut terminal, at(340));
+        assert_eq!(osc52_texts(&written), Vec::<String>::new());
+    }
+
+    #[test]
+    fn worktree_mouse_capture_survives_overlays_and_menu_but_clears_on_focus_loss_or_down() {
+        let (mut terminal, _written) = test_terminal(100, 24);
+        let (mut app, _inbox, _state) = test_app(100, 24);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(160);
+        let at = |ms| Moment {
+            steady: start + Duration::from_millis(ms),
+            system: system + Duration::from_millis(ms),
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(busy_host(1, "work"))),
+            &mut terminal,
+            at(0),
+        )
+        .unwrap();
+        app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None, system);
+        app.draw_due(&mut terminal, at(20)).unwrap();
+        let (_, right) = app.areas();
+        let left = MouseButton::Left;
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(40),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Session);
+        app.give(
+            SplitSide::Sidebar,
+            Some(Over::Ask(Ask::new(
+                1,
+                &menu::Target::Machine(Machine::Local),
+                Path::new("/w"),
+            ))),
+            system,
+        );
+        assert_eq!(
+            app.held,
+            Held::Session,
+            "opening an overlay preserves worktree session capture for its matching Up"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(60),
+        )
+        .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "Up under an overlay finishes and clears Held::Session"
+        );
+        app.give(SplitSide::Session, None, system);
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(80),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Session);
+        assert!(app.chord(MENU, system));
+        assert_eq!(
+            app.held,
+            Held::Session,
+            "opening the floating menu preserves worktree session capture"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(100),
+        )
+        .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "Up under the floating menu finishes and clears Held::Session"
+        );
+        app.give(SplitSide::Session, None, system);
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(110),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Session);
+        app.give(SplitSide::Collapsed, None, system);
+        assert_eq!(
+            app.held,
+            Held::Session,
+            "collapsing the sidebar preserves worktree session capture"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), 0, right.y + 2),
+            &mut terminal,
+            at(115),
+        )
+        .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "Up over the collapsed strip finishes and clears Held::Session"
+        );
+        app.give(SplitSide::Session, None, system);
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(120),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Session);
+        app.handle_at(Event::Input(Input::FocusLost), &mut terminal, at(140))
+            .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "FocusLost clears active worktree capture"
+        );
+
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), right.x + 2, right.y + 2),
+            &mut terminal,
+            at(160),
+        )
+        .unwrap();
+        assert_eq!(app.held, Held::Session);
+        app.handle_at(
+            mouse_input(MouseEventKind::Down(left), 2, 1),
+            &mut terminal,
+            at(180),
+        )
+        .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Nothing,
+            "a new Down in the sidebar clears a stranded worktree capture"
+        );
+        app.handle_at(
+            mouse_input(MouseEventKind::Up(left), 2, 1),
+            &mut terminal,
+            at(200),
+        )
+        .unwrap();
+        assert_eq!(
+            app.pane.side(),
+            SplitSide::Sidebar,
+            "the sidebar click focuses the sidebar instead of routing to the session"
         );
     }
 
