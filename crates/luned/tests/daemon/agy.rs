@@ -9,7 +9,7 @@ use luned::api::{Agent, Harness, Status, TranscriptEndsRequest, WaitingFor};
 use serde_json::{Value, json};
 
 use crate::agents::{Host, MADE_NANOS, terminal};
-use crate::host::{Daemon, PATIENT, Running, start};
+use crate::host::{Daemon, PATIENT, Running, Vars, start};
 
 const FAKE_AGY: &str = r#"
 import { createInterface } from "node:readline";
@@ -46,15 +46,15 @@ fn with_agy() -> (Host, Daemon) {
     (host, daemon)
 }
 
-struct Agy {
+pub(crate) struct Agy {
     process: Running,
     events: ChildStdin,
     told: BufReader<ChildStdout>,
 }
 
 impl Agy {
-    fn start(host: &Host, cmd: &str) -> Self {
-        let mut command = host.vars().command("node");
+    pub(crate) fn start(vars: Vars<'_>, cmd: &str) -> Self {
+        let mut command = vars.command("node");
         command
             .args(["--input-type=module", "--eval", FAKE_AGY])
             .arg(cmd)
@@ -71,10 +71,11 @@ impl Agy {
         }
     }
 
-    fn sends(&mut self, payload: &Value) -> String {
+    pub(crate) fn sends(&mut self, payload: &Value) -> String {
         writeln!(self.events, "{payload}").unwrap();
         let mut line = String::new();
-        self.told.read_line(&mut line).unwrap();
+        let read = self.told.read_line(&mut line).unwrap();
+        assert!(read > 0, "fake agy exited before answering");
         serde_json::from_str(line.trim()).expect("a JSON-encoded stdout string")
     }
 }
@@ -110,7 +111,7 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
         serde_json::from_str(&fs::read_to_string(settings(&host)).unwrap()).unwrap();
     assert_eq!(updated["trustedWorkspaces"], json!(["/w"]));
 
-    let mut agy = Agy::start(&host, &cmd);
+    let mut agy = Agy::start(host.vars(), &cmd);
     let pid = agy.process.pid();
     let printed = agy.sends(&json!({
         "cwd": "/home/you/work",
@@ -129,8 +130,9 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
     assert_eq!(agent.cwd, "/home/you/work");
     assert!(agent.at_a_prompt());
     assert_eq!(agent.terminal, Some(terminal(4)));
+    assert_eq!(agent.name.as_ref().and_then(luned::api::Name::given), None);
     assert_eq!(
-        agent.name.as_ref().and_then(|name| name.given()),
+        agent.name.as_ref().and_then(luned::api::Name::auto),
         Some("Feature parity")
     );
 }
@@ -139,7 +141,7 @@ fn the_title_hook_is_installed_only_once_agy_s_folder_exists_and_chains_a_user_t
 fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
     let (host, _daemon) = with_agy();
     let cmd = title_command(&host).unwrap();
-    let mut agy = Agy::start(&host, &cmd);
+    let mut agy = Agy::start(host.vars(), &cmd);
     let pid = agy.process.pid();
 
     let printed = agy.sends(&json!({
@@ -172,7 +174,7 @@ fn an_agy_agent_reports_status_waits_and_keeps_status_since_across_updates() {
         agent
             .name
             .as_ref()
-            .and_then(|name| name.given())
+            .and_then(luned::api::Name::auto)
             .is_some()
             .then_some(agent)
     });

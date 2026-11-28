@@ -17,12 +17,12 @@ use luned::api::projects::Held;
 use luned::api::remote::unreached::{self, Stopped};
 use luned::api::remote::{self, Reached};
 use luned::api::{
-    self, AskRequest, ClientWaiter, DaemonStanding, FileIssueRequest, IssueRepositoriesRequest,
-    IssueRepository, KeepChecksRequest, KeepImageRequest, ListContentsRequest,
-    ListRepositoriesRequest, ListSkillsRequest, On, PasteRequest, PrintedFile as File,
-    TranscriptEndsRequest, WatchChangesRequest, WatchLocalChangesRequest,
+    self, AskRequest, AskReviewRequest, ClientWaiter, DaemonStanding, FileIssueRequest,
+    IssueRepositoriesRequest, IssueRepository, KeepChecksRequest, KeepImageRequest,
+    ListContentsRequest, ListRepositoriesRequest, ListSkillsRequest, On, PasteRequest,
+    PrintedFile as File, TranscriptEndsRequest, WatchChangesRequest, WatchLocalChangesRequest,
 };
-use luned::asks::{Asked, Step, Turn};
+use luned::asks::{Asked, ReviewAsk, Step, Turn};
 use luned::images::{self, Png};
 use luned::issues::Filed;
 use luned::links::{self, At, Link, Pasted, Readied, Ready, Unready, Wanted, Work};
@@ -1221,10 +1221,25 @@ pub fn claude_that_takes_turns(host: &Host) {
         r#"cat > "{home}/words"
 {{ echo "cwd=$(pwd -P)"
 echo "turn=${{LUNE_TURN-unset}}"; echo "before=${{LUNE_TURN_BEFORE-unset}}"
-resumed=none; for arg; do [ "$after" = --resume ] && resumed=$arg; after=$arg; done
+resumed=none; tools=unset; prompt=none
+for arg; do
+    case "$after" in
+        --resume) resumed=$arg ;;
+        --tools) tools=$arg ;;
+    esac
+    case "$arg" in
+        --system-prompt|--append-system-prompt) prompt=$arg ;;
+    esac
+    after=$arg
+done
 echo "resumed=$resumed"; echo "model=$2 $3"
+echo "tools=$tools"; echo "prompt=$prompt"
 }} > "{home}/told"
-echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+if [ "$prompt" = "--system-prompt" ]; then
+    echo '{{"type":"system","subtype":"init","session_id":"9a11"}}'
+else
+    echo '{{"type":"system","subtype":"init","session_id":"7c22"}}'
+fi
 ran='{{"type":"assistant","parent_tool_use_id":null,"message":{{"content":[{{"type":"tool_use",'\
 '"id":"toolu_1","name":"Bash","input":{{"command":"lune agents"}}}}]}}}}'
 case "$(cat "{home}/words")" in
@@ -1249,6 +1264,24 @@ pub fn told(host: &Host) -> (Vec<String>, String) {
 
 async fn turn(daemon: &mut Daemon, request: AskRequest) -> (Vec<Step>, Result<(), Status>) {
     let mut steps = match daemon.ask(request).await {
+        Ok(steps) => steps.into_inner(),
+        Err(status) => return (Vec::new(), Err(status)),
+    };
+    let mut heard = Vec::new();
+    loop {
+        match steps.message().await {
+            Ok(Some(step)) => heard.extend(Step::of(step).expect("a step")),
+            Ok(None) => return (heard, Ok(())),
+            Err(status) => return (heard, Err(status)),
+        }
+    }
+}
+
+async fn review_turn(
+    daemon: &mut Daemon,
+    request: AskReviewRequest,
+) -> (Vec<Step>, Result<(), Status>) {
+    let mut steps = match daemon.ask_review(request).await {
         Ok(steps) => steps.into_inner(),
         Err(status) => return (Vec::new(), Err(status)),
     };
@@ -1315,9 +1348,76 @@ fn a_turn_of_the_ask_box_runs_on_the_machine_it_is_for() {
                 "before=unset".to_owned(),
                 "resumed=none".to_owned(),
                 "model=--model sonnet".to_owned(),
+                "tools=Bash".to_owned(),
+                "prompt=--append-system-prompt".to_owned(),
             ]
         );
         assert_eq!(words, "which agents run");
+
+        let on_far = || {
+            Some(On {
+                destination: "far".to_owned(),
+            })
+        };
+        let reviewed = ReviewAsk::start(
+            Some(dir.clone()),
+            "<untrusted-diff-excerpt location=\"src/lib.rs\">\n```patch\n+ok\n```\n</untrusted-diff-excerpt>",
+            "explain",
+        )
+        .unwrap()
+        .to_api(on_far());
+        let (review_steps, ended) = review_turn(&mut daemon, reviewed).await;
+        ended.unwrap();
+        let review_session = SessionId::parse("9a11").unwrap();
+        assert_eq!(review_steps[0], Step::Session(review_session.clone()));
+        let (told_review, words) = told(&far);
+        assert_eq!(
+            told_review[5..],
+            ["tools=".to_owned(), "prompt=--system-prompt".to_owned()]
+        );
+        assert!(words.contains("<untrusted-diff-excerpt"), "{words}");
+        assert!(words.ends_with("\n\nexplain"), "{words}");
+
+        let follow = ReviewAsk::follow_up(Some(dir.clone()), review_session.clone(), "why?")
+            .unwrap()
+            .to_api(on_far());
+        let (_steps, ended) = review_turn(&mut daemon, follow).await;
+        ended.unwrap();
+        let (told_follow, words) = told(&far);
+        assert_eq!(told_follow[3], "resumed=9a11");
+        assert_eq!(
+            told_follow[5..],
+            ["tools=".to_owned(), "prompt=--system-prompt".to_owned()]
+        );
+        assert_eq!(words, "why?");
+
+        let escalate = AskRequest {
+            resumed: Some(review_session.as_str().to_owned()),
+            ..ask("far", Some(&dir), "run bash", true)
+        };
+        let (_steps, refused) = turn(&mut daemon, escalate).await;
+        let refused = refused.expect_err("general ask must not resume a review session");
+        assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+
+        let downgrade = ReviewAsk::follow_up(
+            Some(dir.clone()),
+            SessionId::parse("7c22").unwrap(),
+            "downgrade",
+        )
+        .unwrap()
+        .to_api(on_far());
+        let (_steps, refused) = review_turn(&mut daemon, downgrade).await;
+        let refused = refused.expect_err("review ask must not resume a general session");
+        assert_eq!(refused.code(), Code::FailedPrecondition, "{refused:?}");
+
+        let legacy_marked = AskRequest {
+            review_only: true,
+            marked_issues: vec![1],
+            ..ask("far", Some(&dir), "explain", true)
+        };
+        let (_steps, refused) = turn(&mut daemon, legacy_marked).await;
+        let refused = refused.expect_err("legacy review_only with marked issues must be rejected");
+        assert_eq!(refused.code(), Code::InvalidArgument, "{refused:?}");
 
         let (steps, ended) = turn(&mut daemon, ask("far", None, "yes", false)).await;
         assert_eq!(steps, [session.clone(), ran.clone(), said]);

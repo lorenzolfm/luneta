@@ -1,0 +1,40 @@
+{
+  "first_prompt": [
+    {
+      "type": "user",
+      "message": {
+        "content": "fix the sidebar fold"
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_1",
+            "name": "Read",
+            "input": {
+              "file_path": "/w/crates/lune/src/sidebar.rs"
+            }
+          },
+          {
+            "type": "text",
+            "text": "Inspecting the sidebar fold state."
+          }
+        ]
+      }
+    }
+  ],
+  "follow_up": [
+    {
+      "type": "user",
+      "message": {
+        "content": "now align the view tabs"
+      }
+    }
+  ],
+  "expected_first_asked": "fix the sidebar fold",
+  "expected_step": "ran Read: /w/crates/lune/src/sidebar.rs",
+  "expected_follow_up_asked": "now align the view tabs"
+}
