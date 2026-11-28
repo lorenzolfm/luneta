@@ -40,7 +40,7 @@ struct WorkView: View {
                     ForEach(shownPulls, id: \.number) { pull in
                         let author = pull.author.map { " by \($0)" } ?? ""
                         let detail = [
-                            pull.conflicting ? "conflicts" : nil,
+                            pull.mergeability.words,
                             pull.draft ? "draft" : nil,
                             "\(pull.branch)\(author)",
                         ].compactMap { $0 }.joined(separator: " · ")

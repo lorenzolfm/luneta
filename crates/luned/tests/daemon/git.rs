@@ -995,19 +995,33 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     for dir in [&top, &src, &beside] {
         watched(&host, dir);
     }
-    let found = || -> BTreeMap<String, (u32, PullRequestState, String, bool)> {
+    let found = || -> BTreeMap<
+        String,
+        (
+            u32,
+            PullRequestState,
+            String,
+            Option<lune_protocol::github::Mergeability>,
+        ),
+    > {
         let pull_requests = host.host().pull_requests.into_iter();
         pull_requests
             .map(|it| {
+                let parsed = lune_protocol::github::PullRequest::of_api(&it).unwrap();
                 (
                     it.dir.clone(),
-                    (number(&it), it.state(), it.url, it.conflicting),
+                    (number(&it), it.state(), it.url, parsed.mergeability()),
                 )
             })
             .collect()
     };
 
-    let open = (7, PullRequestState::Open, page(7), true);
+    let open = (
+        7,
+        PullRequestState::Open,
+        page(7),
+        Some(lune_protocol::github::Mergeability::Conflicting),
+    );
     let all = eventually("gh finds main's pull request in all three", || {
         let found = found();
         (found.len() == 3).then_some(found)
@@ -1029,7 +1043,12 @@ fn gh_is_asked_once_for_the_pull_request_of_each_branch() {
     assert_eq!(checks, vec![failing; 3]);
 
     assert!(git(&tree, &["switch", "-q", "-c", "fold"]));
-    let draft = (8, PullRequestState::Draft, page(8), false);
+    let draft = (
+        8,
+        PullRequestState::Draft,
+        page(8),
+        Some(lune_protocol::github::Mergeability::Mergeable),
+    );
     eventually("gh finds fold's pull request in tree", || {
         (found().get(&top) == Some(&draft)).then_some(())
     });

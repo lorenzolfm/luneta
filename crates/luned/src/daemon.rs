@@ -98,6 +98,10 @@ const PULL_REQUEST_SWEEP: Duration = Duration::from_mins(2);
 
 const PENDING_CHECKS_SWEEP: Duration = Duration::from_secs(15);
 
+const PULL_REQUEST_RESTS: github::Rests =
+    github::Rests::try_new(PENDING_CHECKS_SWEEP, PULL_REQUEST_SWEEP)
+        .expect("pending rest cannot exceed settled rest");
+
 const KEEPS_SWEEP: Duration = Duration::from_hours(1);
 
 pub const WATCH: Duration = Duration::from_secs(4);
@@ -248,11 +252,7 @@ pub async fn serve(
     )?;
     git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
-    let rests = github::Rests {
-        pending: PENDING_CHECKS_SWEEP,
-        settled: PULL_REQUEST_SWEEP,
-    };
-    github::follow(core.clone(), wake_github, github_woken, rests)?;
+    github::follow(core.clone(), wake_github, github_woken, PULL_REQUEST_RESTS)?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();

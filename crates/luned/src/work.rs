@@ -7,6 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lune_domain::projects::{Dir, PROJECTS_MAX};
+use lune_protocol::github::Mergeability;
+use lune_protocol::said::Said;
+pub use lune_protocol::work::{LABELS_MAX, LISTED_MAX, NAME_BYTES_MAX, TITLE_BYTES_MAX};
+use lune_protocol::work::{check_full, check_name, check_title};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -17,17 +21,9 @@ use crate::api::list_work_response::{
     Work as SaidWork,
 };
 use crate::directory::Directory;
-use crate::github::Mergeability;
+use crate::github::GhMergeability;
 use crate::panics::{self, Panicked};
 use crate::{git, issues, program};
-
-pub const LISTED_MAX: usize = 50;
-
-pub const LABELS_MAX: usize = 16;
-
-pub const TITLE_BYTES_MAX: usize = 1024;
-
-pub const NAME_BYTES_MAX: usize = 256;
 
 pub const PATIENCE: Duration = Duration::from_secs(30);
 
@@ -76,9 +72,9 @@ pub struct Pull {
     pub number: NonZeroU32,
     pub title: String,
     pub draft: bool,
-    pub branch: String,
+    pub branch: Said,
     pub author: Option<String>,
-    pub conflicting: bool,
+    pub mergeability: Option<Mergeability>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,10 +134,10 @@ impl Listed {
 
 impl Work {
     pub fn new(issues: Issues, pulls: Vec<Pull>, more: More) -> Result<Work, String> {
-        full("issues", issues.open().len(), more.issues)?;
-        full("pull requests", pulls.len(), more.pulls)?;
+        check_full("issues", issues.open().len(), more.issues)?;
+        check_full("pull requests", pulls.len(), more.pulls)?;
         for issue in issues.open() {
-            titled(issue.number, &issue.title)?;
+            check_title(issue.number, &issue.title)?;
             if issue.labels.len() > LABELS_MAX {
                 return Err(format!(
                     "#{} has more than {LABELS_MAX} labels",
@@ -149,14 +145,14 @@ impl Work {
                 ));
             }
             for label in &issue.labels {
-                named(issue.number, "a label", label)?;
+                check_name(issue.number, "a label", label)?;
             }
         }
         for pull in &pulls {
-            titled(pull.number, &pull.title)?;
-            named(pull.number, "its branch", &pull.branch)?;
+            check_title(pull.number, &pull.title)?;
+            check_name(pull.number, "its branch", pull.branch.as_str())?;
             if let Some(author) = &pull.author {
-                named(pull.number, "its author", author)?;
+                check_name(pull.number, "its author", author)?;
             }
         }
         Ok(Work {
@@ -205,9 +201,12 @@ impl Work {
             number: pull.number.get(),
             title: pull.title.clone(),
             draft: pull.draft,
-            branch: pull.branch.clone(),
+            branch: pull.branch.as_str().to_owned(),
             author: pull.author.clone(),
-            conflicting: pull.conflicting,
+            mergeability: pull
+                .mergeability
+                .map_or(crate::api::Mergeability::Unspecified, Mergeability::to_api)
+                .into(),
         });
         SaidWork {
             issues: Some(issues),
@@ -222,7 +221,9 @@ impl Work {
             pulls,
             more_pulls,
         } = said;
-        let number = |number| NonZeroU32::new(number).ok_or("an issue or pull request of number 0");
+        let number = |number| {
+            NonZeroU32::new(number).ok_or_else(|| "an issue or pull request of number 0".to_owned())
+        };
         let (issues, more_issues) = match issues.ok_or("issues: neither open nor off")? {
             SaidIssues::Open(SaidOpenIssues { issues, more }) => {
                 let open = issues.into_iter().map(
@@ -238,7 +239,10 @@ impl Work {
                         })
                     },
                 );
-                (Issues::Open(open.collect::<Result<Vec<_>, &str>>()?), more)
+                (
+                    Issues::Open(open.collect::<Result<Vec<_>, String>>()?),
+                    more,
+                )
             }
             SaidIssues::Off(()) => (Issues::Off, false),
         };
@@ -249,19 +253,23 @@ impl Work {
                  draft,
                  branch,
                  author,
-                 conflicting,
+                 mergeability,
              }| {
+                let number = number(at)?;
+                let branch =
+                    Said::new(branch).ok_or_else(|| format!("#{number}: its branch is empty"))?;
+                let mergeability = Mergeability::of_api(mergeability)?;
                 Ok(Pull {
-                    number: number(at)?,
+                    number,
                     title,
                     draft,
                     branch,
                     author,
-                    conflicting,
+                    mergeability,
                 })
             },
         );
-        let pulls = pulls.collect::<Result<Vec<_>, &str>>()?;
+        let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
         Work::new(
             issues,
             pulls,
@@ -273,16 +281,14 @@ impl Work {
     }
 }
 
-fn full(kind: &str, listed: usize, more: bool) -> Result<(), String> {
-    if listed > LISTED_MAX {
-        return Err(format!("at most {LISTED_MAX} {kind}"));
+fn should_cache(result: &Result<Listed, String>) -> bool {
+    match result {
+        Ok(Listed::Work(work)) => !work
+            .pulls()
+            .iter()
+            .any(|pull| pull.mergeability == Some(Mergeability::Unknown)),
+        Ok(Listed::Unhosted) | Err(_) => true,
     }
-    if more && listed < LISTED_MAX {
-        return Err(format!(
-            "{listed} {kind} are listed of more, where {LISTED_MAX} would be"
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Default)]
@@ -313,6 +319,7 @@ impl Listings {
         let kept = listed
             .as_ref()
             .ok()
+            .filter(|result| should_cache(result))
             .map(|listed| (Instant::now(), listed.clone()));
         locked(&self.slots).ran(dir, kept);
         self.done.notify_all();
@@ -445,7 +452,7 @@ struct ListedPull {
     head_ref_name: String,
     author: Option<Author>,
     #[serde(default)]
-    mergeable: Option<Mergeability>,
+    mergeable: Option<GhMergeability>,
 }
 
 #[derive(Deserialize)]
@@ -501,20 +508,16 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
     let (issues, more_issues) = issues?;
     let (pulls, more_pulls) = pulls?;
     let pulls = pulls.into_iter().map(|pull| {
-        if pull.head_ref_name.is_empty() {
-            return Err(format!(
-                "gh lists pull request #{} with no branch",
-                pull.number
-            ));
-        }
+        let branch = Said::new(cut(pull.head_ref_name, NAME_BYTES_MAX))
+            .ok_or_else(|| format!("gh lists pull request #{} with no branch", pull.number))?;
         let author = pull.author.map(|author| cut(author.login, NAME_BYTES_MAX));
         Ok(Pull {
             number: pull.number,
             title: cut(pull.title, TITLE_BYTES_MAX),
             draft: pull.is_draft,
-            branch: cut(pull.head_ref_name, NAME_BYTES_MAX),
+            branch,
             author: author.filter(|login| !login.is_empty()),
-            conflicting: pull.mergeable.is_some_and(Mergeability::is_conflicting),
+            mergeability: pull.mergeable.map(GhMergeability::into_protocol),
         })
     });
     let pulls = pulls.collect::<Result<Vec<_>, String>>()?;
@@ -526,27 +529,6 @@ fn listed_by_gh(dir: &Dir) -> Result<Listed, String> {
     let work = work
         .expect("gh's lists are cut to their most, and their names to NAME_BYTES_MAX, none empty");
     Ok(Listed::Work(work))
-}
-
-fn titled(number: NonZeroU32, title: &str) -> Result<(), String> {
-    if title.len() <= TITLE_BYTES_MAX {
-        return Ok(());
-    }
-    Err(format!(
-        "#{number} has a title longer than {TITLE_BYTES_MAX} bytes"
-    ))
-}
-
-fn named(number: NonZeroU32, what: &str, name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err(format!("#{number}: {what} is empty"));
-    }
-    if name.len() > NAME_BYTES_MAX {
-        return Err(format!(
-            "#{number}: {what} is longer than {NAME_BYTES_MAX} bytes"
-        ));
-    }
-    Ok(())
 }
 
 fn issues_off(dir: &str, asked: Instant, unlisted: String) -> Result<(), String> {
@@ -619,15 +601,19 @@ mod tests {
         }
     }
 
+    fn said(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
     #[test]
     fn work_goes_over_the_wire_and_back_as_it_was() {
-        let pull = |number: u32, author: Option<&str>, conflicting| Pull {
+        let pull = |number: u32, author: Option<&str>, mergeability| Pull {
             number: NonZeroU32::new(number).unwrap(),
             title: "Say view, not pane".to_owned(),
             draft: true,
-            branch: "issue-511".to_owned(),
+            branch: said("issue-511"),
             author: author.map(str::to_owned),
-            conflicting,
+            mergeability,
         };
         let labelled = Issue {
             labels: vec!["enhancement".to_owned()],
@@ -636,7 +622,12 @@ mod tests {
         let open = Issues::Open(vec![labelled, issue(498, "Menu")]);
         let work = Work::new(
             open,
-            vec![pull(524, None, false), pull(526, Some("o"), true)],
+            vec![
+                pull(524, None, Some(Mergeability::Mergeable)),
+                pull(526, Some("o"), Some(Mergeability::Conflicting)),
+                pull(527, None, Some(Mergeability::Unknown)),
+                pull(528, None, None),
+            ],
             More::default(),
         );
         let work = Listed::Work(work.unwrap());
@@ -649,7 +640,12 @@ mod tests {
         let full = Listed::Work(Work::new(many, vec![], more).unwrap());
         assert_eq!(Listed::of(full.answer()), Ok(full));
         let off = Listed::Work(
-            Work::new(Issues::Off, vec![pull(524, None, false)], More::default()).unwrap(),
+            Work::new(
+                Issues::Off,
+                vec![pull(524, None, Some(Mergeability::Mergeable))],
+                More::default(),
+            )
+            .unwrap(),
         );
         assert_eq!(
             Listed::of(off.answer()),
@@ -667,6 +663,22 @@ mod tests {
         assert_eq!(
             Work::of(said),
             Err("issues: neither open nor off".to_owned())
+        );
+        let bad_mergeability = SaidWork {
+            issues: Some(SaidIssues::Off(())),
+            pulls: vec![SaidPull {
+                number: 1,
+                title: "t".to_owned(),
+                draft: false,
+                branch: "b".to_owned(),
+                author: None,
+                mergeability: 99,
+            }],
+            more_pulls: false,
+        };
+        assert_eq!(
+            Work::of(bad_mergeability),
+            Err("unknown mergeability 99".to_owned())
         );
     }
 
@@ -727,13 +739,12 @@ mod tests {
             number: NonZeroU32::new(9).unwrap(),
             title: "t".to_owned(),
             draft: false,
-            branch: branch.to_owned(),
+            branch: said(branch),
             author: author.map(str::to_owned),
-            conflicting: false,
+            mergeability: None,
         };
         let long = "b".repeat(NAME_BYTES_MAX + 1);
         let refused = [
-            (pull("", None), "#9: its branch is empty"),
             (pull(&long, None), "#9: its branch is longer than 256 bytes"),
             (pull("b", Some("")), "#9: its author is empty"),
         ];
@@ -741,6 +752,22 @@ mod tests {
         for (pull, why) in refused {
             assert_eq!(work(Issues::Off, vec![pull]), Err(why.to_owned()));
         }
+        let empty_branch = SaidWork {
+            issues: Some(SaidIssues::Off(())),
+            pulls: vec![SaidPull {
+                number: 9,
+                title: "t".to_owned(),
+                draft: false,
+                branch: String::new(),
+                author: None,
+                mergeability: 0,
+            }],
+            more_pulls: false,
+        };
+        assert_eq!(
+            Work::of(empty_branch),
+            Err("#9: its branch is empty".to_owned())
+        );
         let labelled = |label: &str| {
             Issues::Open(vec![Issue {
                 labels: vec![label.to_owned()],
@@ -882,15 +909,47 @@ mod tests {
                 r#"{{"number":12,"title":"Fix","isDraft":false,"headRefName":"fix","author":null{extra}}}"#
             );
             serde_json::from_str::<ListedPull>(&said)
-                .map(|pull| pull.mergeable.is_some_and(Mergeability::is_conflicting))
+                .map(|pull| pull.mergeable.map(GhMergeability::into_protocol))
                 .map_err(|error| error.to_string())
         };
-        assert_eq!(read(r#","mergeable":"CONFLICTING""#), Ok(true));
-        assert_eq!(read(r#","mergeable":"MERGEABLE""#), Ok(false));
-        assert_eq!(read(r#","mergeable":"UNKNOWN""#), Ok(false));
-        assert_eq!(read(r#","mergeable":null"#), Ok(false));
-        assert_eq!(read(""), Ok(false));
+        assert_eq!(
+            read(r#","mergeable":"CONFLICTING""#),
+            Ok(Some(Mergeability::Conflicting))
+        );
+        assert_eq!(
+            read(r#","mergeable":"MERGEABLE""#),
+            Ok(Some(Mergeability::Mergeable))
+        );
+        assert_eq!(
+            read(r#","mergeable":"UNKNOWN""#),
+            Ok(Some(Mergeability::Unknown))
+        );
+        assert_eq!(read(r#","mergeable":null"#), Ok(None));
+        assert_eq!(read(""), Ok(None));
         assert!(read(r#","mergeable":"DIRTY""#).is_err());
         assert!(read(r#","mergeable":"conflicting""#).is_err());
+    }
+
+    #[test]
+    fn a_listing_with_unknown_mergeability_is_not_cached() {
+        let listed = |mergeability| {
+            let pull = Pull {
+                number: NonZeroU32::new(12).unwrap(),
+                title: "Fix".to_owned(),
+                draft: false,
+                branch: said("fix"),
+                author: None,
+                mergeability,
+            };
+            Ok(Listed::Work(
+                Work::new(Issues::Off, vec![pull], More::default()).unwrap(),
+            ))
+        };
+        assert!(!should_cache(&listed(Some(Mergeability::Unknown))));
+        assert!(should_cache(&listed(Some(Mergeability::Mergeable))));
+        assert!(should_cache(&listed(Some(Mergeability::Conflicting))));
+        assert!(should_cache(&listed(None)));
+        assert!(should_cache(&Ok(Listed::Unhosted)));
+        assert!(should_cache(&Err("gh failed".to_owned())));
     }
 }

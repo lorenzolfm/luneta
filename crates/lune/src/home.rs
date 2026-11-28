@@ -5,6 +5,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::projects::{Dir, ProjectId};
+use lune_protocol::github::Mergeability;
+use lune_protocol::said::Said;
 use luned::asks::Marked;
 use luned::work::{self, Issues, Item, Listed, Work};
 use ratatui::buffer::Buffer;
@@ -512,15 +514,17 @@ impl Home {
             let here = self.cursor == Some(Item::Pull(pull.number));
             at = at.or(here.then_some(lines.len()));
             let marked = self.marked.contains(&Item::Pull(pull.number));
-            let side = if pull.draft {
-                format!("{} · draft", pull.branch)
+            let plain;
+            let side = if pull.mergeability == Some(Mergeability::Conflicting) {
+                Side::Conflicting {
+                    branch: &pull.branch,
+                    draft: pull.draft,
+                }
+            } else if pull.draft {
+                plain = format!("{}{SIDE_SEPARATOR}draft", pull.branch);
+                Side::Plain(&plain)
             } else {
-                pull.branch.clone()
-            };
-            let side = if pull.conflicting {
-                Side::Conflicting(&side)
-            } else {
-                Side::Plain(&side)
+                Side::Plain(pull.branch.as_str())
             };
             lines.push(row(
                 width,
@@ -644,7 +648,7 @@ impl Homes {
 #[derive(Clone, Copy)]
 enum Side<'a> {
     Plain(&'a str),
-    Conflicting(&'a str),
+    Conflicting { branch: &'a Said, draft: bool },
 }
 
 fn row(
@@ -673,9 +677,13 @@ fn row(
     let room = width.saturating_sub(lead + 1);
     let side_width = match side {
         Side::Plain(text) => text.width(),
-        Side::Conflicting(text) => {
-            assert!(!text.is_empty(), "a conflicting pull request has a branch");
-            CONFLICTS.len() + SIDE_SEPARATOR.width() + text.width()
+        Side::Conflicting { branch, draft } => {
+            let draft = if draft {
+                SIDE_SEPARATOR.width() + "draft".len()
+            } else {
+                0
+            };
+            CONFLICTS.len() + SIDE_SEPARATOR.width() + branch.as_str().width() + draft
         }
     };
     let side_room = if side_width == 0 {
@@ -701,14 +709,16 @@ fn row(
         let shown_room = side_room - 2;
         match side {
             Side::Plain(text) => spans.push(Span::styled(sidebar::cut(text, shown_room), dim)),
-            Side::Conflicting(text) => {
+            Side::Conflicting { branch, draft } => {
                 let red = Style::new().fg(moonlight::RED);
                 if shown_room > CONFLICTS.len() {
                     spans.push(Span::styled(CONFLICTS, red));
-                    let rest = sidebar::cut(
-                        &format!("{SIDE_SEPARATOR}{text}"),
-                        shown_room - CONFLICTS.len(),
-                    );
+                    let rest = if draft {
+                        format!("{SIDE_SEPARATOR}{branch}{SIDE_SEPARATOR}draft")
+                    } else {
+                        format!("{SIDE_SEPARATOR}{branch}")
+                    };
+                    let rest = sidebar::cut(&rest, shown_room - CONFLICTS.len());
                     spans.push(Span::styled(rest, dim));
                 } else {
                     spans.push(Span::styled(sidebar::cut(CONFLICTS_CUT, shown_room), red));
@@ -731,6 +741,10 @@ mod tests {
         NonZeroU32::new(at).unwrap()
     }
 
+    fn said(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
     fn work(issues: &[(u32, &str, &[&str])], pulls: &[(u32, &str, &str, bool)]) -> Listed {
         let issues = issues.iter().map(|(at, title, labels)| Issue {
             number: number(*at),
@@ -741,9 +755,9 @@ mod tests {
             number: number(*at),
             title: (*title).to_owned(),
             draft: *draft,
-            branch: (*branch).to_owned(),
+            branch: said(branch),
             author: None,
-            conflicting: false,
+            mergeability: None,
         });
         Listed::Work(
             Work::new(
@@ -963,9 +977,9 @@ mod tests {
             number: number(524),
             title: "Say view, not pane".to_owned(),
             draft: false,
-            branch: "issue-511".to_owned(),
+            branch: said("issue-511"),
             author: None,
-            conflicting: false,
+            mergeability: None,
         };
         home.listed(
             Ok(Listed::Work(
@@ -1155,17 +1169,17 @@ mod tests {
                 number: number(524),
                 title: "Fix merge".to_owned(),
                 draft: false,
-                branch: "issue-511".to_owned(),
+                branch: said("issue-511"),
                 author: None,
-                conflicting: true,
+                mergeability: Some(Mergeability::Conflicting),
             },
             Pull {
                 number: number(526),
                 title: "Clean change".to_owned(),
                 draft: false,
-                branch: "issue-520".to_owned(),
+                branch: said("issue-520"),
                 author: None,
-                conflicting: false,
+                mergeability: Some(Mergeability::Mergeable),
             },
         ];
         home.listed(

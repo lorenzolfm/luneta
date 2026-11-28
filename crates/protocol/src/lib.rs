@@ -13,6 +13,7 @@ pub mod socket;
 pub mod turn;
 pub mod unread;
 pub mod watch;
+pub mod work;
 
 pub const TAILNET_PORT: u16 = 7473;
 

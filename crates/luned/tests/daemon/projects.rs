@@ -1298,15 +1298,19 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
             more: false
         }))
     );
-    let pull =
-        |number, title: &str, draft, branch: &str, author: Option<&str>, conflicting| ListedPull {
-            number,
-            title: title.to_owned(),
-            draft,
-            branch: branch.to_owned(),
-            author: author.map(str::to_owned),
-            conflicting,
-        };
+    let pull = |number,
+                title: &str,
+                draft,
+                branch: &str,
+                author: Option<&str>,
+                mergeability: luned::api::Mergeability| ListedPull {
+        number,
+        title: title.to_owned(),
+        draft,
+        branch: branch.to_owned(),
+        author: author.map(str::to_owned),
+        mergeability: mergeability.into(),
+    };
     assert_eq!(
         listed.pulls,
         [
@@ -1316,7 +1320,7 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
                 true,
                 "issue-511",
                 Some("lorenzolfm"),
-                true
+                luned::api::Mergeability::Conflicting
             ),
             pull(
                 526,
@@ -1324,7 +1328,7 @@ fn a_project_s_work_is_what_gh_lists_open_in_its_folder_on_its_machine() {
                 false,
                 "issue-523",
                 None,
-                false
+                luned::api::Mergeability::Mergeable
             ),
         ]
     );

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use lune_protocol::agent_status::{AgentStatus, BlockedReason};
-use lune_protocol::github::{PULL_REQUESTS_MAX, PullRequest};
+use lune_protocol::git::{GitStatus, Head, ParsedGitStatuses};
+use lune_protocol::github::ParsedPullRequests;
 use lune_protocol::made::Made;
 
 use crate::api::project::clone;
@@ -124,7 +125,6 @@ pub struct Worktree {
     pub folder: String,
     pub branch: Option<String>,
     pub seen: Seen,
-    pub conflicting: bool,
     pub views: Vec<View>,
 }
 
@@ -134,8 +134,8 @@ pub enum Seen {
     Unread,
     NoBranch,
     Working,
-    PullRequestOpen,
-    ChecksFailing,
+    PullRequestOpen { conflicting: bool },
+    ChecksFailing { conflicting: bool },
     Merged,
     Untold,
 }
@@ -306,24 +306,29 @@ fn held_of(seat: &Seat<'_>) -> Held {
         Some(projects::Held::Unkept(why)) => return Held::Unkept { why: why.clone() },
         None => return Held::Untold,
     };
-    let branches: HashMap<&str, &str> = seat
-        .git_statuses
+    let statuses = ParsedGitStatuses::of_api(seat.git_statuses);
+    let branches: HashMap<&str, &str> = statuses
+        .by_dir
         .iter()
-        .take(PULL_REQUESTS_MAX)
-        .filter_map(|status| match &status.stands {
-            Some(api::git_status::Stands::Checkout(api::Checkout {
-                head: Some(api::checkout::Head::Branch(branch)),
+        .filter_map(|(&dir, status)| match status {
+            GitStatus::Checkout {
+                head: Head::Branch { name, .. },
                 ..
-            })) => Some((status.dir.as_str(), branch.name.as_str())),
-            _ => None,
+            } => Some((dir, name.as_str())),
+            GitStatus::Outside
+            | GitStatus::NoCheckout { .. }
+            | GitStatus::Checkout {
+                head: Head::Detached,
+                ..
+            } => None,
         })
         .collect();
-    let conflicts: HashSet<&str> = seat
-        .pull_requests
+    let pulls = ParsedPullRequests::of_api(seat.pull_requests);
+    let conflicts: HashSet<&str> = pulls
+        .by_dir
         .iter()
-        .take(PULL_REQUESTS_MAX)
-        .filter(|pull| PullRequest::of_api(pull).is_some_and(|pull| pull.has_conflicts()))
-        .map(|pull| pull.dir.as_str())
+        .filter(|(_, pull)| pull.has_conflicts())
+        .map(|(&dir, _)| dir)
         .collect();
     let projects = kept
         .projects
@@ -378,32 +383,20 @@ fn worktree_of(
     branches: &HashMap<&str, &str>,
     conflicts: &HashSet<&str>,
 ) -> Worktree {
+    let conflicting = conflicts.contains(worktree.folder.as_str());
     let seen = match worktree.seen {
         Some(worktree::Seen::Missing(())) => Seen::Missing,
         Some(worktree::Seen::Unread(())) => Seen::Unread,
         Some(worktree::Seen::Stage(stage)) => match api::Stage::try_from(stage) {
             Ok(api::Stage::NoBranch) => Seen::NoBranch,
             Ok(api::Stage::Working) => Seen::Working,
-            Ok(api::Stage::PullRequestOpen) => Seen::PullRequestOpen,
-            Ok(api::Stage::ChecksFailing) => Seen::ChecksFailing,
+            Ok(api::Stage::PullRequestOpen) => Seen::PullRequestOpen { conflicting },
+            Ok(api::Stage::ChecksFailing) => Seen::ChecksFailing { conflicting },
             Ok(api::Stage::Merged) => Seen::Merged,
             Ok(api::Stage::Unspecified) | Err(_) => Seen::Untold,
         },
         None => Seen::Untold,
     };
-    let open_pull = match seen {
-        Seen::PullRequestOpen | Seen::ChecksFailing => true,
-        Seen::Missing
-        | Seen::Unread
-        | Seen::NoBranch
-        | Seen::Working
-        | Seen::Merged
-        | Seen::Untold => false,
-    };
-    let conflicting = open_pull && conflicts.contains(worktree.folder.as_str());
-    if conflicting {
-        assert!(matches!(seen, Seen::PullRequestOpen | Seen::ChecksFailing));
-    }
     Worktree {
         id: worktree.id,
         name: worktree.name.clone(),
@@ -413,7 +406,6 @@ fn worktree_of(
             .get(worktree.folder.as_str())
             .map(|&branch| branch.to_owned()),
         seen,
-        conflicting,
         views: worktree
             .terminals
             .iter()
@@ -709,6 +701,7 @@ mod tests {
         let head = Some(api::checkout::Head::Branch(branch));
         let checkout = api::Checkout {
             head,
+            changes: Some(api::Changes::default()),
             ..api::Checkout::default()
         };
         let host = api::Host {
@@ -730,13 +723,19 @@ mod tests {
 
     #[test]
     fn a_worktree_says_when_its_open_pull_request_has_merge_conflicts() {
-        let pull = |dir: &str, state: api::PullRequestState, conflicting| api::PullRequest {
-            dir: dir.to_owned(),
-            state: state.into(),
-            url: "https://github.com/o/r/pull/1".to_owned(),
-            checks: None,
-            stale: false,
-            conflicting,
+        use lune_protocol::github::{Mergeability, PullPage, PullRequest, State};
+
+        let open_pull = |dir: &str, draft, mergeability| {
+            PullRequest {
+                page: PullPage::parse("https://github.com/o/r/pull/1").unwrap(),
+                state: State::Open {
+                    draft,
+                    checks: None,
+                    mergeability,
+                },
+                stale: false,
+            }
+            .to_api(dir)
         };
         let worktree = |id, name: &str, seen| api::Worktree {
             seen,
@@ -753,18 +752,45 @@ mod tests {
             worktree(7, "unread", Some(worktree::Seen::Unread(()))),
             worktree(8, "detached", stage(api::Stage::NoBranch)),
             worktree(9, "untold", None),
+            worktree(10, "dup", stage(api::Stage::PullRequestOpen)),
+            worktree(11, "legacy", stage(api::Stage::PullRequestOpen)),
         ];
+        let conflicting = Some(Mergeability::Conflicting);
+        let mergeable = Some(Mergeability::Mergeable);
+        let corrupt_merged = api::PullRequest {
+            dir: "/w/lune/merged".to_owned(),
+            state: api::PullRequestState::Merged.into(),
+            url: "https://github.com/o/r/pull/1".to_owned(),
+            checks: None,
+            stale: false,
+            detail: Some(api::pull_request::Detail::Open(api::pull_request::Open {
+                draft: false,
+                checks: None,
+                mergeability: api::Mergeability::Conflicting.into(),
+            })),
+        };
+        let legacy_open = api::PullRequest {
+            dir: "/w/lune/legacy".to_owned(),
+            state: api::PullRequestState::Open.into(),
+            url: "https://github.com/o/r/pull/2".to_owned(),
+            checks: None,
+            stale: false,
+            detail: None,
+        };
         let host = api::Host {
             pull_requests: vec![
-                pull("/w/lune/open", api::PullRequestState::Open, true),
-                pull("/w/lune/draft", api::PullRequestState::Draft, true),
-                pull("/w/lune/clean", api::PullRequestState::Open, false),
-                pull("/w/lune/merged", api::PullRequestState::Merged, true),
-                pull("/w/lune/gone", api::PullRequestState::Open, true),
-                pull("/w/lune/working", api::PullRequestState::Open, true),
-                pull("/w/lune/unread", api::PullRequestState::Open, true),
-                pull("/w/lune/detached", api::PullRequestState::Open, true),
-                pull("/w/lune/untold", api::PullRequestState::Open, true),
+                open_pull("/w/lune/open", false, conflicting),
+                open_pull("/w/lune/draft", true, conflicting),
+                open_pull("/w/lune/clean", false, mergeable),
+                corrupt_merged,
+                open_pull("/w/lune/gone", false, conflicting),
+                open_pull("/w/lune/working", false, conflicting),
+                open_pull("/w/lune/unread", false, conflicting),
+                open_pull("/w/lune/detached", false, conflicting),
+                open_pull("/w/lune/untold", false, conflicting),
+                open_pull("/w/lune/dup", false, mergeable),
+                open_pull("/w/lune/dup", false, conflicting),
+                legacy_open,
             ],
             projects: Some(kept(vec![clone_of(worktrees)])),
             ..api::Host::default()
@@ -772,24 +798,26 @@ mod tests {
         let Held::Kept { projects } = &Model::of(&host).here else {
             panic!("the projects are kept");
         };
-        let conflicts: Vec<(&str, bool)> = projects[0]
+        let seen: Vec<(&str, Seen)> = projects[0]
             .holds
             .worktrees()
             .iter()
-            .map(|worktree| (worktree.name.as_str(), worktree.conflicting))
+            .map(|worktree| (worktree.name.as_str(), worktree.seen))
             .collect();
         assert_eq!(
-            conflicts,
+            seen,
             [
-                ("open", true),
-                ("draft", true),
-                ("clean", false),
-                ("merged", false),
-                ("gone", false),
-                ("working", false),
-                ("unread", false),
-                ("detached", false),
-                ("untold", false),
+                ("open", Seen::PullRequestOpen { conflicting: true }),
+                ("draft", Seen::ChecksFailing { conflicting: true }),
+                ("clean", Seen::PullRequestOpen { conflicting: false }),
+                ("merged", Seen::Merged),
+                ("gone", Seen::Missing),
+                ("working", Seen::Working),
+                ("unread", Seen::Unread),
+                ("detached", Seen::NoBranch),
+                ("untold", Seen::Untold),
+                ("dup", Seen::PullRequestOpen { conflicting: false }),
+                ("legacy", Seen::PullRequestOpen { conflicting: false }),
             ]
         );
     }

@@ -1103,8 +1103,8 @@ impl Stage {
         match (pull_request.state, pull_request.verdict()) {
             (State::Merged, _) => Stage::Merged,
             (State::Closed, _) => Stage::Working,
-            (State::Open | State::Draft, Some(Verdict::Failing)) => Stage::ChecksFailing,
-            (State::Open | State::Draft, Some(Verdict::Pending | Verdict::Passing) | None) => {
+            (State::Open { .. }, Some(Verdict::Failing)) => Stage::ChecksFailing,
+            (State::Open { .. }, Some(Verdict::Pending | Verdict::Passing) | None) => {
                 Stage::PullRequestOpen
             }
         }
@@ -4352,19 +4352,12 @@ mod tests {
         );
     }
 
-    fn pull_request(state: State, failed: u32) -> PullRequest {
-        let checks = Some(Checks {
-            pending: 0,
-            failed,
-            passed: 1,
-        });
+    fn pull_request(state: State) -> PullRequest {
         let page = PullPage::parse("https://github.com/o/r/pull/1").unwrap();
         PullRequest {
             page,
             state,
-            checks,
             stale: false,
-            conflicting: false,
         }
     }
 
@@ -4389,18 +4382,27 @@ mod tests {
     #[test]
     fn the_stage_is_read_off_the_branch_and_its_pull_request() {
         let branch = Some("issue-1");
-        let stage = |state, failed| Stage::of(branch, Some(&pull_request(state, failed)));
+        let open = |draft, failed| State::Open {
+            draft,
+            checks: Some(Checks {
+                pending: 0,
+                failed,
+                passed: 1,
+            }),
+            mergeability: None,
+        };
+        let stage = |state| Stage::of(branch, Some(&pull_request(state)));
         assert_eq!(Stage::of(None, None), Stage::NoBranch);
         assert_eq!(
-            Stage::of(None, Some(&pull_request(State::Merged, 0))),
+            Stage::of(None, Some(&pull_request(State::Merged))),
             Stage::NoBranch
         );
         assert_eq!(Stage::of(branch, None), Stage::Working);
-        assert_eq!(stage(State::Open, 0), Stage::PullRequestOpen);
-        assert_eq!(stage(State::Draft, 0), Stage::PullRequestOpen);
-        assert_eq!(stage(State::Open, 1), Stage::ChecksFailing);
-        assert_eq!(stage(State::Closed, 1), Stage::Working);
-        assert_eq!(stage(State::Merged, 1), Stage::Merged);
+        assert_eq!(stage(open(false, 0)), Stage::PullRequestOpen);
+        assert_eq!(stage(open(true, 0)), Stage::PullRequestOpen);
+        assert_eq!(stage(open(false, 1)), Stage::ChecksFailing);
+        assert_eq!(stage(State::Closed), Stage::Working);
+        assert_eq!(stage(State::Merged), Stage::Merged);
     }
 
     #[test]
