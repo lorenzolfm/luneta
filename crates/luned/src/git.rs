@@ -908,6 +908,7 @@ pub(crate) fn says_within<S: AsRef<OsStr>>(
 }
 
 pub fn is_clean(dir: &str) -> Result<bool, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
     let asked = [
         "--porcelain",
         "--untracked-files=normal",
@@ -918,14 +919,19 @@ pub fn is_clean(dir: &str) -> Result<bool, String> {
 }
 
 pub fn head_oid(dir: &str) -> Result<String, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
     let oid = says(dir, "rev-parse", &["--verify"], &["HEAD"])?;
     if oid.is_empty() {
         return Err(format!("git rev-parse HEAD in {dir} returned empty output"));
     }
+    assert_ne!(oid, "");
     Ok(oid)
 }
 
 pub fn is_ancestor(dir: &str, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    assert!(!ancestor.is_empty(), "ancestor ref is non-empty");
+    assert!(!descendant.is_empty(), "descendant ref is non-empty");
     let mut git = Git::at(dir, "merge-base");
     git.arg("--is-ancestor");
     let ran = git
@@ -938,13 +944,14 @@ pub fn is_ancestor(dir: &str, ancestor: &str, descendant: &str) -> Result<bool, 
         Ran::Ended { status, .. } if status.code() == Some(0) => Ok(true),
         Ran::Ended { status, .. } if status.code() == Some(1) => Ok(false),
         other => match other.answer() {
-            Ok(_) => Ok(true),
+            Ok(_) => unreachable!("git merge-base --is-ancestor succeeded with an exit code not 0"),
             Err(why) => Err(format!("git merge-base --is-ancestor in {dir}: {why}")),
         },
     }
 }
 
 pub fn rebase_in_progress(dir: &str) -> Result<bool, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
     let said = says(
         dir,
         "rev-parse",
@@ -970,21 +977,38 @@ pub fn rebase_in_progress(dir: &str) -> Result<bool, String> {
     Ok(false)
 }
 
-fn upstream_oid(dir: &str) -> Result<Option<String>, String> {
+fn upstream_oid(dir: &str, branch: &str) -> Result<Option<String>, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    assert!(!branch.is_empty(), "branch name is non-empty");
+    let local = format!("refs/heads/{branch}");
+    let upstream = says(dir, "for-each-ref", &["--format=%(upstream)"], &[local])?;
+    let upstream = upstream.trim();
+    if upstream.is_empty() {
+        return Ok(None);
+    }
+    let commit = format!("{upstream}^{{commit}}");
     let mut git = Git::at(dir, "rev-parse");
     git.args(["--verify", "--quiet"]);
     let ran = git
-        .named(["@{u}"])
+        .named([commit.as_str()])
         .run(LIMIT)
-        .map_err(|error| format!("git rev-parse @{{u}} in {dir} could not be run: {error}"))?;
+        .map_err(|error| format!("git rev-parse {upstream} in {dir} could not be run: {error}"))?;
     match ran {
-        Ran::Ended { status, stdout, .. } if status.success() => Ok(one_line(stdout)),
-        Ran::Ended { .. } => Ok(None),
-        Ran::Stuck => Err(format!("git rev-parse @{{u}} in {dir} timed out")),
+        Ran::Ended { status, stdout, .. } if status.success() => match one_line(stdout) {
+            Some(oid) => Ok(Some(oid)),
+            None => Err(format!("git rev-parse {upstream} in {dir} said no oid")),
+        },
+        Ran::Ended { status, .. } if status.code() == Some(1) => Ok(None),
+        other => match other.answer() {
+            Ok(_) => unreachable!("git rev-parse --verify succeeded with an exit code not 0"),
+            Err(why) => Err(format!("git rev-parse {upstream} in {dir}: {why}")),
+        },
     }
 }
 
 fn push_remote(dir: &str, branch: &str) -> Result<String, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    assert!(!branch.is_empty(), "branch name is non-empty");
     for key in [
         format!("branch.{branch}.pushRemote"),
         "remote.pushDefault".to_owned(),
@@ -1003,6 +1027,7 @@ fn push_remote(dir: &str, branch: &str) -> Result<String, String> {
 }
 
 pub fn push_if_ahead(dir: &str) -> Result<String, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
     if !is_clean(dir)? {
         return Err(
             "working tree is not clean; commit or discard changes before pushing".to_owned(),
@@ -1012,7 +1037,9 @@ pub fn push_if_ahead(dir: &str) -> Result<String, String> {
         return Err(format!("{dir} is not on a branch"));
     };
     let head = head_oid(dir)?;
-    if upstream_oid(dir)?.is_some() {
+    let remote = push_remote(dir, &branch)?;
+    let refspec = format!("refs/heads/{branch}");
+    if upstream_oid(dir, &branch)?.is_some() {
         let ahead_raw = says(dir, "rev-list", &["--count"], &["@{u}..HEAD"])?;
         let ahead: u64 = ahead_raw
             .parse()
@@ -1022,14 +1049,12 @@ pub fn push_if_ahead(dir: &str) -> Result<String, String> {
         }
         let git = Git::at(dir, "push");
         let ran = git
-            .named(std::iter::empty::<&str>())
+            .named([remote.as_str(), refspec.as_str()])
             .run_alone(PUSH_LIMIT)
             .map_err(|error| format!("git push in {dir} could not be run: {error}"))?;
         ran.answer()
             .map_err(|why| format!("git push in {dir}: {why}"))?;
     } else {
-        let remote = push_remote(dir, &branch)?;
-        let refspec = format!("refs/heads/{branch}");
         let mut git = Git::at(dir, "push");
         git.arg("-u");
         let ran = git
@@ -1039,10 +1064,14 @@ pub fn push_if_ahead(dir: &str) -> Result<String, String> {
         ran.answer()
             .map_err(|why| format!("git push -u in {dir}: {why}"))?;
     }
-    head_oid(dir)
+    let after = head_oid(dir)?;
+    assert_ne!(after, "");
+    Ok(after)
 }
 
-pub fn push_force_with_lease(dir: &str) -> Result<String, String> {
+pub fn push_force_with_lease(dir: &str, expected_head: &str) -> Result<String, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    assert!(!expected_head.is_empty(), "the head to push is named");
     if !is_clean(dir)? {
         return Err(
             "working tree is not clean; commit or discard changes before pushing".to_owned(),
@@ -1051,16 +1080,19 @@ pub fn push_force_with_lease(dir: &str) -> Result<String, String> {
     let Some(branch) = branch(dir)? else {
         return Err(format!("{dir} is not on a branch"));
     };
+    let head = head_oid(dir)?;
+    if head != expected_head {
+        return Err(format!(
+            "HEAD moved to {head} after the rebase was checked at {expected_head}; not pushing"
+        ));
+    }
     let remote = push_remote(dir, &branch)?;
     let refspec = format!("refs/heads/{branch}");
     let mut git = Git::at(dir, "push");
-    match upstream_oid(dir)? {
-        Some(remote_oid) => {
-            git.leased(&branch, &remote_oid);
-        }
-        None => {
-            git.args(["--force-with-lease", "-u"]);
-        }
+    let upstream = upstream_oid(dir, &branch)?;
+    git.leased(&branch, upstream.as_deref().unwrap_or(""));
+    if upstream.is_none() {
+        git.arg("-u");
     }
     let ran = git
         .named([remote.as_str(), refspec.as_str()])
@@ -1070,7 +1102,9 @@ pub fn push_force_with_lease(dir: &str) -> Result<String, String> {
         })?;
     ran.answer()
         .map_err(|why| format!("git push --force-with-lease in {dir}: {why}"))?;
-    head_oid(dir)
+    let after = head_oid(dir)?;
+    assert_ne!(after, "");
+    Ok(after)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -5539,7 +5573,8 @@ mod tests {
         scratch(&work, &["commit", "-q", "--amend", "-m", "feat amended"]).unwrap();
         let amended_oid = head_oid(work_str).unwrap();
         assert_ne!(amended_oid, feat_oid);
-        let leased = push_force_with_lease(work_str).unwrap();
+        assert!(push_force_with_lease(work_str, &feat_oid).is_err());
+        let leased = push_force_with_lease(work_str, &amended_oid).unwrap();
         assert_eq!(leased, amended_oid);
         let remote_feat = String::from_utf8(
             scratch(

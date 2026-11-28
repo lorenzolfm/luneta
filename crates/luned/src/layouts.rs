@@ -161,6 +161,10 @@ pub enum Command {
         view: ViewId,
         answer: oneshot::Sender<Result<(), String>>,
     },
+    StepRunning {
+        view: ViewId,
+        answer: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -444,6 +448,7 @@ pub fn start(
         resume_store,
         resume_synth: Synthesizer::default(),
         flows: None,
+        pending_flow_exits: BTreeMap::new(),
     };
     let thread = thread::Builder::new().name("layouts".to_owned());
     thread.spawn(move || run(layouts, &commands, sweep))?;
@@ -472,6 +477,7 @@ struct Layouts {
     resume_store: ResumeStore,
     resume_synth: Synthesizer,
     flows: Option<SyncSender<crate::flows::Command>>,
+    pending_flow_exits: BTreeMap<ViewId, lune_domain::flows::TerminalExit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -686,6 +692,7 @@ fn run(mut layouts: Layouts, commands: &Receiver<Command>, sweep: Duration) {
         layouts.restore();
         layouts.type_due();
         layouts.settle();
+        layouts.flush_flow_exits();
         layouts.tell_core();
         layouts.troubles.done();
     }
@@ -821,6 +828,7 @@ impl Layouts {
             }
             Command::AttachFlows(flows) => {
                 self.flows = Some(flows);
+                self.flush_flow_exits();
             }
             Command::OpenNamedTerminal {
                 worktree,
@@ -832,6 +840,9 @@ impl Layouts {
             }
             Command::FocusView { view, answer } => {
                 let _ = answer.send(self.socket_focus_pane(view));
+            }
+            Command::StepRunning { view, answer } => {
+                let _ = answer.send(self.step_running(view));
             }
             Command::Rooted { root, listed } => {
                 let rooted = Change::Rooted {
@@ -1767,11 +1778,14 @@ impl Layouts {
             placed,
             size,
         })?;
-        if let Some(parsed_name) = stage_view_name(name) {
-            let _ = self.changed(Change::RenameTerminal {
+        if let Some(parsed_name) = stage_view_name(name)
+            && let Err(why) = self.changed(Change::RenameTerminal {
                 terminal: view,
                 to: Some(parsed_name),
-            });
+            })
+        {
+            self.troubles
+                .say(format!("flow view {view} could not be renamed: {why}"));
         }
         self.spawned(terminal, &cwd, opens, inner)?;
         for client in self.clients.values_mut() {
@@ -1786,6 +1800,70 @@ impl Layouts {
             }
         }
         Ok(view)
+    }
+
+    fn step_running(&self, view: ViewId) -> bool {
+        let Some(known) = self
+            .known
+            .iter()
+            .find(|(terminal, _)| terminal.view() == view)
+            .map(|(_, known)| known)
+        else {
+            return false;
+        };
+        let Some(listed) = self.listed.get(&known.key) else {
+            return matches!(known.heard, Heard::Made(_));
+        };
+        match &listed.is {
+            Is::Ended(_) => false,
+            Is::Running { front: None, .. } => true,
+            Is::Running {
+                front: Some(front), ..
+            } => front.argv.get(1).is_some_and(|word| word == "_step"),
+        }
+    }
+
+    fn queue_flow_exit(&mut self, view: ViewId, exit: lune_domain::flows::TerminalExit) {
+        if !self.pending_flow_exits.contains_key(&view)
+            && self.pending_flow_exits.len() >= VIEWS_MAX
+        {
+            self.troubles.say(format!(
+                "flow exit queue reached limit of {VIEWS_MAX}; dropping oldest pending exit"
+            ));
+            let _ = self.pending_flow_exits.pop_first();
+        }
+        self.pending_flow_exits.insert(view, exit);
+        assert!(self.pending_flow_exits.len() <= VIEWS_MAX);
+    }
+
+    fn flush_flow_exits(&mut self) {
+        if self.pending_flow_exits.is_empty() {
+            return;
+        }
+        let Some(flows) = self.flows.clone() else {
+            return;
+        };
+        let pending: Vec<(ViewId, lune_domain::flows::TerminalExit)> = self
+            .pending_flow_exits
+            .iter()
+            .map(|(&view, &exit)| (view, exit))
+            .collect();
+        assert!(pending.len() <= VIEWS_MAX);
+        for (view, exit) in pending {
+            match flows.try_send(crate::flows::Command::TerminalExited { view, exit }) {
+                Ok(()) => {
+                    self.pending_flow_exits.remove(&view);
+                }
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Disconnected(_)) => {
+                    self.troubles
+                        .say("flows actor stopped while delivering terminal exit".to_owned());
+                    self.flows = None;
+                    self.pending_flow_exits.clear();
+                    break;
+                }
+            }
+        }
     }
 
     fn kept(&self) -> Result<&Projects, String> {
@@ -3024,19 +3102,23 @@ impl Layouts {
             "no two terminals share a key of lune-mux"
         );
         let before = std::mem::replace(&mut self.listed, terminals);
-        if let Some(flows) = &self.flows {
-            for (&terminal, known) in &self.known {
-                if let Some(now_term) = self.listed.get(&known.key)
-                    && let Is::Ended(exit) = now_term.is
-                    && before
+        if self.flows.is_some() {
+            let newly_ended: Vec<(ViewId, lune_domain::flows::TerminalExit)> = self
+                .known
+                .iter()
+                .filter_map(|(&terminal, known)| {
+                    let Is::Ended(exit) = self.listed.get(&known.key)?.is else {
+                        return None;
+                    };
+                    let was_running = before
                         .get(&known.key)
-                        .is_none_or(|was| !matches!(was.is, Is::Ended(_)))
-                {
-                    let _ = flows.try_send(crate::flows::Command::TerminalExited {
-                        view: terminal.view(),
-                        exit,
-                    });
-                }
+                        .is_none_or(|was| !matches!(was.is, Is::Ended(_)));
+                    was_running.then_some((terminal.view(), exit))
+                })
+                .collect();
+            assert!(newly_ended.len() <= self.known.len());
+            for (view, exit) in newly_ended {
+                self.queue_flow_exit(view, exit);
             }
             for &terminal in &ended {
                 let already_ended = before_keys
@@ -3044,12 +3126,13 @@ impl Layouts {
                     .and_then(|key| before.get(key))
                     .is_some_and(|was| matches!(was.is, Is::Ended(_)));
                 if !already_ended {
-                    let _ = flows.try_send(crate::flows::Command::TerminalExited {
-                        view: terminal.view(),
-                        exit: lune_domain::flows::TerminalExit::Unknown,
-                    });
+                    self.queue_flow_exit(
+                        terminal.view(),
+                        lune_domain::flows::TerminalExit::Unknown,
+                    );
                 }
             }
+            self.flush_flow_exits();
         }
         for terminal in ended {
             if let Err(failed) = self.closed(terminal.view()) {

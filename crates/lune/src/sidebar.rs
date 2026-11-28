@@ -11,7 +11,7 @@ use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
 use lune_domain::projects::{self, Argv, Dir, Opens, ProjectId, Used, ViewId};
 use lune_domain::projects::{Arranged, ProjectName, WorktreeId};
-use lune_domain::rows::{self, FlowSummary, Told};
+use lune_domain::rows::{self, FlowRow, Told};
 use lune_protocol::agent_status::AgentStatus;
 use lune_protocol::git::{Changed, Changes, GitStatus, Head, Upstream};
 use lune_protocol::github::{PullRequest, State, Verdict};
@@ -719,7 +719,7 @@ enum Row {
         waiting: usize,
         dot: bool,
         busy: bool,
-        flow: Option<Box<FlowSummary>>,
+        flow: Option<Box<FlowRow>>,
     },
     View {
         machine: Machine,
@@ -1018,7 +1018,7 @@ struct KnownWorktree {
     used: Option<Used>,
     terminals: Vec<KnownTerminal>,
     arranged: Option<Arranged>,
-    flow: Option<Box<FlowSummary>>,
+    flow: Option<Box<FlowRow>>,
 }
 
 impl KnownWorktree {
@@ -4351,7 +4351,7 @@ impl Sidebar {
         Some(Target::View(machine.clone(), row))
     }
 
-    fn worktree_flow(&self, machine: &Machine, place: &WorktreePlace) -> Option<Box<FlowSummary>> {
+    fn worktree_flow(&self, machine: &Machine, place: &WorktreePlace) -> Option<Box<FlowRow>> {
         let known = shelf(&self.shelves, machine)
             .iter()
             .find(|it| it.project.id() == place.project.id())?;
@@ -7196,7 +7196,7 @@ fn checkout_line(
     (Line::from(spans), number, room)
 }
 
-fn flow_line(here: bool, flow: &FlowSummary, width: usize) -> Line<'static> {
+fn flow_line(here: bool, flow: &FlowRow, width: usize) -> Line<'static> {
     let (glyph, style) = match flow.badge_kind {
         FlowBadgeKind::Running => ("▸ ", Style::new().fg(moonlight::CYAN)),
         FlowBadgeKind::WaitingInteractive => ("◈ ", Style::new().fg(ACCENT)),

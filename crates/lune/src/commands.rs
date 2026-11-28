@@ -162,7 +162,7 @@ pub enum Command {
             value_enum,
             help = "Agent harness for `lune flow start`: claude, pi, or agy"
         )]
-        harness: Option<flow::HarnessArg>,
+        harness: Option<crate::step::StepHarness>,
     },
     #[command(
         about = "Open a browser view in the current worktree, or the start page when no URL is \

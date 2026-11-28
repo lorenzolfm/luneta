@@ -23,11 +23,11 @@ pub struct ShipOptions {
 }
 
 impl ShipOptions {
-    fn mode(&self) -> luned::api::FlowMode {
+    fn mode(&self) -> lune_domain::flows::FlowMode {
         if self.interactive {
-            luned::api::FlowMode::Interactive
+            lune_domain::flows::FlowMode::Interactive
         } else {
-            luned::api::FlowMode::Unattended
+            lune_domain::flows::FlowMode::Unattended
         }
     }
 }
@@ -244,7 +244,7 @@ fn started(what: &str, ship: Option<&ShipOptions>, path: &Path) -> Result<Starte
 fn start_ship_flow(
     path: &Path,
     worktree: WorktreeId,
-    opts: &ShipOptions,
+    options: &ShipOptions,
     prompt: Option<String>,
     label: &dyn std::fmt::Display,
 ) -> Left {
@@ -252,9 +252,9 @@ fn start_ship_flow(
     match flow::start_on(
         path,
         worktree,
-        opts.mode(),
+        options.mode(),
         harness,
-        opts.flow.clone(),
+        options.flow.clone(),
         prompt,
     ) {
         Ok(_) => Left::Done,

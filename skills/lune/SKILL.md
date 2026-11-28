@@ -59,6 +59,10 @@ lune info
 - `flow` starts, inspects, or controls worktree flows (implement, review skills,
   CI fixes, rebases, and PR merge). Without an action it prints the flow on the
   current worktree or lists all active flows; it exits 5 where no luned runs.
+  A control the flow does not offer at that moment (its `controls:` line) is
+  refused. `pause`, `takeover` and `abort` stop an unattended step that is
+  running; `resume`, `retry` and `skip` refuse while a stopped step is still
+  ending, so run them again once its view says it ended.
 - `browse` opens an embedded browser view beside your view (or in the current
   worktree), on `<url>` or the start page when omitted.
 - `agents` lists the agents that run on this machine.

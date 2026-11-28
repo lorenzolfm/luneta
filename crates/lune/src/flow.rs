@@ -3,10 +3,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::ValueEnum;
+use lune_domain::flows;
 use lune_domain::projects::WorktreeId;
 use luned::api::{
-    self, ControlFlowRequest, FlowControl, FlowMode, FlowSummary, ListFlowsRequest,
-    ListFlowsResponse, StartFlowRequest, start_flow_request,
+    self, ControlFlowRequest, FlowControl, FlowSummary, ListFlowsRequest, ListFlowsResponse,
 };
 
 use crate::agents::{Harness, Kept};
@@ -14,6 +14,7 @@ use crate::daemon;
 use crate::machines::Machine;
 use crate::reach::{self, Luned};
 use crate::state;
+use crate::step::StepHarness;
 use crate::worktrees;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -31,30 +32,13 @@ pub enum Action {
     Abort,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum HarnessArg {
-    Claude,
-    Pi,
-    Agy,
-}
-
-impl HarnessArg {
-    fn to_harness(self) -> Harness {
-        match self {
-            HarnessArg::Claude => Harness::ClaudeCode,
-            HarnessArg::Pi => Harness::Pi,
-            HarnessArg::Agy => Harness::Antigravity,
-        }
-    }
-}
-
 pub struct Args {
     pub action: Option<Action>,
     pub dir: Option<PathBuf>,
     pub prompt: Option<String>,
     pub flow: Option<String>,
     pub interactive: bool,
-    pub harness: Option<HarnessArg>,
+    pub harness: Option<StepHarness>,
 }
 
 pub fn run(args: &Args, folder: &Path) -> ExitCode {
@@ -149,23 +133,12 @@ pub fn run(args: &Args, folder: &Path) -> ExitCode {
 pub fn start_on(
     folder: &Path,
     worktree: WorktreeId,
-    mode: FlowMode,
+    mode: flows::FlowMode,
     harness: Harness,
     flow_name: Option<String>,
     prompt: Option<String>,
 ) -> Result<Option<FlowSummary>, String> {
-    let entry = match prompt {
-        Some(prompt) => start_flow_request::Entry::ImplementPrompt(prompt),
-        None => start_flow_request::Entry::PullRequest(()),
-    };
-    let request = StartFlowRequest {
-        on: None,
-        worktree: worktree.get(),
-        flow_name,
-        mode: mode.into(),
-        harness: harness.to_api().into(),
-        entry: Some(entry),
-    };
+    let request = flows::start_request(worktree, mode, harness, flow_name, prompt);
     Luned::at(folder, &Machine::Local, reach::ANSWER)?.start_flow(request)
 }
 
@@ -193,8 +166,9 @@ fn status(
 ) -> Result<(), String> {
     let response = fetch_list(tasks, daemon)?;
     print_warnings(&response.config_warnings);
-    match resolve_worktree(folder, dir) {
-        Ok(worktree) => {
+    let (target, found) = worktree_of(folder, dir)?;
+    match (found, dir) {
+        (Some(worktree), _) => {
             let found = response
                 .flows
                 .iter()
@@ -203,20 +177,18 @@ fn status(
                 Some(flow) => print_summary_detail(flow),
                 None => println!("no active flow on worktree {}", worktree.get()),
             }
-            Ok(())
         }
-        Err(_) if dir.is_none() => {
+        (None, None) => {
             if response.flows.is_empty() {
                 println!("no active flows");
-            } else {
-                for flow in &response.flows {
-                    print_summary_line(flow);
-                }
             }
-            Ok(())
+            for flow in &response.flows {
+                print_summary_line(flow);
+            }
         }
-        Err(why) => Err(why),
+        (None, Some(_)) => return Err(unkept(&target)),
     }
+    Ok(())
 }
 
 fn start(
@@ -228,25 +200,20 @@ fn start(
     let worktree = resolve_worktree(folder, args.dir.as_deref())?;
     let harness = args.harness.map_or_else(
         || Kept::shared(&state::Folder::of_user()).0.harness(),
-        HarnessArg::to_harness,
+        StepHarness::into_harness,
     );
     let mode = if args.interactive {
-        FlowMode::Interactive
+        flows::FlowMode::Interactive
     } else {
-        FlowMode::Unattended
+        flows::FlowMode::Unattended
     };
-    let entry = match &args.prompt {
-        Some(prompt) => start_flow_request::Entry::ImplementPrompt(prompt.clone()),
-        None => start_flow_request::Entry::PullRequest(()),
-    };
-    let request = StartFlowRequest {
-        on: None,
-        worktree: worktree.get(),
-        flow_name: args.flow.clone(),
-        mode: mode.into(),
-        harness: harness.to_api().into(),
-        entry: Some(entry),
-    };
+    let request = flows::start_request(
+        worktree,
+        mode,
+        harness,
+        args.flow.clone(),
+        args.prompt.clone(),
+    );
     let response = tasks
         .block_on(daemon.start_flow(luned::ANSWER, request))
         .map_err(|unasked| unasked.said(None))?;
@@ -290,6 +257,18 @@ fn fetch_list(
 }
 
 fn resolve_worktree(folder: &Path, dir: Option<&Path>) -> Result<WorktreeId, String> {
+    let (target, found) = worktree_of(folder, dir)?;
+    found.ok_or_else(|| unkept(&target))
+}
+
+fn unkept(target: &Path) -> String {
+    format!(
+        "{} is in no worktree luned keeps; start it with `lune start` first",
+        target.display()
+    )
+}
+
+fn worktree_of(folder: &Path, dir: Option<&Path>) -> Result<(PathBuf, Option<WorktreeId>), String> {
     let target = match dir {
         Some(dir) => dir.to_path_buf(),
         None => env::current_dir().map_err(|error| format!("no working directory: {error}"))?,
@@ -299,21 +278,16 @@ fn resolve_worktree(folder: &Path, dir: Option<&Path>) -> Result<WorktreeId, Str
     let mut best: Option<(usize, WorktreeId)> = None;
     for project in &projects {
         for worktree in project.worktrees() {
-            let wt_path = Path::new(worktree.folder.as_str());
-            if real.starts_with(wt_path) {
-                let len = worktree.folder.as_str().len();
-                if best.is_none_or(|(best_len, _)| len > best_len) {
-                    best = Some((len, worktree.id));
+            let held = Path::new(worktree.folder.as_str());
+            if real.starts_with(held) {
+                let depth = worktree.folder.as_str().len();
+                if best.is_none_or(|(deepest, _)| depth > deepest) {
+                    best = Some((depth, worktree.id));
                 }
             }
         }
     }
-    best.map(|(_, id)| id).ok_or_else(|| {
-        format!(
-            "{} is in no worktree luned keeps; start it with `lune start` first",
-            real.display()
-        )
-    })
+    Ok((real, best.map(|(_, id)| id)))
 }
 
 fn print_warnings(warnings: &[String]) {
@@ -338,7 +312,7 @@ fn print_summary_detail(flow: &FlowSummary) {
     println!("flow: {} ({})", flow.flow_name, mode_label(flow.mode));
     println!(
         "stage: {}/{} {}",
-        flow.step_index, flow.step_total, flow.stage_label
+        flow.step_number, flow.step_total, flow.stage_label
     );
     println!("status: {}", flow.badge);
     if let Some(reason) = &flow.pause_reason {
@@ -365,9 +339,10 @@ fn print_summary_detail(flow: &FlowSummary) {
 }
 
 fn mode_label(raw: i32) -> &'static str {
-    match FlowMode::try_from(raw) {
-        Ok(FlowMode::Interactive) => "interactive",
-        Ok(FlowMode::Unattended | FlowMode::Unspecified) | Err(_) => "unattended",
+    match flows::FlowMode::of_api(raw) {
+        Ok(flows::FlowMode::Interactive) => "interactive",
+        Ok(flows::FlowMode::Unattended) => "unattended",
+        Err(_) => "unknown mode",
     }
 }
 

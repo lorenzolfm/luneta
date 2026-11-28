@@ -6,9 +6,9 @@ use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use lune_domain::flows::{
-    DEFAULT_CI_SETTLE_SECS, DEFAULT_FIX_CHECKS_ATTEMPTS_MAX, DEFAULT_FLOW_NAME,
-    DEFAULT_REBASE_ATTEMPTS_MAX, DEFAULT_STEP_TIMEOUT_SECS, FlowSpec, InteractiveLandPolicy,
-    StageKind, StageSpec,
+    CI_SETTLE_SECS_DEFAULT, FIX_CHECKS_ATTEMPTS_MAX_DEFAULT, FLOW_NAME_DEFAULT, FlowSpec,
+    InteractiveLandPolicy, MergeMethod, REBASE_ATTEMPTS_MAX_DEFAULT, STAGES_MAX,
+    STEP_TIMEOUT_SECS_DEFAULT, StageKind, StageSpec,
 };
 use toml::Value;
 
@@ -16,8 +16,14 @@ const CONFIG_BYTES_MAX: usize = 1024 * 1024;
 
 const FLOWS_DEFINED_MAX: usize = 64;
 
+const FLOWS_TABLE_ENTRIES_MAX: usize = 256;
+
+const CONFIG_WARNINGS_MAX: usize = 64;
+
 const _: () = assert!(CONFIG_BYTES_MAX > 0);
 const _: () = assert!(FLOWS_DEFINED_MAX > 0);
+const _: () = assert!(FLOWS_TABLE_ENTRIES_MAX >= FLOWS_DEFINED_MAX);
+const _: () = assert!(CONFIG_WARNINGS_MAX > 0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadedFlows {
@@ -28,7 +34,7 @@ pub struct LoadedFlows {
 impl Default for LoadedFlows {
     fn default() -> Self {
         let mut specs = BTreeMap::new();
-        specs.insert(DEFAULT_FLOW_NAME.to_owned(), FlowSpec::default_spec());
+        specs.insert(FLOW_NAME_DEFAULT.to_owned(), FlowSpec::default_spec());
         LoadedFlows {
             specs,
             warnings: Vec::new(),
@@ -103,11 +109,21 @@ pub fn parse_flows_toml(content: &str) -> LoadedFlows {
             .push("[flows] must be a table of named flows".to_owned());
         return loaded;
     };
-    for (name, value) in flows_table {
+    for (seen, (name, value)) in flows_table.iter().enumerate() {
+        if seen >= FLOWS_TABLE_ENTRIES_MAX {
+            push_warning(
+                &mut loaded.warnings,
+                format!(
+                    "[flows] has more than {FLOWS_TABLE_ENTRIES_MAX} entries; remaining entries skipped"
+                ),
+            );
+            break;
+        }
         if loaded.specs.len() >= FLOWS_DEFINED_MAX && !loaded.specs.contains_key(name) {
-            loaded.warnings.push(format!(
-                "flow {name:?} skipped: exceeds limit of {FLOWS_DEFINED_MAX} flows"
-            ));
+            push_warning(
+                &mut loaded.warnings,
+                format!("flow {name:?} skipped: exceeds limit of {FLOWS_DEFINED_MAX} flows"),
+            );
             break;
         }
         match parse_flow_spec(name, value) {
@@ -115,11 +131,19 @@ pub fn parse_flows_toml(content: &str) -> LoadedFlows {
                 loaded.specs.insert(name.clone(), spec);
             }
             Err(why) => {
-                loaded.warnings.push(format!("flow {name:?}: {why}"));
+                push_warning(&mut loaded.warnings, format!("flow {name:?}: {why}"));
             }
         }
     }
+    assert!(loaded.specs.len() <= FLOWS_DEFINED_MAX);
+    assert!(loaded.warnings.len() <= CONFIG_WARNINGS_MAX);
     loaded
+}
+
+fn push_warning(warnings: &mut Vec<String>, message: String) {
+    if warnings.len() < CONFIG_WARNINGS_MAX {
+        warnings.push(message);
+    }
 }
 
 fn parse_flow_spec(name: &str, value: &Value) -> Result<FlowSpec, String> {
@@ -131,15 +155,15 @@ fn parse_flow_spec(name: &str, value: &Value) -> Result<FlowSpec, String> {
         Some(raw) => parse_stages(raw)?,
         None => default.stages,
     };
-    let rebase_attempts_max = read_u32(table, "rebase_attempts_max", DEFAULT_REBASE_ATTEMPTS_MAX)?;
+    let rebase_attempts_max = read_u32(table, "rebase_attempts_max", REBASE_ATTEMPTS_MAX_DEFAULT)?;
     let fix_checks_attempts_max = read_u32(
         table,
         "fix_checks_attempts_max",
-        DEFAULT_FIX_CHECKS_ATTEMPTS_MAX,
+        FIX_CHECKS_ATTEMPTS_MAX_DEFAULT,
     )?;
     let wait_for_all_checks = read_bool(table, "wait_for_all_checks", true)?;
-    let step_timeout_secs = read_u64(table, "step_timeout_secs", DEFAULT_STEP_TIMEOUT_SECS)?;
-    let ci_settle_secs = read_u64(table, "ci_settle_secs", DEFAULT_CI_SETTLE_SECS)?;
+    let step_timeout_secs = read_u64(table, "step_timeout_secs", STEP_TIMEOUT_SECS_DEFAULT)?;
+    let ci_settle_secs = read_u64(table, "ci_settle_secs", CI_SETTLE_SECS_DEFAULT)?;
     let interactive_land = match table.get("interactive_land") {
         None => InteractiveLandPolicy::CheckThenConfirmMerge,
         Some(raw) => match raw.as_str() {
@@ -147,6 +171,17 @@ fn parse_flow_spec(name: &str, value: &Value) -> Result<FlowSpec, String> {
             Some("stop" | "ready") => InteractiveLandPolicy::StopReadyToMerge,
             _ => {
                 return Err("interactive_land must be \"confirm\" or \"stop\"".to_owned());
+            }
+        },
+    };
+    let merge_method = match table.get("merge_method") {
+        None => MergeMethod::Squash,
+        Some(raw) => match raw.as_str() {
+            Some("squash") => MergeMethod::Squash,
+            Some("merge") => MergeMethod::Merge,
+            Some("rebase") => MergeMethod::Rebase,
+            _ => {
+                return Err("merge_method must be \"squash\", \"merge\", or \"rebase\"".to_owned());
             }
         },
     };
@@ -159,6 +194,7 @@ fn parse_flow_spec(name: &str, value: &Value) -> Result<FlowSpec, String> {
         step_timeout_secs,
         ci_settle_secs,
         interactive_land,
+        merge_method,
     };
     spec.validate()?;
     Ok(spec)
@@ -168,10 +204,17 @@ fn parse_stages(value: &Value) -> Result<Vec<StageSpec>, String> {
     let items = value
         .as_array()
         .ok_or_else(|| "stages must be an array".to_owned())?;
+    if items.len() > STAGES_MAX {
+        return Err(format!(
+            "stages defines {} entries, exceeding limit of {STAGES_MAX}",
+            items.len()
+        ));
+    }
     let mut stages = Vec::with_capacity(items.len());
     for item in items {
         stages.push(parse_stage(item)?);
     }
+    assert!(stages.len() <= STAGES_MAX);
     Ok(stages)
 }
 
@@ -299,6 +342,7 @@ fn read_config_file(path: &Path) -> Result<Option<String>, String> {
     if bytes.len() > CONFIG_BYTES_MAX {
         return Err(format!("exceeds {CONFIG_BYTES_MAX} bytes"));
     }
+    assert!(bytes.len() <= CONFIG_BYTES_MAX);
     String::from_utf8(bytes)
         .map(Some)
         .map_err(|error| format!("not valid UTF-8: {error}"))
@@ -350,5 +394,34 @@ stages = ["land", "tigerstyle"]
         assert_eq!(loaded.warnings.len(), 1);
         assert!(loaded.get("broken").is_none());
         assert!(loaded.get("default").is_some());
+    }
+
+    #[test]
+    fn parses_merge_method_and_rejects_excessive_stages_and_invalid_method() {
+        let toml = r#"
+[flows.rebase_merge]
+stages = ["tigerstyle", "land"]
+merge_method = "rebase"
+
+[flows.bad_method]
+stages = ["tigerstyle", "land"]
+merge_method = "fast-forward"
+"#;
+        let loaded = parse_flows_toml(toml);
+        assert_eq!(
+            loaded.get("rebase_merge").unwrap().merge_method,
+            MergeMethod::Rebase
+        );
+        assert!(loaded.get("bad_method").is_none());
+        assert_eq!(loaded.warnings.len(), 1);
+
+        let too_many = (0..=STAGES_MAX)
+            .map(|idx| format!("\"s{idx}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let overflow_toml = format!("[flows.big]\nstages = [{too_many}]\n");
+        let loaded = parse_flows_toml(&overflow_toml);
+        assert!(loaded.get("big").is_none());
+        assert_eq!(loaded.warnings.len(), 1);
     }
 }

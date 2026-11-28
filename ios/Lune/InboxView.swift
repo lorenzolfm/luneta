@@ -39,6 +39,7 @@ struct InboxView: View {
 
 private struct FlowAlert: Hashable {
     let seat: ProjectSeat
+    let worktreeId: UInt64
     let projectName: String
     let worktreeName: String
     let flow: Flow
@@ -54,8 +55,8 @@ private func flowAlerts(in model: Model) -> [FlowAlert] {
                 if let flow = worktree.flow, flow.needsAttention {
                     alerts.append(
                         FlowAlert(
-                            seat: seat, projectName: project.name, worktreeName: worktree.name,
-                            flow: flow))
+                            seat: seat, worktreeId: worktree.id, projectName: project.name,
+                            worktreeName: worktree.name, flow: flow))
                 }
             }
         }

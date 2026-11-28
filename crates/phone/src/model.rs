@@ -436,12 +436,12 @@ fn worktree_of(
 
 fn flow_of(said: &api::FlowSummary) -> Flow {
     let badge_kind = match api::FlowBadgeKind::try_from(said.badge_kind) {
+        Ok(api::FlowBadgeKind::Running) => FlowBadgeKind::Running,
         Ok(api::FlowBadgeKind::WaitingInteractive) => FlowBadgeKind::WaitingInteractive,
-        Ok(api::FlowBadgeKind::Paused) => FlowBadgeKind::Paused,
         Ok(api::FlowBadgeKind::Merged) => FlowBadgeKind::Merged,
         Ok(api::FlowBadgeKind::ReadyToMerge) => FlowBadgeKind::ReadyToMerge,
-        Ok(api::FlowBadgeKind::Running | api::FlowBadgeKind::Unspecified) | Err(_) => {
-            FlowBadgeKind::Running
+        Ok(api::FlowBadgeKind::Paused | api::FlowBadgeKind::Unspecified) | Err(_) => {
+            FlowBadgeKind::Paused
         }
     };
     let controls = said
@@ -1044,7 +1044,7 @@ mod tests {
             flow_name: "default".to_owned(),
             mode: api::FlowMode::Unattended.into(),
             harness: api::Harness::ClaudeCode.into(),
-            step_index: 2,
+            step_number: 2,
             step_total: 4,
             stage_label: "illegal-states".to_owned(),
             badge: "paused".to_owned(),

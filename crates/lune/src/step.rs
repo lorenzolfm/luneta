@@ -1,7 +1,11 @@
+use std::borrow::Cow;
 use std::fs;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -10,9 +14,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use clap::{ArgGroup, Args, ValueEnum};
 use lune_domain::agent::Harness;
+use lune_domain::flows::SESSION_ID_BYTES_MAX;
+use rustix::io::Errno;
+use rustix::process::{Pid, Signal};
 use serde_json::Value;
+use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
 
-pub const DEFAULT_TIMEOUT_SECS: u64 = 1800;
+pub const TIMEOUT_SECS_DEFAULT: u64 = 1800;
 
 pub const TIMEOUT_SECS_MIN: u64 = 1;
 
@@ -20,13 +28,25 @@ pub const TIMEOUT_SECS_MAX: u64 = 4 * 3600;
 
 pub const ACTING_DIVIDER: &str = "─── Acting on findings ───";
 
-const LINE_BYTES_MAX: usize = 16 * 1024 * 1024;
+const LINE_BYTES_MAX: usize = 8 * 1024 * 1024;
 
-const LINES_PER_TURN_MAX: usize = 65_536;
+const LINE_QUEUE_MAX: usize = 32;
+
+const QUEUED_BYTES_MAX: usize = 256 * 1024 * 1024;
+
+const TURN_BYTES_MAX: u64 = 1024 * 1024 * 1024;
+
+const LINES_PER_TURN_MAX: usize = 4 * 1024 * 1024;
+
+const CONTENT_BLOCKS_MAX: usize = 1024;
 
 const PROMPT_BYTES_MAX: usize = 1024 * 1024;
 
 const STDERR_BYTES_MAX: usize = 64 * 1024;
+
+const STDERR_DRAIN_CHUNK_BYTES: usize = 4096;
+
+const STDERR_DRAIN_CHUNKS_MAX: u64 = TURN_BYTES_MAX / STDERR_DRAIN_CHUNK_BYTES as u64;
 
 const DETAIL_CHARS_MAX: usize = 120;
 
@@ -34,22 +54,43 @@ const OSC_TITLE_BYTES_MAX: usize = 128;
 
 const OSC_MESSAGE_BYTES_MAX: usize = 256;
 
-const CHILD_WAIT_POLL: Duration = Duration::from_millis(50);
+const CHILD_WAIT_POLL_MS: u64 = 50;
 
-const CHILD_WAIT_MAX: Duration = Duration::from_secs(5);
+const CHILD_WAIT_MAX_MS: u64 = 5_000;
 
-const LINE_QUEUE_MAX: usize = 128;
+const CHILD_WAIT_POLL: Duration = Duration::from_millis(CHILD_WAIT_POLL_MS);
 
-const _: () = assert!(TIMEOUT_SECS_MIN <= DEFAULT_TIMEOUT_SECS);
-const _: () = assert!(DEFAULT_TIMEOUT_SECS <= TIMEOUT_SECS_MAX);
+const CHILD_WAIT_MAX: Duration = Duration::from_millis(CHILD_WAIT_MAX_MS);
+
+const CHILD_WAIT_POLLS_MAX: u64 = CHILD_WAIT_MAX_MS.div_ceil(CHILD_WAIT_POLL_MS) + 1;
+
+const STOP_POLL_MS: u64 = 250;
+
+const STOP_POLL: Duration = Duration::from_millis(STOP_POLL_MS);
+
+const STOP_POLLS_PER_STEP_MAX: usize =
+    (TIMEOUT_SECS_MAX * 1000).div_ceil(STOP_POLL_MS) as usize + 1;
+
+const _: () = assert!(TIMEOUT_SECS_MIN <= TIMEOUT_SECS_DEFAULT);
+const _: () = assert!(TIMEOUT_SECS_DEFAULT <= TIMEOUT_SECS_MAX);
 const _: () = assert!(LINE_BYTES_MAX > 0);
+const _: () = assert!(LINE_QUEUE_MAX > 0);
+const _: () = assert!(LINE_QUEUE_MAX * LINE_BYTES_MAX <= QUEUED_BYTES_MAX);
+const _: () = assert!(LINE_BYTES_MAX as u64 <= TURN_BYTES_MAX);
 const _: () = assert!(LINES_PER_TURN_MAX > 0);
+const _: () = assert!(CONTENT_BLOCKS_MAX > 0);
 const _: () = assert!(PROMPT_BYTES_MAX > 0);
 const _: () = assert!(STDERR_BYTES_MAX > 0);
+const _: () = assert!(STDERR_DRAIN_CHUNK_BYTES > 0);
+const _: () = assert!(STDERR_DRAIN_CHUNKS_MAX > 0);
+const _: () = assert!(TURN_BYTES_MAX.is_multiple_of(STDERR_DRAIN_CHUNK_BYTES as u64));
 const _: () = assert!(DETAIL_CHARS_MAX > 0);
 const _: () = assert!(OSC_TITLE_BYTES_MAX > 0);
 const _: () = assert!(OSC_MESSAGE_BYTES_MAX > 0);
-const _: () = assert!(LINE_QUEUE_MAX > 0);
+const _: () = assert!(CHILD_WAIT_POLL_MS > 0);
+const _: () = assert!(CHILD_WAIT_POLLS_MAX > 0);
+const _: () = assert!(STOP_POLL_MS > 0);
+const _: () = assert!(STOP_POLLS_PER_STEP_MAX > 0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum StepHarness {
@@ -97,8 +138,16 @@ pub struct StepArgs {
     pub pi_session: Option<PathBuf>,
     #[arg(long, value_name = "PATH")]
     pub session_out: Option<PathBuf>,
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+    #[arg(long, value_name = "PATH")]
+    pub stop_file: Option<PathBuf>,
+    #[arg(long, default_value_t = TIMEOUT_SECS_DEFAULT)]
     pub timeout_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Succeeded(Option<String>),
+    Failed(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,16 +163,13 @@ pub enum StreamEvent {
         name: Option<String>,
         is_error: bool,
     },
-    TurnFinished {
-        ok: bool,
-        summary: Option<String>,
-    },
+    TurnFinished(Verdict),
+    Retried,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct TurnOutcome {
+struct Turn {
     session_id: Option<String>,
-    ok: bool,
     summary: Option<String>,
 }
 
@@ -131,6 +177,32 @@ enum LineItem {
     Line(String),
     Eof,
     Error(io::Error),
+}
+
+struct Stopping {
+    file: Option<PathBuf>,
+    signalled: Arc<AtomicBool>,
+}
+
+impl Stopping {
+    fn requested(&self) -> Option<String> {
+        if self.signalled.load(Ordering::SeqCst) {
+            return Some("the step was interrupted by a signal".to_owned());
+        }
+        let file = self.file.as_ref()?;
+        if !file.exists() {
+            return None;
+        }
+        if let Err(error) = fs::remove_file(file)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Some(format!(
+                "the flow stopped the step, and {} stays: {error}",
+                file.display()
+            ));
+        }
+        Some("the flow stopped the step".to_owned())
+    }
 }
 
 #[must_use]
@@ -166,23 +238,33 @@ pub fn run(args: &StepArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut out = io::stdout().lock();
-    let result = execute(
+    let signalled = Arc::new(AtomicBool::new(false));
+    for signal in [SIGHUP, SIGINT, SIGTERM] {
+        if let Err(error) = signal_hook::flag::register(signal, Arc::clone(&signalled)) {
+            eprintln!("lune _step: signal {signal} could not be handled: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let stopping = Stopping {
+        file: args.stop_file.clone(),
+        signalled,
+    };
+    let mut renderer = Renderer::new(io::stdout().lock());
+    let step = StepPlan {
         harness,
         stage,
-        &prompt,
-        followup.as_deref(),
-        args.pi_session.as_deref(),
-        args.session_out.as_deref(),
-        timeout,
-        &mut out,
-    );
+        prompt: &prompt,
+        followup: followup.as_deref(),
+        pi_session: args.pi_session.as_deref(),
+        session_out: args.session_out.as_deref(),
+        deadline: Instant::now() + timeout,
+    };
+    let result = execute(&step, &stopping, &mut renderer);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            let _ = writeln!(out, "\nerror: {why}");
-            let _ = write!(out, "{}", osc_7501_error(harness, stage, &why));
-            let _ = out.flush();
+            renderer.note(&format!("\nerror: {why}"));
+            renderer.raw(&osc_7501_error(harness, stage, &why));
             ExitCode::FAILURE
         }
     }
@@ -224,93 +306,79 @@ fn read_file_bounded(path: &Path, limit: usize) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn execute(
+struct StepPlan<'a> {
     harness: Harness,
-    stage: &str,
-    prompt: &str,
-    followup: Option<&str>,
-    pi_session: Option<&Path>,
-    session_out: Option<&Path>,
-    turn_timeout: Duration,
-    out: &mut impl Write,
+    stage: &'a str,
+    prompt: &'a str,
+    followup: Option<&'a str>,
+    pi_session: Option<&'a Path>,
+    session_out: Option<&'a Path>,
+    deadline: Instant,
+}
+
+fn execute(
+    step: &StepPlan<'_>,
+    stopping: &Stopping,
+    renderer: &mut Renderer<impl Write>,
 ) -> Result<(), String> {
-    assert!(!stage.is_empty(), "stage label is non-empty");
-    assert!(!prompt.trim().is_empty(), "prompt is non-empty");
-    let initial_pi_session = if harness == Harness::Pi {
-        pi_session.map(|path| path.to_string_lossy().into_owned())
-    } else {
-        None
+    let harness = step.harness;
+    assert!(!step.stage.is_empty(), "stage label is non-empty");
+    assert!(!step.prompt.trim().is_empty(), "prompt is non-empty");
+    let pi_session = match (harness, step.pi_session) {
+        (Harness::Pi, Some(path)) => Some(
+            path.to_str()
+                .ok_or_else(|| format!("{} is not UTF-8", path.display()))?
+                .to_owned(),
+        ),
+        _ => None,
     };
-    if let (Some(out_path), Some(session_path)) = (session_out, initial_pi_session.as_deref()) {
+    if let (Some(out_path), Some(session_path)) = (step.session_out, pi_session.as_deref()) {
         write_session_id(out_path, session_path)?;
     }
-    let _ = writeln!(out, "═══ {stage} ({}) ═══", harness.program());
-    let _ = write!(out, "{}", osc_7501_working(harness, stage));
-    let _ = out.flush();
-
-    let turn1 = run_turn(
+    let turns = TurnPlan {
         harness,
-        prompt,
-        initial_pi_session.as_deref(),
-        session_out,
-        initial_pi_session.is_none(),
-        turn_timeout,
-        out,
-    )?;
-    if !turn1.ok {
-        let why = turn1
-            .summary
-            .unwrap_or_else(|| format!("{} turn 1 failed", harness.program()));
-        return Err(why);
-    }
+        session_out: step.session_out,
+        record_stream_session: pi_session.is_none(),
+        deadline: step.deadline,
+    };
+    renderer.note(&format!("═══ {} ({}) ═══", step.stage, harness.program()));
+    renderer.raw(&osc_7501_working(harness, step.stage));
+    renderer.failure()?;
 
-    let resume_handle = initial_pi_session.or(turn1.session_id);
-    if let Some(followup) = followup {
-        let Some(handle) = resume_handle.as_deref() else {
-            return Err(format!(
-                "{} emitted no session_id on turn 1; cannot resume for turn 2",
-                harness.program()
-            ));
-        };
-        let _ = writeln!(out, "\n{ACTING_DIVIDER}");
-        let _ = write!(out, "{}", osc_7501_working(harness, stage));
-        let _ = out.flush();
-        let turn2 = run_turn(
-            harness,
-            followup,
-            Some(handle),
-            session_out,
-            false,
-            turn_timeout,
-            out,
-        )?;
-        if !turn2.ok {
-            let why = turn2
-                .summary
-                .unwrap_or_else(|| format!("{} turn 2 failed", harness.program()));
-            return Err(why);
+    let first = run_turn(
+        &turns,
+        step.prompt,
+        pi_session.as_deref(),
+        stopping,
+        renderer,
+    )?;
+    let summary = match step.followup {
+        None => first.summary,
+        Some(followup) => {
+            let resume = pi_session.or(first.session_id);
+            let Some(handle) = resume.as_deref() else {
+                return Err(format!(
+                    "{} emitted no session_id on turn 1; cannot resume for turn 2",
+                    harness.program()
+                ));
+            };
+            renderer.note(&format!("\n{ACTING_DIVIDER}"));
+            renderer.raw(&osc_7501_working(harness, step.stage));
+            renderer.failure()?;
+            run_turn(&turns, followup, Some(handle), stopping, renderer)?.summary
         }
-        let summary = turn2
-            .summary
-            .unwrap_or_else(|| format!("{stage} completed"));
-        let _ = write!(out, "{}", osc_7501_done(harness, stage, &summary));
-        let _ = out.flush();
-    } else {
-        let summary = turn1
-            .summary
-            .unwrap_or_else(|| format!("{stage} completed"));
-        let _ = write!(out, "{}", osc_7501_done(harness, stage, &summary));
-        let _ = out.flush();
-    }
-    Ok(())
+    };
+    let summary = summary.unwrap_or_else(|| format!("{} completed", step.stage));
+    renderer.raw(&osc_7501_done(harness, step.stage, &summary));
+    renderer.failure()
 }
 
 #[must_use]
 pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>) -> Command {
-    let mut cmd = Command::new(harness.program());
+    let mut command = Command::new(harness.program());
     match harness {
         Harness::ClaudeCode => {
-            cmd.args([
+            command.args([
                 "-p",
                 "--output-format",
                 "stream-json",
@@ -318,234 +386,348 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
                 "--dangerously-skip-permissions",
             ]);
             if let Some(id) = resume_handle {
-                cmd.args(["--resume", id]);
+                command.args(["--resume", id]);
             }
-            cmd.args(["--", prompt]);
+            command.args(["--", prompt]);
         }
         Harness::Antigravity => {
-            cmd.args([
+            command.args([
                 "-p",
                 "--output-format",
                 "stream-json",
                 "--dangerously-skip-permissions",
             ]);
             if let Some(id) = resume_handle {
-                cmd.args(["--resume", id]);
+                command.args(["--resume", id]);
             }
-            cmd.args(["--", prompt]);
+            command.args(["--", prompt]);
         }
         Harness::Pi => {
-            cmd.args(["--mode", "json"]);
+            command.args(["--mode", "json"]);
             if let Some(session) = resume_handle {
-                cmd.args(["--session", session]);
+                command.args(["--session", session]);
             }
-            cmd.args(["-p", "--", prompt]);
+            command.args(["-p", "--", prompt]);
         }
     }
-    luned::local_git(&mut cmd);
-    cmd.env_remove("LUNE_MUX_TERMINAL")
+    luned::local_git(&mut command);
+    command
+        .env_remove("LUNE_MUX_TERMINAL")
         .env_remove("LUNE_MUX_TERMINAL_MADE")
         .env_remove("OSC7577_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    cmd
+        .stderr(Stdio::piped())
+        .process_group(0);
+    command
+}
+
+struct TurnPlan<'a> {
+    harness: Harness,
+    session_out: Option<&'a Path>,
+    record_stream_session: bool,
+    deadline: Instant,
+}
+
+struct Heard {
+    session_id: Option<String>,
+    verdict: Option<Verdict>,
+    unparsed_lines: u64,
 }
 
 fn run_turn(
-    harness: Harness,
+    plan: &TurnPlan<'_>,
     prompt: &str,
     resume_handle: Option<&str>,
-    session_out: Option<&Path>,
-    record_stream_session: bool,
-    timeout: Duration,
-    out: &mut impl Write,
-) -> Result<TurnOutcome, String> {
-    let mut cmd = build_command(harness, prompt, resume_handle);
-    let mut child = cmd
+    stopping: &Stopping,
+    renderer: &mut Renderer<impl Write>,
+) -> Result<Turn, String> {
+    let harness = plan.harness;
+    let mut command = build_command(harness, prompt, resume_handle);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("{} could not be started: {error}", harness.program()))?;
+    let group = Pid::from_child(&child);
     let stdout = child.stdout.take().expect("spawned child has piped stdout");
     let stderr = child.stderr.take().expect("spawned child has piped stderr");
 
     let (line_tx, line_rx) = mpsc::sync_channel::<LineItem>(LINE_QUEUE_MAX);
     let stdout_thread = thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
+        let mut reader = BufReader::new(stdout.take(TURN_BYTES_MAX));
         for _ in 0..LINES_PER_TURN_MAX {
-            match read_line_bounded(&mut reader, LINE_BYTES_MAX) {
-                Ok(Some(line)) => {
-                    if line_tx.send(LineItem::Line(line)).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => {
-                    let _ = line_tx.send(LineItem::Eof);
-                    return;
-                }
-                Err(error) => {
-                    let _ = line_tx.send(LineItem::Error(error));
-                    return;
-                }
+            let item = match read_line_bounded(&mut reader, LINE_BYTES_MAX) {
+                Ok(Some(line)) => LineItem::Line(line),
+                Ok(None) if reader.get_ref().limit() == 0 => LineItem::Error(io::Error::other(
+                    format!("output exceeded {TURN_BYTES_MAX} bytes"),
+                )),
+                Ok(None) => LineItem::Eof,
+                Err(error) => LineItem::Error(error),
+            };
+            let last = !matches!(item, LineItem::Line(_));
+            if line_tx.send(item).is_err() || last {
+                return;
             }
         }
-        let _ = line_tx.send(LineItem::Error(io::Error::other(format!(
-            "output exceeded {LINES_PER_TURN_MAX} lines"
-        ))));
+        let exceeded = io::Error::other(format!("output exceeded {LINES_PER_TURN_MAX} lines"));
+        let _receiver_left = line_tx.send(LineItem::Error(exceeded));
     });
 
-    let stderr_thread = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let cap = u64::try_from(STDERR_BYTES_MAX).expect("usize fits u64");
-        let _ = stderr.take(cap).read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).trim().to_owned()
+    let (stderr_tx, stderr_rx) = mpsc::sync_channel::<io::Result<String>>(1);
+    thread::spawn(move || {
+        let drained = drain_stderr(stderr);
+        let _receiver_left = stderr_tx.send(drained);
     });
 
-    let deadline = Instant::now() + timeout;
-    let mut renderer = Renderer::default();
-    let mut session_id: Option<String> = None;
-    let mut terminal_result: Option<(bool, Option<String>)> = None;
-    let mut stream_failure: Option<String> = None;
-
-    for _ in 0..=LINES_PER_TURN_MAX {
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            kill_child(&mut child);
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            return Err(format!(
-                "{} timed out after {}s",
-                harness.program(),
-                timeout.as_secs()
+    let mut heard = Heard {
+        session_id: None,
+        verdict: None,
+        unparsed_lines: 0,
+    };
+    let mut ended = false;
+    let mut exited_at: Option<Instant> = None;
+    let mut failure: Option<String> = None;
+    for _ in 0..LINES_PER_TURN_MAX + STOP_POLLS_PER_STEP_MAX {
+        if let Some(why) = stopping.requested() {
+            failure = Some(why);
+            break;
+        }
+        let Some(remaining) = plan.deadline.checked_duration_since(Instant::now()) else {
+            failure = Some(format!(
+                "{} ran past the step's deadline",
+                harness.program()
             ));
+            break;
         };
-        match line_rx.recv_timeout(remaining) {
+        match line_rx.recv_timeout(remaining.min(STOP_POLL)) {
             Ok(LineItem::Line(line)) => {
-                let events = parse_line(harness, &line);
-                if events.is_empty() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() && !trimmed.starts_with('{') {
-                        renderer.write_block(out, trimmed);
-                    }
-                }
-                for event in events {
-                    match event {
-                        StreamEvent::SessionId(id) => {
-                            if session_id.is_none() {
-                                if record_stream_session
-                                    && let Some(path) = session_out
-                                    && let Err(why) = write_session_id(path, &id)
-                                {
-                                    stream_failure = Some(why);
-                                }
-                                session_id = Some(id);
-                            }
-                        }
-                        StreamEvent::TextDelta(delta) => renderer.write_delta(out, &delta),
-                        StreamEvent::TextBlock(text) => renderer.write_block(out, &text),
-                        StreamEvent::ToolUse { name, detail } => {
-                            renderer.write_tool(out, &name, detail.as_deref());
-                        }
-                        StreamEvent::ToolResult { name, is_error } => {
-                            if is_error {
-                                let label = name.as_deref().unwrap_or("tool");
-                                renderer.write_note(out, &format!("✗ {label} failed"));
-                            }
-                        }
-                        StreamEvent::TurnFinished { ok, summary } => {
-                            terminal_result = Some((ok, summary));
-                        }
-                    }
+                failure = heard_line(plan, &line, &mut heard, renderer).err();
+                if failure.is_some() {
+                    break;
                 }
             }
-            Ok(LineItem::Eof) | Err(RecvTimeoutError::Disconnected) => break,
+            Ok(LineItem::Eof) | Err(RecvTimeoutError::Disconnected) => {
+                ended = true;
+                break;
+            }
             Ok(LineItem::Error(error)) => {
-                stream_failure = Some(format!("{} stream error: {error}", harness.program()));
-                kill_child(&mut child);
+                failure = Some(format!("{} stream error: {error}", harness.program()));
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                kill_child(&mut child);
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return Err(format!(
-                    "{} timed out after {}s",
-                    harness.program(),
-                    timeout.as_secs()
-                ));
+                if exited_at.is_none() {
+                    match child.try_wait() {
+                        Ok(Some(_)) => exited_at = Some(Instant::now()),
+                        Ok(None) => {}
+                        Err(error) => {
+                            failure = Some(format!("failed to poll child status: {error}"));
+                            break;
+                        }
+                    }
+                }
+                if exited_at.is_some_and(|at| at.elapsed() >= CHILD_WAIT_MAX) {
+                    signal_group(group, Signal::KILL)?;
+                }
             }
         }
     }
-
-    renderer.finish(out);
-    let _ = stdout_thread.join();
-    let status = wait_child(&mut child, deadline)?;
-    let stderr_text = stderr_thread.join().unwrap_or_default();
-
-    if let Some(why) = stream_failure {
+    if failure.is_none() && !ended {
+        failure = Some(format!(
+            "{} streamed past the turn's bound",
+            harness.program()
+        ));
+    }
+    if let Some(why) = failure {
+        drop(line_rx);
+        renderer.finish();
+        end_group(&mut child, group)?;
         return Err(why);
     }
 
-    let (ok, summary) = interpret_turn(harness, status, terminal_result, &stderr_text);
-    Ok(TurnOutcome {
-        session_id,
-        ok,
+    renderer.finish();
+    stdout_thread
+        .join()
+        .map_err(|_| format!("{} stdout reader panicked", harness.program()))?;
+    let status = wait_child(&mut child, group, plan.deadline)?;
+    signal_group(group, Signal::KILL)?;
+    let stderr_text = match stderr_rx.recv_timeout(CHILD_WAIT_MAX) {
+        Ok(Ok(text)) => text,
+        Ok(Err(error)) => {
+            return Err(format!("{} stderr read error: {error}", harness.program()));
+        }
+        Err(_) => String::new(),
+    };
+    renderer.failure()?;
+    let summary = interpret_turn(
+        harness,
+        status,
+        heard.verdict,
+        &stderr_text,
+        heard.unparsed_lines,
+    )?;
+    Ok(Turn {
+        session_id: heard.session_id,
         summary,
     })
+}
+
+fn heard_line(
+    plan: &TurnPlan<'_>,
+    line: &str,
+    heard: &mut Heard,
+    renderer: &mut Renderer<impl Write>,
+) -> Result<(), String> {
+    let events = parse_line(plan.harness, line);
+    if events.is_empty() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{') {
+            heard.unparsed_lines += 1;
+        } else if !trimmed.is_empty() {
+            renderer.block(trimmed);
+        }
+    }
+    for event in events {
+        match event {
+            StreamEvent::SessionId(id) => {
+                if heard.session_id.is_none() {
+                    if !usable_session_id(&id) {
+                        return Err(format!(
+                            "{} reported an unusable session id",
+                            plan.harness.program()
+                        ));
+                    }
+                    if plan.record_stream_session
+                        && let Some(path) = plan.session_out
+                    {
+                        write_session_id(path, &id)?;
+                    }
+                    heard.session_id = Some(id);
+                }
+            }
+            StreamEvent::TextDelta(delta) => renderer.delta(&delta),
+            StreamEvent::TextBlock(text) => renderer.block(&text),
+            StreamEvent::ToolUse { name, detail } => renderer.tool(&name, detail.as_deref()),
+            StreamEvent::ToolResult { name, is_error } => {
+                if is_error {
+                    let label = name.as_deref().unwrap_or("tool");
+                    renderer.note(&format!("✗ {label} failed"));
+                }
+            }
+            StreamEvent::TurnFinished(verdict) => {
+                heard.verdict = match (heard.verdict.take(), verdict) {
+                    (Some(Verdict::Failed(why)), Verdict::Succeeded(_)) => {
+                        Some(Verdict::Failed(why))
+                    }
+                    (_, verdict) => Some(verdict),
+                };
+            }
+            StreamEvent::Retried => {
+                if matches!(heard.verdict, Some(Verdict::Failed(_))) {
+                    heard.verdict = None;
+                }
+            }
+        }
+    }
+    renderer.failure()
+}
+
+fn usable_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= SESSION_ID_BYTES_MAX
+        && !id.starts_with('-')
+        && !id.chars().any(char::is_control)
+}
+
+fn drain_stderr(mut stderr: impl io::Read) -> io::Result<String> {
+    let mut captured = Vec::new();
+    let mut scratch = [0u8; STDERR_DRAIN_CHUNK_BYTES];
+    let mut ended = false;
+    for _ in 0..STDERR_DRAIN_CHUNKS_MAX {
+        let read = stderr.read(&mut scratch)?;
+        if read == 0 {
+            ended = true;
+            break;
+        }
+        let room = STDERR_BYTES_MAX.saturating_sub(captured.len());
+        captured.extend_from_slice(&scratch[..read.min(room)]);
+    }
+    assert!(captured.len() <= STDERR_BYTES_MAX);
+    if !ended {
+        return Err(io::Error::other(format!(
+            "stderr exceeded {TURN_BYTES_MAX} bytes"
+        )));
+    }
+    Ok(String::from_utf8_lossy(&captured).trim().to_owned())
 }
 
 fn interpret_turn(
     harness: Harness,
     status: ExitStatus,
-    terminal_result: Option<(bool, Option<String>)>,
+    verdict: Option<Verdict>,
     stderr_text: &str,
-) -> (bool, Option<String>) {
-    match (status.success(), terminal_result) {
-        (true, Some((true, summary))) => (true, summary),
-        (true, None) => (true, None),
-        (true, Some((false, summary))) => {
-            let why = summary
-                .or_else(|| (!stderr_text.is_empty()).then(|| stderr_text.to_owned()))
-                .unwrap_or_else(|| format!("{} reported an error", harness.program()));
-            (false, Some(why))
+    unparsed_lines: u64,
+) -> Result<Option<String>, String> {
+    let program = harness.program();
+    let exited = || {
+        if stderr_text.is_empty() {
+            format!("{program} exited with {status}")
+        } else {
+            stderr_text.to_owned()
         }
-        (false, Some((_, summary))) => {
-            let why = summary
-                .or_else(|| (!stderr_text.is_empty()).then(|| stderr_text.to_owned()))
-                .unwrap_or_else(|| format!("{} exited with {status}", harness.program()));
-            (false, Some(why))
-        }
-        (false, None) => {
-            let why = if stderr_text.is_empty() {
-                format!("{} exited with {status}", harness.program())
-            } else {
-                stderr_text.to_owned()
-            };
-            (false, Some(why))
-        }
+    };
+    match (status.success(), verdict) {
+        (true, Some(Verdict::Succeeded(summary))) => Ok(summary),
+        (true, None) if harness == Harness::Pi => Ok(None),
+        (true, None) => Err(format!(
+            "{program} ended without a result record ({unparsed_lines} lines did not parse)"
+        )),
+        (_, Some(Verdict::Failed(why))) => Err(why),
+        (false, Some(Verdict::Succeeded(_)) | None) => Err(exited()),
     }
 }
 
-fn wait_child(child: &mut Child, deadline: Instant) -> Result<ExitStatus, String> {
+fn wait_child(child: &mut Child, group: Pid, deadline: Instant) -> Result<ExitStatus, String> {
     let wait_until = deadline.min(Instant::now() + CHILD_WAIT_MAX);
-    loop {
+    for _ in 0..CHILD_WAIT_POLLS_MAX {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
                 if Instant::now() >= wait_until {
-                    kill_child(child);
-                    return child
-                        .wait()
-                        .map_err(|error| format!("failed to wait on child: {error}"));
+                    break;
                 }
                 thread::sleep(CHILD_WAIT_POLL);
             }
             Err(error) => return Err(format!("failed to poll child status: {error}")),
         }
     }
+    end_group(child, group)
 }
 
-fn kill_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn signal_group(group: Pid, signal: Signal) -> Result<(), String> {
+    match rustix::process::kill_process_group(group, signal) {
+        Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(error) => Err(format!(
+            "process group {} could not be signalled: {error}",
+            group.as_raw_nonzero()
+        )),
+    }
+}
+
+fn end_group(child: &mut Child, group: Pid) -> Result<ExitStatus, String> {
+    signal_group(group, Signal::TERM)?;
+    for _ in 0..CHILD_WAIT_POLLS_MAX {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                signal_group(group, Signal::KILL)?;
+                return Ok(status);
+            }
+            Ok(None) => thread::sleep(CHILD_WAIT_POLL),
+            Err(error) => return Err(format!("failed to poll child status: {error}")),
+        }
+    }
+    signal_group(group, Signal::KILL)?;
+    child
+        .wait()
+        .map_err(|error| format!("failed to wait on child: {error}"))
 }
 
 fn write_session_id(path: &Path, id: &str) -> Result<(), String> {
@@ -553,10 +735,13 @@ fn write_session_id(path: &Path, id: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
     }
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    let written = fs::write(&tmp, format!("{id}\n")).and_then(|()| fs::rename(&tmp, path));
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp);
+    let staged = path.with_extension(format!("tmp.{}", std::process::id()));
+    let written = fs::write(&staged, format!("{id}\n")).and_then(|()| fs::rename(&staged, path));
+    if written.is_err()
+        && let Err(error) = fs::remove_file(&staged)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(format!("{}: {error}", staged.display()));
     }
     written.map_err(|error| format!("{}: {error}", path.display()))
 }
@@ -589,78 +774,127 @@ fn read_line_bounded(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-#[derive(Default)]
-struct Renderer {
-    mid_line: bool,
-    streamed_delta: bool,
+fn printable(text: &str) -> Cow<'_, str> {
+    let unprintable = |c: char| c.is_control() && c != '\n' && c != '\t';
+    if !text.chars().any(unprintable) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        text.chars()
+            .map(|c| if unprintable(c) { '\u{FFFD}' } else { c })
+            .collect(),
+    )
 }
 
-impl Renderer {
-    fn write_delta(&mut self, out: &mut impl Write, delta: &str) {
+struct Renderer<W: Write> {
+    out: W,
+    mid_line: bool,
+    streamed_delta: bool,
+    failed: Option<io::Error>,
+}
+
+impl<W: Write> Renderer<W> {
+    fn new(out: W) -> Renderer<W> {
+        Renderer {
+            out,
+            mid_line: false,
+            streamed_delta: false,
+            failed: None,
+        }
+    }
+
+    fn failure(&mut self) -> Result<(), String> {
+        match self.failed.take() {
+            Some(error) => Err(format!("the step's terminal could not be written: {error}")),
+            None => Ok(()),
+        }
+    }
+
+    fn written(&mut self, written: io::Result<()>) {
+        if let Err(error) = written
+            && self.failed.is_none()
+        {
+            self.failed = Some(error);
+        }
+    }
+
+    fn raw(&mut self, sequence: &str) {
+        let written = self
+            .out
+            .write_all(sequence.as_bytes())
+            .and_then(|()| self.out.flush());
+        self.written(written);
+    }
+
+    fn text(&mut self, text: &str) {
+        let shown = printable(text);
+        assert!(
+            !shown.contains('\x1b'),
+            "agent text reaches the terminal without escapes"
+        );
+        let written = self
+            .out
+            .write_all(shown.as_bytes())
+            .and_then(|()| self.out.flush());
+        self.written(written);
+    }
+
+    fn end_line(&mut self) {
+        if self.mid_line {
+            self.text("\n");
+            self.mid_line = false;
+        }
+    }
+
+    fn delta(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
         }
-        let _ = write!(out, "{delta}");
-        let _ = out.flush();
+        self.text(delta);
         self.mid_line = !delta.ends_with('\n');
         self.streamed_delta = true;
     }
 
-    fn write_block(&mut self, out: &mut impl Write, text: &str) {
+    fn block(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
         if self.streamed_delta {
             self.streamed_delta = false;
-            if self.mid_line {
-                let _ = writeln!(out);
-                self.mid_line = false;
-            }
-            let _ = out.flush();
+            self.end_line();
             return;
         }
-        if self.mid_line {
-            let _ = writeln!(out);
-            self.mid_line = false;
-        }
-        let _ = writeln!(out, "{text}");
-        let _ = out.flush();
+        self.end_line();
+        self.text(&format!("{text}\n"));
     }
 
-    fn write_tool(&mut self, out: &mut impl Write, name: &str, detail: Option<&str>) {
+    fn tool(&mut self, name: &str, detail: Option<&str>) {
         self.streamed_delta = false;
-        if self.mid_line {
-            let _ = writeln!(out);
-            self.mid_line = false;
-        }
+        self.end_line();
         match detail {
-            Some(detail) if !detail.is_empty() => {
-                let _ = writeln!(out, "▸ {name}: {detail}");
-            }
-            _ => {
-                let _ = writeln!(out, "▸ {name}");
-            }
+            Some(detail) if !detail.is_empty() => self.text(&format!("▸ {name}: {detail}\n")),
+            _ => self.text(&format!("▸ {name}\n")),
         }
-        let _ = out.flush();
     }
 
-    fn write_note(&mut self, out: &mut impl Write, note: &str) {
+    fn note(&mut self, note: &str) {
         self.streamed_delta = false;
-        if self.mid_line {
-            let _ = writeln!(out);
-            self.mid_line = false;
-        }
-        let _ = writeln!(out, "{note}");
-        let _ = out.flush();
+        self.end_line();
+        self.text(&format!("{note}\n"));
     }
 
-    fn finish(&mut self, out: &mut impl Write) {
-        if self.mid_line {
-            let _ = writeln!(out);
-            self.mid_line = false;
-        }
-        let _ = out.flush();
+    fn finish(&mut self) {
+        self.end_line();
     }
+}
+
+fn finished(ok: bool, summary: Option<String>, fallback: &str) -> StreamEvent {
+    if ok {
+        return StreamEvent::TurnFinished(Verdict::Succeeded(summary));
+    }
+    StreamEvent::TurnFinished(Verdict::Failed(
+        summary.unwrap_or_else(|| fallback.to_owned()),
+    ))
 }
 
 #[must_use]
@@ -685,7 +919,8 @@ fn parse_claude(record: &Value) -> Vec<StreamEvent> {
             let blocks = record["message"]["content"]
                 .as_array()
                 .into_iter()
-                .flatten();
+                .flatten()
+                .take(CONTENT_BLOCKS_MAX);
             for block in blocks {
                 push_content_block(&mut events, block);
             }
@@ -707,10 +942,7 @@ fn parse_claude(record: &Value) -> Vec<StreamEvent> {
                 .or_else(|| nonempty_str(&record["error"]))
                 .or(subtype)
                 .map(str::to_owned);
-            events.push(StreamEvent::TurnFinished {
-                ok: !is_error,
-                summary,
-            });
+            events.push(finished(!is_error, summary, "claude reported an error"));
         }
         _ => {}
     }
@@ -759,7 +991,8 @@ fn parse_agy(record: &Value) -> Vec<StreamEvent> {
                 .as_array()
                 .or_else(|| record["content"].as_array())
                 .into_iter()
-                .flatten();
+                .flatten()
+                .take(CONTENT_BLOCKS_MAX);
             let before = events.len();
             for block in blocks {
                 push_content_block(&mut events, block);
@@ -815,16 +1048,13 @@ fn parse_agy(record: &Value) -> Vec<StreamEvent> {
                     .or_else(|| nonempty_str(&record["text"]))
                     .map(str::to_owned)
             };
-            events.push(StreamEvent::TurnFinished {
-                ok: !is_error,
-                summary,
-            });
+            events.push(finished(!is_error, summary, "agy reported an error"));
         }
         Some("error") => {
             let summary = nonempty_str(&record["error"])
                 .or_else(|| nonempty_str(&record["message"]))
                 .map(str::to_owned);
-            events.push(StreamEvent::TurnFinished { ok: false, summary });
+            events.push(finished(false, summary, "agy reported an error"));
         }
         _ => {}
     }
@@ -853,7 +1083,7 @@ fn parse_pi(record: &Value) -> Vec<StreamEvent> {
                     let summary = nonempty_str(&nested["error"])
                         .or_else(|| nonempty_str(&nested["reason"]))
                         .map(str::to_owned);
-                    events.push(StreamEvent::TurnFinished { ok: false, summary });
+                    events.push(finished(false, summary, "pi reported an error"));
                 }
                 _ => {}
             }
@@ -867,9 +1097,9 @@ fn parse_pi(record: &Value) -> Vec<StreamEvent> {
                     let summary = nonempty_str(&message["errorMessage"])
                         .or(Some(reason))
                         .map(str::to_owned);
-                    events.push(StreamEvent::TurnFinished { ok: false, summary });
+                    events.push(finished(false, summary, "pi reported an error"));
                 } else if let Some(blocks) = message["content"].as_array() {
-                    for block in blocks {
+                    for block in blocks.iter().take(CONTENT_BLOCKS_MAX) {
                         if block["type"].as_str() == Some("text")
                             && let Some(text) = nonempty_str(&block["text"])
                         {
@@ -893,18 +1123,17 @@ fn parse_pi(record: &Value) -> Vec<StreamEvent> {
             let is_error = record["isError"].as_bool() == Some(true);
             events.push(StreamEvent::ToolResult { name, is_error });
         }
-        Some("auto_retry_end") => {
-            if record["success"].as_bool() == Some(false) {
+        Some("auto_retry_end") => match record["success"].as_bool() {
+            Some(true) => events.push(StreamEvent::Retried),
+            Some(false) => {
                 let summary = nonempty_str(&record["finalError"]).map(str::to_owned);
-                events.push(StreamEvent::TurnFinished { ok: false, summary });
+                events.push(finished(false, summary, "pi gave up retrying"));
             }
-        }
+            None => {}
+        },
         Some("agent_settled") => {
             let aborted = record["aborted"].as_bool() == Some(true);
-            events.push(StreamEvent::TurnFinished {
-                ok: !aborted,
-                summary: aborted.then(|| "aborted".to_owned()),
-            });
+            events.push(finished(!aborted, None, "pi aborted the turn"));
         }
         _ => {}
     }
@@ -955,10 +1184,11 @@ fn nonempty_str(value: &Value) -> Option<&str> {
 }
 
 fn single_line_preview(text: &str, chars_max: usize) -> String {
+    assert!(chars_max > 0, "preview cap holds at least one char");
     let first_line = text.lines().next().unwrap_or(text).trim();
     let mut out = String::new();
-    for (count, ch) in first_line.chars().enumerate() {
-        if count >= chars_max {
+    for (index, ch) in first_line.chars().enumerate() {
+        if index >= chars_max {
             out.push('…');
             break;
         }
@@ -971,10 +1201,9 @@ fn truncate_utf8(text: &str, bytes_max: usize) -> &str {
     if text.len() <= bytes_max {
         return text;
     }
-    let mut end = bytes_max;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = text.floor_char_boundary(bytes_max);
+    assert!(end <= bytes_max);
+    assert!(text.is_char_boundary(end));
     &text[..end]
 }
 
@@ -1130,19 +1359,17 @@ mod tests {
             r#"{"type":"result","subtype":"success","is_error":false,"result":"All clean"}"#;
         assert_eq!(
             parse_line(Harness::ClaudeCode, result_ok),
-            vec![StreamEvent::TurnFinished {
-                ok: true,
-                summary: Some("All clean".to_owned()),
-            }]
+            vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
+                "All clean".to_owned()
+            )))]
         );
 
         let result_err = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
         assert_eq!(
             parse_line(Harness::ClaudeCode, result_err),
-            vec![StreamEvent::TurnFinished {
-                ok: false,
-                summary: Some("boom".to_owned()),
-            }]
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "boom".to_owned()
+            ))]
         );
     }
 
@@ -1173,19 +1400,17 @@ mod tests {
         let result_ok = r#"{"type":"result","status":"SUCCESS","response":"Done"}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, result_ok),
-            vec![StreamEvent::TurnFinished {
-                ok: true,
-                summary: Some("Done".to_owned()),
-            }]
+            vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
+                "Done".to_owned()
+            )))]
         );
 
         let result_timeout = r#"{"type":"result","status":"ERROR","finished_reason":"print_timeout","error":"timed out"}"#;
         assert_eq!(
             parse_line(Harness::Antigravity, result_timeout),
-            vec![StreamEvent::TurnFinished {
-                ok: false,
-                summary: Some("timed out".to_owned()),
-            }]
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "timed out".to_owned()
+            ))]
         );
     }
 
@@ -1215,19 +1440,15 @@ mod tests {
         let settled = r#"{"type":"agent_settled","aborted":false}"#;
         assert_eq!(
             parse_line(Harness::Pi, settled),
-            vec![StreamEvent::TurnFinished {
-                ok: true,
-                summary: None,
-            }]
+            vec![StreamEvent::TurnFinished(Verdict::Succeeded(None))]
         );
 
         let aborted = r#"{"type":"agent_settled","aborted":true}"#;
         assert_eq!(
             parse_line(Harness::Pi, aborted),
-            vec![StreamEvent::TurnFinished {
-                ok: false,
-                summary: Some("aborted".to_owned()),
-            }]
+            vec![StreamEvent::TurnFinished(Verdict::Failed(
+                "pi aborted the turn".to_owned()
+            ))]
         );
     }
 
@@ -1246,5 +1467,22 @@ mod tests {
         assert!(err.starts_with("\x1b]7501;state=error:app=antigravity:title="));
         assert!(err.contains(":msg="));
         assert!(err.ends_with('\x07'));
+    }
+
+    #[test]
+    fn parse_claude_bounds_content_blocks_and_truncate_utf8_respects_boundaries() {
+        let blocks: Vec<serde_json::Value> = (0..CONTENT_BLOCKS_MAX + 50)
+            .map(|idx| serde_json::json!({"type": "text", "text": format!("b{idx}")}))
+            .collect();
+        let line = serde_json::json!({
+            "type": "assistant",
+            "parent_tool_use_id": null,
+            "message": { "content": blocks }
+        })
+        .to_string();
+        let events = parse_line(Harness::ClaudeCode, &line);
+        assert_eq!(events.len(), CONTENT_BLOCKS_MAX);
+        assert_eq!(truncate_utf8("héllo", 2), "h");
+        assert_eq!(truncate_utf8("héllo", 3), "hé");
     }
 }

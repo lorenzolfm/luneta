@@ -101,13 +101,18 @@ enum Onto {
 struct NamedBranch(String);
 
 pub(crate) fn rebase(dir: &Directory, expected: Option<&Said>) -> Result<Rebased, Unrebased> {
-    rebase_with_ref(dir, expected).map(|(rebased, _)| rebased)
+    rebase_naming_onto(dir, expected).map(|named| named.rebased)
 }
 
-pub(crate) fn rebase_with_ref(
+pub(crate) struct RebasedOnto {
+    pub rebased: Rebased,
+    pub onto_ref: String,
+}
+
+pub(crate) fn rebase_naming_onto(
     dir: &Directory,
     expected: Option<&Said>,
-) -> Result<(Rebased, String), Unrebased> {
+) -> Result<RebasedOnto, Unrebased> {
     let until = Instant::now() + RUNNING_MAX;
     let Ready {
         top,
@@ -132,7 +137,11 @@ pub(crate) fn rebase_with_ref(
             })
         }
     };
-    Ok((Rebased { branch, onto, came }, reference))
+    assert!(!reference.is_empty(), "a rebase names the ref it went onto");
+    Ok(RebasedOnto {
+        rebased: Rebased { branch, onto, came },
+        onto_ref: reference,
+    })
 }
 
 fn ready(dir: &Directory, expected: Option<&Said>, until: Instant) -> Result<Ready, String> {

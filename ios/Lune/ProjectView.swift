@@ -9,6 +9,7 @@ struct ProjectView: View {
     @State private var tackling = false
     @State private var closing: Worktree?
     @State private var closings: Set<UInt64> = []
+    @State private var flowBusy: Set<UInt64> = []
     @State private var failed: String?
 
     var body: some View {
@@ -37,7 +38,10 @@ struct ProjectView: View {
                                     machine: seat.machine, cwd: worktree.folder,
                                     title: worktree.name)
                             },
+                            flowEnabled: !flowBusy.contains(worktree.id),
                             startFlow: { interactive in
+                                let (inserted, _) = flowBusy.insert(worktree.id)
+                                precondition(inserted)
                                 Task {
                                     do {
                                         try await luned.startFlow(
@@ -46,9 +50,12 @@ struct ProjectView: View {
                                     } catch {
                                         failed = reason(error)
                                     }
+                                    flowBusy.remove(worktree.id)
                                 }
                             },
                             controlFlow: { control in
+                                let (inserted, _) = flowBusy.insert(worktree.id)
+                                precondition(inserted)
                                 Task {
                                     do {
                                         try await luned.controlFlow(
@@ -57,6 +64,7 @@ struct ProjectView: View {
                                     } catch {
                                         failed = reason(error)
                                     }
+                                    flowBusy.remove(worktree.id)
                                 }
                             },
                             closes: !closings.contains(worktree.id),
@@ -125,6 +133,7 @@ struct ProjectView: View {
 private struct WorktreeHeader: View {
     let worktree: Worktree
     let ask: () -> Void
+    let flowEnabled: Bool
     let startFlow: (Bool) -> Void
     let controlFlow: (FlowControl) -> Void
     let closes: Bool
@@ -163,6 +172,7 @@ private struct WorktreeHeader: View {
                             ) {
                                 controlFlow(control)
                             }
+                            .disabled(!flowEnabled)
                         }
                     }
                 }
@@ -171,9 +181,11 @@ private struct WorktreeHeader: View {
                         Button("Start PR flow (auto)", systemImage: "bolt") {
                             startFlow(false)
                         }
+                        .disabled(!flowEnabled)
                         Button("Start PR flow (interactive)", systemImage: "play.circle") {
                             startFlow(true)
                         }
+                        .disabled(!flowEnabled)
                     }
                 }
                 Button("Ask here", systemImage: "bubble.left", action: ask)

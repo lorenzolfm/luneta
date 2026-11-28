@@ -1,12 +1,12 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use lune_domain::agent::Harness;
 use lune_domain::flows::{
-    FixChecksGateFailure, MergeOutcome, PrSnapshot, PrState, RebaseOutcome, StageGateFailure,
-    StageKind,
+    FixChecksGateFailure, MergeMethod, MergeOutcome, PrSnapshot, PrState, RebaseOutcome,
+    StageGateFailure, StageKind,
 };
 use lune_domain::projects::Argv;
 use lune_protocol::github::{PullPage, State};
@@ -15,10 +15,18 @@ use crate::checks::{self, Failing, Log};
 use crate::directory::Directory;
 use crate::git::{self, Common};
 use crate::github::{self, Pulled};
+use crate::log;
 use crate::program;
 use crate::rebases::{self, Came};
 
 const MERGE_LIMIT: Duration = Duration::from_mins(2);
+
+pub const STEP_FILES_MAX: usize = 5;
+
+const DEFAULT_BRANCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+const _: () = assert!(MERGE_LIMIT.as_secs() > 0);
+const _: () = assert!(DEFAULT_BRANCH_TIMEOUT.as_secs() > 0);
 
 const REVIEW_FOLLOWUP: &str = "Act on the recommended findings from your audit above. Make the \
     fixes cleanly, run local checks and tests to verify everything passes, commit all changes, \
@@ -61,6 +69,7 @@ pub fn check_stage_post_conditions(
     dir: &str,
     require_open_pr: bool,
 ) -> Result<(), StageGateFailure> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
     let clean = git::is_clean(dir).map_err(StageGateFailure::Failed)?;
     if !clean {
         return Err(StageGateFailure::DirtyTree);
@@ -76,6 +85,8 @@ pub fn check_stage_post_conditions(
 }
 
 pub fn check_rebase_post_conditions(dir: &str, onto_ref: &str) -> Result<String, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    assert!(!onto_ref.is_empty(), "rebase target ref is non-empty");
     if git::rebase_in_progress(dir)? {
         return Err("rebase state (.git/rebase-merge or rebase-apply) still remains".to_owned());
     }
@@ -94,6 +105,8 @@ pub fn check_fix_checks_post_conditions(
     dir: &str,
     previous_head: &str,
 ) -> Result<String, FixChecksGateFailure> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
+    assert!(!previous_head.is_empty(), "previous head oid is non-empty");
     let clean = git::is_clean(dir).map_err(FixChecksGateFailure::Failed)?;
     if !clean {
         return Err(FixChecksGateFailure::DirtyTree);
@@ -106,6 +119,7 @@ pub fn check_fix_checks_post_conditions(
 }
 
 pub fn poll_pr(dir: &str) -> Result<Option<PrSnapshot>, String> {
+    assert!(!dir.is_empty(), "worktree directory is non-empty");
     let Some(branch) = git::branch(dir)? else {
         return Ok(None);
     };
@@ -152,8 +166,8 @@ pub fn run_rebase(dir: &str) -> RebaseOutcome {
         Ok(dir) => dir,
         Err(why) => return RebaseOutcome::Failed(why),
     };
-    match rebases::rebase_with_ref(&parsed, None) {
-        Ok((rebased, onto_ref)) => match &rebased.came {
+    match rebases::rebase_naming_onto(&parsed, None) {
+        Ok(rebases::RebasedOnto { rebased, onto_ref }) => match &rebased.came {
             Came::Already => RebaseOutcome::Already,
             Came::Clean { .. } => match git::head_oid(dir) {
                 Ok(new_head) => RebaseOutcome::Clean { new_head },
@@ -187,6 +201,11 @@ pub fn fetch_checks_prompt(pr_url: &str) -> Result<String, String> {
 }
 
 fn format_checks_prompt(failing: &Failing, pr_url: &str) -> String {
+    assert!(
+        !failing.failed.is_empty(),
+        "failing checks list is non-empty"
+    );
+    assert!(!pr_url.is_empty(), "PR URL is non-empty");
     let mut lines = vec![format!(
         "Fix the failing CI checks on {pr_url} (commit {}).",
         failing.head
@@ -217,12 +236,27 @@ fn format_checks_prompt(failing: &Failing, pr_url: &str) -> String {
 }
 
 #[must_use]
-pub fn merge_pr(dir: &str, pr_url: &str) -> MergeOutcome {
+pub fn merge_pr(
+    dir: &str,
+    pr_url: &str,
+    merge_method: MergeMethod,
+    expected_head: &str,
+) -> MergeOutcome {
+    assert!(!dir.is_empty(), "merge directory is non-empty");
+    assert!(!pr_url.trim().is_empty(), "merge PR URL is non-empty");
+    assert!(
+        !expected_head.trim().is_empty(),
+        "merge names the head CI passed"
+    );
     let mut gh = Command::new("gh");
-    let mut args = vec!["pr", "merge"];
-    if !pr_url.is_empty() {
-        args.push(pr_url);
-    }
+    let args = [
+        "pr",
+        "merge",
+        merge_method.gh_flag(),
+        "--match-head-commit",
+        expected_head,
+        pr_url,
+    ];
     git::local(gh.args(args).current_dir(dir));
     let ran = match program::run(&mut gh, MERGE_LIMIT) {
         Ok(ran) => ran,
@@ -252,9 +286,16 @@ pub fn is_merge_race(error: &str) -> bool {
 
 #[must_use]
 pub fn pr_scope(dir: &str, pr_url: Option<&str>) -> String {
-    let base = git::default_branch(dir, Duration::from_secs(10))
-        .ok()
-        .map_or_else(|| "main".to_owned(), |branch| branch.to_string());
+    assert!(!dir.is_empty(), "scope directory is non-empty");
+    let base = match git::default_branch(dir, DEFAULT_BRANCH_TIMEOUT) {
+        Ok(branch) => branch.to_string(),
+        Err(why) => {
+            log::say(&format!(
+                "flows pr_scope {dir}: default branch unreadable ({why}); falling back to main"
+            ));
+            "main".to_owned()
+        }
+    };
     match pr_url {
         Some(url) if !url.is_empty() => format!("{base}..HEAD ({url})"),
         _ => format!("{base}..HEAD"),
@@ -269,12 +310,18 @@ pub fn stage_prompts(
     implement_prompt: Option<&str>,
     pr_url: Option<&str>,
 ) -> (String, Option<String>) {
+    assert!(
+        !matches!(stage_kind, StageKind::Land),
+        "land stage has no agent prompt"
+    );
     match stage_kind {
         StageKind::Implement => {
-            let user_prompt = implement_prompt.unwrap_or("Implement the requested change.");
+            let user_prompt = implement_prompt.expect("implement stage requires a prompt");
+            assert_ne!(user_prompt.trim(), "");
             (format!("{user_prompt}\n\n{IMPLEMENT_SUFFIX}"), None)
         }
         StageKind::ReviewSkill { skill } => {
+            assert_ne!(skill.trim(), "");
             let spelled = spelled_skill(harness, skill);
             let scope = pr_scope(dir, pr_url);
             let turn1 = format!(
@@ -283,7 +330,7 @@ pub fn stage_prompts(
             );
             (turn1, Some(REVIEW_FOLLOWUP.to_owned()))
         }
-        StageKind::Land => (String::new(), None),
+        StageKind::Land => unreachable!("land stage asserted excluded above"),
     }
 }
 
@@ -294,12 +341,18 @@ pub fn interactive_stage_argv(
     implement_prompt: Option<&str>,
     pr_url: Option<&str>,
 ) -> Result<Argv, String> {
+    assert!(
+        !matches!(stage_kind, StageKind::Land),
+        "land stage has no interactive prompt"
+    );
     match stage_kind {
         StageKind::Implement => {
-            let prompt = implement_prompt.unwrap_or("Implement the requested change.");
+            let prompt = implement_prompt.expect("implement stage requires a prompt");
+            assert_ne!(prompt.trim(), "");
             Argv::on_words(harness, prompt.to_owned(), &[])
         }
         StageKind::ReviewSkill { skill } => {
+            assert_ne!(skill.trim(), "");
             let spelled = spelled_skill(harness, skill);
             let scope = pr_scope(dir, pr_url);
             let prompt = format!("{spelled} {scope}");
@@ -311,7 +364,30 @@ pub fn interactive_stage_argv(
             };
             Argv::parse(words)
         }
-        StageKind::Land => Err("land stage has no interactive prompt".to_owned()),
+        StageKind::Land => unreachable!("land stage asserted excluded above"),
+    }
+}
+
+pub struct StepFiles {
+    pub prompt: PathBuf,
+    pub followup: Option<PathBuf>,
+    pub pi_session: Option<PathBuf>,
+    pub session_out: PathBuf,
+    pub stop: PathBuf,
+}
+
+impl StepFiles {
+    #[must_use]
+    pub fn all(&self) -> Vec<PathBuf> {
+        let mut files = vec![
+            self.prompt.clone(),
+            self.session_out.clone(),
+            self.stop.clone(),
+        ];
+        files.extend(self.followup.clone());
+        files.extend(self.pi_session.clone());
+        assert!(files.len() <= STEP_FILES_MAX);
+        files
     }
 }
 
@@ -319,12 +395,16 @@ pub fn unattended_step_argv(
     lune_bin: &str,
     harness: Harness,
     stage_label: &str,
-    prompt_file: &Path,
-    followup_file: Option<&Path>,
-    pi_session: Option<&Path>,
-    session_out: &Path,
+    files: &StepFiles,
     timeout_secs: u64,
 ) -> Result<Argv, String> {
+    assert!(!lune_bin.is_empty(), "lune binary path is non-empty");
+    assert!(!stage_label.trim().is_empty(), "stage label is non-empty");
+    let path = |path: &Path| -> Result<String, String> {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} is not UTF-8", path.display()))
+    };
     let mut words = vec![
         lune_bin.to_owned(),
         "_step".to_owned(),
@@ -333,21 +413,23 @@ pub fn unattended_step_argv(
         "--stage".to_owned(),
         stage_label.to_owned(),
         "--prompt-file".to_owned(),
-        prompt_file.to_string_lossy().into_owned(),
+        path(&files.prompt)?,
         "--session-out".to_owned(),
-        session_out.to_string_lossy().into_owned(),
+        path(&files.session_out)?,
+        "--stop-file".to_owned(),
+        path(&files.stop)?,
         "--timeout-secs".to_owned(),
         timeout_secs.to_string(),
     ];
-    if let Some(followup) = followup_file {
+    if let Some(followup) = &files.followup {
         words.push("--followup-file".to_owned());
-        words.push(followup.to_string_lossy().into_owned());
+        words.push(path(followup)?);
     }
     if harness == Harness::Pi
-        && let Some(pi_session) = pi_session
+        && let Some(pi_session) = &files.pi_session
     {
         words.push("--pi-session".to_owned());
-        words.push(pi_session.to_string_lossy().into_owned());
+        words.push(path(pi_session)?);
     }
     Argv::parse(words)
 }

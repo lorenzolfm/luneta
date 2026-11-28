@@ -257,8 +257,11 @@ pub async fn serve(
     let wake_github_flows = wake_github.clone();
     github::follow(core.clone(), wake_github, github_woken, rests)?;
     let flows = flows::start(core.clone(), layouts.clone(), wake_github_flows)?;
-    let _ = core.send(Command::AttachFlows(flows.clone()));
-    let _ = layouts.send(layouts::Command::AttachFlows(flows.clone()));
+    core.send(Command::AttachFlows(flows.clone()))
+        .map_err(|_| io::Error::other("core stopped before attaching flows"))?;
+    layouts
+        .send(layouts::Command::AttachFlows(flows.clone()))
+        .map_err(|_| io::Error::other("layouts stopped before attaching flows"))?;
     let bridges = Arc::new(Bridges::default());
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();
@@ -1454,7 +1457,8 @@ impl Daemon for Host {
         let worktree_id = layouts::id("worktree", worktree)
             .map(WorktreeId::new)
             .map_err(Status::invalid_argument)?;
-        let parsed_mode = flows::mode_of_api(mode).map_err(Status::invalid_argument)?;
+        let parsed_mode =
+            lune_domain::flows::FlowMode::of_api(mode).map_err(Status::invalid_argument)?;
         let parsed_harness = match api::Harness::try_from(harness) {
             Ok(api::Harness::ClaudeCode | api::Harness::Unspecified) => Harness::ClaudeCode,
             Ok(api::Harness::Pi) => Harness::Pi,
@@ -1492,7 +1496,7 @@ impl Daemon for Host {
                 entry: parsed_entry,
                 answer,
             })
-            .ok_or_else(|| Status::unavailable("the flows actor has stopped"))?;
+            .map_err(Status::unavailable)?;
             result.map_err(Status::failed_precondition)
         })
         .await
@@ -1514,7 +1518,8 @@ impl Daemon for Host {
         let worktree_id = layouts::id("worktree", worktree)
             .map(WorktreeId::new)
             .map_err(Status::invalid_argument)?;
-        let parsed_control = flows::control_of_api(control).map_err(Status::invalid_argument)?;
+        let parsed_control =
+            lune_domain::flows::FlowControl::of_api(control).map_err(Status::invalid_argument)?;
         if let Some(mut daemon) = self.bridged(on).await? {
             return daemon
                 .control_flow(ControlFlowRequest {
@@ -1536,7 +1541,7 @@ impl Daemon for Host {
                 control: parsed_control,
                 answer,
             })
-            .ok_or_else(|| Status::unavailable("the flows actor has stopped"))?;
+            .map_err(Status::unavailable)?;
             result.map_err(Status::failed_precondition)
         })
         .await
@@ -1558,7 +1563,7 @@ impl Daemon for Host {
         })
         .await
         .map_err(|error| unfinished(&error))?;
-        let response = listed.ok_or_else(|| Status::unavailable("the flows actor has stopped"))?;
+        let response = listed.map_err(Status::unavailable)?;
         Ok(Response::new(response))
     }
 }

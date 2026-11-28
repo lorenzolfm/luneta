@@ -4,16 +4,19 @@ use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
 use lune_protocol::v1::{self as api, terminal};
 
-use crate::flows::{FlowBadgeKind, FlowControl, FlowMode};
+use crate::flows::{
+    BADGE_BYTES_MAX, FlowBadgeKind, FlowControl, FlowMode, NAME_BYTES_MAX, REASON_BYTES_MAX,
+    SESSION_ID_BYTES_MAX, STAGES_MAX,
+};
 use crate::mux::TerminalKey;
 use crate::projects::{Arranged, Dir, ProjectId, ProjectName, Seen, Subfolder, Used, ViewId};
 use crate::projects::{CLONE_WORKTREES_MAX, VIEWS_MAX, WORKTREES_MAX, WorktreeId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlowSummary {
+pub struct FlowRow {
     pub flow_name: String,
     pub mode: FlowMode,
-    pub step_index: u32,
+    pub step_number: u32,
     pub step_total: u32,
     pub stage_label: String,
     pub badge: String,
@@ -25,53 +28,104 @@ pub struct FlowSummary {
     pub controls: Vec<FlowControl>,
 }
 
-impl FlowSummary {
-    #[must_use]
-    pub fn of_api(said: &api::FlowSummary) -> FlowSummary {
-        let mode = match api::FlowMode::try_from(said.mode) {
-            Ok(api::FlowMode::Interactive) => FlowMode::Interactive,
-            Ok(api::FlowMode::Unattended | api::FlowMode::Unspecified) | Err(_) => {
-                FlowMode::Unattended
+impl FlowRow {
+    pub fn of_api(said: &api::FlowSummary) -> Result<FlowRow, String> {
+        if said.flow_name.trim().is_empty() {
+            return Err("flow has an empty name".to_owned());
+        }
+        if said.stage_label.trim().is_empty() {
+            return Err("flow has an empty stage label".to_owned());
+        }
+        if said.badge.trim().is_empty() {
+            return Err("flow has an empty badge".to_owned());
+        }
+        let bounded = [
+            ("name", Some(&said.flow_name), NAME_BYTES_MAX),
+            ("stage label", Some(&said.stage_label), NAME_BYTES_MAX),
+            ("badge", Some(&said.badge), BADGE_BYTES_MAX),
+            ("pause reason", said.pause_reason.as_ref(), REASON_BYTES_MAX),
+            ("detail", said.detail.as_ref(), REASON_BYTES_MAX),
+            (
+                "resume session",
+                said.resume_session.as_ref(),
+                SESSION_ID_BYTES_MAX,
+            ),
+        ];
+        for (field, text, bytes_max) in bounded {
+            if let Some(text) = text
+                && text.len() > bytes_max
+            {
+                return Err(format!("flow {field} exceeds {bytes_max} bytes"));
             }
-        };
+        }
+        let step_total = usize::try_from(said.step_total)
+            .map_err(|_| format!("flow step_total {} out of range", said.step_total))?;
+        if step_total == 0 || step_total > STAGES_MAX {
+            return Err(format!(
+                "flow step_total {} must be in 1..={STAGES_MAX}",
+                said.step_total
+            ));
+        }
+        if said.step_number == 0 || said.step_number > said.step_total {
+            return Err(format!(
+                "flow step_number {} must be in 1..={}",
+                said.step_number, said.step_total
+            ));
+        }
+        let mode = FlowMode::of_api(said.mode)?;
         let badge_kind = match api::FlowBadgeKind::try_from(said.badge_kind) {
+            Ok(api::FlowBadgeKind::Running) => FlowBadgeKind::Running,
             Ok(api::FlowBadgeKind::WaitingInteractive) => FlowBadgeKind::WaitingInteractive,
             Ok(api::FlowBadgeKind::Paused) => FlowBadgeKind::Paused,
             Ok(api::FlowBadgeKind::Merged) => FlowBadgeKind::Merged,
             Ok(api::FlowBadgeKind::ReadyToMerge) => FlowBadgeKind::ReadyToMerge,
-            Ok(api::FlowBadgeKind::Running | api::FlowBadgeKind::Unspecified) | Err(_) => {
-                FlowBadgeKind::Running
+            Ok(api::FlowBadgeKind::Unspecified) | Err(_) => {
+                return Err(format!("flow has unknown badge kind {}", said.badge_kind));
             }
         };
-        let controls = said
-            .controls
-            .iter()
-            .filter_map(|raw| match api::FlowControl::try_from(*raw) {
-                Ok(api::FlowControl::Advance) => Some(FlowControl::Advance),
-                Ok(api::FlowControl::AutoRest) => Some(FlowControl::AutoRest),
-                Ok(api::FlowControl::Pause) => Some(FlowControl::Pause),
-                Ok(api::FlowControl::Resume) => Some(FlowControl::Resume),
-                Ok(api::FlowControl::RetryStep) => Some(FlowControl::RetryStep),
-                Ok(api::FlowControl::SkipStep) => Some(FlowControl::SkipStep),
-                Ok(api::FlowControl::TakeOver) => Some(FlowControl::TakeOver),
-                Ok(api::FlowControl::Abort) => Some(FlowControl::Abort),
-                Ok(api::FlowControl::Unspecified) | Err(_) => None,
-            })
-            .collect();
-        FlowSummary {
+        if said.controls.len() > FlowControl::ALL.len() {
+            return Err(format!(
+                "flow lists {} controls, exceeding {}",
+                said.controls.len(),
+                FlowControl::ALL.len()
+            ));
+        }
+        let mut controls = Vec::with_capacity(said.controls.len());
+        for &raw in &said.controls {
+            let control = FlowControl::of_api(raw)?;
+            if controls.contains(&control) {
+                return Err(format!("flow lists {} twice", control.label()));
+            }
+            controls.push(control);
+        }
+        if said.pause_reason.is_some() != (badge_kind == FlowBadgeKind::Paused) {
+            return Err("flow has a pause reason exactly when it is paused".to_owned());
+        }
+        let active_view = match said.active_view {
+            None => None,
+            Some(raw) => {
+                let id = ViewId::of(raw).ok_or_else(|| "flow active view has id 0".to_owned())?;
+                Some(id)
+            }
+        };
+        let row = FlowRow {
             flow_name: said.flow_name.clone(),
             mode,
-            step_index: said.step_index,
+            step_number: said.step_number,
             step_total: said.step_total,
             stage_label: said.stage_label.clone(),
             badge: said.badge.clone(),
             badge_kind,
             pause_reason: said.pause_reason.clone(),
             detail: said.detail.clone(),
-            active_view: said.active_view.and_then(ViewId::of),
+            active_view,
             resume_session: said.resume_session.clone(),
             controls,
-        }
+        };
+        assert!(row.step_number >= 1);
+        assert!(row.step_number <= row.step_total);
+        assert!(row.controls.len() <= FlowControl::ALL.len());
+        Ok(row)
     }
 
     #[must_use]
@@ -98,7 +152,7 @@ pub struct Worktree {
     pub used: Option<Used>,
     pub seen: Seen,
     pub arranged: Option<Arranged>,
-    pub flow: Option<Box<FlowSummary>>,
+    pub flow: Option<Box<FlowRow>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -397,7 +451,10 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
     let flow = worktree
         .flow
         .as_ref()
-        .map(|flow| Box::new(FlowSummary::of_api(flow)));
+        .map(FlowRow::of_api)
+        .transpose()
+        .map_err(|why| format!("worktree {named}'s flow: {why}"))?
+        .map(Box::new);
     let name = named.clone();
     Ok(Worktree {
         id,
@@ -880,5 +937,69 @@ mod tests {
         let over = format!("it lists {over} worktrees not open, over the {max} a clone holds");
         let over = format!("{clone}: {over}");
         assert_eq!(listing(many(max + 1)), Err(over));
+    }
+
+    #[test]
+    fn flow_row_accepts_valid_summary_and_rejects_illegal_wire_values() {
+        let valid = || api::FlowSummary {
+            worktree: 11,
+            flow_name: "default".to_owned(),
+            mode: api::FlowMode::Unattended.into(),
+            harness: api::Harness::ClaudeCode.into(),
+            step_number: 2,
+            step_total: 4,
+            stage_label: "tigerstyle".to_owned(),
+            badge: "2/4 tigerstyle".to_owned(),
+            badge_kind: api::FlowBadgeKind::Running.into(),
+            pause_reason: None,
+            detail: None,
+            active_view: Some(21),
+            resume_session: None,
+            controls: vec![
+                api::FlowControl::Pause.into(),
+                api::FlowControl::Abort.into(),
+            ],
+        };
+        let row = FlowRow::of_api(&valid()).unwrap();
+        assert_eq!(row.step_number, 2);
+        assert_eq!(row.step_total, 4);
+        assert_eq!(row.active_view, ViewId::of(21));
+
+        let mut bad_mode = valid();
+        bad_mode.mode = api::FlowMode::Unspecified.into();
+        assert!(FlowRow::of_api(&bad_mode).is_err());
+
+        let mut bad_badge = valid();
+        bad_badge.badge_kind = api::FlowBadgeKind::Unspecified.into();
+        assert!(FlowRow::of_api(&bad_badge).is_err());
+
+        let mut zero_view = valid();
+        zero_view.active_view = Some(0);
+        assert!(FlowRow::of_api(&zero_view).is_err());
+
+        let mut bad_step = valid();
+        bad_step.step_number = 5;
+        assert!(FlowRow::of_api(&bad_step).is_err());
+
+        let mut too_many_controls = valid();
+        too_many_controls.controls =
+            vec![api::FlowControl::Pause.into(); FlowControl::ALL.len() + 1];
+        assert!(FlowRow::of_api(&too_many_controls).is_err());
+
+        let mut twice = valid();
+        twice.controls = vec![api::FlowControl::Pause.into(); 2];
+        assert!(FlowRow::of_api(&twice).is_err());
+
+        let mut long_name = valid();
+        long_name.flow_name = "n".repeat(NAME_BYTES_MAX + 1);
+        assert!(FlowRow::of_api(&long_name).is_err());
+
+        let mut running_with_reason = valid();
+        running_with_reason.pause_reason = Some("paused".to_owned());
+        assert!(FlowRow::of_api(&running_with_reason).is_err());
+
+        let mut paused_without_reason = valid();
+        paused_without_reason.badge_kind = api::FlowBadgeKind::Paused.into();
+        assert!(FlowRow::of_api(&paused_without_reason).is_err());
     }
 }

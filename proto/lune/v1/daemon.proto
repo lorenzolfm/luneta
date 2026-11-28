@@ -1447,7 +1447,7 @@ message FlowSummary {
   string flow_name = 2;
   FlowMode mode = 3;
   Harness harness = 4;
-  uint32 step_index = 5;
+  uint32 step_number = 5;
   uint32 step_total = 6;
   string stage_label = 7;
   string badge = 8;

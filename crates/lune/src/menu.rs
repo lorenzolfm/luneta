@@ -9,7 +9,7 @@ use lune_domain::names::SessionName;
 use lune_domain::projects::{
     self, Argv, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId,
 };
-use lune_domain::rows::FlowSummary;
+use lune_domain::rows::FlowRow;
 use lune_protocol::github::{PullRequest, State};
 use lune_protocol::said::Said;
 use lune_protocol::shell::Ending;
@@ -880,7 +880,7 @@ pub struct WorktreeRow {
     pub folder: Directory,
     pub branch: Option<Said>,
     pub repository: Option<String>,
-    pub flow: Option<Box<FlowSummary>>,
+    pub flow: Option<Box<FlowRow>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -890,7 +890,7 @@ pub struct ViewRow {
     pub cwd: Cwd,
     pub ran: Ran,
     pub arranged: Option<Arranged>,
-    pub flow: Option<Box<FlowSummary>>,
+    pub flow: Option<Box<FlowRow>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1052,7 +1052,7 @@ impl Target {
             }
             (Action::FlowStartPrAuto, _) => {
                 let (worktree, flow) = self.worktree_flow()?;
-                if !flow.is_none_or(FlowSummary::is_finished) {
+                if !flow.is_none_or(FlowRow::is_finished) {
                     return None;
                 }
                 Offer::FlowStart {
@@ -1063,7 +1063,7 @@ impl Target {
             }
             (Action::FlowStartPrInteractive, _) => {
                 let (worktree, flow) = self.worktree_flow()?;
-                if !flow.is_none_or(FlowSummary::is_finished) {
+                if !flow.is_none_or(FlowRow::is_finished) {
                     return None;
                 }
                 Offer::FlowStart {
@@ -1074,7 +1074,7 @@ impl Target {
             }
             (Action::FlowStartPromptAuto, _) => {
                 let (worktree, flow) = self.worktree_flow()?;
-                if !flow.is_none_or(FlowSummary::is_finished) {
+                if !flow.is_none_or(FlowRow::is_finished) {
                     return None;
                 }
                 Offer::FlowStart {
@@ -1085,7 +1085,7 @@ impl Target {
             }
             (Action::FlowStartPromptInteractive, _) => {
                 let (worktree, flow) = self.worktree_flow()?;
-                if !flow.is_none_or(FlowSummary::is_finished) {
+                if !flow.is_none_or(FlowRow::is_finished) {
                     return None;
                 }
                 Offer::FlowStart {
@@ -1142,7 +1142,7 @@ impl Target {
         }
     }
 
-    fn worktree_flow(&self) -> Option<(WorktreeId, Option<&FlowSummary>)> {
+    fn worktree_flow(&self) -> Option<(WorktreeId, Option<&FlowRow>)> {
         match self {
             Target::Worktree(_, row) => Some((row.place.worktree, row.flow.as_deref())),
             Target::View(_, row) => Some((row.place.worktree().worktree, row.flow.as_deref())),
@@ -4198,10 +4198,10 @@ mod tests {
         let Target::Worktree(_, mut flowing) = worktree_on(Machine::Local) else {
             panic!("expected worktree target");
         };
-        flowing.flow = Some(Box::new(FlowSummary {
+        flowing.flow = Some(Box::new(FlowRow {
             flow_name: "default".to_owned(),
             mode: FlowMode::Interactive,
-            step_index: 1,
+            step_number: 1,
             step_total: 4,
             stage_label: "tigerstyle".to_owned(),
             badge: "paused".to_owned(),
@@ -6422,10 +6422,10 @@ mod tests {
             }
         );
 
-        let paused_flow = FlowSummary {
+        let paused_flow = FlowRow {
             flow_name: "default".to_owned(),
             mode: FlowMode::Unattended,
-            step_index: 2,
+            step_number: 2,
             step_total: 4,
             stage_label: "illegal-states".to_owned(),
             badge: "paused".to_owned(),

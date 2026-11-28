@@ -636,7 +636,7 @@ impl Core {
             worktree,
             flow_name: None,
             mode: mode.into(),
-            harness: api::Harness::ClaudeCode.into(),
+            harness: api::Harness::Unspecified.into(),
             entry: Some(entry),
         };
         self.on_runtime(async move {

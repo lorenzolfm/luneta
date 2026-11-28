@@ -160,6 +160,29 @@ impl Projected {
             shown.titles(),
         )
     }
+
+    #[must_use]
+    pub fn flow_worktrees(&self) -> Vec<(Machine, WorktreeId, &str, &rows::FlowRow)> {
+        let held = std::iter::once((Machine::Local, &self.here)).chain(
+            self.far
+                .iter()
+                .map(|(destination, holding)| (Machine::Remote(destination.clone()), holding)),
+        );
+        let mut out = Vec::new();
+        for (machine, holding) in held {
+            let Holding::Read(projects) = holding else {
+                continue;
+            };
+            for project in projects {
+                for worktree in project.worktrees() {
+                    if let Some(flow) = worktree.flow.as_deref() {
+                        out.push((machine.clone(), worktree.id, worktree.name.as_str(), flow));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 fn held(projects: Option<&api::Projects>) -> Result<Holding, String> {

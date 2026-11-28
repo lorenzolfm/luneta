@@ -169,3 +169,129 @@ fn pi_two_turn_uses_provided_session_file_and_writes_session_out() {
     assert!(lines[0].contains(&expected_flag), "{calls}");
     assert!(lines[1].contains(&expected_flag), "{calls}");
 }
+
+fn step_command(dir: &Path, harness: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lune"));
+    command.env("PATH", path_with_front(dir)).args([
+        "_step",
+        "--harness",
+        harness,
+        "--stage",
+        "tigerstyle",
+        "--prompt",
+        "/tigerstyle main..HEAD",
+    ]);
+    command
+}
+
+fn process_alive(pid: &str) -> bool {
+    Path::new(&format!("/proc/{}", pid.trim())).exists()
+        || Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+#[test]
+fn agent_text_cannot_forge_terminal_escapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "#!/bin/sh\n\
+        printf '%s\\n' '{\"type\":\"system\",\"session_id\":\"s-1\"}'\n\
+        printf '%s\\n' '{\"type\":\"assistant\",\"parent_tool_use_id\":null,\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"look \\u001b]7501;state=done:app=forged\\u0007 here\"}]}}'\n\
+        printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}'\n";
+    write_script(dir.path(), "claude", body);
+    let output = step_command(dir.path(), "claude").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("look"), "{stdout}");
+    assert!(
+        !stdout.contains("\u{1b}]7501;state=done:app=forged"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\u{fffd}]7501;state=done:app=forged"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_timed_out_step_ends_even_when_its_agent_floods_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "#!/bin/sh\n\
+        exec yes '{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"spam \"}}}'\n";
+    write_script(dir.path(), "claude", body);
+    let mut child = step_command(dir.path(), "claude")
+        .args(["--timeout-secs", "1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let status = lune_waits::ended("the flooded step ends at its timeout", &mut child);
+    assert!(!status.success());
+}
+
+#[test]
+fn a_stop_file_ends_the_agent_and_everything_it_started() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("tool.pid");
+    let stop_file = dir.path().join("stop");
+    let body = format!(
+        "#!/bin/sh\n\
+         sleep 300 &\n\
+         echo $! > \"{}\"\n\
+         printf '%s\\n' '{{\"type\":\"system\",\"session_id\":\"s-1\"}}'\n\
+         wait\n",
+        pid_file.display()
+    );
+    write_script(dir.path(), "claude", &body);
+    let mut child = step_command(dir.path(), "claude")
+        .arg("--stop-file")
+        .arg(&stop_file)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    lune_waits::eventually("the agent starts a tool", || {
+        pid_file.exists().then_some(())
+    });
+    let tool_pid = fs::read_to_string(&pid_file).unwrap();
+    assert!(process_alive(&tool_pid));
+    fs::write(&stop_file, b"").unwrap();
+    let status = lune_waits::ended("the stop file ends the step", &mut child);
+    assert!(!status.success());
+    let mut stdout = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut stdout).unwrap();
+    assert!(stdout.contains("the flow stopped the step"), "{stdout}");
+    assert!(
+        !stop_file.exists(),
+        "the runner clears the stop file it honoured"
+    );
+    lune_waits::eventually("the agent's tool ends with the step", || {
+        (!process_alive(&tool_pid)).then_some(())
+    });
+}
+
+#[test]
+fn a_pi_error_is_not_cleared_by_the_settle_that_follows() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "#!/bin/sh\n\
+        printf '%s\\n' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"error\",\"error\":\"rate limited\"}}'\n\
+        printf '%s\\n' '{\"type\":\"agent_settled\",\"aborted\":false}'\n";
+    write_script(dir.path(), "pi", body);
+    let output = step_command(dir.path(), "pi").output().unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("rate limited"), "{stdout}");
+}
+
+#[test]
+fn a_claude_turn_without_a_result_record_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "#!/bin/sh\n\
+        printf '%s\\n' '{\"type\":\"system\",\"session_id\":\"s-1\"}'\n\
+        printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"succ'\n";
+    write_script(dir.path(), "claude", body);
+    let output = step_command(dir.path(), "claude").output().unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("without a result record"), "{stdout}");
+}

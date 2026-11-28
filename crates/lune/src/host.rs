@@ -22,7 +22,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
-use lune_domain::flows::{FlowBadgeKind, FlowControl, FlowMode};
+use lune_domain::flows::{self, FlowBadgeKind, FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{self, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId};
 use lune_domain::rows;
@@ -1538,7 +1538,7 @@ impl App {
                 let projected = &self.projected;
                 self.homes.forget(|home| gone(projected, home));
                 let review_status = self.review_git_status(&host);
-                self.check_flow_transitions(&host);
+                self.check_flow_transitions();
                 self.sidebar.heard(host, now.system);
                 self.seat();
                 if review_status != self.diff.git_status {
@@ -2836,7 +2836,7 @@ impl App {
                 if self.refuse_naming(Some(menu), busy) {
                     return;
                 }
-                let luned = self.luned.clone();
+                let (luned, events) = (self.luned.clone(), self.events.clone());
                 self.naming_on(move || {
                     let said = |unchanged| worktrees::said_unopened(unchanged, &cwd, &name);
                     let made = unmade_caught(PULL_PANICKED, said, || {
@@ -2846,29 +2846,20 @@ impl App {
                             | worktrees::Pulled::Opened { worktree, .. }
                             | worktrees::Pulled::Unopened { worktree, .. } => *worktree,
                         };
-                        let entry = match prompt {
-                            Some(prompt) => {
-                                luned::api::start_flow_request::Entry::ImplementPrompt(prompt)
-                            }
-                            None => luned::api::start_flow_request::Entry::PullRequest(()),
-                        };
-                        let request = luned::api::StartFlowRequest {
-                            on: None,
-                            worktree: worktree.get(),
-                            flow_name: None,
-                            mode: luned::api::FlowMode::Unattended.into(),
-                            harness: harness.to_api().into(),
-                            entry: Some(entry),
-                        };
-                        let pulled = match Luned::at(&luned, &on, reach::ANSWER)
-                            .and_then(|mut client| client.start_flow(request))
-                        {
-                            Ok(_) => pulled,
-                            Err(why) => worktrees::Pulled::Unopened {
-                                worktree,
-                                why: format!("no flow started: {why}"),
-                            },
-                        };
+                        let request = flows::start_request(
+                            worktree,
+                            FlowMode::Unattended,
+                            harness,
+                            None,
+                            prompt,
+                        );
+                        let started = Luned::at(&luned, &on, reach::ANSWER)
+                            .and_then(|mut client| client.start_flow(request));
+                        if let Err(why) = started {
+                            let notice =
+                                format!("flow: {name} was made, but no flow started: {why}");
+                            let _app_gone = events.send(Event::Notice(notice));
+                        }
                         Ok(Pulled { on, pulled })
                     });
                     Made::Pulled { menu, made }
@@ -3051,22 +3042,7 @@ impl App {
         prompt: Option<String>,
     ) {
         let (luned, events) = (self.luned.clone(), self.events.clone());
-        let api_mode = match mode {
-            FlowMode::Interactive => luned::api::FlowMode::Interactive,
-            FlowMode::Unattended => luned::api::FlowMode::Unattended,
-        };
-        let entry = match prompt {
-            Some(prompt) => luned::api::start_flow_request::Entry::ImplementPrompt(prompt),
-            None => luned::api::start_flow_request::Entry::PullRequest(()),
-        };
-        let request = luned::api::StartFlowRequest {
-            on: None,
-            worktree: worktree.get(),
-            flow_name: None,
-            mode: api_mode.into(),
-            harness: harness.to_api().into(),
-            entry: Some(entry),
-        };
+        let request = flows::start_request(worktree, mode, harness, None, prompt);
         self.keep_change(thread::spawn(move || {
             let result = caught(FLOW_PANICKED, || {
                 Luned::at(&luned, &on, reach::ANSWER)?.start_flow(request)
@@ -3079,16 +3055,7 @@ impl App {
 
     fn control_flow(&mut self, on: Machine, worktree: WorktreeId, control: FlowControl) {
         let (luned, events) = (self.luned.clone(), self.events.clone());
-        let api_control = match control {
-            FlowControl::Advance => luned::api::FlowControl::Advance,
-            FlowControl::AutoRest => luned::api::FlowControl::AutoRest,
-            FlowControl::Pause => luned::api::FlowControl::Pause,
-            FlowControl::Resume => luned::api::FlowControl::Resume,
-            FlowControl::RetryStep => luned::api::FlowControl::RetryStep,
-            FlowControl::SkipStep => luned::api::FlowControl::SkipStep,
-            FlowControl::TakeOver => luned::api::FlowControl::TakeOver,
-            FlowControl::Abort => luned::api::FlowControl::Abort,
-        };
+        let api_control = control.to_api();
         self.keep_change(thread::spawn(move || {
             let result = caught(FLOW_PANICKED, || {
                 Luned::at(&luned, &on, reach::ANSWER)?.control_flow(worktree, api_control)
@@ -3099,52 +3066,27 @@ impl App {
         }));
     }
 
-    fn check_flow_transitions(&mut self, host: &Host) {
+    fn check_flow_transitions(&mut self) {
         let mut current = FlowStates::new();
-        let mut transitions: Vec<(String, rows::FlowSummary)> = Vec::new();
-        let mut scan_projects = |machine: &Machine, projects: Option<&luned::api::Projects>| {
-            let Some(luned::api::projects::Held::Kept(kept)) =
-                projects.and_then(|projects| projects.held.as_ref())
-            else {
-                return;
-            };
-            let Ok(listed) = rows::listed(&kept.projects) else {
-                return;
-            };
-            for project in listed {
-                for worktree in project.worktrees() {
-                    let Some(flow) = &worktree.flow else {
-                        continue;
-                    };
-                    let key = (machine.clone(), worktree.id);
-                    let next = (flow.badge_kind, flow.detail.clone());
-                    if let Some(previous) = self.flow_states.as_ref() {
-                        let prev = previous.get(&key);
-                        if prev != Some(&next) {
-                            let changed_kind = prev.map(|(kind, _)| *kind) != Some(flow.badge_kind);
-                            if matches!(
-                                flow.badge_kind,
-                                FlowBadgeKind::Paused
-                                    | FlowBadgeKind::Merged
-                                    | FlowBadgeKind::ReadyToMerge
-                            ) && (changed_kind || flow.badge_kind == FlowBadgeKind::Paused)
-                            {
-                                transitions.push((worktree.name.clone(), (**flow).clone()));
-                            }
-                        }
+        let mut transitions: Vec<(String, rows::FlowRow)> = Vec::new();
+        for (machine, worktree_id, name, flow) in self.projected.flow_worktrees() {
+            let key = (machine, worktree_id);
+            let next = (flow.badge_kind, flow.detail.clone());
+            if let Some(previous) = self.flow_states.as_ref() {
+                let before = previous.get(&key);
+                let kind_before = before.map(|(kind, _)| *kind);
+                let tells = match flow.badge_kind {
+                    FlowBadgeKind::Paused => before != Some(&next),
+                    FlowBadgeKind::Merged | FlowBadgeKind::ReadyToMerge => {
+                        kind_before != Some(flow.badge_kind)
                     }
-                    current.insert(key, next);
+                    FlowBadgeKind::Running | FlowBadgeKind::WaitingInteractive => false,
+                };
+                if tells {
+                    transitions.push((name.to_owned(), flow.clone()));
                 }
             }
-        };
-        scan_projects(&Machine::Local, host.projects.as_ref());
-        for remote in &host.remotes {
-            let Ok(destination) = remote.destination.parse::<Destination>() else {
-                continue;
-            };
-            if let Some(luned::api::remote::Reached::Host(far)) = &remote.reached {
-                scan_projects(&Machine::Remote(destination), far.projects.as_ref());
-            }
+            current.insert(key, next);
         }
         self.flow_states = Some(current);
         for (name, flow) in transitions {
