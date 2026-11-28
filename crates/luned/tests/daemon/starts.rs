@@ -769,15 +769,17 @@ fn super_shift_t_in_lune_revives_a_closed_view() {
     let mut window = Window::open(&owned.host, &dir, &[]);
     let first = eventually("lune opens the worktree's first view", || {
         let worktree = shown(&owned, &dir.path)?;
-        worktree.terminals.first().map(|t| (worktree.id, t.id))
+        let terminal = worktree.terminals.first()?;
+        matches!(terminal.found, Some(Found::Key(_))).then_some((worktree.id, terminal.id))
     });
-    eventually("lune shows no empty prompt", || {
-        (!window.shows(UNSHOWN)).then_some(())
+    crate::attach::seated(&window, "revive/main");
+    eventually("the view has the keys", || {
+        window.cursor().is_some().then_some(())
     });
 
     window.send("\x1b[97;3u");
     eventually("menu opens over the view", || {
-        window.shows("Close").then_some(())
+        (window.shows("n  New ▸") && window.shows("d  Close ▸")).then_some(())
     });
     window.send("dd");
     eventually("closing the last view unviews lune", || {

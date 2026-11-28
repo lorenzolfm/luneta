@@ -65,7 +65,7 @@ fn as_panes(owned: &Owned, window: &mut Window, folder: &Path) {
     });
 }
 
-fn seated(window: &Window, view: &str) {
+pub(crate) fn seated(window: &Window, view: &str) {
     let want = format!(" {view}");
     eventually(&format!("the sidebar seats {view}"), || {
         window
