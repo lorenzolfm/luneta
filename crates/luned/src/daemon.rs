@@ -1771,8 +1771,8 @@ where
     let failed = heard.clone();
     let talking = task::spawn_blocking(move || {
         let hear = |step: Step| {
-            if let Step::Session(session) = &step {
-                sessions.record(session.clone(), mode);
+            if let Step::Session { id, .. } = &step {
+                sessions.record(id.clone(), mode);
             }
             let _ = heard.blocking_send(Ok(step.answer()));
         };

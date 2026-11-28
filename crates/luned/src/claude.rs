@@ -4,7 +4,6 @@ use std::fmt;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
 use lune_domain::agent::{Declared, Harness, Rung};
@@ -17,23 +16,15 @@ use crate::agent::{
     FILE_BYTES_MAX, Name, Sighting, Source, Unread, absolute, moment, named_pid, nonempty,
     read_file_text, terminal_or_trouble,
 };
+use crate::log;
 use crate::mux;
 use crate::process::{self, AgentId, AgentPid};
 use crate::statuses::{self, Proof, ReportedAgent, RungUpdate, SOURCE_AGENTS_MAX};
 use crate::watch::{self, Troubles};
-use crate::{log, program};
 
 pub const TORN: Duration = Duration::from_secs(1);
 
 pub(crate) const READS: Declared = Declared::of(Harness::ClaudeCode, Rung::Feed);
-
-pub fn one_answer(model: &str, system: &str, prompt: &str) -> io::Result<(Command, Stdio)> {
-    let mut claude = Command::new("claude");
-    claude.args(["-p", "--model", model, "--tools", "", "--safe-mode"]);
-    claude.args(["--no-session-persistence", "--system-prompt", system]);
-    mux::own::in_no_terminal(&mut claude);
-    Ok((claude, program::saying(prompt)?))
-}
 
 #[must_use]
 pub fn folder() -> Option<PathBuf> {
@@ -407,45 +398,8 @@ fn reported(id: AgentId, session: &Session, terminal: Option<TerminalKey>) -> Re
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
-
     use super::*;
     use crate::process::{AgentPid, Start as ProcessStart};
-
-    #[test]
-    fn one_answer_runs_in_no_terminal_with_no_tools() {
-        let (claude, told) = one_answer("haiku", "be brief", "the prompt").unwrap();
-        let args: Vec<&OsStr> = claude.get_args().collect();
-        let said = [
-            "-p",
-            "--model",
-            "haiku",
-            "--tools",
-            "",
-            "--safe-mode",
-            "--no-session-persistence",
-            "--system-prompt",
-            "be brief",
-        ];
-        assert_eq!(args, said.map(OsStr::new));
-        let mut unset: Vec<&OsStr> = claude
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(name, _)| name)
-            .collect();
-        unset.sort_unstable();
-        assert_eq!(
-            unset,
-            [
-                "LUNE_MUX_TERMINAL",
-                "LUNE_MUX_TERMINAL_MADE",
-                "OSC7577_TOKEN"
-            ]
-            .map(OsStr::new)
-        );
-        let heard = Command::new("cat").stdin(told).output().unwrap();
-        assert_eq!(heard.stdout, b"the prompt");
-    }
 
     #[test]
     fn parse_leading_file_tolerates_stray_tails_and_rejects_truncated_objects() {

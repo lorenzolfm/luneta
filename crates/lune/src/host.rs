@@ -1859,10 +1859,7 @@ impl App {
                 false
             }
             Event::News => self.sidebar.reread(now.system) && self.sidebar_changed(),
-            Event::Agent => {
-                self.sidebar.reagent();
-                false
-            }
+            Event::Agent => self.sidebar.reagent(),
         };
         if relists {
             self.relist();
@@ -2419,9 +2416,10 @@ impl App {
                 (heeded, action, false)
             }
             Some(Right::Home(shown)) => {
+                let picked = self.sidebar.kept_harness();
                 self.homes
                     .shown_mut(shown)
-                    .key(key, &mut self.asks, &self.events);
+                    .key(key, &mut self.asks, picked, &self.events);
                 (Heeded::Quiet, ReviewAction::None, true)
             }
             None => (Heeded::Quiet, ReviewAction::None, false),
@@ -3282,7 +3280,12 @@ impl App {
             Asked::Checks { menu, on, page } => checks::fetch(menu, &on, page, &self.events),
             Asked::Brief(brief) => {
                 self.briefs += 1;
-                let briefing = brief::ask(self.briefs, brief, &self.events);
+                let briefing = brief::ask(
+                    self.briefs,
+                    brief,
+                    self.sidebar.kept_harness(),
+                    &self.events,
+                );
                 self.give(self.pane.side(), Some(Over::Brief(briefing)), wall);
             }
             Asked::Ask(target) => {
@@ -3292,7 +3295,9 @@ impl App {
             }
             Asked::Issue(repository) => {
                 self.issues += 1;
-                let issue = Issue::open(self.issues, repository, &self.unfiled, &self.events);
+                let picked = self.sidebar.kept_harness();
+                let issue =
+                    Issue::open(self.issues, repository, picked, &self.unfiled, &self.events);
                 self.give(self.pane.side(), Some(Over::Issue(issue)), wall);
             }
             Asked::Ssh(destination) => match machines::add(&destination) {
@@ -3593,8 +3598,9 @@ impl App {
         self.asks += 1;
         let initial = send_now.then_some(EXPLAIN_PROMPT);
         let mut ask = Ask::reviewed(self.asks, &on, &dir, excerpt, initial);
+        let picked = self.sidebar.kept_harness();
         if send_now {
-            ask.send(Marked::default(), &self.events);
+            ask.send(Marked::default(), picked, &self.events);
         }
         self.give(self.pane.side(), Some(Over::Ask(ask)), now);
     }
@@ -3737,8 +3743,9 @@ impl App {
     }
 
     fn converse(&mut self) {
+        let picked = self.sidebar.kept_harness();
         if let Some(Over::Ask(ask)) = &mut self.over {
-            ask.send(Marked::default(), &self.events);
+            ask.send(Marked::default(), picked, &self.events);
         }
     }
 
@@ -6393,6 +6400,17 @@ mod tests {
         }
     }
 
+    fn home_ask_in_a_turn(app: &mut App) {
+        let Some(Right::Home(shown)) = app.pane.right() else {
+            panic!("a home is shown");
+        };
+        app.homes
+            .shown_mut(shown)
+            .ask_numbered(app.asks)
+            .expect("the shown home holds the newest ask")
+            .in_a_turn(agents::Harness::ClaudeCode, None);
+    }
+
     fn painted_buffer(app: &mut App, columns: u16, rows: u16, now: Moment) -> Buffer {
         let mut view = Terminal::new(ratatui::backend::TestBackend::new(columns, rows)).unwrap();
         view.draw(|frame| {
@@ -6453,9 +6471,11 @@ mod tests {
         };
 
         let mut ask = Ask::new(1, &menu::Target::Machine(Machine::Local), Path::new("/w"));
+        ask.in_a_turn(agents::Harness::ClaudeCode, None);
         ask.heard(ask::Heard::Step(luned::asks::Step::Said(
             "copy this answer".to_owned(),
         )));
+        ask.heard(ask::Heard::Ended(Ok(())));
         app.give(SplitSide::Sidebar, Some(Over::Ask(ask)), system);
         app.draw_due(&mut terminal, at(0)).unwrap();
         let initial = painted_buffer(&mut app, 100, 24, at(0));
@@ -6553,6 +6573,7 @@ mod tests {
         let project = ProjectId::of(1).unwrap();
         app.go_home(&Machine::Local, project, system);
         app.give(SplitSide::Sidebar, None, system);
+        home_ask_in_a_turn(&mut app);
         app.handle_at(
             Event::Heard {
                 number: app.asks,
@@ -6560,6 +6581,15 @@ mod tests {
             },
             &mut terminal,
             at(20),
+        )
+        .unwrap();
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Ended(Ok(())),
+            },
+            &mut terminal,
+            at(30),
         )
         .unwrap();
         app.draw_due(&mut terminal, at(40)).unwrap();
@@ -6661,6 +6691,7 @@ mod tests {
         .unwrap();
         let project = ProjectId::of(1).unwrap();
         app.go_home(&Machine::Local, project, system);
+        home_ask_in_a_turn(&mut app);
         app.handle_at(
             Event::Heard {
                 number: app.asks,
@@ -6668,6 +6699,15 @@ mod tests {
             },
             &mut terminal,
             at(20),
+        )
+        .unwrap();
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Ended(Ok(())),
+            },
+            &mut terminal,
+            at(30),
         )
         .unwrap();
         app.draw_due(&mut terminal, at(40)).unwrap();
@@ -6829,6 +6869,7 @@ mod tests {
         .unwrap();
         let project = ProjectId::of(1).unwrap();
         app.go_home(&Machine::Local, project, system);
+        home_ask_in_a_turn(&mut app);
         app.handle_at(
             Event::Heard {
                 number: app.asks,
@@ -6836,6 +6877,15 @@ mod tests {
             },
             &mut terminal,
             at(20),
+        )
+        .unwrap();
+        app.handle_at(
+            Event::Heard {
+                number: app.asks,
+                heard: ask::Heard::Ended(Ok(())),
+            },
+            &mut terminal,
+            at(30),
         )
         .unwrap();
         app.draw_due(&mut terminal, at(40)).unwrap();
@@ -6927,9 +6977,11 @@ mod tests {
         assert_eq!(app.held, Held::Nothing);
 
         let mut ask = Ask::new(99, &menu::Target::Machine(Machine::Local), Path::new("/w"));
+        ask.in_a_turn(agents::Harness::ClaudeCode, None);
         ask.heard(ask::Heard::Step(luned::asks::Step::Said(
             "overlay burst text".to_owned(),
         )));
+        ask.heard(ask::Heard::Ended(Ok(())));
         app.give(SplitSide::Sidebar, Some(Over::Ask(ask)), system);
         let overlay = painted_buffer(&mut app, 100, 24, at(260));
         let (ox, oy) = find_text(&overlay, "overlay burst text");

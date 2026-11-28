@@ -1983,7 +1983,11 @@ mod tests {
                     let chunk = "x".repeat(16 * 1024);
                     for _ in 0..256 {
                         let step = Some(api::ask_response::Step::Said(chunk.clone()));
-                        if sent.send(Ok(AskResponse { step })).await.is_err() {
+                        if sent
+                            .send(Ok(AskResponse { step, runner: None }))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                         flooded.fetch_add(chunk.len(), Ordering::Relaxed);
@@ -1993,7 +1997,7 @@ mod tests {
             }
             let (sent, heard) = mpsc::channel(1);
             let step = Some(api::ask_response::Step::Said("held".to_owned()));
-            let _ = sent.send(Ok(AskResponse { step })).await;
+            let _ = sent.send(Ok(AskResponse { step, runner: None })).await;
             let hold = ReceiverStream::new(heard).chain(tokio_stream::pending());
             Ok(GrpcResponse::new(Box::pin(hold)))
         }

@@ -13,10 +13,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lune_protocol::said::Said;
-use serde_json::Value;
+use serde_json::{Value, json};
+use tempfile::NamedTempFile;
 
 use crate::api::ask_response::{self, Ran};
 use crate::api::{AskRequest, AskResponse, AskReviewRequest, On, ask_review_request};
+use crate::headless::{self, Harness, NonEmpty};
 use crate::mux;
 use crate::program::{self, Wanted};
 use crate::state;
@@ -24,7 +26,8 @@ use crate::transcripts::{SESSION_ID_BYTES_MAX, SessionId};
 use crate::work::{self, Item};
 use crate::{git, log};
 
-pub const MODEL: &str = "sonnet";
+pub const MODEL: NonEmpty<'static> =
+    NonEmpty::try_new("sonnet").expect("ask model name is non-empty");
 
 pub const TURN: Duration = Duration::from_mins(10);
 
@@ -82,18 +85,18 @@ const _: () = assert!(
 
 pub use lune_protocol::turn::{BEFORE_VAR, TURN_VAR, Turn};
 
-pub const ALLOWED: [&str; 11] = [
-    "Bash(lune start:*)",
-    "Bash(lune agents:*)",
-    "Bash(lune prune:*)",
-    "Bash(zoxide query:*)",
-    "Bash(gh issue view:*)",
-    "Bash(gh issue list:*)",
-    "Bash(gh pr view:*)",
-    "Bash(gh pr list:*)",
-    "Bash(luned worktree:*)",
-    "Bash(git worktree add:*)",
-    "Bash(git worktree list:*)",
+pub const ALLOWED_COMMANDS: [&str; 11] = [
+    "lune start",
+    "lune agents",
+    "lune prune",
+    "zoxide query",
+    "gh issue view",
+    "gh issue list",
+    "gh pr view",
+    "gh pr list",
+    "luned worktree",
+    "git worktree add",
+    "git worktree list",
 ];
 
 pub const SKILL: &str = include_str!("../../../skills/lune/SKILL.md");
@@ -105,10 +108,113 @@ pub const SYSTEM: &str = "You run in lune's ask box. The user typed what they wa
     on what you did, and where. Run one command in each call to Bash, with nothing around it: \
     no $(…), no pipes, no && and no ;. Only these run: lune start, agents and prune, zoxide \
     query, gh issue view and list, gh pr view and list, luned worktree, and git worktree add \
-    and list. Claude Code denies any other. You cannot wait for the user in the middle of a \
+    and list. Any other is denied. You cannot wait for the user in the middle of a \
     turn: to ask them anything, as the skill has you ask before a prune, or which of two things \
     they meant, end your turn with the question. Their answer comes as the next message. So a \
     prune takes --yes only in the turn after the one that said its plan.";
+
+const GATE: &str = include_str!("pi/gate.ts");
+
+const GATE_ALLOWED: &str = "\"LUNE_ALLOWED\"";
+
+const GATE_DENIED: &str = "\"LUNE_DENIED\"";
+
+const GATE_ENTRY: &str = "\"LUNE_ENTRY\"";
+
+pub const DENIED: &str = "lune: its ask box runs none but lune's own commands, one in each call";
+
+const ENTRY: &str = "lune-gate";
+
+const PI_SESSIONS_FOLDER: &str = "pi-asks";
+
+const WHY_BYTES_MAX: usize = 240;
+
+const AGY_SAID_BYTES_MAX: usize = LINE_BYTES_MAX;
+
+const AGY_TOOLS_MAX: usize = LINES_PER_TURN_MAX;
+
+const MALFORMED_LOGS_MAX: usize = 4;
+
+const TURN_FAILED: &str = "the turn failed";
+
+const fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut offset = 0;
+    while offset + needle.len() <= haystack.len() {
+        let mut matched = 0;
+        while matched < needle.len() && haystack[offset + matched] == needle[matched] {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            count += 1;
+            offset += needle.len();
+        } else {
+            offset += 1;
+        }
+    }
+    count
+}
+
+const fn is_shell_or_control(byte: u8) -> bool {
+    byte <= 0x1f
+        || byte == 0x7f
+        || matches!(byte, b';' | b'&' | b'|' | b'<' | b'>' | b'`' | b'$' | b'\\')
+}
+
+const fn valid_command_prefix(prefix: &str) -> bool {
+    let bytes = prefix.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes[0] <= b' ' || bytes[bytes.len() - 1] <= b' ' {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_shell_or_control(bytes[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn all_allowed_commands_valid() -> bool {
+    let mut index = 0;
+    while index < ALLOWED_COMMANDS.len() {
+        if !valid_command_prefix(ALLOWED_COMMANDS[index]) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(AGY_SAID_BYTES_MAX > 0);
+const _: () = assert!(AGY_SAID_BYTES_MAX as u64 <= program::SAID_MAX);
+const _: () = assert!(AGY_TOOLS_MAX > 0);
+const _: () = assert!(MALFORMED_LOGS_MAX > 0);
+const _: () = assert!(WHY_BYTES_MAX >= TURN_FAILED.len());
+const _: () = assert!(
+    !ALLOWED_COMMANDS.is_empty(),
+    "ask box allows at least one command"
+);
+const _: () = assert!(
+    all_allowed_commands_valid(),
+    "each allowed command prefix is non-empty, trimmed, and holds no shell or control character"
+);
+const _: () = assert!(!DENIED.is_empty(), "denied reason is not empty");
+const _: () = assert!(!ENTRY.is_empty(), "gate entry name is not empty");
+const _: () = assert!(
+    !PI_SESSIONS_FOLDER.is_empty(),
+    "pi session folder name is not empty"
+);
+const _: () = assert!(count_occurrences(GATE.as_bytes(), GATE_ALLOWED.as_bytes()) == 1);
+const _: () = assert!(count_occurrences(GATE.as_bytes(), GATE_DENIED.as_bytes()) == 1);
+const _: () = assert!(count_occurrences(GATE.as_bytes(), GATE_ENTRY.as_bytes()) == 1);
 
 pub const REVIEW_SYSTEM: &str = "You run in lune's review ask box. Answer the user's question \
     about the diff excerpt in plain text for a terminal, with no markdown, no backticks, no \
@@ -120,7 +226,7 @@ pub const REVIEW_SYSTEM: &str = "You run in lune's review ask box. Answer the us
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    Session(SessionId),
+    Session { id: SessionId, runner: Harness },
     Ran { id: String, command: String },
     Denied(String),
     Said(String),
@@ -129,28 +235,61 @@ pub enum Step {
 impl Step {
     #[must_use]
     pub fn answer(self) -> AskResponse {
-        let step = match self {
-            Step::Session(session) => ask_response::Step::Session(session.as_str().to_owned()),
-            Step::Ran { id, command } => ask_response::Step::Ran(Ran { id, command }),
-            Step::Denied(id) => ask_response::Step::Denied(id),
-            Step::Said(said) => ask_response::Step::Said(said),
+        let (step, runner) = match self {
+            Step::Session { id, runner } => (
+                ask_response::Step::Session(id.as_str().to_owned()),
+                Some(runner.to_api().into()),
+            ),
+            Step::Ran { id, command } => (ask_response::Step::Ran(Ran { id, command }), None),
+            Step::Denied(id) => (ask_response::Step::Denied(id), None),
+            Step::Said(said) => (ask_response::Step::Said(said), None),
         };
-        AskResponse { step: Some(step) }
+        AskResponse {
+            step: Some(step),
+            runner,
+        }
     }
 
     pub fn of(answer: AskResponse) -> Result<Option<Step>, String> {
-        let Some(step) = answer.step else {
+        let AskResponse { step, runner } = answer;
+        let Some(step) = step else {
             return Ok(None);
         };
         Ok(Some(match step {
-            ask_response::Step::Session(session) => match SessionId::parse(&session) {
-                Some(session) => Step::Session(session),
-                None => return Err(format!("session: {session:?} names no session")),
-            },
+            ask_response::Step::Session(session) => {
+                let id = SessionId::parse(&session)
+                    .ok_or_else(|| format!("session: {session:?} names no session"))?;
+                let runner = Harness::said(runner).map_err(|why| format!("runner: {why}"))?;
+                Step::Session { id, runner }
+            }
             ask_response::Step::Ran(Ran { id, command }) => Step::Ran { id, command },
             ask_response::Step::Denied(id) => Step::Denied(id),
             ask_response::Step::Said(said) => Step::Said(said),
         }))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandHarness {
+    ClaudeCode,
+    Pi,
+}
+
+impl CommandHarness {
+    #[must_use]
+    pub const fn from_picked(harness: Harness) -> Self {
+        match harness {
+            Harness::ClaudeCode | Harness::Antigravity => Self::ClaudeCode,
+            Harness::Pi => Self::Pi,
+        }
+    }
+
+    #[must_use]
+    pub const fn harness(self) -> Harness {
+        match self {
+            Self::ClaudeCode => Harness::ClaudeCode,
+            Self::Pi => Harness::Pi,
+        }
     }
 }
 
@@ -486,6 +625,7 @@ pub enum ReviewTurn {
 pub struct ReviewAsk {
     cwd: Option<PathBuf>,
     turn: ReviewTurn,
+    harness: Harness,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -495,12 +635,17 @@ enum AskKind {
         resumed: Option<SessionId>,
         highlighted: Option<PromptText>,
         turn: Turn,
+        harness: CommandHarness,
         marked: Marked,
     },
-    Review(ReviewTurn),
+    Review {
+        turn: ReviewTurn,
+        harness: Harness,
+    },
     LegacyReview {
         words: Said,
         resumed: Option<SessionId>,
+        harness: Harness,
     },
 }
 
@@ -514,6 +659,13 @@ pub enum AskWire {
 pub struct Asked {
     cwd: Option<PathBuf>,
     kind: AskKind,
+}
+
+struct Run {
+    command: Command,
+    reader: Reader,
+    stdin: String,
+    gate: Option<NamedTempFile>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -564,6 +716,11 @@ impl Marked {
 
     pub fn clear(&mut self) {
         self.marked.clear();
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.marked.is_empty()
     }
 
     #[must_use]
@@ -646,13 +803,19 @@ fn parse_trimmed_said(field: &str, raw: &str, empty_message: &str) -> Result<Sai
 }
 
 impl ReviewAsk {
-    pub fn start(cwd: Option<PathBuf>, context: &str, words: &str) -> Result<ReviewAsk, String> {
+    pub fn start(
+        cwd: Option<PathBuf>,
+        context: &str,
+        words: &str,
+        harness: Harness,
+    ) -> Result<ReviewAsk, String> {
         let cwd = parse_cwd(cwd)?;
         let context = parse_trimmed_said("context", context, "no review context")?;
         let words = parse_trimmed_said("words", words, "nothing asked")?;
         Ok(ReviewAsk {
             cwd,
             turn: ReviewTurn::Start { context, words },
+            harness,
         })
     }
 
@@ -660,27 +823,35 @@ impl ReviewAsk {
         cwd: Option<PathBuf>,
         resumed: SessionId,
         words: &str,
+        harness: Harness,
     ) -> Result<ReviewAsk, String> {
         let cwd = parse_cwd(cwd)?;
         let words = parse_trimmed_said("words", words, "nothing asked")?;
         Ok(ReviewAsk {
             cwd,
             turn: ReviewTurn::FollowUp { resumed, words },
+            harness,
         })
     }
 
     pub fn of_api(request: AskReviewRequest) -> Result<(Option<On>, ReviewAsk), String> {
-        let AskReviewRequest { on, cwd, turn } = request;
+        let AskReviewRequest {
+            on,
+            cwd,
+            turn,
+            harness,
+        } = request;
+        let harness = Harness::said(harness).map_err(|why| format!("harness: {why}"))?;
         let cwd = cwd.map(PathBuf::from);
         let asked = match turn {
             None => return Err("turn: review ask has neither start nor follow_up".to_owned()),
             Some(ask_review_request::Turn::Start(start)) => {
-                ReviewAsk::start(cwd, &start.context, &start.words)?
+                ReviewAsk::start(cwd, &start.context, &start.words, harness)?
             }
             Some(ask_review_request::Turn::FollowUp(follow_up)) => {
                 let resumed = SessionId::parse(&follow_up.resumed)
                     .ok_or_else(|| format!("resumed: {:?} names no session", follow_up.resumed))?;
-                ReviewAsk::follow_up(cwd, resumed, &follow_up.words)?
+                ReviewAsk::follow_up(cwd, resumed, &follow_up.words, harness)?
             }
         };
         Ok((on, asked))
@@ -709,7 +880,13 @@ impl ReviewAsk {
                 .as_ref()
                 .map(|cwd| cwd.to_string_lossy().into_owned()),
             turn: Some(turn),
+            harness: Some(self.harness.to_api().into()),
         }
+    }
+
+    #[must_use]
+    pub const fn runner(&self) -> Harness {
+        self.harness
     }
 
     #[must_use]
@@ -725,7 +902,10 @@ impl From<ReviewAsk> for Asked {
     fn from(review: ReviewAsk) -> Asked {
         Asked {
             cwd: review.cwd,
-            kind: AskKind::Review(review.turn),
+            kind: AskKind::Review {
+                turn: review.turn,
+                harness: review.harness,
+            },
         }
     }
 }
@@ -738,7 +918,15 @@ impl Asked {
         highlighted: String,
         turn: Turn,
     ) -> Result<Asked, String> {
-        Asked::general(cwd, words, resumed, highlighted, turn, Marked::default())
+        Asked::general(
+            cwd,
+            words,
+            resumed,
+            highlighted,
+            turn,
+            CommandHarness::ClaudeCode,
+            Marked::default(),
+        )
     }
 
     pub fn general(
@@ -747,6 +935,7 @@ impl Asked {
         resumed: Option<SessionId>,
         highlighted: String,
         turn: Turn,
+        harness: CommandHarness,
         marked: Marked,
     ) -> Result<Asked, String> {
         let cwd = parse_cwd(cwd)?;
@@ -759,28 +948,43 @@ impl Asked {
                 resumed,
                 highlighted,
                 turn,
+                harness,
                 marked,
             },
         })
     }
 
-    pub fn review_start(cwd: Option<PathBuf>, context: &str, words: &str) -> Result<Asked, String> {
-        ReviewAsk::start(cwd, context, words).map(Asked::from)
+    pub fn review_start(
+        cwd: Option<PathBuf>,
+        context: &str,
+        words: &str,
+        harness: Harness,
+    ) -> Result<Asked, String> {
+        ReviewAsk::start(cwd, context, words, harness).map(Asked::from)
     }
 
     pub fn review_follow_up(
         cwd: Option<PathBuf>,
         resumed: SessionId,
         words: &str,
+        harness: Harness,
     ) -> Result<Asked, String> {
-        ReviewAsk::follow_up(cwd, resumed, words).map(Asked::from)
+        ReviewAsk::follow_up(cwd, resumed, words, harness).map(Asked::from)
     }
 
     #[must_use]
     pub const fn mode(&self) -> AskMode {
         match &self.kind {
             AskKind::General { .. } => AskMode::General,
-            AskKind::Review(_) | AskKind::LegacyReview { .. } => AskMode::Review,
+            AskKind::Review { .. } | AskKind::LegacyReview { .. } => AskMode::Review,
+        }
+    }
+
+    #[must_use]
+    pub const fn runner(&self) -> Harness {
+        match &self.kind {
+            AskKind::General { harness, .. } => harness.harness(),
+            AskKind::Review { harness, .. } | AskKind::LegacyReview { harness, .. } => *harness,
         }
     }
 
@@ -790,8 +994,14 @@ impl Asked {
             AskKind::General { resumed, .. } | AskKind::LegacyReview { resumed, .. } => {
                 resumed.as_ref()
             }
-            AskKind::Review(ReviewTurn::Start { .. }) => None,
-            AskKind::Review(ReviewTurn::FollowUp { resumed, .. }) => Some(resumed),
+            AskKind::Review {
+                turn: ReviewTurn::Start { .. },
+                ..
+            } => None,
+            AskKind::Review {
+                turn: ReviewTurn::FollowUp { resumed, .. },
+                ..
+            } => Some(resumed),
         }
     }
 
@@ -807,7 +1017,9 @@ impl Asked {
             marked_issues,
             marked_pulls,
             review_only,
+            harness,
         } = request;
+        let harness = Harness::said(harness).map_err(|why| format!("harness: {why}"))?;
         let resumed = match resumed {
             None => None,
             Some(resumed) => Some(
@@ -829,13 +1041,25 @@ impl Asked {
                 on,
                 Asked {
                     cwd,
-                    kind: AskKind::LegacyReview { words, resumed },
+                    kind: AskKind::LegacyReview {
+                        words,
+                        resumed,
+                        harness,
+                    },
                 },
             ));
         }
         let turn = Turn::new(turn, before)?;
         let marked = Marked::read(marked_issues, marked_pulls)?;
-        let asked = Asked::general(cwd, &words, resumed, highlighted, turn, marked)?;
+        let asked = Asked::general(
+            cwd,
+            &words,
+            resumed,
+            highlighted,
+            turn,
+            CommandHarness::from_picked(harness),
+            marked,
+        )?;
         Ok((on, asked))
     }
 
@@ -851,6 +1075,7 @@ impl Asked {
                 resumed,
                 highlighted,
                 turn,
+                harness,
                 marked,
             } => AskWire::General(AskRequest {
                 on,
@@ -865,15 +1090,21 @@ impl Asked {
                 marked_issues: marked.issues().map(NonZeroU32::get).collect(),
                 marked_pulls: marked.pulls().map(NonZeroU32::get).collect(),
                 review_only: false,
+                harness: Some(harness.harness().to_api().into()),
             }),
-            AskKind::Review(turn) => AskWire::Review(
+            AskKind::Review { turn, harness } => AskWire::Review(
                 ReviewAsk {
                     cwd: self.cwd.clone(),
                     turn: turn.clone(),
+                    harness: *harness,
                 }
                 .to_api(on),
             ),
-            AskKind::LegacyReview { words, resumed } => AskWire::General(AskRequest {
+            AskKind::LegacyReview {
+                words,
+                resumed,
+                harness,
+            } => AskWire::General(AskRequest {
                 on,
                 cwd,
                 words: words.as_str().to_owned(),
@@ -884,6 +1115,7 @@ impl Asked {
                 marked_issues: Vec::new(),
                 marked_pulls: Vec::new(),
                 review_only: true,
+                harness: Some(harness.to_api().into()),
             }),
         }
     }
@@ -913,23 +1145,27 @@ impl Asked {
                     marked_issues: Vec::new(),
                     marked_pulls: Vec::new(),
                     review_only: true,
+                    harness: request.harness,
                 }
             }
         }
     }
 
     pub(crate) fn talk(&self, wanted: &Wanted, hear: &dyn Fn(Step)) -> Option<Result<(), String>> {
-        let prompt = match &self.kind {
-            AskKind::General { words, marked, .. } => told(marked, words.as_str()),
-            AskKind::Review(ReviewTurn::Start { context, words }) => {
-                format!("{}\n\n{}", context.as_str(), words.as_str())
-            }
-            AskKind::Review(ReviewTurn::FollowUp { words, .. })
-            | AskKind::LegacyReview { words, .. } => words.as_str().to_owned(),
+        let run = match self.run() {
+            Ok(run) => run,
+            Err(why) => return Some(Err(why)),
         };
+        let Run {
+            command,
+            reader,
+            stdin,
+            gate: _held,
+        } = run;
         talk(
-            self.claude(),
-            &prompt,
+            command,
+            reader,
+            &stdin,
             TURN,
             LINES_PER_TURN_MAX,
             wanted,
@@ -937,71 +1173,268 @@ impl Asked {
         )
     }
 
-    fn claude(&self) -> Command {
-        let mut claude = Command::new("claude");
+    fn run(&self) -> Result<Run, String> {
+        match &self.kind {
+            AskKind::General {
+                words,
+                resumed,
+                highlighted,
+                turn,
+                harness: CommandHarness::ClaudeCode,
+                marked,
+            } => Ok(Run {
+                command: self.claude_commands(resumed.as_ref(), highlighted.as_ref(), *turn),
+                reader: Reader::Claude,
+                stdin: told(marked, words.as_str()),
+                gate: None,
+            }),
+            AskKind::General {
+                words,
+                resumed,
+                highlighted,
+                turn,
+                harness: CommandHarness::Pi,
+                marked,
+            } => {
+                let gate = gate().map_err(|error| ungated(&error))?;
+                let session_dir = pi_sessions_folder()?;
+                let command = self.pi_commands(
+                    gate.path(),
+                    &session_dir,
+                    resumed.as_ref(),
+                    highlighted.as_ref(),
+                    *turn,
+                );
+                Ok(Run {
+                    command,
+                    reader: Reader::pi_gated(),
+                    stdin: told(marked, words.as_str()),
+                    gate: Some(gate),
+                })
+            }
+            AskKind::Review { turn, harness } => {
+                let (resumed, prompt) = match turn {
+                    ReviewTurn::Start { context, words } => {
+                        (None, format!("{}\n\n{}", context.as_str(), words.as_str()))
+                    }
+                    ReviewTurn::FollowUp { resumed, words } => {
+                        (Some(resumed), words.as_str().to_owned())
+                    }
+                };
+                self.run_review(*harness, resumed, prompt)
+            }
+            AskKind::LegacyReview {
+                words,
+                resumed,
+                harness,
+            } => self.run_review(*harness, resumed.as_ref(), words.as_str().to_owned()),
+        }
+    }
+
+    fn run_review(
+        &self,
+        harness: Harness,
+        resumed: Option<&SessionId>,
+        prompt: String,
+    ) -> Result<Run, String> {
+        match harness {
+            Harness::ClaudeCode => Ok(Run {
+                command: self.claude_review(resumed),
+                reader: Reader::Claude,
+                stdin: prompt,
+                gate: None,
+            }),
+            Harness::Pi => {
+                let session_dir = pi_sessions_folder()?;
+                let bare = bare_folder()?;
+                Ok(Run {
+                    command: self.pi_review(resumed, &session_dir, &bare),
+                    reader: Reader::pi_review(),
+                    stdin: prompt,
+                    gate: None,
+                })
+            }
+            Harness::Antigravity => {
+                let bare = bare_folder()?;
+                Ok(Run {
+                    command: self.agy_review(resumed, &bare),
+                    reader: Reader::agy(),
+                    stdin: headless::agy_message(&format!("{REVIEW_SYSTEM}\n\n{prompt}")),
+                    gate: None,
+                })
+            }
+        }
+    }
+
+    fn claude_base() -> Command {
+        let mut claude = Command::new(Harness::ClaudeCode.program());
         claude.args([
             "-p",
             "--model",
-            MODEL,
+            MODEL.as_str(),
             "--safe-mode",
             "--setting-sources",
             "user",
             "--permission-mode",
             "dontAsk",
         ]);
-        match &self.kind {
-            AskKind::General {
-                resumed,
-                highlighted,
-                turn,
-                ..
-            } => {
-                claude.args([
-                    "--tools",
-                    "Bash",
-                    "--output-format",
-                    "stream-json",
-                    "--verbose",
-                ]);
-                let highlighted = highlighted.as_ref().map_or("", PromptText::as_str);
-                claude
-                    .arg("--append-system-prompt")
-                    .arg(system(highlighted));
-                if let Some(session) = resumed {
-                    claude.args(["--resume", session.as_str()]);
-                }
-                claude.arg("--allowedTools").args(ALLOWED);
-                turn.name_in(&mut claude);
-            }
-            AskKind::Review(ReviewTurn::Start { .. }) => {
-                claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
-                claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
-            }
-            AskKind::Review(ReviewTurn::FollowUp { resumed, .. }) => {
-                claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
-                claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
-                claude.args(["--resume", resumed.as_str()]);
-            }
-            AskKind::LegacyReview { resumed, .. } => {
-                claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
-                claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
-                if let Some(session) = resumed {
-                    claude.args(["--resume", session.as_str()]);
-                }
-            }
-        }
-        mux::own::in_no_terminal(&mut claude);
-        git::local(&mut claude);
-        if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
-            claude.env("PATH", path);
-        }
-        match (&self.cwd, env::var_os("HOME")) {
-            (Some(cwd), _) => claude.current_dir(cwd),
-            (None, Some(home)) => claude.current_dir(home),
-            (None, None) => &mut claude,
-        };
         claude
     }
+
+    fn claude_commands(
+        &self,
+        resumed: Option<&SessionId>,
+        highlighted: Option<&PromptText>,
+        turn: Turn,
+    ) -> Command {
+        let mut claude = Self::claude_base();
+        claude.args([
+            "--tools",
+            "Bash",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]);
+        let highlighted = highlighted.map_or("", PromptText::as_str);
+        claude
+            .arg("--append-system-prompt")
+            .arg(system(highlighted));
+        if let Some(session) = resumed {
+            claude.args(["--resume", session.as_str()]);
+        }
+        claude.arg("--allowedTools").args(claude_allowed_tools());
+        turn.name_in(&mut claude);
+        self.placed(&mut claude);
+        claude
+    }
+
+    fn claude_review(&self, resumed: Option<&SessionId>) -> Command {
+        let mut claude = Self::claude_base();
+        claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
+        claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
+        if let Some(session) = resumed {
+            claude.args(["--resume", session.as_str()]);
+        }
+        self.placed(&mut claude);
+        claude
+    }
+
+    fn pi_base(session_dir: &Path) -> Command {
+        let mut pi = Command::new(Harness::Pi.program());
+        pi.args(["-p", "--mode", "json"])
+            .args(headless::PI_BARE)
+            .arg("--session-dir")
+            .arg(session_dir);
+        pi
+    }
+
+    fn pi_commands(
+        &self,
+        gate: &Path,
+        session_dir: &Path,
+        resumed: Option<&SessionId>,
+        highlighted: Option<&PromptText>,
+        turn: Turn,
+    ) -> Command {
+        let mut pi = Self::pi_base(session_dir);
+        pi.args(["--tools", "bash", "--extension"]).arg(gate);
+        let highlighted = highlighted.map_or("", PromptText::as_str);
+        pi.arg("--append-system-prompt").arg(system(highlighted));
+        if let Some(session) = resumed {
+            pi.args(["--session-id", session.as_str()]);
+        }
+        turn.name_in(&mut pi);
+        self.placed(&mut pi);
+        pi
+    }
+
+    fn pi_review(&self, resumed: Option<&SessionId>, session_dir: &Path, bare: &Path) -> Command {
+        let mut pi = Self::pi_base(session_dir);
+        pi.arg("--no-tools");
+        pi.arg("--system-prompt").arg(REVIEW_SYSTEM);
+        if let Some(session) = resumed {
+            pi.args(["--session-id", session.as_str()]);
+        }
+        self.placed_in(&mut pi, bare);
+        pi
+    }
+
+    fn agy_review(&self, resumed: Option<&SessionId>, bare: &Path) -> Command {
+        let mut agy = headless::agy_strict();
+        if let Some(session) = resumed {
+            agy.args(["--conversation", session.as_str()]);
+        }
+        self.placed_in(&mut agy, bare);
+        agy
+    }
+
+    fn placed_env(agent: &mut Command) {
+        mux::own::in_no_terminal(agent);
+        git::local(agent);
+        if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
+            agent.env("PATH", path);
+        }
+    }
+
+    fn placed(&self, agent: &mut Command) {
+        Self::placed_env(agent);
+        match (&self.cwd, env::var_os("HOME")) {
+            (Some(cwd), _) => agent.current_dir(cwd),
+            (None, Some(home)) => agent.current_dir(home),
+            (None, None) => agent,
+        };
+    }
+
+    fn placed_in(&self, agent: &mut Command, cwd: &Path) {
+        let _ = self;
+        Self::placed_env(agent);
+        agent.current_dir(cwd);
+    }
+}
+
+fn pi_sessions_folder() -> Result<PathBuf, String> {
+    headless::runtime_subfolder(PI_SESSIONS_FOLDER)
+        .map_err(|error| format!("pi's session folder could not be made: {error}"))
+}
+
+fn bare_folder() -> Result<PathBuf, String> {
+    headless::bare_folder()
+        .map_err(|error| format!("the folder for a toolless agent could not be made: {error}"))
+}
+
+fn claude_allowed_tools() -> Vec<String> {
+    ALLOWED_COMMANDS
+        .into_iter()
+        .map(|command| format!("Bash({command}:*)"))
+        .collect()
+}
+
+fn gate() -> io::Result<NamedTempFile> {
+    let allowed_json = json!(json!(ALLOWED_COMMANDS).to_string()).to_string();
+    let denied_json = json!(DENIED).to_string();
+    let entry_json = json!(ENTRY).to_string();
+    assert!(!allowed_json.contains(GATE_DENIED));
+    assert!(!allowed_json.contains(GATE_ENTRY));
+    assert!(!denied_json.contains(GATE_ENTRY));
+    let script = GATE
+        .replacen(GATE_ALLOWED, &allowed_json, 1)
+        .replacen(GATE_DENIED, &denied_json, 1)
+        .replacen(GATE_ENTRY, &entry_json, 1);
+    assert!(!script.contains(GATE_ALLOWED));
+    assert!(!script.contains(GATE_DENIED));
+    assert!(!script.contains(GATE_ENTRY));
+    assert!(!script.contains("LUNE_"));
+    let mut file = tempfile::Builder::new()
+        .prefix("lune-ask-")
+        .suffix(".ts")
+        .tempfile()?;
+    file.write_all(script.as_bytes())?;
+    file.flush()?;
+    Ok(file)
+}
+
+fn ungated(error: &io::Error) -> String {
+    format!("what holds pi to lune's commands could not be written: {error}")
 }
 
 fn system(highlighted: &str) -> String {
@@ -1028,19 +1461,274 @@ fn path_with(exe: &Path) -> Option<OsString> {
 enum Read {
     Step(Step),
     Ended(Result<String, String>),
+    Unsafe(String),
+    OverLimit(String),
 }
 
-fn read(line: &str) -> Vec<Read> {
-    let Ok(record) = serde_json::from_str::<Value>(line) else {
-        return Vec::new();
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PiTools {
+    Forbidden,
+    AwaitingGate,
+    Gated,
+}
+
+#[derive(Debug)]
+enum PiOutcome {
+    Last(String),
+    Failed(String),
+}
+
+#[derive(Debug)]
+enum Reader {
+    Claude,
+    Pi { tools: PiTools, outcome: PiOutcome },
+    Agy { said: String, tools: BTreeSet<u64> },
+}
+
+impl Reader {
+    const fn pi_gated() -> Reader {
+        Reader::Pi {
+            tools: PiTools::AwaitingGate,
+            outcome: PiOutcome::Last(String::new()),
+        }
+    }
+
+    const fn pi_review() -> Reader {
+        Reader::Pi {
+            tools: PiTools::Forbidden,
+            outcome: PiOutcome::Last(String::new()),
+        }
+    }
+
+    const fn agy() -> Reader {
+        Reader::Agy {
+            said: String::new(),
+            tools: BTreeSet::new(),
+        }
+    }
+
+    const fn harness(&self) -> Harness {
+        match self {
+            Reader::Claude => Harness::ClaudeCode,
+            Reader::Pi { .. } => Harness::Pi,
+            Reader::Agy { .. } => Harness::Antigravity,
+        }
+    }
+
+    fn read(&mut self, line: &str) -> Result<Vec<Read>, serde_json::Error> {
+        let record: Value = serde_json::from_str(line)?;
+        Ok(match self {
+            Reader::Claude => read_claude(&record),
+            Reader::Pi { tools, outcome } => read_pi(tools, outcome, &record),
+            Reader::Agy { said, tools } => read_agy(said, tools, &record),
+        })
+    }
+}
+
+fn session(id: &Value, runner: Harness) -> Vec<Read> {
+    let session = id.as_str().and_then(SessionId::parse);
+    session
+        .map(|id| Read::Step(Step::Session { id, runner }))
+        .into_iter()
+        .collect()
+}
+
+fn why(said: Option<&str>) -> String {
+    let line = said.and_then(|said| said.lines().map(str::trim).find(|line| !line.is_empty()));
+    let line = line.unwrap_or(TURN_FAILED);
+    let end = (0..=line.len().min(WHY_BYTES_MAX)).rfind(|at| line.is_char_boundary(*at));
+    let out = line[..end.unwrap_or_default()].to_owned();
+    assert!(!out.is_empty(), "a failure reason is not empty");
+    assert!(
+        out.len() <= WHY_BYTES_MAX,
+        "a failure reason stays within its byte bound"
+    );
+    out
+}
+
+fn result_mentions_denied(result: &Value) -> bool {
+    if result.as_str().is_some_and(|text| text.contains(DENIED)) {
+        return true;
+    }
+    result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["text"].as_str())
+        .any(|text| text.contains(DENIED))
+}
+
+fn read_pi(tools: &mut PiTools, outcome: &mut PiOutcome, record: &Value) -> Vec<Read> {
     match record["type"].as_str() {
-        Some("system") if record["subtype"] == "init" => {
-            let session = record["session_id"].as_str().and_then(SessionId::parse);
-            session
-                .map(|session| Read::Step(Step::Session(session)))
+        Some("session") => session(&record["id"], Harness::Pi),
+        Some("entry_appended") => {
+            if *tools == PiTools::AwaitingGate && record["entry"]["customType"] == ENTRY {
+                *tools = PiTools::Gated;
+            }
+            Vec::new()
+        }
+        Some("tool_execution_start") => {
+            let name = record["toolName"].as_str().unwrap_or("a tool");
+            match *tools {
+                PiTools::Gated => {
+                    let id = record["toolCallId"].as_str().unwrap_or_default().to_owned();
+                    let command = record["args"]["command"]
+                        .as_str()
+                        .unwrap_or(name)
+                        .to_owned();
+                    vec![Read::Step(Step::Ran { id, command })]
+                }
+                PiTools::AwaitingGate => {
+                    let unheld = format!("pi ran {name} where nothing held it to lune's commands");
+                    vec![Read::Unsafe(unheld)]
+                }
+                PiTools::Forbidden => {
+                    let unheld = format!("pi ran {name} where it has no tools");
+                    vec![Read::Unsafe(unheld)]
+                }
+            }
+        }
+        Some("tool_execution_end") => {
+            let denied = record["isError"] == true && result_mentions_denied(&record["result"]);
+            let id = record["toolCallId"]
+                .as_str()
+                .filter(|id| denied && !id.is_empty());
+            id.map(|id| Read::Step(Step::Denied(id.to_owned())))
                 .into_iter()
                 .collect()
+        }
+        Some("message_end") if record["message"]["role"] == "assistant" => {
+            let message = &record["message"];
+            let blocks = message["content"].as_array().into_iter().flatten();
+            let texts = blocks.filter(|block| block["type"] == "text");
+            let texts = texts
+                .filter_map(|block| block["text"].as_str())
+                .map(str::trim);
+            let texts: Vec<&str> = texts.filter(|text| !text.is_empty()).collect();
+            if let Some("error" | "aborted") = message["stopReason"].as_str() {
+                *outcome = PiOutcome::Failed(why(message["errorMessage"].as_str()));
+            } else {
+                let last = match texts.last() {
+                    Some(text) => (*text).to_owned(),
+                    None => match mem::replace(outcome, PiOutcome::Last(String::new())) {
+                        PiOutcome::Last(prev) => prev,
+                        PiOutcome::Failed(_) => String::new(),
+                    },
+                };
+                *outcome = PiOutcome::Last(last);
+            }
+            texts
+                .into_iter()
+                .map(|text| Read::Step(Step::Said(text.to_owned())))
+                .collect()
+        }
+        Some("agent_settled") => {
+            let ended = match mem::replace(outcome, PiOutcome::Last(String::new())) {
+                PiOutcome::Failed(why) => Err(why),
+                PiOutcome::Last(last) => Ok(last),
+            };
+            vec![Read::Ended(ended)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn read_agy(said: &mut String, tools: &mut BTreeSet<u64>, record: &Value) -> Vec<Read> {
+    match record["event"].as_str() {
+        Some("init") => session(&record["conversation_id"], Harness::Antigravity),
+        Some("step_update") => {
+            let update = &record["step_update"];
+            match update["step_type"].as_str() {
+                Some("agent_response") => {
+                    let delta = update["text_delta"].as_str().unwrap_or_default();
+                    if said.len().saturating_add(delta.len()) > AGY_SAID_BYTES_MAX {
+                        said.clear();
+                        let over = format!("agy said more than {AGY_SAID_BYTES_MAX} bytes");
+                        return vec![Read::OverLimit(over)];
+                    }
+                    said.push_str(delta);
+                    assert!(
+                        said.len() <= AGY_SAID_BYTES_MAX,
+                        "buffered agy response stays within bound"
+                    );
+                    if update["state"] == "DONE" {
+                        let text = mem::take(said);
+                        let text = Some(text.trim()).filter(|text| !text.is_empty());
+                        text.map(|text| Read::Step(Step::Said(text.to_owned())))
+                            .into_iter()
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Some("tool") => {
+                    let Some(step_index) = update["step_index"].as_u64() else {
+                        return Vec::new();
+                    };
+                    assert!(
+                        tools.len() <= AGY_TOOLS_MAX,
+                        "tracked agy tools stay within turn line bound"
+                    );
+                    if !tools.insert(step_index) {
+                        return Vec::new();
+                    }
+                    let name = update["tool_name"].as_str().unwrap_or("a tool");
+                    let command = update["tool_info"]["parameters"]["CommandLine"].as_str();
+                    let ran = Step::Ran {
+                        id: step_index.to_string(),
+                        command: command.unwrap_or(name).to_owned(),
+                    };
+                    vec![Read::Step(ran)]
+                }
+                _ => Vec::new(),
+            }
+        }
+        Some("result") => {
+            said.clear();
+            let result = &record["result"];
+            let denied = result["denied_actions"]
+                .as_array()
+                .is_some_and(|denied| !denied.is_empty());
+            let tools = mem::take(tools);
+            let mut read: Vec<_> = if denied {
+                tools
+                    .into_iter()
+                    .map(|index| Read::Step(Step::Denied(index.to_string())))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let response = result["response"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            let ended = if result["status"] == "SUCCESS" {
+                if denied {
+                    if response.is_empty() {
+                        Err("agy stopped at a tool, and has none here".to_owned())
+                    } else {
+                        Ok(response)
+                    }
+                } else {
+                    Ok(response)
+                }
+            } else {
+                Err(why(result["error"]
+                    .as_str()
+                    .or_else(|| result["status"].as_str())))
+            };
+            read.push(Read::Ended(ended));
+            read
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn read_claude(record: &Value) -> Vec<Read> {
+    match record["type"].as_str() {
+        Some("system") if record["subtype"] == "init" => {
+            session(&record["session_id"], Harness::ClaudeCode)
         }
         Some("assistant") if record["parent_tool_use_id"].is_null() => {
             let blocks = record["message"]["content"]
@@ -1054,7 +1742,9 @@ fn read(line: &str) -> Vec<Read> {
                 .as_array()
                 .into_iter()
                 .flatten();
-            let denied = denials.filter_map(|denial| denial["tool_use_id"].as_str());
+            let denied = denials
+                .filter_map(|denial| denial["tool_use_id"].as_str())
+                .filter(|id| !id.is_empty());
             let mut read: Vec<_> = denied
                 .map(|id| Read::Step(Step::Denied(id.to_owned())))
                 .collect();
@@ -1210,7 +1900,7 @@ impl LineWriter {
             && matches!(producer, Producer::Reading)
         {
             *producer = Producer::Failed(io::Error::other(
-                "claude stdout queue woke too many times without space",
+                "the agent's stdout queue woke too many times without space",
             ));
             self.lines.changed.notify_all();
         }
@@ -1246,7 +1936,7 @@ impl Drop for LineWriter {
             && matches!(producer, Producer::Reading)
         {
             *producer = Producer::Failed(io::Error::other(
-                "claude stdout reader ended before reporting eof",
+                "the agent's stdout reader ended before reporting eof",
             ));
             self.lines.changed.notify_all();
         }
@@ -1336,7 +2026,7 @@ fn read_line_bounded(
         return Ok(None);
     }
     if raw.len() > bytes_max {
-        let message = format!("claude said a line past {bytes_max} bytes");
+        let message = format!("the agent said a line past {bytes_max} bytes");
         return Err(io::Error::new(io::ErrorKind::InvalidData, message));
     }
     if raw.ends_with(b"\n") {
@@ -1350,31 +2040,38 @@ fn read_line_bounded(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn stop_child(child: &mut Child) {
+fn stop_child(program: &str, child: &mut Child) {
     if let Err(error) = child.kill()
         && error.kind() != io::ErrorKind::InvalidInput
     {
-        log::say(&format!("claude could not be killed: {error}"));
+        log::say(&format!("{program} could not be killed: {error}"));
     }
     if let Err(error) = child.wait() {
-        log::say(&format!("claude could not be waited for: {error}"));
+        log::say(&format!("{program} could not be waited for: {error}"));
     }
 }
 
 fn talk(
     mut command: Command,
-    words: &str,
+    mut reader: Reader,
+    stdin: &str,
     limit: Duration,
     lines_max: usize,
     wanted: &Wanted,
     hear: &dyn Fn(Step),
 ) -> Option<Result<(), String>> {
     assert!(lines_max > 0, "a turn allows at least one line");
+    let harness = reader.harness();
+    let program = harness.program();
     if !wanted.still() {
         return None;
     }
+    let stdin = match program::saying(stdin) {
+        Ok(stdin) => stdin,
+        Err(error) => return Some(Err(format!("{program} could not be told: {error}"))),
+    };
     command
-        .stdin(Stdio::piped())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = match command.spawn() {
@@ -1383,20 +2080,14 @@ fn talk(
             let gone = command.get_current_dir().filter(|cwd| !cwd.is_dir());
             return Some(Err(match gone {
                 Some(cwd) => format!("{}, where the agent works, is gone", cwd.display()),
-                None => "claude is not on the PATH".to_owned(),
+                None => format!("{program} is not on the PATH"),
             }));
         }
-        Err(error) => return Some(Err(format!("claude could not be run: {error}"))),
+        Err(error) => return Some(Err(format!("{program} could not be run: {error}"))),
     };
-    if let Some(mut stdin) = child.stdin.take()
-        && let Err(error) = stdin.write_all(words.as_bytes())
-        && error.kind() != io::ErrorKind::BrokenPipe
-    {
-        log::say(&format!("claude did not hear its prompt: {error}"));
-    }
     let unread = |child: &mut Child, error: io::Error| {
-        stop_child(child);
-        Some(Err(format!("no thread reads what claude says: {error}")))
+        stop_child(program, child);
+        Some(Err(format!("no thread reads what {program} says: {error}")))
     };
     let stdout = child.stdout.take().expect("its stdout is piped");
     let (mut writer, mut lines, cancel_lines) = line_channel();
@@ -1404,7 +2095,7 @@ fn talk(
         cancel_lines.give_up();
     });
     let reading = thread::Builder::new()
-        .name("claude says".to_owned())
+        .name(format!("{program} says"))
         .spawn(move || {
             let mut reader = BufReader::new(stdout);
             for _ in 0..=lines_max {
@@ -1431,7 +2122,7 @@ fn talk(
     }
     let stderr = child.stderr.take().expect("its stderr is piped");
     let stderr = thread::Builder::new()
-        .name("claude's stderr".to_owned())
+        .name(format!("{program}'s stderr"))
         .spawn(move || {
             let mut said = Vec::new();
             let _ = stderr.take(program::SAID_MAX).read_to_end(&mut said);
@@ -1442,44 +2133,60 @@ fn talk(
         Err(error) => return unread(&mut child, error),
     };
     let deadline = Instant::now() + limit;
-    let (mut ended, mut spoke) = (None, false);
+    let (mut ended, mut spoke, mut malformed_logged) = (None, false, 0);
     for lines_read in 0..=lines_max {
         match lines.next(deadline, wanted) {
             NextLine::Line(line) => {
                 if lines_read == lines_max {
-                    stop_child(&mut child);
-                    return Some(Err(format!("claude said more than {lines_max} lines")));
+                    stop_child(program, &mut child);
+                    return Some(Err(format!("{program} said more than {lines_max} lines")));
                 }
-                for read in read(&line) {
+                let steps = match reader.read(&line) {
+                    Ok(steps) => steps,
+                    Err(error) => {
+                        if malformed_logged < MALFORMED_LOGS_MAX {
+                            log::say(&format!("{program} wrote unreadable json: {error}"));
+                            malformed_logged += 1;
+                        }
+                        continue;
+                    }
+                };
+                for read in steps {
                     match read {
                         Read::Step(step) => {
                             spoke |= matches!(step, Step::Said(_));
                             hear(step);
                         }
                         Read::Ended(end) => ended = Some(end),
+                        Read::Unsafe(why) | Read::OverLimit(why) => {
+                            stop_child(program, &mut child);
+                            return Some(Err(why));
+                        }
                     }
                 }
             }
             NextLine::Failed(error) => {
-                stop_child(&mut child);
-                return Some(Err(format!("claude's output could not be read: {error}")));
+                stop_child(program, &mut child);
+                return Some(Err(format!(
+                    "{program}'s output could not be read: {error}"
+                )));
             }
             NextLine::Eof => break,
             NextLine::GivenUp => {
-                stop_child(&mut child);
+                stop_child(program, &mut child);
                 return None;
             }
             NextLine::Late => {
-                stop_child(&mut child);
+                stop_child(program, &mut child);
                 let minutes = TURN.as_secs() / 60;
                 return Some(Err(format!(
-                    "claude was still at it after {minutes} minutes"
+                    "{program} was still at it after {minutes} minutes"
                 )));
             }
         }
     }
     if !wanted.still() {
-        stop_child(&mut child);
+        stop_child(program, &mut child);
         return None;
     }
     let status = child.wait();
@@ -1492,17 +2199,18 @@ fn talk(
             }
             Ok(())
         }
-        (_, Ok(status)) => Err(failed(&stderr, status)),
-        (_, Err(error)) => Err(format!("claude could not be waited for: {error}")),
+        (_, Ok(status)) => Err(failed(harness, &stderr, status)),
+        (_, Err(error)) => Err(format!("{program} could not be waited for: {error}")),
     })
 }
 
-fn failed(stderr: &[u8], status: ExitStatus) -> String {
+fn failed(harness: Harness, stderr: &[u8], status: ExitStatus) -> String {
+    let program = harness.program();
     let said = String::from_utf8_lossy(stderr);
     match said.lines().map(str::trim).find(|line| !line.is_empty()) {
-        Some(line) => format!("claude failed: {line}"),
-        None if status.success() => "claude ended without saying how the turn went".to_owned(),
-        None => format!("claude failed: {status}"),
+        Some(line) => format!("{program} failed: {line}"),
+        None if status.success() => format!("{program} ended without saying how the turn went"),
+        None => format!("{program} failed: {status}"),
     }
 }
 
@@ -1541,7 +2249,7 @@ mod tests {
         let highlighted = "The row highlighted is terminal 4 of lune.".to_owned();
         let cwd = Some(PathBuf::from("/w/lune"));
         let first = Asked::new(cwd, " prune it ", None, highlighted, turn()).unwrap();
-        let claude = first.claude();
+        let claude = first.run().unwrap().command;
         assert_eq!(claude.get_current_dir(), Some(Path::new("/w/lune")));
         let said = args(&claude);
         let model = [
@@ -1558,7 +2266,12 @@ mod tests {
         assert_eq!(said[13], "--append-system-prompt");
         let system = format!("{SYSTEM}\n\nThe row highlighted is terminal 4 of lune.\n\n{SKILL}");
         assert_eq!(said[14], system);
-        assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
+        let allowed = claude_allowed_tools();
+        let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
+        assert_eq!(
+            said[15..],
+            [&["--allowedTools"][..], &allowed_refs].concat()
+        );
         assert!(matches!(
             &first.kind,
             AskKind::General { words, .. } if words.as_str() == "prune it"
@@ -1578,7 +2291,7 @@ mod tests {
 
         let resumed = Some(session("7c22"));
         let next = Asked::new(None, "yes", resumed, String::new(), turn());
-        let claude = next.unwrap().claude();
+        let claude = next.unwrap().run().unwrap().command;
         assert_eq!(
             claude.get_current_dir(),
             env::var_os("HOME").as_deref().map(Path::new)
@@ -1588,7 +2301,9 @@ mod tests {
         let first = Turn::new(10, None).unwrap();
         let claude = Asked::new(None, "yes", None, String::new(), first)
             .unwrap()
-            .claude();
+            .run()
+            .unwrap()
+            .command;
         assert_eq!(
             var(&claude, TURN_VAR),
             Some(Some("000000000000000a".to_owned()))
@@ -1599,10 +2314,11 @@ mod tests {
             Some(PathBuf::from("/w/lune")),
             "<untrusted-diff-excerpt location=\"src/lib.rs:10\">\n```patch\n+ok\n```\n</untrusted-diff-excerpt>",
             "Explain.",
+            Harness::ClaudeCode,
         )
         .unwrap();
         let review_asked = Asked::from(reviewed.clone());
-        let review_args = args(&review_asked.claude());
+        let review_args = args(&review_asked.run().unwrap().command);
         assert!(review_args.windows(2).any(|pair| pair == ["--tools", ""]));
         assert!(
             review_args
@@ -1621,9 +2337,14 @@ mod tests {
             Ok((None, reviewed))
         );
 
-        let follow_up =
-            ReviewAsk::follow_up(Some(PathBuf::from("/w/lune")), session("7c22"), "Why?").unwrap();
-        let follow_args = args(&Asked::from(follow_up.clone()).claude());
+        let follow_up = ReviewAsk::follow_up(
+            Some(PathBuf::from("/w/lune")),
+            session("7c22"),
+            "Why?",
+            Harness::ClaudeCode,
+        )
+        .unwrap();
+        let follow_args = args(&Asked::from(follow_up.clone()).run().unwrap().command);
         assert!(follow_args.windows(2).any(|pair| pair == ["--tools", ""]));
         assert!(
             follow_args
@@ -1652,9 +2373,9 @@ mod tests {
             .is_err()
         );
         assert!(Asked::new(None, "hi\0", None, String::new(), turn()).is_err());
-        assert!(ReviewAsk::start(None, "   ", "Explain.").is_err());
-        assert!(ReviewAsk::start(None, "ctx", "   ").is_err());
-        assert!(ReviewAsk::start(None, "bad\0ctx", "Explain.").is_err());
+        assert!(ReviewAsk::start(None, "   ", "Explain.", Harness::ClaudeCode).is_err());
+        assert!(ReviewAsk::start(None, "ctx", "   ", Harness::ClaudeCode).is_err());
+        assert!(ReviewAsk::start(None, "bad\0ctx", "Explain.", Harness::ClaudeCode).is_err());
         assert!(ReviewAsk::of_api(AskReviewRequest::default()).is_err());
         assert!(
             ReviewAsk::of_api(AskReviewRequest {
@@ -1666,6 +2387,19 @@ mod tests {
                         words: "Why?".to_owned(),
                     }
                 )),
+                harness: None,
+            })
+            .is_err()
+        );
+        assert!(
+            ReviewAsk::of_api(AskReviewRequest {
+                on: None,
+                cwd: None,
+                turn: Some(ask_review_request::Turn::Start(ask_review_request::Start {
+                    context: "ctx".to_owned(),
+                    words: "Explain.".to_owned(),
+                })),
+                harness: Some(99),
             })
             .is_err()
         );
@@ -1794,7 +2528,9 @@ mod tests {
         for turn in [first, turn()] {
             let claude = Asked::new(None, "yes", None, String::new(), turn)
                 .unwrap()
-                .claude();
+                .run()
+                .unwrap()
+                .command;
             let [key, before] = [TURN_VAR, BEFORE_VAR].map(|name| var(&claude, name));
             assert_eq!(
                 Turn::read(key.as_deref(), before.as_deref()),
@@ -1802,6 +2538,592 @@ mod tests {
             );
         }
         assert_eq!(Turn::read(None, None), Ok(None));
+    }
+
+    #[test]
+    fn another_harness_runs_the_turn_under_the_same_limits() {
+        let general = |resumed: Option<&str>, harness: CommandHarness| {
+            let cwd = Some(PathBuf::from("/w/lune"));
+            let row = "The row highlighted is terminal 4 of lune.".to_owned();
+            Asked::general(
+                cwd,
+                "prune it",
+                resumed.map(session),
+                row,
+                turn(),
+                harness,
+                Marked::default(),
+            )
+            .unwrap()
+        };
+        let pi = general(None, CommandHarness::Pi);
+        assert_eq!(Asked::of(pi.asked(None)), Ok((None, pi.clone())));
+        let highlighted =
+            PromptText::parse("The row highlighted is terminal 4 of lune.".to_owned()).unwrap();
+        let command = pi.pi_commands(
+            Path::new("/tmp/lune-ask-1.ts"),
+            Path::new("/tmp/lune-pi-asks"),
+            None,
+            highlighted.as_ref(),
+            turn(),
+        );
+        assert_eq!(command.get_program(), "pi");
+        assert_eq!(command.get_current_dir(), Some(Path::new("/w/lune")));
+        let system = system("The row highlighted is terminal 4 of lune.");
+        let sessions = ["--session-dir", "/tmp/lune-pi-asks"];
+        let gated = ["--tools", "bash", "--extension", "/tmp/lune-ask-1.ts"];
+        let told = ["--append-system-prompt", &system];
+        let said = [
+            &["-p", "--mode", "json"][..],
+            &headless::PI_BARE,
+            &sessions,
+            &gated,
+            &told,
+        ]
+        .concat();
+        assert_eq!(args(&command), said);
+        let unset = command
+            .get_envs()
+            .any(|(key, value)| key == "LUNE_MUX_TERMINAL" && value.is_none());
+        assert!(unset, "the turn's agent is in no terminal of lune");
+        let expected_sessions = pi_sessions_folder().unwrap();
+        let expected_bare = bare_folder().unwrap();
+        let Run {
+            command,
+            reader,
+            stdin,
+            gate,
+        } = pi.run().unwrap();
+        assert!(matches!(
+            reader,
+            Reader::Pi {
+                tools: PiTools::AwaitingGate,
+                ..
+            }
+        ));
+        assert_eq!(stdin, "prune it");
+        let gate = gate.expect("pi runs commands behind lune's gate");
+        assert!(
+            args(&command)
+                .windows(2)
+                .any(|pair| pair == ["--extension", gate.path().to_str().unwrap()])
+        );
+        assert!(
+            args(&command)
+                .windows(2)
+                .any(|pair| pair == ["--session-dir", expected_sessions.to_str().unwrap()])
+        );
+
+        let resumed = Asked::review_follow_up(
+            Some(PathBuf::from("/w/lune")),
+            session("7c22"),
+            "why?",
+            Harness::Pi,
+        )
+        .unwrap();
+        let Run {
+            command,
+            reader,
+            gate,
+            stdin,
+        } = resumed.run().unwrap();
+        assert!(gate.is_none());
+        assert_eq!(stdin, "why?");
+        assert_eq!(command.get_current_dir(), Some(expected_bare.as_path()));
+        assert!(
+            args(&command)
+                .windows(2)
+                .any(|pair| pair == ["--session-dir", expected_sessions.to_str().unwrap()])
+        );
+        assert!(matches!(
+            reader,
+            Reader::Pi {
+                tools: PiTools::Forbidden,
+                ..
+            }
+        ));
+        let resumed_id = session("7c22");
+        let review_command = resumed.pi_review(
+            Some(&resumed_id),
+            Path::new("/tmp/lune-pi-asks"),
+            Path::new("/tmp/lune-bare"),
+        );
+        assert_eq!(
+            review_command.get_current_dir(),
+            Some(Path::new("/tmp/lune-bare"))
+        );
+        let said = args(&review_command);
+        let tail = [
+            "--session-dir",
+            "/tmp/lune-pi-asks",
+            "--no-tools",
+            "--system-prompt",
+            REVIEW_SYSTEM,
+            "--session-id",
+            "7c22",
+        ];
+        assert_eq!(said[said.len() - 7..], tail);
+        assert!(
+            !said
+                .iter()
+                .any(|arg| arg == "--tools" || arg == "--extension")
+        );
+
+        let legacy_agy_commands = AskRequest {
+            harness: Some(Harness::Antigravity.to_api().into()),
+            review_only: false,
+            ..general(Some("7c22"), CommandHarness::ClaudeCode).asked(None)
+        };
+        let downgraded = Asked::of(legacy_agy_commands).unwrap().1;
+        assert_eq!(
+            downgraded.runner(),
+            Harness::ClaudeCode,
+            "nothing holds agy to lune's commands"
+        );
+        let Run {
+            command, reader, ..
+        } = downgraded.run().unwrap();
+        assert_eq!(command.get_program(), "claude");
+        assert!(matches!(reader, Reader::Claude));
+
+        let reviewed = ReviewAsk::follow_up(
+            Some(PathBuf::from("/w/lune")),
+            session("7c22"),
+            "why?",
+            Harness::Antigravity,
+        )
+        .unwrap();
+        assert_eq!(reviewed.runner(), Harness::Antigravity);
+        assert_eq!(
+            ReviewAsk::of_api(reviewed.to_api(None)),
+            Ok((None, reviewed.clone()))
+        );
+        let reviewed = Asked::from(reviewed);
+        assert_eq!(reviewed.runner(), Harness::Antigravity);
+        let Run {
+            command,
+            reader,
+            stdin,
+            ..
+        } = reviewed.run().unwrap();
+        assert!(matches!(reader, Reader::Agy { .. }));
+        assert_eq!(command.get_current_dir(), Some(expected_bare.as_path()));
+        assert_eq!(
+            stdin,
+            headless::agy_message(&format!("{REVIEW_SYSTEM}\n\nwhy?"))
+        );
+        let strict = [
+            "--settings",
+            headless::AGY_STRICT,
+            "--disable-slash-commands",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+        ];
+        assert_eq!(
+            args(&command),
+            [&strict[..], &["--conversation", "7c22"]].concat()
+        );
+        let long_ctx = "x".repeat(128 * 1024);
+        let long = Asked::review_start(
+            Some(PathBuf::from("/w/lune")),
+            &long_ctx,
+            "Explain.",
+            Harness::Antigravity,
+        )
+        .unwrap();
+        let long_run = long.run().unwrap();
+        assert_eq!(
+            long_run.command.get_current_dir(),
+            Some(expected_bare.as_path())
+        );
+        assert!(
+            !args(&long_run.command)
+                .iter()
+                .any(|arg| arg.contains("xxxx"))
+        );
+        let long_payload: Value = serde_json::from_str(long_run.stdin.trim_end()).unwrap();
+        assert!(
+            long_payload["message"]["content"]
+                .as_str()
+                .is_some_and(|text| text.contains(&long_ctx) && text.ends_with("\n\nExplain."))
+        );
+        let unknown = AskRequest {
+            harness: Some(99),
+            ..general(None, CommandHarness::ClaudeCode).asked(None)
+        };
+        assert!(Asked::of(unknown).is_err());
+        let unsaid = AskRequest {
+            harness: None,
+            ..general(None, CommandHarness::ClaudeCode).asked(None)
+        };
+        assert_eq!(Asked::of(unsaid).unwrap().1.runner(), Harness::ClaudeCode);
+        let marked_review = AskRequest {
+            review_only: true,
+            marked_issues: vec![12],
+            ..general(None, CommandHarness::ClaudeCode).asked(None)
+        };
+        assert!(Asked::of(marked_review).is_err());
+    }
+
+    #[test]
+    fn the_gate_lets_pi_run_what_claude_is_allowed() {
+        assert_eq!(ALLOWED_COMMANDS[0], "lune start");
+        assert_eq!(
+            ALLOWED_COMMANDS[ALLOWED_COMMANDS.len() - 1],
+            "git worktree list"
+        );
+        assert_eq!(claude_allowed_tools()[0], "Bash(lune start:*)");
+        assert_eq!(
+            claude_allowed_tools()[ALLOWED_COMMANDS.len() - 1],
+            "Bash(git worktree list:*)"
+        );
+        let gate = gate().unwrap();
+        let script = std::fs::read_to_string(gate.path()).unwrap();
+        assert!(
+            script.contains(r#"JSON.parse("[\"lune start\",\"lune agents\",\"lune prune\","#),
+            "{script}"
+        );
+        assert!(script.contains(&format!("const DENIED = {};", json!(DENIED))));
+        assert!(script.contains(r#"const ENTRY = "lune-gate";"#));
+        assert!(!script.contains("LUNE_"), "each name is filled in");
+
+        let runner = r#"
+import { pathToFileURL } from "node:url";
+
+const [, file, casesJson] = process.argv;
+const { default: factory } = await import(pathToFileURL(file).href);
+const entries = [];
+const handlers = new Map();
+factory({
+  appendEntry: (customType, data) => entries.push({ customType, data }),
+  on: (name, handler) => handlers.set(name, handler),
+});
+await handlers.get("session_start")();
+const toolCall = handlers.get("tool_call");
+const results = [];
+for (const event of JSON.parse(casesJson)) {
+  results.push(await toolCall(event));
+}
+results.push(await toolCall(undefined));
+console.log(JSON.stringify({ entries, results }));
+"#;
+        let huge = format!("lune agents {}", "a".repeat(20_000));
+        let cases = json!([
+            {"toolName": "bash", "input": {"command": "lune agents"}},
+            {"toolName": "bash", "input": {"command": "  lune start #42  "}},
+            {"toolName": "bash", "input": {"command": "git worktree list"}},
+            {"toolName": "bash", "input": {"command": "lune startx"}},
+            {"toolName": "bash", "input": {"command": "rm -rf /"}},
+            {"toolName": "bash", "input": {"command": ""}},
+            {"toolName": "bash", "input": {"command": "lune agents; id"}},
+            {"toolName": "bash", "input": {"command": "lune agents && id"}},
+            {"toolName": "bash", "input": {"command": "lune agents | cat"}},
+            {"toolName": "bash", "input": {"command": "lune agents $(id)"}},
+            {"toolName": "bash", "input": {"command": "lune agents `id`"}},
+            {"toolName": "bash", "input": {"command": "lune agents > /tmp/x"}},
+            {"toolName": "bash", "input": {"command": "lune agents\nid"}},
+            {"toolName": "bash", "input": {"command": "lune agents\0id"}},
+            {"toolName": "bash", "input": {"command": "lune agents\tid"}},
+            {"toolName": "bash", "input": {"command": huge}},
+            {"toolName": "read", "input": {"path": "/etc/passwd"}},
+            {"toolName": "bash", "input": null},
+            {"toolName": "bash", "input": {"command": 42}},
+            null,
+        ]);
+        let output = Command::new("node")
+            .args(["--input-type=module", "--eval", runner])
+            .arg(gate.path())
+            .arg(cases.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["entries"],
+            json!([{"customType": ENTRY, "data": {}}])
+        );
+        let results = report["results"].as_array().unwrap();
+        assert_eq!(results.len(), 21);
+        for allowed_result in &results[..3] {
+            assert!(allowed_result.is_null(), "{allowed_result}");
+        }
+        let blocked = json!({"block": true, "reason": DENIED});
+        for (index, denied_result) in results[3..].iter().enumerate() {
+            assert_eq!(denied_result, &blocked, "case {}", index + 3);
+        }
+    }
+
+    #[test]
+    fn what_pi_writes_says_what_the_agent_ran_and_said() {
+        let mut reader = Reader::pi_gated();
+        assert!(reader.read("not json").is_err());
+        let mut read = |record: Value| reader.read(&record.to_string()).unwrap();
+        let id = "01a21f2d-3160-7371-ba62-2ab9905227a2";
+        assert_eq!(
+            read(json!({"type": "session", "version": 3, "id": id, "cwd": "/w"})),
+            [Read::Step(Step::Session {
+                id: session(id),
+                runner: Harness::Pi,
+            })]
+        );
+        let entry = |kind: &str| json!({"type": "entry_appended", "entry": {"type": "custom", "customType": kind}});
+        assert_eq!(read(entry("another")), []);
+        let ran = |id: &str, command: &str| json!({"type": "tool_execution_start", "toolCallId": id, "toolName": "bash", "args": {"command": command}});
+        let unheld = "pi ran bash where nothing held it to lune's commands".to_owned();
+        assert_eq!(read(ran("call_0", "lune agents")), [Read::Unsafe(unheld)]);
+        assert_eq!(read(entry(ENTRY)), []);
+        assert_eq!(
+            read(ran("call_1", "lune agents")),
+            [Read::Step(Step::Ran {
+                id: "call_1".to_owned(),
+                command: "lune agents".to_owned()
+            })]
+        );
+        let ended = |id: &str, failed: bool, text: &str| {
+            json!({"type": "tool_execution_end", "toolCallId": id, "toolName": "bash", "isError": failed,
+                   "result": {"content": [{"type": "text", "text": text}]}})
+        };
+        assert_eq!(read(ended("call_1", false, "terminal 4")), []);
+        assert_eq!(read(ended("call_2", true, "no such worktree")), []);
+        assert_eq!(
+            read(ended("call_3", true, DENIED)),
+            [Read::Step(Step::Denied("call_3".to_owned()))]
+        );
+        assert_eq!(
+            read(
+                json!({"type": "tool_execution_end", "toolCallId": "call_4", "isError": true, "result": DENIED})
+            ),
+            [Read::Step(Step::Denied("call_4".to_owned()))]
+        );
+        let message = |role: &str, content: Value, stop: &str| json!({"type": "message_end", "message": {"role": role, "content": content, "stopReason": stop}});
+        assert_eq!(
+            read(message(
+                "user",
+                json!([{"type": "text", "text": "where am I"}]),
+                "stop"
+            )),
+            []
+        );
+        let content = json!([
+            {"type": "thinking", "thinking": "hmm"},
+            {"type": "text", "text": "  You are in lune:2.  "},
+            {"type": "toolCall", "id": "call_4", "name": "bash", "arguments": {}},
+            {"type": "text", "text": " "},
+        ]);
+        let said = Read::Step(Step::Said("You are in lune:2.".to_owned()));
+        assert_eq!(read(message("assistant", content, "stop")), [said]);
+        assert_eq!(
+            read(
+                json!({"type": "message_update", "assistantMessageEvent": {"type": "text_delta"}})
+            ),
+            []
+        );
+        assert_eq!(
+            read(json!({"type": "agent_settled", "aborted": false})),
+            [Read::Ended(Ok("You are in lune:2.".to_owned()))]
+        );
+
+        let mut failed = message("assistant", json!([]), "error");
+        failed["message"]["errorMessage"] =
+            json!(format!("OAuth refresh failed\n{}", "x".repeat(999)));
+        assert_eq!(read(failed.clone()), []);
+        assert_eq!(
+            read(message(
+                "assistant",
+                json!([{"type": "text", "text": "Done."}]),
+                "stop"
+            ))
+            .len(),
+            1
+        );
+        assert_eq!(
+            read(json!({"type": "agent_settled"})),
+            [Read::Ended(Ok("Done.".to_owned()))]
+        );
+        assert_eq!(read(failed), []);
+        let why = "OAuth refresh failed".to_owned();
+        assert_eq!(
+            read(json!({"type": "agent_settled"})),
+            [Read::Ended(Err(why))]
+        );
+        let long = "é".repeat(WHY_BYTES_MAX);
+        assert_eq!(why_of(&long).len(), WHY_BYTES_MAX);
+        assert_eq!(why_of(" \n"), "the turn failed");
+
+        let mut review_reader = Reader::pi_review();
+        let gate_entry =
+            json!({"type": "entry_appended", "entry": {"type": "custom", "customType": ENTRY}});
+        assert_eq!(review_reader.read(&gate_entry.to_string()).unwrap(), []);
+        let tool = json!({"type": "tool_execution_start", "toolCallId": "call_9", "toolName": "bash", "args": {"command": "lune agents"}});
+        assert_eq!(
+            review_reader.read(&tool.to_string()).unwrap(),
+            [Read::Unsafe("pi ran bash where it has no tools".to_owned())],
+            "review mode never unlocks tools on entry_appended"
+        );
+    }
+
+    fn why_of(said: &str) -> String {
+        why(Some(said))
+    }
+
+    #[test]
+    fn what_agy_writes_says_what_the_agent_said() {
+        let mut reader = Reader::agy();
+        assert!(reader.read("not json").is_err());
+        let mut read = |record: Value| reader.read(&record.to_string()).unwrap();
+        let id = "00fc2d19-b171-4faf-820c-4c0ca98627d8";
+        let init = json!({"event": "init", "conversation_id": id, "init": {"cwd": "/w", "permission_mode": "strict"}});
+        assert_eq!(
+            read(init),
+            [Read::Step(Step::Session {
+                id: session(id),
+                runner: Harness::Antigravity,
+            })]
+        );
+        let update = |update: Value| json!({"event": "step_update", "step_update": update});
+        assert_eq!(
+            read(update(
+                json!({"step_index": 0, "state": "DONE", "step_type": "user_input"})
+            )),
+            []
+        );
+        let says = |state: &str, delta: &str| {
+            update(
+                json!({"step_index": 1, "state": state, "step_type": "agent_response", "text_delta": delta}),
+            )
+        };
+        assert_eq!(read(says("ACTIVE", "It renames ")), []);
+        assert_eq!(read(says("ACTIVE", "the field.")), []);
+        let said = Read::Step(Step::Said("It renames the field.".to_owned()));
+        assert_eq!(read(says("DONE", "\n")), [said]);
+        assert_eq!(
+            read(update(
+                json!({"step_index": 2, "state": "DONE", "step_type": "agent_response"})
+            )),
+            []
+        );
+        let result = |result: Value| json!({"event": "result", "result": result});
+        let done = result(
+            json!({"conversation_id": id, "status": "SUCCESS", "response": "It renames the field.\n"}),
+        );
+        assert_eq!(
+            read(done),
+            [Read::Ended(Ok("It renames the field.".to_owned()))]
+        );
+
+        assert_eq!(
+            read(update(
+                json!({"state": "ACTIVE", "step_type": "tool", "tool_name": "read_file"})
+            )),
+            [],
+            "a tool update with no step_index is ignored"
+        );
+        let tool = |index: u64, state: &str, name: &str| {
+            update(
+                json!({"step_index": index, "state": state, "step_type": "tool", "tool_name": name,
+                          "tool_info": {"name": name, "parameters": {"Path": "/w/x"}}}),
+            )
+        };
+        let ran_read = Step::Ran {
+            id: "2".to_owned(),
+            command: "read_file".to_owned(),
+        };
+        let ran_grep = Step::Ran {
+            id: "3".to_owned(),
+            command: "grep_search".to_owned(),
+        };
+        assert_eq!(read(tool(2, "ACTIVE", "read_file")), [Read::Step(ran_read)]);
+        assert_eq!(
+            read(tool(3, "ACTIVE", "grep_search")),
+            [Read::Step(ran_grep)]
+        );
+        assert_eq!(read(tool(2, "DONE", "read_file")), []);
+        assert_eq!(read(tool(3, "DONE", "grep_search")), []);
+        let denied = result(json!({"status": "SUCCESS", "response": "",
+                                   "denied_actions": [{"action": "read_file", "display_name": "ReadFile"}]}));
+        let stopped = Read::Ended(Err("agy stopped at a tool, and has none here".to_owned()));
+        assert_eq!(
+            read(denied),
+            [
+                Read::Step(Step::Denied("2".to_owned())),
+                Read::Step(Step::Denied("3".to_owned())),
+                stopped
+            ]
+        );
+        let failed =
+            result(json!({"status": "ERROR", "response": "", "error": "Error: not signed in"}));
+        assert_eq!(
+            read(failed),
+            [Read::Ended(Err("Error: not signed in".to_owned()))]
+        );
+        assert_eq!(
+            read(json!({"event": "result", "result": {}})),
+            [Read::Ended(Err("the turn failed".to_owned()))]
+        );
+
+        let chunk = "x".repeat(AGY_SAID_BYTES_MAX / 2 + 1);
+        assert_eq!(read(says("ACTIVE", &chunk)), []);
+        assert_eq!(
+            read(says("ACTIVE", &chunk)),
+            [Read::OverLimit(format!(
+                "agy said more than {AGY_SAID_BYTES_MAX} bytes"
+            ))]
+        );
+    }
+
+    #[test]
+    fn a_turn_of_pi_that_runs_a_tool_past_the_gate_is_killed() {
+        let heard = |script: &str| {
+            let mut sh = Command::new("sh");
+            sh.args(["-c", script]);
+            let heard = RefCell::new(Vec::new());
+            let hear = |said| heard.borrow_mut().push(said);
+            let ended = talk(
+                sh,
+                Reader::pi_gated(),
+                "",
+                TURN,
+                LINES_PER_TURN_MAX,
+                &Wanted::always(),
+                &hear,
+            );
+            (heard.into_inner(), ended)
+        };
+        let ran = r#"{"type":"tool_execution_start","toolCallId":"call_1","toolName":"bash","args":{"command":"lune agents"}}"#;
+        let (said, ended) = heard(&format!("echo '{ran}'; exec sleep 600"));
+        assert_eq!(said, []);
+        let unheld = "pi ran bash where nothing held it to lune's commands".to_owned();
+        assert_eq!(ended, Some(Err(unheld)));
+
+        let gated =
+            r#"{"type":"entry_appended","entry":{"type":"custom","customType":"lune-gate"}}"#;
+        let says = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"One agent runs."}],"stopReason":"stop"}}"#;
+        let settled = r#"{"type":"agent_settled","aborted":false}"#;
+        let (said, ended) = heard(&format!(
+            "echo '{gated}'; echo '{ran}'; echo '{says}'; echo '{settled}'"
+        ));
+        assert_eq!(
+            said,
+            [
+                Step::Ran {
+                    id: "call_1".to_owned(),
+                    command: "lune agents".to_owned()
+                },
+                Step::Said("One agent runs.".to_owned()),
+            ]
+        );
+        assert_eq!(ended, Some(Ok(())));
+        let (_, ended) = heard("echo 'Error: Failed to load extension' >&2; exit 1");
+        assert_eq!(
+            ended,
+            Some(Err("pi failed: Error: Failed to load extension".to_owned()))
+        );
     }
 
     fn marked(issues: &[u32], pulls: &[u32]) -> Marked {
@@ -1886,6 +3208,7 @@ mod tests {
                 resumed,
                 "row".to_owned(),
                 turn(),
+                CommandHarness::ClaudeCode,
                 marked(&[12, 14], &[20]),
             )
             .unwrap();
@@ -1956,7 +3279,10 @@ mod tests {
             command: "lune agents".to_owned(),
         };
         let steps = [
-            Step::Session(session("7c22")),
+            Step::Session {
+                id: session("7c22"),
+                runner: Harness::Pi,
+            },
             ran,
             Step::Denied("toolu_1".to_owned()),
             Step::Said("Done.".to_owned()),
@@ -1964,9 +3290,32 @@ mod tests {
         for step in steps {
             assert_eq!(Step::of(step.clone().answer()), Ok(Some(step)));
         }
-        assert_eq!(Step::of(AskResponse { step: None }), Ok(None));
+        let legacy_session = AskResponse {
+            step: Some(ask_response::Step::Session("7c22".to_owned())),
+            runner: None,
+        };
+        assert_eq!(
+            Step::of(legacy_session),
+            Ok(Some(Step::Session {
+                id: session("7c22"),
+                runner: Harness::ClaudeCode,
+            }))
+        );
+        let bad_runner = AskResponse {
+            step: Some(ask_response::Step::Session("7c22".to_owned())),
+            runner: Some(99),
+        };
+        assert!(Step::of(bad_runner).unwrap_err().starts_with("runner: "));
+        assert_eq!(
+            Step::of(AskResponse {
+                step: None,
+                runner: None,
+            }),
+            Ok(None)
+        );
         let unnamed = AskResponse {
             step: Some(ask_response::Step::Session("../x".to_owned())),
+            runner: None,
         };
         assert_eq!(
             Step::of(unnamed),
@@ -1990,12 +3339,17 @@ mod tests {
     #[test]
     fn what_claude_writes_says_what_the_agent_ran_and_said() {
         let line = |record: Value| record.to_string();
+        let read = |line: &str| Reader::Claude.read(line).unwrap_or_default();
         let assistant = |content: Value| json!({"type": "assistant", "parent_tool_use_id": null, "message": {"content": content}});
+        assert!(Reader::Claude.read("not json").is_err());
         assert_eq!(
             read(&line(
                 json!({"type": "system", "subtype": "init", "session_id": "7c22"})
             )),
-            [Read::Step(Step::Session(session("7c22")))]
+            [Read::Step(Step::Session {
+                id: session("7c22"),
+                runner: Harness::ClaudeCode,
+            })]
         );
         let unnamed = json!({"type": "system", "subtype": "init", "session_id": "../x"});
         assert_eq!(read(&line(unnamed)), []);
@@ -2069,9 +3423,17 @@ mod tests {
             let mut sh = Command::new("sh");
             sh.args(["-c", script]);
             let heard = RefCell::new(Vec::new());
-            let ended = talk(sh, words, TURN, LINES_PER_TURN_MAX, &always, &|said| {
-                heard.borrow_mut().push(said);
-            });
+            let ended = talk(
+                sh,
+                Reader::Claude,
+                words,
+                TURN,
+                LINES_PER_TURN_MAX,
+                &always,
+                &|said| {
+                    heard.borrow_mut().push(said);
+                },
+            );
             (heard.into_inner(), ended)
         };
         let init = r#"{"type":"system","subtype":"init","session_id":"7c22"}"#;
@@ -2083,7 +3445,10 @@ mod tests {
         assert_eq!(
             said,
             [
-                Step::Session(session("7c22")),
+                Step::Session {
+                    id: session("7c22"),
+                    runner: Harness::ClaudeCode,
+                },
                 Step::Ran {
                     id: "toolu_1".to_owned(),
                     command: "lune agents".to_owned()
@@ -2114,13 +3479,23 @@ mod tests {
 
         let mut gone = Command::new("sh");
         gone.current_dir("/w/gone");
-        let ended = talk(gone, "", TURN, LINES_PER_TURN_MAX, &always, &|_| {});
+        let ended = talk(
+            gone,
+            Reader::Claude,
+            "",
+            TURN,
+            LINES_PER_TURN_MAX,
+            &always,
+            &|_| {},
+        );
         assert_eq!(
             ended,
             Some(Err("/w/gone, where the agent works, is gone".to_owned()))
         );
+        let unfound = Command::new("/w/gone/claude");
         let ended = talk(
-            Command::new("/w/gone/claude"),
+            unfound,
+            Reader::Claude,
             "",
             TURN,
             LINES_PER_TURN_MAX,
@@ -2137,6 +3512,7 @@ mod tests {
             |ready, wanted| {
                 talk(
                     outlasting_patience(ready),
+                    Reader::Claude,
                     "",
                     TURN,
                     LINES_PER_TURN_MAX,
@@ -2156,6 +3532,7 @@ mod tests {
         flood.args(["-c", r"while echo '{}'; do :; done"]);
         let ended = talk(
             flood,
+            Reader::Claude,
             "",
             DEADLINE,
             LINES_PER_TURN_MAX,
@@ -2176,7 +3553,7 @@ mod tests {
         let mut exact = Command::new("sh");
         exact.args(["-c", &format!("echo '{{}}'; echo '{{}}'; echo '{done}'")]);
         let heard = RefCell::new(Vec::new());
-        let ended = talk(exact, "", TURN, 3, &always, &|step| {
+        let ended = talk(exact, Reader::Claude, "", TURN, 3, &always, &|step| {
             heard.borrow_mut().push(step);
         });
         assert_eq!(ended, Some(Ok(())));
@@ -2187,7 +3564,7 @@ mod tests {
             "-c",
             &format!("echo '{{}}'; echo '{{}}'; echo '{{}}'; echo '{done}'"),
         ]);
-        let ended = talk(over, "", TURN, 3, &always, &|_| {});
+        let ended = talk(over, Reader::Claude, "", TURN, 3, &always, &|_| {});
         assert_eq!(ended, Some(Err("claude said more than 3 lines".to_owned())));
     }
 

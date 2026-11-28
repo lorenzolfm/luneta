@@ -39,7 +39,7 @@ lune calls these programs when it finds them on the `PATH`:
 | `gh`, logged in | pull requests, issues and their checks |
 | `zoxide` | the folders you work in, to open as projects |
 | `eza` | listing a folder's contents |
-| `claude`, `pi`, `agy` | the agents a view runs; `claude -p` also answers lune's ask box |
+| `claude`, `pi`, `agy` | the agents a view runs; the one picked last in lune's menu also answers its ask box, writes its briefs and the issues it files (with `agy` picked, the ask box that runs lune's commands is `claude`'s, as nothing holds `agy` to them) |
 | `ssh` | watching another machine, which needs lune installed there too |
 
 lune makes worktrees with [wt](https://github.com/lorenzolfm/wt)'s code, built

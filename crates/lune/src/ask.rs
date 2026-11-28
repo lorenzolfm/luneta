@@ -7,7 +7,8 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use lune_diff::{ExcerptBody, SelectionExcerpt};
 use lune_domain::projects::Dir;
-use luned::asks::{self, Asked, Marked, Step, Turn};
+use luned::asks::{self, Asked, CommandHarness, Marked, Step, Turn};
+use luned::headless::{self, Harness};
 use luned::transcripts::SessionId;
 use luned::{Destination, Directory};
 use ratatui::buffer::Buffer;
@@ -79,17 +80,28 @@ enum Works {
     },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeneralSession {
+    session: SessionId,
+    harness: CommandHarness,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ReviewSession {
-    Unstarted { context: String },
-    Started { session: SessionId },
+    Unstarted {
+        context: String,
+    },
+    Started {
+        session: SessionId,
+        harness: Harness,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum AskMode {
     General {
         highlighted: String,
-        session: Option<SessionId>,
+        pinned: Option<GeneralSession>,
         turned: Option<u64>,
     },
     Review(ReviewSession),
@@ -369,13 +381,20 @@ impl Body {
 }
 
 #[derive(Debug)]
+struct ActiveTurn {
+    harness: Harness,
+    turn_key: Option<u64>,
+    _asking: Asking,
+}
+
+#[derive(Debug)]
 pub struct Ask {
     number: u64,
     works: Works,
     mode: AskMode,
+    turn: Option<ActiveTurn>,
     talk: Talk,
     typed: String,
-    turn: Option<Asking>,
     drawn: DrawnAsk,
 }
 
@@ -396,12 +415,12 @@ impl Ask {
             works,
             mode: AskMode::General {
                 highlighted: highlighted(target),
-                session: None,
+                pinned: None,
                 turned: None,
             },
+            turn: None,
             talk: Talk::default(),
             typed: String::new(),
-            turn: None,
             drawn: DrawnAsk::Unshown,
         }
     }
@@ -425,12 +444,12 @@ impl Ask {
             works,
             mode: AskMode::General {
                 highlighted,
-                session: None,
+                pinned: None,
                 turned: None,
             },
+            turn: None,
             talk: Talk::default(),
             typed: String::new(),
-            turn: None,
             drawn: DrawnAsk::Unshown,
         }
     }
@@ -490,9 +509,9 @@ impl Ask {
             number,
             works,
             mode: AskMode::Review(ReviewSession::Unstarted { context }),
+            turn: None,
             talk: Talk::default(),
             typed: initial.unwrap_or("").to_owned(),
-            turn: None,
             drawn: DrawnAsk::Unshown,
         }
     }
@@ -503,7 +522,7 @@ impl Ask {
         }
         let AskMode::General {
             highlighted: current_highlighted,
-            session: None,
+            pinned: None,
             ..
         } = &mut self.mode
         else {
@@ -532,7 +551,7 @@ impl Ask {
         match key.code {
             KeyCode::Esc if bare => return Keyed::Close,
             KeyCode::Char('c') if control => return Keyed::Interrupt,
-            _ if self.turn.is_some() => return Keyed::Nothing,
+            _ if self.turning() => return Keyed::Nothing,
             KeyCode::Enter if bare && !self.typed.trim().is_empty() => return Keyed::Send,
             KeyCode::Backspace if bare => {
                 self.typed.pop();
@@ -546,14 +565,14 @@ impl Ask {
 
     pub fn paste(&mut self, text: &str) {
         self.clear_selection();
-        if self.turn.is_none() {
+        if !self.turning() {
             self.typed.push_str(&plain(text));
         }
     }
 
     pub fn dictated(&mut self, text: &str) {
         self.clear_selection();
-        if self.turn.is_some() {
+        if self.turning() {
             return;
         }
         let text = plain(text);
@@ -563,8 +582,8 @@ impl Ask {
         self.typed.push_str(&text);
     }
 
-    pub fn send(&mut self, marked: Marked, events: &Sender<Event>) {
-        if self.turn.is_some() {
+    pub fn send(&mut self, marked: Marked, picked: Harness, events: &Sender<Event>) {
+        if self.turning() {
             return;
         }
         let words = std::mem::take(&mut self.typed).trim().to_owned();
@@ -578,38 +597,44 @@ impl Ask {
                 (Machine::Remote(on.clone()), cwd)
             }
         };
-        let (asked, next_turn) = match &self.mode {
+        let (asked, runner, next_turn) = match &self.mode {
             AskMode::General {
                 highlighted,
-                session,
+                pinned,
                 turned,
             } => {
+                let harness = pinned.as_ref().map_or_else(
+                    || CommandHarness::from_picked(picked),
+                    |pinned| pinned.harness,
+                );
                 let turn = Turn::after(*turned);
                 let asked = Asked::general(
                     cwd,
                     &words,
-                    session.clone(),
+                    pinned.as_ref().map(|pinned| pinned.session.clone()),
                     highlighted.clone(),
                     turn,
+                    harness,
                     marked,
                 );
-                (asked, Some(turn.key()))
+                (asked, harness.harness(), Some(turn.key()))
             }
-            AskMode::Review(ReviewSession::Unstarted { context }) => {
-                (Asked::review_start(cwd, context, &words), None)
-            }
-            AskMode::Review(ReviewSession::Started { session }) => {
-                (Asked::review_follow_up(cwd, session.clone(), &words), None)
-            }
+            AskMode::Review(ReviewSession::Unstarted { context }) => (
+                Asked::review_start(cwd, context, &words, picked),
+                picked,
+                None,
+            ),
+            AskMode::Review(ReviewSession::Started { session, harness }) => (
+                Asked::review_follow_up(cwd, session.clone(), &words, *harness),
+                *harness,
+                None,
+            ),
         };
         self.talk.push(Said::You(words));
         let asked = match asked {
             Ok(asked) => asked,
             Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
-        if let (AskMode::General { turned, .. }, Some(key)) = (&mut self.mode, next_turn) {
-            *turned = Some(key);
-        }
         let (number, events) = (self.number, events.clone());
         let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
             let ended = ended
@@ -620,7 +645,7 @@ impl Ask {
                 heard: Heard::Ended(ended),
             }
         });
-        self.turn = Some(Asking::on_thread(move |wanted| {
+        let asking = Asking::on_thread(move |wanted| {
             let hear = |step| {
                 let _ = events.send(Event::Heard {
                     number,
@@ -634,34 +659,91 @@ impl Ask {
             if let Some(ended) = ended {
                 due.pay(Ok(ended));
             }
-        }));
+        });
+        self.turn = Some(ActiveTurn {
+            harness: runner,
+            turn_key: next_turn,
+            _asking: asking,
+        });
     }
 
     pub fn heard(&mut self, heard: Heard) {
         match heard {
-            Heard::Step(Step::Session(session)) => match &mut self.mode {
-                AskMode::General { session: slot, .. } => *slot = Some(session),
-                AskMode::Review(review) => *review = ReviewSession::Started { session },
-            },
-            Heard::Step(Step::Ran { id, command }) => {
-                self.talk.push(Said::Ran {
-                    id,
-                    command,
-                    denied: false,
-                });
+            Heard::Step(Step::Session { id, runner }) => {
+                let Some(turn) = &mut self.turn else {
+                    return;
+                };
+                match &mut self.mode {
+                    AskMode::General { pinned, .. } => {
+                        let harness = CommandHarness::from_picked(runner);
+                        turn.harness = harness.harness();
+                        *pinned = Some(GeneralSession {
+                            session: id,
+                            harness,
+                        });
+                    }
+                    AskMode::Review(review) => {
+                        turn.harness = runner;
+                        *review = ReviewSession::Started {
+                            session: id,
+                            harness: runner,
+                        };
+                    }
+                }
             }
-            Heard::Step(Step::Denied(id)) => self.talk.mark_denied(&id),
-            Heard::Step(Step::Said(said)) => self.talk.push(Said::Agent(said)),
-            Heard::Ended(Ok(())) => self.turn = None,
-            Heard::Ended(Err(why)) => {
-                self.talk.push(Said::Wrong(why));
-                self.turn = None;
+            Heard::Step(Step::Ran { id, command }) => {
+                if self.turning() {
+                    self.talk.push(Said::Ran {
+                        id,
+                        command,
+                        denied: false,
+                    });
+                }
+            }
+            Heard::Step(Step::Denied(id)) => {
+                if self.turning() {
+                    self.talk.mark_denied(&id);
+                }
+            }
+            Heard::Step(Step::Said(said)) => {
+                if self.turning() {
+                    self.talk.push(Said::Agent(said));
+                }
+            }
+            Heard::Ended(outcome) => {
+                let Some(turn) = self.turn.take() else {
+                    return;
+                };
+                match outcome {
+                    Ok(()) => {
+                        if let (AskMode::General { turned, .. }, Some(key)) =
+                            (&mut self.mode, turn.turn_key)
+                        {
+                            *turned = Some(key);
+                        }
+                    }
+                    Err(why) => {
+                        self.talk.push(Said::Wrong(why));
+                        if let AskMode::General { turned, .. } = &mut self.mode {
+                            *turned = None;
+                        }
+                    }
+                }
             }
         }
     }
 
     pub fn turning(&self) -> bool {
         self.turn.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn in_a_turn(&mut self, harness: Harness, turn_key: Option<u64>) {
+        self.turn = Some(ActiveTurn {
+            harness,
+            turn_key,
+            _asking: Asking::on_thread(|_| {}),
+        });
     }
 
     pub fn stop(&mut self, number: u64) {
@@ -810,13 +892,14 @@ impl Ask {
             return cadence;
         };
         let (inner, room) = (box_room.inner(), box_room.room());
-        let keys: &[(Hint, &str)] = match self.turn {
-            Some(_) => &[(Hint::Esc, "Close")],
-            None => &[
+        let keys: &[(Hint, &str)] = if self.turning() {
+            &[(Hint::Esc, "Close")]
+        } else {
+            &[
                 (Hint::Enter, "Send"),
                 (Hint::Alt('r'), "Dictate"),
                 (Hint::Esc, "Close"),
-            ],
+            ]
         };
         let footer = [Line::default(), menu::keys_line(inner, keys)];
         let body_rows_max = room.saturating_sub(footer.len());
@@ -933,8 +1016,9 @@ impl Ask {
         }
         let dim = Style::new().add_modifier(Modifier::DIM);
         let yours = Style::new().fg(ACCENT);
-        let tail = if self.turn.is_some() {
-            menu::waiting(&format!("Asking {}…", asks::MODEL), inner, dim, frame)
+        let tail = if let Some(turn) = &self.turn {
+            let asked = headless::writer(turn.harness, asks::MODEL);
+            menu::waiting(&format!("Asking {asked}…"), inner, dim, frame)
                 .into_iter()
                 .enumerate()
                 .map(|(index, line)| BodyRow {
@@ -1292,8 +1376,11 @@ mod tests {
         }
     }
 
-    fn at_a_turn() -> Asking {
-        Asking::on_thread(|_| {})
+    fn general_pinned(ask: &Ask) -> Option<(&GeneralSession, Option<u64>)> {
+        match &ask.mode {
+            AskMode::General { pinned, turned, .. } => pinned.as_ref().map(|it| (it, *turned)),
+            AskMode::Review(_) => None,
+        }
     }
 
     #[test]
@@ -1303,7 +1390,7 @@ mod tests {
         assert_eq!(ask.typed, "Open a tab.");
         ask.dictated("Then\nrun the tests.");
         assert_eq!(ask.typed, "Open a tab. Then run the tests.");
-        ask.turn = Some(at_a_turn());
+        ask.in_a_turn(Harness::ClaudeCode, Some(1));
         ask.dictated("Close it.");
         assert_eq!(ask.typed, "Open a tab. Then run the tests.");
     }
@@ -1332,9 +1419,12 @@ mod tests {
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Send);
 
         ask.talk.push(Said::You(std::mem::take(&mut ask.typed)));
-        ask.turn = Some(at_a_turn());
+        ask.in_a_turn(Harness::ClaudeCode, Some(1));
         let session = SessionId::parse("7c22").unwrap();
-        ask.heard(Heard::Step(Step::Session(session.clone())));
+        ask.heard(Heard::Step(Step::Session {
+            id: session.clone(),
+            runner: Harness::ClaudeCode,
+        }));
         let ran = |id: &str, command: &str| Step::Ran {
             id: id.to_owned(),
             command: command.to_owned(),
@@ -1344,10 +1434,10 @@ mod tests {
         ask.heard(Heard::Step(Step::Said(
             "This kills bipa and elo.\n\nClose them?".to_owned(),
         )));
-        assert!(matches!(
-            &ask.mode,
-            AskMode::General { session: Some(saved), .. } if *saved == session
-        ));
+        assert_eq!(
+            general_pinned(&ask).map(|(pinned, _)| &pinned.session),
+            Some(&session)
+        );
         assert_eq!(ask.key(&key(KeyCode::Char('y'))), Keyed::Nothing);
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Nothing);
         ask.paste("y");
@@ -1390,7 +1480,7 @@ mod tests {
         );
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Send);
         ask.talk.push(Said::You(std::mem::take(&mut ask.typed)));
-        ask.turn = Some(at_a_turn());
+        ask.in_a_turn(Harness::ClaudeCode, Some(2));
         ask.heard(Heard::Ended(Err(
             "ask: claude failed: no such session".to_owned()
         )));
@@ -1406,7 +1496,12 @@ mod tests {
                 "│ › _                                            │",
             ]
         );
-        assert!(ask.turn.is_none());
+        assert!(!ask.turning());
+        assert_eq!(
+            general_pinned(&ask).and_then(|(_, turned)| turned),
+            None,
+            "a failed turn clears the previous turn key"
+        );
         assert_eq!(ask.key(&key(KeyCode::Esc)), Keyed::Close);
         let interrupt = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(ask.key(&interrupt), Keyed::Interrupt);
@@ -1529,16 +1624,16 @@ mod tests {
     fn a_stopped_turn_ends_its_talk_goes_on_under_a_new_number_and_it_is_no_turn_before() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.talk.push(Said::You("tackle these".to_owned()));
-        ask.turn = Some(at_a_turn());
-        if let AskMode::General { turned, .. } = &mut ask.mode {
-            *turned = Some(7);
-        }
+        ask.in_a_turn(Harness::ClaudeCode, Some(7));
         let session = SessionId::parse("7c22").unwrap();
-        ask.heard(Heard::Step(Step::Session(session.clone())));
+        ask.heard(Heard::Step(Step::Session {
+            id: session.clone(),
+            runner: Harness::ClaudeCode,
+        }));
         ask.stop(2);
         assert!(!ask.turning());
         let AskMode::General {
-            session: saved,
+            pinned: saved,
             turned,
             ..
         } = &ask.mode
@@ -1546,8 +1641,8 @@ mod tests {
             panic!("expected general ask");
         };
         assert_eq!(
-            (ask.number(), saved.clone()),
-            (2, Some(session)),
+            (ask.number(), saved.as_ref().map(|it| it.session.clone())),
+            (2, Some(session.clone())),
             "the next turn resumes it"
         );
         let stopped = [
@@ -1565,6 +1660,19 @@ mod tests {
             (3, 2),
             "a stop with no turn says nothing"
         );
+        assert_eq!(
+            general_pinned(&ask).map(|(pinned, _)| pinned.session.clone()),
+            Some(session.clone()),
+            "an idle stop keeps the pinned session"
+        );
+        ask.heard(Heard::Ended(Ok(())));
+        ask.heard(Heard::Ended(Err("late".to_owned())));
+        assert_eq!(
+            general_pinned(&ask).map(|(pinned, _)| pinned.session.clone()),
+            Some(session),
+            "a stray end while idle keeps the pinned session"
+        );
+        assert_eq!(ask.talk, stopped);
     }
 
     #[test]
@@ -1572,14 +1680,65 @@ mod tests {
         let mut ask = Ask::new(1, &project_on(Machine::Local), Path::new("w"));
         typed(&mut ask, "close it");
         let (events, _heard) = mpsc::channel();
-        ask.send(Marked::default(), &events);
+        ask.send(Marked::default(), Harness::ClaudeCode, &events);
         let wrong = "ask: cwd: w is no absolute path".to_owned();
         assert_eq!(
             ask.talk,
             [Said::You("close it".to_owned()), Said::Wrong(wrong)]
         );
         assert!(!ask.turning());
+        assert_eq!(general_pinned(&ask), None);
         assert!(matches!(ask.mode, AskMode::General { turned: None, .. }));
+    }
+
+    #[test]
+    fn a_harness_is_pinned_only_once_a_session_starts_and_names_the_active_turn() {
+        let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        let session = SessionId::parse("7c22").unwrap();
+        ask.heard(Heard::Step(Step::Session {
+            id: session.clone(),
+            runner: Harness::Pi,
+        }));
+        assert_eq!(
+            general_pinned(&ask),
+            None,
+            "a stray session step while idle does not pin a session"
+        );
+
+        ask.in_a_turn(Harness::Pi, Some(1));
+        let lines = shown(&mut ask, 40, 8);
+        assert!(
+            lines.iter().any(|line| line.contains("Asking pi…")),
+            "{lines:?}"
+        );
+        ask.heard(Heard::Ended(Err("ask: pi is not on the PATH".to_owned())));
+        assert_eq!(
+            general_pinned(&ask),
+            None,
+            "a failed turn with no session leaves no harness pinned"
+        );
+
+        ask.in_a_turn(Harness::Pi, Some(2));
+        ask.heard(Heard::Step(Step::Session {
+            id: session.clone(),
+            runner: Harness::ClaudeCode,
+        }));
+        let lines = shown(&mut ask, 40, 8);
+        assert!(
+            lines.iter().any(|line| line.contains("Asking sonnet…")),
+            "the active turn reflects the actual runner reported by luned: {lines:?}"
+        );
+        ask.heard(Heard::Ended(Ok(())));
+        assert_eq!(
+            general_pinned(&ask),
+            Some((
+                &GeneralSession {
+                    session,
+                    harness: CommandHarness::ClaudeCode,
+                },
+                Some(2),
+            ))
+        );
     }
 
     #[test]
@@ -1630,7 +1789,7 @@ mod tests {
             "rehome does not strip review mode"
         );
 
-        ask.turn = Some(at_a_turn());
+        ask.in_a_turn(Harness::Antigravity, None);
         ask.heard(Heard::Ended(Err("ask: timed out".to_owned())));
         assert!(
             matches!(ask.mode, AskMode::Review(ReviewSession::Unstarted { .. })),
@@ -1638,10 +1797,17 @@ mod tests {
         );
 
         let session = SessionId::parse("7c22").unwrap();
-        ask.heard(Heard::Step(Step::Session(session.clone())));
+        ask.in_a_turn(Harness::Antigravity, None);
+        ask.heard(Heard::Step(Step::Session {
+            id: session.clone(),
+            runner: Harness::Antigravity,
+        }));
         assert_eq!(
             ask.mode,
-            AskMode::Review(ReviewSession::Started { session })
+            AskMode::Review(ReviewSession::Started {
+                session,
+                harness: Harness::Antigravity,
+            })
         );
 
         let expanded = SelectionExcerpt::expanded(
@@ -1675,7 +1841,7 @@ mod tests {
     fn a_turning_ask_spins_only_when_its_waiting_line_survives_truncation() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.talk.push(Said::You("check this".to_owned()));
-        ask.turn = Some(at_a_turn());
+        ask.in_a_turn(Harness::ClaudeCode, Some(1));
         let drawn = crate::clock::Moment {
             steady: std::time::Instant::now(),
             system: SystemTime::UNIX_EPOCH,
@@ -1795,8 +1961,8 @@ mod tests {
     #[test]
     fn a_sweep_survives_spinner_ticks_below_it_and_clears_when_text_shifts_or_drag_is_cancelled() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.in_a_turn(Harness::ClaudeCode, None);
         ask.talk.push(Said::Agent("alpha beta".to_owned()));
-        ask.turn = Some(at_a_turn());
         let area = Rect::new(0, 0, 44, 10);
         let t0 = SystemTime::UNIX_EPOCH;
         let t1 = t0 + sidebar::SPIN;
@@ -1908,6 +2074,7 @@ mod tests {
     #[test]
     fn denied_elided_command_copies_uncut_and_talk_stays_capped() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.in_a_turn(Harness::ClaudeCode, None);
         let long_command = "rm -rf /tmp/very-long-command-path-for-testing-elision";
         for n in 0..(TALK_MAX + 12) {
             ask.heard(Heard::Step(Step::Said(format!("turn {n}"))));
@@ -1919,6 +2086,7 @@ mod tests {
         }));
         ask.heard(Heard::Step(Step::Denied("toolu_denied".to_owned())));
         assert_eq!(ask.talk.len(), TALK_MAX);
+        ask.heard(Heard::Ended(Ok(())));
         let area = Rect::new(0, 0, 36, 9);
         let mut buffer = Buffer::empty(area);
         ask.draw(&mut buffer, area, SystemTime::UNIX_EPOCH);
@@ -1941,6 +2109,7 @@ mod tests {
     #[test]
     fn active_drag_survives_spinner_ticks_but_cancels_on_capped_scroll_or_in_place_denial() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.in_a_turn(Harness::ClaudeCode, None);
         ask.heard(Heard::Step(Step::Said("line one".to_owned())));
         ask.heard(Heard::Step(Step::Said("line two".to_owned())));
         ask.heard(Heard::Step(Step::Said("line three".to_owned())));
@@ -1948,7 +2117,6 @@ mod tests {
             id: "toolu_1".to_owned(),
             command: "cargo test".to_owned(),
         }));
-        ask.turn = Some(at_a_turn());
 
         let area = Rect::new(0, 0, 36, 9);
         let t0 = SystemTime::UNIX_EPOCH;
@@ -2035,6 +2203,7 @@ mod tests {
     #[test]
     fn mid_frame_mouse_events_and_same_top_vertical_shrink_still_invalidate_selection() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
+        ask.in_a_turn(Harness::ClaudeCode, None);
         ask.heard(Heard::Step(Step::Said("same line".to_owned())));
         ask.heard(Heard::Step(Step::Said("same line".to_owned())));
         ask.heard(Heard::Step(Step::Said("same line".to_owned())));
@@ -2042,7 +2211,6 @@ mod tests {
             id: "toolu_1".to_owned(),
             command: "cargo test".to_owned(),
         }));
-        ask.turn = Some(at_a_turn());
 
         let area = Rect::new(0, 0, 36, 9);
         let t0 = SystemTime::UNIX_EPOCH;

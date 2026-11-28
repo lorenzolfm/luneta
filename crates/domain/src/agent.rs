@@ -90,6 +90,13 @@ impl Harness {
     }
 
     #[must_use]
+    pub fn from_program(program: &str) -> Option<Harness> {
+        Harness::ALL
+            .into_iter()
+            .find(|harness| harness.program() == program)
+    }
+
+    #[must_use]
     pub const fn resumes(self) -> &'static str {
         match self {
             Harness::ClaudeCode | Harness::Antigravity => "--resume",
@@ -662,6 +669,15 @@ mod tests {
             );
         }
         assert_eq!(named.len(), Harness::ALL.len());
+    }
+
+    #[test]
+    fn each_harness_round_trips_through_its_program_name() {
+        for harness in Harness::ALL {
+            assert_eq!(Harness::from_program(harness.program()), Some(harness));
+        }
+        assert_eq!(Harness::from_program(""), None);
+        assert_eq!(Harness::from_program("codex"), None);
     }
 
     #[test]

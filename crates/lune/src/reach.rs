@@ -662,6 +662,7 @@ mod tests {
 
         let unnamed = AskResponse {
             step: Some(ask_response::Step::Session("../x".to_owned())),
+            runner: None,
         };
         let none = heard_of(stuck(vec![Ok(unnamed), Ok(said.answer())]), true);
         let why = "nixos: session: \"../x\" names no session".to_owned();
