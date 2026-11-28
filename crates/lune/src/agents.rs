@@ -26,7 +26,8 @@ pub const fn next(harness: Harness) -> Harness {
     match harness {
         Harness::ClaudeCode => Harness::Pi,
         Harness::Pi => Harness::Antigravity,
-        Harness::Antigravity => Harness::ClaudeCode,
+        Harness::Antigravity => Harness::Codex,
+        Harness::Codex => Harness::ClaudeCode,
     }
 }
 
@@ -52,6 +53,7 @@ pub fn spelled(harness: Harness, skill: &str) -> String {
     match harness {
         Harness::ClaudeCode | Harness::Antigravity => format!("/{skill}"),
         Harness::Pi => format!("/skill:{skill}"),
+        Harness::Codex => format!("${skill}"),
     }
 }
 
@@ -60,6 +62,7 @@ pub fn of(agent: &api::Agent) -> Option<Harness> {
         api::Harness::ClaudeCode => Some(Harness::ClaudeCode),
         api::Harness::Pi => Some(Harness::Pi),
         api::Harness::Antigravity => Some(Harness::Antigravity),
+        api::Harness::Codex => Some(Harness::Codex),
         api::Harness::Unspecified => None,
     }
 }
@@ -71,7 +74,9 @@ pub fn on_skill(harness: Harness, skill: &str, given: Option<&str>) -> Result<Ar
         None => spelled,
     };
     let words = match harness {
-        Harness::ClaudeCode | Harness::Pi => vec![name(harness).to_owned(), prompt],
+        Harness::ClaudeCode | Harness::Pi | Harness::Codex => {
+            vec![name(harness).to_owned(), prompt]
+        }
         Harness::Antigravity => vec![name(harness).to_owned(), "-i".to_owned(), prompt],
     };
     Argv::parse(words)
@@ -267,6 +272,18 @@ mod tests {
                 .words(),
             ["agy", "-i", "/code-review since main"]
         );
+        assert_eq!(
+            on_skill(Harness::Codex, "tigerstyle", None)
+                .unwrap()
+                .words(),
+            ["codex", "$tigerstyle"]
+        );
+        assert_eq!(
+            on_skill(Harness::Codex, "code-review", Some("since main"))
+                .unwrap()
+                .words(),
+            ["codex", "$code-review since main"]
+        );
     }
 
     #[test]
@@ -295,10 +312,14 @@ mod tests {
 
     #[test]
     fn a_harness_is_known_by_its_program_s_name() {
-        for harness in [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity] {
+        let mut picked = Harness::ClaudeCode;
+        for harness in Harness::ALL {
             assert_eq!(Harness::from_program(name(harness)), Some(harness));
+            assert_eq!(picked, harness, "the pick steps through every harness");
+            picked = next(picked);
         }
-        assert_eq!(Harness::from_program("codex"), None);
+        assert_eq!(picked, Harness::ClaudeCode, "and comes back round");
+        assert_eq!(Harness::from_program("opencode"), None);
     }
 
     #[test]
@@ -320,10 +341,10 @@ mod tests {
     fn a_file_that_names_no_harness_says_why() {
         let scratch = tempfile::tempdir().unwrap();
         let file = scratch.path().join(FILE);
-        fs::write(&file, "codex\n").unwrap();
+        fs::write(&file, "opencode\n").unwrap();
         let (mut kept, unread) = Kept::within(file.clone());
         assert_eq!(kept.harness(), Harness::ClaudeCode);
-        assert!(unread.is_some_and(|why| why.contains("\"codex\" is no harness")));
+        assert!(unread.is_some_and(|why| why.contains("\"opencode\" is no harness")));
         kept.keep(Harness::Pi).unwrap();
         assert_eq!(Kept::within(file).0.harness(), Harness::Pi);
 

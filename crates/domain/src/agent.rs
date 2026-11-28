@@ -55,16 +55,23 @@ pub enum Harness {
     ClaudeCode,
     Pi,
     Antigravity,
+    Codex,
 }
 
 impl Harness {
-    pub const ALL: [Harness; 3] = [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity];
+    pub const ALL: [Harness; 4] = [
+        Harness::ClaudeCode,
+        Harness::Pi,
+        Harness::Antigravity,
+        Harness::Codex,
+    ];
 
     pub fn said(said: Option<i32>) -> Result<Harness, String> {
         match said.map(api::Harness::try_from) {
             None | Some(Ok(api::Harness::ClaudeCode)) => Ok(Harness::ClaudeCode),
             Some(Ok(api::Harness::Pi)) => Ok(Harness::Pi),
             Some(Ok(api::Harness::Antigravity)) => Ok(Harness::Antigravity),
+            Some(Ok(api::Harness::Codex)) => Ok(Harness::Codex),
             Some(Ok(api::Harness::Unspecified) | Err(_)) => {
                 Err("a harness this luned does not know".to_owned())
             }
@@ -77,6 +84,7 @@ impl Harness {
             Harness::ClaudeCode => api::Harness::ClaudeCode,
             Harness::Pi => api::Harness::Pi,
             Harness::Antigravity => api::Harness::Antigravity,
+            Harness::Codex => api::Harness::Codex,
         }
     }
 
@@ -86,6 +94,7 @@ impl Harness {
             Harness::ClaudeCode => "claude",
             Harness::Pi => "pi",
             Harness::Antigravity => "agy",
+            Harness::Codex => "codex",
         }
     }
 
@@ -101,6 +110,7 @@ impl Harness {
         match self {
             Harness::ClaudeCode | Harness::Antigravity => "--resume",
             Harness::Pi => "--session",
+            Harness::Codex => "resume",
         }
     }
 
@@ -110,6 +120,17 @@ impl Harness {
             Harness::ClaudeCode => &CLAUDE_CODE,
             Harness::Pi => &PI,
             Harness::Antigravity => &ANTIGRAVITY,
+            Harness::Codex => &CODEX,
+        }
+    }
+
+    #[must_use]
+    pub const fn flows(self) -> Flows {
+        match self {
+            Harness::ClaudeCode => Flows::Runs(FlowHarness::ClaudeCode),
+            Harness::Pi => Flows::Runs(FlowHarness::Pi),
+            Harness::Antigravity => Flows::Runs(FlowHarness::Antigravity),
+            Harness::Codex => CODEX_FLOWS,
         }
     }
 
@@ -119,6 +140,7 @@ impl Harness {
             Harness::ClaudeCode => CLAUDE_CODE_TOPICS,
             Harness::Pi => PI_TOPICS,
             Harness::Antigravity => ANTIGRAVITY_TOPICS,
+            Harness::Codex => CODEX_TOPICS,
         }
     }
 
@@ -194,6 +216,68 @@ impl Step {
     #[must_use]
     pub fn named(name: &str) -> Option<Step> {
         Step::ALL.into_iter().find(|step| step.name() == name)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FlowHarness {
+    ClaudeCode,
+    Pi,
+    Antigravity,
+}
+
+impl FlowHarness {
+    pub const ALL: [FlowHarness; 3] = [
+        FlowHarness::ClaudeCode,
+        FlowHarness::Pi,
+        FlowHarness::Antigravity,
+    ];
+
+    pub fn of(harness: Harness) -> Result<FlowHarness, String> {
+        harness
+            .flows()
+            .runs()
+            .map_err(|why| format!("no flow runs on {}: {why}", harness.program()))
+    }
+
+    #[must_use]
+    pub const fn harness(self) -> Harness {
+        match self {
+            FlowHarness::ClaudeCode => Harness::ClaudeCode,
+            FlowHarness::Pi => Harness::Pi,
+            FlowHarness::Antigravity => Harness::Antigravity,
+        }
+    }
+
+    #[must_use]
+    pub const fn program(self) -> &'static str {
+        self.harness().program()
+    }
+
+    const fn is(self, other: FlowHarness) -> bool {
+        self as u8 == other as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flows {
+    Runs(FlowHarness),
+    No { why: &'static str },
+}
+
+impl Flows {
+    pub const fn runs(self) -> Result<FlowHarness, &'static str> {
+        match self {
+            Flows::Runs(harness) => Ok(harness),
+            Flows::No { why } => Err(why),
+        }
+    }
+
+    const fn gap_explained(self) -> bool {
+        match self {
+            Flows::Runs(_) => true,
+            Flows::No { why } => !why.trim_ascii().is_empty(),
+        }
     }
 }
 
@@ -301,9 +385,45 @@ impl Steps {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialogs {
+    None,
+    Under(&'static str),
+}
+
+impl Dialogs {
+    #[must_use]
+    pub fn holds(self, id: &str) -> bool {
+        match self {
+            Dialogs::None => false,
+            Dialogs::Under(parent) => id
+                .strip_prefix(parent)
+                .is_some_and(|child| child.len() > 1 && child.starts_with('/')),
+        }
+    }
+
+    const fn names_a_record(self) -> bool {
+        match self {
+            Dialogs::None => true,
+            Dialogs::Under(parent) => {
+                let parent = parent.as_bytes();
+                let mut index = 0;
+                while index < parent.len() {
+                    if !parent[index].is_ascii_graphic() || parent[index] == b'/' {
+                        return false;
+                    }
+                    index += 1;
+                }
+                !parent.is_empty()
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Osc7501 {
     pub app: &'static str,
     pub steps: Steps,
+    pub dialogs: Dialogs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,6 +468,10 @@ impl Ladder {
             },
             Sound::AppAscii => match &self.osc_7501 {
                 Some(osc_7501) => osc_7501.app.is_ascii(),
+                None => true,
+            },
+            Sound::DialogsNamed => match &self.osc_7501 {
+                Some(osc_7501) => osc_7501.dialogs.names_a_record(),
                 None => true,
             },
         }
@@ -398,6 +522,7 @@ enum Sound {
     GapExplained,
     AppNamed,
     AppAscii,
+    DialogsNamed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -453,6 +578,14 @@ impl OscReads {
     pub const fn harness(self) -> Harness {
         self.0.harness
     }
+
+    #[must_use]
+    pub const fn dialogs(self) -> Dialogs {
+        match &self.0.harness.ladder().osc_7501 {
+            Some(osc_7501) => osc_7501.dialogs,
+            None => Dialogs::None,
+        }
+    }
 }
 
 const NO_FINISH_IN_SESSIONS: Tells = Tells::No {
@@ -467,6 +600,7 @@ const CLAUDE_CODE: Ladder = Ladder {
     osc_7501: Some(Osc7501 {
         app: "claude-code",
         steps: Steps::EVERY,
+        dialogs: Dialogs::None,
     }),
     feed: Some(Steps {
         finish: NO_FINISH_IN_SESSIONS,
@@ -502,6 +636,7 @@ const PI: Ladder = Ladder {
     osc_7501: Some(Osc7501 {
         app: "pi",
         steps: PI_STEPS,
+        dialogs: Dialogs::None,
     }),
     feed: None,
     extension: Some(PI_STEPS),
@@ -530,10 +665,24 @@ const ANTIGRAVITY: Ladder = Ladder {
     osc_7501: Some(Osc7501 {
         app: "antigravity",
         steps: Steps::EVERY,
+        dialogs: Dialogs::None,
     }),
     feed: None,
     extension: None,
     hook: Some(ANTIGRAVITY_HOOK),
+    transcript: None,
+    screen: None,
+};
+
+const CODEX: Ladder = Ladder {
+    osc_7501: Some(Osc7501 {
+        app: "codex",
+        steps: Steps::EVERY,
+        dialogs: Dialogs::Under("startup"),
+    }),
+    feed: None,
+    extension: None,
+    hook: None,
     transcript: None,
     screen: None,
 };
@@ -549,6 +698,46 @@ const PI_TOPICS: TopicSource = TopicSource::No {
 const ANTIGRAVITY_TOPICS: TopicSource = TopicSource::Transcript {
     terminal_title: false,
 };
+
+const CODEX_TOPICS: TopicSource = TopicSource::No {
+    why: "Codex's rollouts are not read by luned yet",
+};
+
+const CODEX_FLOWS: Flows = Flows::No {
+    why: "a flow runs each step unattended, and lune's step runner drives no Codex turn yet",
+};
+
+const fn every_flow_gap_explained() -> bool {
+    let mut index = 0;
+    while index < Harness::ALL.len() {
+        if !Harness::ALL[index].flows().gap_explained() {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const fn every_flow_harness_is_its_own() -> bool {
+    let mut index = 0;
+    while index < Harness::ALL.len() {
+        if let Flows::Runs(flow) = Harness::ALL[index].flows()
+            && !flow.harness().is(Harness::ALL[index])
+        {
+            return false;
+        }
+        index += 1;
+    }
+    let mut index = 0;
+    while index < FlowHarness::ALL.len() {
+        let flow = FlowHarness::ALL[index];
+        if !matches!(flow.harness().flows(), Flows::Runs(runs) if runs.is(flow)) {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
 
 const fn every_topic_gap_explained() -> bool {
     let mut index = 0;
@@ -631,8 +820,23 @@ const _: () = assert!(
 const _: () = assert!(every_ladder(Sound::AppAscii), "each OSC 7501 app is ASCII");
 
 const _: () = assert!(
+    every_ladder(Sound::DialogsNamed),
+    "each harness's own dialogs sit under one record id, a single path segment"
+);
+
+const _: () = assert!(
     apps_are_distinct(),
     "no two harnesses share an OSC 7501 app"
+);
+
+const _: () = assert!(
+    every_flow_gap_explained(),
+    "each harness that runs no flow says why in Flows::No"
+);
+
+const _: () = assert!(
+    every_flow_harness_is_its_own(),
+    "the harness a flow runs on is the one that says it runs flows, and each of them is listed"
 );
 
 const _: () = assert!(
@@ -647,7 +851,7 @@ mod tests {
     #[test]
     fn a_request_names_a_harness_this_luned_knows() {
         assert_eq!(Harness::said(None), Ok(Harness::ClaudeCode));
-        for harness in [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity] {
+        for harness in Harness::ALL {
             assert_eq!(Harness::said(Some(harness.to_api().into())), Ok(harness));
         }
         for unknown in [api::Harness::Unspecified.into(), 99] {
@@ -677,7 +881,7 @@ mod tests {
             assert_eq!(Harness::from_program(harness.program()), Some(harness));
         }
         assert_eq!(Harness::from_program(""), None);
-        assert_eq!(Harness::from_program("codex"), None);
+        assert_eq!(Harness::from_program("opencode"), None);
     }
 
     #[test]
@@ -701,6 +905,60 @@ mod tests {
             }
         }
         assert_eq!(Harness::from_osc_7501_app("no-such-agent"), None);
+    }
+
+    #[test]
+    fn a_harness_s_own_dialogs_are_the_records_under_the_id_it_names() {
+        let startup = OscReads::of(Harness::Codex).dialogs();
+        assert_eq!(startup, Dialogs::Under("startup"));
+        for dialog in [
+            "startup/trust",
+            "startup/hooks",
+            "startup/update",
+            "startup/a/b",
+        ] {
+            assert!(startup.holds(dialog), "{dialog}");
+        }
+        for other in [
+            "startup",
+            "startup/",
+            "startups/trust",
+            "sub-1",
+            "a/startup/trust",
+            "",
+        ] {
+            assert!(!startup.holds(other), "{other:?}");
+        }
+        for harness in [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity] {
+            let dialogs = OscReads::of(harness).dialogs();
+            assert_eq!(dialogs, Dialogs::None, "{harness:?}");
+            assert!(!dialogs.holds("startup/trust"), "{harness:?}");
+        }
+        assert!(!Dialogs::Under("").names_a_record());
+        assert!(!Dialogs::Under("start/up").names_a_record());
+        assert!(!Dialogs::Under("start up").names_a_record());
+    }
+
+    #[test]
+    fn a_flow_runs_on_each_harness_whose_steps_lune_runs_and_on_no_other() {
+        for harness in Harness::ALL {
+            match harness.flows() {
+                Flows::Runs(flow) => {
+                    assert_eq!(flow.harness(), harness);
+                    assert_eq!(flow.program(), harness.program());
+                    assert_eq!(FlowHarness::of(harness), Ok(flow));
+                }
+                Flows::No { why } => {
+                    let refused = format!("no flow runs on {}: {why}", harness.program());
+                    assert_eq!(FlowHarness::of(harness), Err(refused));
+                }
+            }
+        }
+        assert_eq!(
+            FlowHarness::ALL.map(FlowHarness::harness),
+            [Harness::ClaudeCode, Harness::Pi, Harness::Antigravity]
+        );
+        assert!(FlowHarness::of(Harness::Codex).is_err());
     }
 
     #[test]
@@ -731,6 +989,8 @@ mod tests {
         assert!(!Harness::Antigravity.topics().has_terminal_title());
         assert!(!Harness::Pi.topics().has_transcript());
         assert!(!Harness::Pi.topics().has_terminal_title());
+        assert!(!Harness::Codex.topics().has_transcript());
+        assert!(!Harness::Codex.topics().has_terminal_title());
         assert!(!TopicSource::No { why: "" }.gap_explained());
         assert!(!TopicSource::No { why: "   \t\n" }.gap_explained());
     }

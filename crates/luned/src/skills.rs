@@ -120,6 +120,15 @@ pub(crate) fn found_in(cwd: &Directory, harness: Harness) -> Result<Vec<Skill>, 
             let home = env_dir("HOME");
             Ok(agy_found(Path::new(cwd.as_str()), home.as_deref()))
         }
+        Harness::Codex => {
+            let home = env_dir("HOME");
+            let codex = crate::codex::folder();
+            Ok(codex_found(
+                Path::new(cwd.as_str()),
+                home.as_deref(),
+                codex.as_deref(),
+            ))
+        }
     }
 }
 
@@ -208,6 +217,10 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
     for (root, kept) in &places {
         skill_files(root, root, *kept, 0, &mut files);
     }
+    described(files)
+}
+
+fn described(files: Vec<PathBuf>) -> Vec<Skill> {
     let found = files.into_iter().filter_map(|file| {
         let mut front = Front::read(&frontmatter(&file).ok().flatten()?);
         if front.description.trim().is_empty() {
@@ -218,6 +231,34 @@ fn pi_found(cwd: &Path, home: Option<&Path>, agent: Option<&Path>) -> Vec<Skill>
         Some((name.unwrap_or_else(|| folder.to_owned()), front))
     });
     listed(found)
+}
+
+const CODEX_ROOTS: [&str; 2] = [".agents", ".codex"];
+
+fn codex_found(cwd: &Path, home: Option<&Path>, codex: Option<&Path>) -> Vec<Skill> {
+    assert!(cwd.is_absolute());
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let top = cwd.ancestors().find(|dir| dir.join(".git").exists());
+    for dir in cwd.ancestors() {
+        for name in CODEX_ROOTS {
+            push_unique_path(&mut roots, &mut seen, dir.join(name).join("skills"));
+        }
+        if top.is_none() || Some(dir) == top {
+            break;
+        }
+    }
+    if let Some(codex) = codex {
+        push_unique_path(&mut roots, &mut seen, codex.join("skills"));
+    }
+    if let Some(home) = home {
+        push_unique_path(&mut roots, &mut seen, home.join(".agents").join("skills"));
+    }
+    let mut files = Vec::new();
+    for root in &roots {
+        skill_files(root, root, Kept::Agents, 0, &mut files);
+    }
+    described(files)
 }
 
 const AGY_ROOTS: [&str; 4] = [".agents", ".agent", "_agents", "_agent"];
@@ -992,6 +1033,79 @@ mod tests {
         );
         let found = pi_found(&root.join("a/b/c"), None, None);
         assert!(found.contains(&skill("up", "Up.")), "{found:?}");
+    }
+
+    #[test]
+    fn the_finder_finds_what_codex_runs_where_codex_lists_it() {
+        let Ok(scratch) = tempfile::tempdir() else {
+            panic!("no scratch directory");
+        };
+        let root = scratch.path();
+        let home = root.join("home");
+        let codex = home.join(".codex");
+        let front = |description: &str| format!("---\ndescription: {description}\n---\nDo it.\n");
+        put(
+            root,
+            "outside/.agents/skills/far/SKILL.md",
+            &front("Above the repository."),
+        );
+        put(root, "outside/repo/.git/HEAD", "");
+        put(
+            root,
+            "outside/repo/.agents/skills/top/SKILL.md",
+            &front("At the top."),
+        );
+        put(
+            root,
+            "outside/repo/.codex/skills/kept/SKILL.md",
+            &front("In the repository's Codex folder."),
+        );
+        put(
+            root,
+            "outside/repo/inner/.agents/skills/near/SKILL.md",
+            &front("Near."),
+        );
+        put(
+            root,
+            "outside/repo/.agents/skills/near/SKILL.md",
+            &front("Farther."),
+        );
+        put(
+            root,
+            "home/.codex/skills/own/SKILL.md",
+            &front("In Codex's home."),
+        );
+        put(
+            root,
+            "home/.codex/skills/.system/installer/SKILL.md",
+            &front("Codex's own."),
+        );
+        put(
+            root,
+            "home/.agents/skills/synced/held/SKILL.md",
+            "---\nname: shared\ndescription: Shared.\n---\n",
+        );
+        put(
+            root,
+            "home/.agents/skills/mute/SKILL.md",
+            "---\nname: mute\n---\n",
+        );
+        let cwd = root.join("outside/repo/inner");
+        assert_eq!(
+            codex_found(&cwd, Some(&home), Some(&codex)),
+            [
+                skill("kept", "In the repository's Codex folder."),
+                skill("near", "Near."),
+                skill("own", "In Codex's home."),
+                skill("shared", "Shared."),
+                skill("top", "At the top."),
+            ]
+        );
+        assert_eq!(
+            codex_found(&root.join("outside"), None, None),
+            [skill("far", "Above the repository.")],
+            "outside a repository Codex reads the folder it runs in alone"
+        );
     }
 
     #[test]

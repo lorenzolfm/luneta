@@ -26,6 +26,14 @@ impl Cadence {
         }
     }
 
+    pub fn clock_at(&mut self, at: SystemTime, wall: SystemTime) {
+        assert!(
+            at > wall,
+            "a scheduled wall tick lands strictly after wall time"
+        );
+        self.clock_next = Some(self.clock_next.map_or(at, |next| next.min(at)));
+    }
+
     pub fn every_second(&mut self, since: Instant, steady: Instant) {
         let seconds = steady.saturating_duration_since(since).as_secs();
         if let Some(at) = since.checked_add(Duration::from_secs(seconds.saturating_add(1))) {

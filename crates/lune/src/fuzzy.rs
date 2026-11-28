@@ -54,6 +54,7 @@ impl Fuzzy {
         let at_start = Scoring {
             prefix_bonus: scoring.delimiter_bonus,
             exact_match_bonus: 0,
+            matching_case_bonus: 0,
             ..scoring
         };
         Self::scored(term, typos, at_start)
@@ -156,5 +157,6 @@ mod tests {
         assert_eq!(anywhere.score(start), anywhere.score(word));
         let anywhere = Fuzzy::anywhere("review", Typos::None);
         assert_eq!(anywhere.score("review"), anywhere.score("docs (review:4)"));
+        assert_eq!(anywhere.score("review"), anywhere.score("docs (Review:4)"));
     }
 }

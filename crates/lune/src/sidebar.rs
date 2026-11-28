@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{FlowBadgeKind, FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
@@ -19,6 +20,7 @@ use lune_protocol::git::{Changed, Changes, GitStatus, Head, ParsedGitStatuses, U
 use lune_protocol::github::{Mergeability, ParsedPullRequests, PullRequest, State, Verdict};
 use lune_protocol::said::Said;
 use lune_protocol::shell::{Doing, Ending, Front};
+use lune_protocol::telemetry::{AgentTelemetry, AgentUsage};
 use lune_protocol::unread;
 #[cfg(test)]
 use luned::api::Status;
@@ -62,18 +64,20 @@ use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
     self, AllKeys, Briefed, Choice, Cwd, Did, Done, Folder, Hint, InteractiveMenu, Label, Menu,
-    MenuId, Origin, ProjectTarget, Pull, Ran, Rename, Target, Top, ViewKind, ViewRow, WaitingMenu,
-    Wants, WorktreeRow,
+    MenuId, Origin, ProjectTarget, Pull, Pulls, Ran, Rename, Target, Top, ViewKind, ViewRow,
+    WaitingMenu, Wants, WorktreeRow,
 };
 use crate::moonlight;
 use crate::news::{Dwell, News};
-use crate::picker::{Aim, Here, Housed, Listing, Runs, Seated, Shelved, Unopened, Worktree};
+use crate::picker::{Aim, Here, Holds, Housed, Listing, Runs, Seated, Shelved, Worktree};
 use crate::printed::Printed;
 use crate::prune;
 use crate::pull::{Found, Link, Others, Wanted, Work, Worked};
 use crate::skills::{Name, Skill};
 use crate::spots::{Drawn, Keyed, SidebarBottom, Spots};
+use crate::statusbar;
 use crate::sweep::{Continuation, CutAt, Join, NonEmptyRect, Page, Sweep, cells};
+use crate::viewed::FocusedView;
 
 pub const COLUMNS: u16 = 32;
 
@@ -476,6 +480,20 @@ impl Seat {
             | Sitting::Home => None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RightTarget {
+    None,
+    Home {
+        on: Machine,
+        project: ProjectId,
+    },
+    Worktree {
+        on: Machine,
+        worktree: WorktreeId,
+        focused: Option<FocusedView>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -963,66 +981,87 @@ struct Checkout {
     pull_request: Option<Numbered>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Named<C> {
-    Unbranched(String),
-    Branch(C),
-    Apart { name: String, checkout: C },
-}
+pub use named::{Branched, Named};
 
-pub trait Branched {
-    fn branch(&self) -> &str;
-}
+mod named {
+    use lune_protocol::said::Said;
 
-impl Branched for Checkout {
-    fn branch(&self) -> &str {
-        self.branch.as_str()
+    use super::Checkout;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Named<C>(Kind<C>);
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Kind<C> {
+        Unbranched(Said),
+        Branch(C),
+        Apart { name: Said, checkout: C },
     }
-}
 
-impl Branched for String {
-    fn branch(&self) -> &str {
-        self
+    pub trait Branched {
+        fn branch(&self) -> &str;
     }
-}
 
-impl<C: Branched> Named<C> {
-    #[must_use]
-    pub fn of(name: String, checkout: Option<C>) -> Named<C> {
-        match checkout {
-            None => Named::Unbranched(name),
-            Some(checkout) if checkout.branch() == name => Named::Branch(checkout),
-            Some(checkout) => Named::Apart { name, checkout },
+    impl Branched for Checkout {
+        fn branch(&self) -> &str {
+            self.branch.as_str()
         }
     }
 
-    #[must_use]
-    pub fn name(&self) -> &str {
-        match self {
-            Named::Unbranched(name) | Named::Apart { name, .. } => name,
-            Named::Branch(checkout) => checkout.branch(),
+    impl Branched for Said {
+        fn branch(&self) -> &str {
+            self.as_str()
         }
     }
 
-    #[must_use]
-    pub fn apart(&self) -> Option<&C> {
-        match self {
-            Named::Apart { checkout, .. } => Some(checkout),
-            Named::Unbranched(_) | Named::Branch(_) => None,
+    impl<C: Branched> Named<C> {
+        #[must_use]
+        pub fn of(name: Said, checkout: Option<C>) -> Named<C> {
+            Named(match checkout {
+                None => Kind::Unbranched(name),
+                Some(checkout) if checkout.branch() == name.as_str() => Kind::Branch(checkout),
+                Some(checkout) => Kind::Apart { name, checkout },
+            })
         }
-    }
 
-    fn checkout(&self) -> Option<&C> {
-        match self {
-            Named::Unbranched(_) => None,
-            Named::Branch(checkout) | Named::Apart { checkout, .. } => Some(checkout),
+        #[must_use]
+        pub fn name(&self) -> &str {
+            match &self.0 {
+                Kind::Unbranched(name) | Kind::Apart { name, .. } => name.as_str(),
+                Kind::Branch(checkout) => checkout.branch(),
+            }
         }
-    }
 
-    fn height(&self) -> usize {
-        match self {
-            Named::Unbranched(_) | Named::Branch(_) => 1,
-            Named::Apart { .. } => 2,
+        #[must_use]
+        pub fn apart(&self) -> Option<&C> {
+            match &self.0 {
+                Kind::Apart { checkout, .. } => Some(checkout),
+                Kind::Unbranched(_) | Kind::Branch(_) => None,
+            }
+        }
+
+        #[must_use]
+        pub(super) fn same_branch(&self) -> Option<&C> {
+            match &self.0 {
+                Kind::Branch(checkout) => Some(checkout),
+                Kind::Unbranched(_) | Kind::Apart { .. } => None,
+            }
+        }
+
+        #[must_use]
+        pub(super) fn checkout(&self) -> Option<&C> {
+            match &self.0 {
+                Kind::Unbranched(_) => None,
+                Kind::Branch(checkout) | Kind::Apart { checkout, .. } => Some(checkout),
+            }
+        }
+
+        #[must_use]
+        pub(super) fn height(&self) -> usize {
+            match &self.0 {
+                Kind::Unbranched(_) | Kind::Branch(_) => 1,
+                Kind::Apart { .. } => 2,
+            }
         }
     }
 }
@@ -1232,17 +1271,25 @@ impl Away {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum KnownHolds {
+    Folder(KnownWorktree),
+    Clone {
+        worktrees: Vec<KnownWorktree>,
+        unopened: rows::Unopened,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Known {
     project: ProjectRow,
     dir: Dir,
-    worktrees: Vec<KnownWorktree>,
-    unopened: Unopened,
+    holds: KnownHolds,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KnownWorktree {
     place: WorktreePlace,
-    name: String,
+    name: Said,
     folder: Dir,
     seen: projects::Seen,
     used: Option<Used>,
@@ -1438,7 +1485,7 @@ impl Known {
             kept: ledger::Session::Project(said.id),
         };
         let project = ProjectRow::of(listed);
-        let worktrees = said.worktrees().iter().map(|worktree| KnownWorktree {
+        let known_worktree = |worktree: &rows::Worktree| KnownWorktree {
             place: WorktreePlace {
                 project: project.clone(),
                 worktree: worktree.id,
@@ -1450,24 +1497,44 @@ impl Known {
             views: worktree.views.iter().map(KnownView::of).collect(),
             arranged: worktree.arranged,
             flow: worktree.flow.clone(),
-        });
-        let worktrees = worktrees.collect();
-        let unopened = match &said.holds {
-            rows::Holds::Folder(_) => Unopened::Folder,
+        };
+        let holds = match &said.holds {
+            rows::Holds::Folder(own) => KnownHolds::Folder(known_worktree(own)),
             rows::Holds::Clone {
-                unopened: rows::Unopened::Listed(folders),
-                ..
-            } => Unopened::Listed(folders.clone()),
-            rows::Holds::Clone {
-                unopened: rows::Unopened::Unlisted(why),
-                ..
-            } => Unopened::Unlisted(why.clone()),
+                worktrees,
+                unopened,
+            } => KnownHolds::Clone {
+                worktrees: worktrees.iter().map(known_worktree).collect(),
+                unopened: unopened.clone(),
+            },
         };
         Known {
             project,
             dir: said.dir.clone(),
-            worktrees,
-            unopened,
+            holds,
+        }
+    }
+
+    fn worktrees(&self) -> &[KnownWorktree] {
+        match &self.holds {
+            KnownHolds::Folder(own) => std::slice::from_ref(own),
+            KnownHolds::Clone { worktrees, .. } => worktrees,
+        }
+    }
+
+    fn worktrees_mut(&mut self) -> &mut [KnownWorktree] {
+        match &mut self.holds {
+            KnownHolds::Folder(own) => std::slice::from_mut(own),
+            KnownHolds::Clone { worktrees, .. } => worktrees,
+        }
+    }
+
+    fn refuses_new_worktree(&self) -> Option<String> {
+        match &self.holds {
+            KnownHolds::Folder(_) => Some(projects::folder_has_one_worktree(
+                self.project.listed().name(),
+            )),
+            KnownHolds::Clone { .. } => None,
         }
     }
 
@@ -1476,22 +1543,22 @@ impl Known {
     }
 
     fn order(&self) -> Vec<WorktreeId> {
-        self.worktrees
+        self.worktrees()
             .iter()
             .map(|worktree| worktree.place.worktree)
             .collect()
     }
 
     fn view_ids(&self) -> impl Iterator<Item = ViewId> {
-        self.worktrees.iter().flat_map(KnownWorktree::view_ids)
+        self.worktrees().iter().flat_map(KnownWorktree::view_ids)
     }
 
     fn terminals(&self) -> impl Iterator<Item = &FoundTerminal> {
-        self.worktrees.iter().flat_map(KnownWorktree::terminals)
+        self.worktrees().iter().flat_map(KnownWorktree::terminals)
     }
 
     fn placed_terminals(&self) -> impl Iterator<Item = (&WorktreePlace, &FoundTerminal)> {
-        let each = self.worktrees.iter();
+        let each = self.worktrees().iter();
         each.flat_map(|worktree| {
             worktree
                 .terminals()
@@ -1500,7 +1567,7 @@ impl Known {
     }
 
     fn placed_views(&self) -> impl Iterator<Item = (&WorktreePlace, KnownShown<'_>)> {
-        let each = self.worktrees.iter();
+        let each = self.worktrees().iter();
         each.flat_map(|worktree| worktree.shown().map(move |view| (&worktree.place, view)))
     }
 
@@ -1509,7 +1576,7 @@ impl Known {
     }
 
     fn has_browser(&self, id: ViewId) -> bool {
-        self.worktrees.iter().any(|worktree| {
+        self.worktrees().iter().any(|worktree| {
             worktree
                 .views
                 .iter()
@@ -1543,7 +1610,7 @@ fn arranged_holding(
     let shelf = shelves.iter().find(|shelf| shelf.machine == *on)?;
     let known = shelf.projects().iter().find(|it| it.listed() == listed)?;
     let holding = known
-        .worktrees
+        .worktrees()
         .iter()
         .find(|it| it.view_ids().any(|id| id == view))?;
     let seated =
@@ -1653,7 +1720,7 @@ impl Shelf {
                 let known = known.find(|known| known.project.id() == *project);
                 let known = known.expect("the project reordered is shelved");
                 let at = |worktree: &KnownWorktree| position(worktrees, worktree.place.worktree);
-                known.worktrees.sort_by_key(at);
+                known.worktrees_mut().sort_by_key(at);
             }
         }
     }
@@ -1928,14 +1995,14 @@ pub enum Asked {
         on: Machine,
         cwd: Directory,
         name: String,
-        harness: agents::Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
     },
     StartFlow {
         on: Machine,
         worktree: WorktreeId,
         mode: FlowMode,
-        harness: agents::Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
         go: Option<Place>,
     },
@@ -2850,6 +2917,27 @@ impl Sidebar {
         self.state().here_agent()
     }
 
+    #[must_use]
+    pub fn status_bar(
+        &self,
+        target: &RightTarget,
+        last_usage: Option<&(agents::Harness, AgentUsage)>,
+        sidebar_focused: bool,
+        sidebar_collapsed: bool,
+        wall: SystemTime,
+    ) -> statusbar::Snapshot {
+        self.state()
+            .status_bar(target, last_usage, sidebar_focused, sidebar_collapsed, wall)
+    }
+
+    #[must_use]
+    pub fn focused_subscription_usage(
+        &self,
+        target: &RightTarget,
+    ) -> Option<(agents::Harness, AgentUsage)> {
+        self.state().focused_subscription_usage(target)
+    }
+
     pub fn on_header(&self) -> Option<Machine> {
         self.state().on_header()
     }
@@ -3184,7 +3272,7 @@ impl SidebarState {
             let mut live = Vec::new();
             for known in projects {
                 live.push(Fold::Project(machine, known.project.id()));
-                let worktrees = known.worktrees.iter();
+                let worktrees = known.worktrees().iter();
                 live.extend(worktrees.map(|it| Fold::Worktree(machine, it.place.worktree)));
             }
             self.folds.listed(machine, &live);
@@ -3809,7 +3897,7 @@ impl SidebarState {
     fn here_worktree(&self) -> Option<WorktreePlace> {
         let seat = self.seat.as_ref()?;
         let known = self.known_of(seat.project)?;
-        let mut worktrees = known.worktrees.iter();
+        let mut worktrees = known.worktrees().iter();
         let seated = seat.worktree()?;
         let worktree = worktrees.find(|worktree| worktree.place.worktree == seated)?;
         Some(worktree.place.clone())
@@ -3855,6 +3943,183 @@ impl SidebarState {
         })
     }
 
+    fn focused_subscription_usage(
+        &self,
+        target: &RightTarget,
+    ) -> Option<(agents::Harness, AgentUsage)> {
+        let RightTarget::Worktree {
+            on,
+            worktree,
+            focused: Some(FocusedView::Terminal { id, key }),
+        } = target
+        else {
+            return None;
+        };
+        let seen = self.seen(on)?;
+        let seated = seen.seated();
+        let terminal = self.find_worktree(on, *worktree).and_then(|(_, wt)| {
+            wt.terminals()
+                .find(|term| Some(term.key) == *key || term.id == *id)
+        })?;
+        let agent = seated.get(&terminal.key)?;
+        let harness = agents::of(agent)?;
+        let telemetry = agent.parsed_telemetry()?;
+        let usage = telemetry.usage()?.clone();
+        usage.has_windows().then_some((harness, usage))
+    }
+
+    fn find_worktree(
+        &self,
+        on: &Machine,
+        worktree: WorktreeId,
+    ) -> Option<(&Known, &KnownWorktree)> {
+        for known in shelf(&self.shelves, on) {
+            if let Some(wt) = known
+                .worktrees()
+                .iter()
+                .find(|wt| wt.place.worktree == worktree)
+            {
+                return Some((known, wt));
+            }
+        }
+        None
+    }
+
+    fn status_bar(
+        &self,
+        target: &RightTarget,
+        last_usage: Option<&(agents::Harness, AgentUsage)>,
+        sidebar_focused: bool,
+        sidebar_collapsed: bool,
+        wall: SystemTime,
+    ) -> statusbar::Snapshot {
+        let tallies = if sidebar_collapsed {
+            statusbar::CollapsedTallies {
+                waiting: self.counts.waiting,
+                unread: self.counts.new,
+                busy: self.counts.busy,
+            }
+        } else {
+            statusbar::CollapsedTallies::default()
+        };
+        let away = self.away.is_some();
+        let (machine, project, worktree, view, usage_machine) = match target {
+            RightTarget::None => (None, None, None, None, &Machine::Local),
+            RightTarget::Home {
+                on,
+                project: project_id,
+            } => {
+                let project = shelf(&self.shelves, on)
+                    .iter()
+                    .find(|known| known.project.id() == *project_id)
+                    .map(|known| statusbar::ProjectInfo {
+                        name: known.listed().name().as_str().to_owned(),
+                        colour: colour_of(known.project.id()),
+                    });
+                (
+                    remote_machine_name(on),
+                    project,
+                    None,
+                    Some(statusbar::ViewInfo::plain("home".to_owned())),
+                    on,
+                )
+            }
+            RightTarget::Worktree {
+                on,
+                worktree: worktree_id,
+                focused,
+            } => {
+                let seen = self.seen(on);
+                let found = self.find_worktree(on, *worktree_id);
+                let project = found.map(|(known, _)| statusbar::ProjectInfo {
+                    name: known.listed().name().as_str().to_owned(),
+                    colour: colour_of(known.project.id()),
+                });
+                let worktree_info = found.map(|(_, wt)| build_worktree_status(wt, seen.as_ref()));
+                let view_info = build_view_status(
+                    focused.as_ref(),
+                    found.map(|(_, wt)| wt),
+                    seen.as_ref(),
+                    wall,
+                );
+                (
+                    remote_machine_name(on),
+                    project,
+                    worktree_info,
+                    view_info,
+                    on,
+                )
+            }
+        };
+        let has_own_usage = view
+            .as_ref()
+            .and_then(|info| info.telemetry.as_ref())
+            .and_then(AgentTelemetry::usage)
+            .is_some();
+        let fallback_usage = if has_own_usage {
+            None
+        } else {
+            self.fallback_subscription_usage(usage_machine, last_usage, wall)
+        };
+        statusbar::Snapshot {
+            sidebar_focused,
+            sidebar_collapsed,
+            away,
+            tallies,
+            machine,
+            project,
+            worktree,
+            view,
+            fallback_usage,
+        }
+    }
+
+    fn fallback_subscription_usage(
+        &self,
+        on: &Machine,
+        last_usage: Option<&(agents::Harness, AgentUsage)>,
+        wall: SystemTime,
+    ) -> Option<(agents::Harness, AgentUsage)> {
+        let preferred = last_usage.map(|(harness, _)| *harness);
+        let from_seen = |seen: Seen<'_>| {
+            let mut candidates: Vec<(agents::Harness, u32, AgentUsage)> = seen
+                .agents
+                .iter()
+                .filter_map(|agent| {
+                    let harness = agents::of(agent)?;
+                    let telemetry = agent.parsed_telemetry()?;
+                    let usage = telemetry.usage()?.clone();
+                    usage.has_windows().then_some((harness, agent.pid, usage))
+                })
+                .collect();
+            if candidates.is_empty() {
+                return None;
+            }
+            candidates.sort_by_key(|(harness, pid, _)| {
+                let matches_preferred = preferred == Some(*harness);
+                let rank = match harness {
+                    agents::Harness::ClaudeCode => 0u8,
+                    agents::Harness::Antigravity => 1u8,
+                    agents::Harness::Pi => 2u8,
+                    agents::Harness::Codex => 3u8,
+                };
+                (!matches_preferred, rank, std::cmp::Reverse(*pid))
+            });
+            let (harness, _, usage) = candidates.into_iter().next()?;
+            Some((harness, usage))
+        };
+        self.seen(on)
+            .and_then(from_seen)
+            .or_else(|| {
+                if *on == Machine::Local {
+                    None
+                } else {
+                    self.seen(&Machine::Local).and_then(from_seen)
+                }
+            })
+            .or_else(|| last_usage.and_then(|cached| fresh_cached_usage(cached, wall)))
+    }
+
     fn lit_machine(&self) -> Option<Machine> {
         self.lit_spot().map(Spot::machine)
     }
@@ -3895,29 +4160,36 @@ impl SidebarState {
     fn shelved(&self, machine: &Machine, seen: Result<&Seen<'_>, &Away>) -> Shelved {
         let heard = seen.ok();
         let statuses = git_statuses(heard.map_or(&[], |seen| seen.git_statuses));
+        let picker_worktree = |worktree: &KnownWorktree| {
+            let branch = statuses
+                .get(worktree.folder.as_str())
+                .and_then(|status| Some(checkout(status, None)?.branch));
+            let terminals = worktree.terminals().map(|view| view.key);
+            Worktree {
+                id: worktree.place.worktree,
+                named: Named::of(worktree.name.clone(), branch),
+                folder: worktree.folder.clone(),
+                used: worktree.used,
+                terminals: terminals.collect(),
+            }
+        };
         let mut projects = Vec::new();
         for known in shelf(&self.shelves, machine) {
-            let mut worktrees = Vec::with_capacity(known.worktrees.len());
-            for worktree in &known.worktrees {
-                let branch = statuses
-                    .get(worktree.folder.as_str())
-                    .and_then(|status| Some(String::from(checkout(status, None)?.branch)));
-                let terminals = worktree.terminals().map(|view| view.key);
-                worktrees.push(Worktree {
-                    place: worktree.place.clone(),
-                    named: Named::of(worktree.name.clone(), branch),
-                    folder: worktree.folder.clone(),
-                    used: worktree.used,
-                    terminals: terminals.collect(),
-                });
-            }
+            let holds = match &known.holds {
+                KnownHolds::Folder(own) => Holds::Folder(picker_worktree(own)),
+                KnownHolds::Clone {
+                    worktrees,
+                    unopened,
+                } => Holds::Clone {
+                    worktrees: worktrees.iter().map(picker_worktree).collect(),
+                    unopened: unopened.clone(),
+                },
+            };
             let (project, dir) = (known.project.clone(), known.dir.clone());
-            let unopened = known.unopened.clone();
             projects.push(Housed {
                 project,
                 dir,
-                worktrees,
-                unopened,
+                holds,
             });
         }
         let away = seen.err().map(|away| away.said().0);
@@ -4230,7 +4502,7 @@ impl SidebarState {
             | Mode::Afloat { .. }
             | Mode::AfloatNote(_) => None,
         };
-        let finder = term.map(|term| Finder::new(term, typos));
+        let finder = term.and_then(|term| Finder::of(term, typos));
         let mut finished: HashMap<Key, SystemTime> = HashMap::new();
         let mut view_titles: HashMap<Machine, HashMap<WorktreeId, BTreeMap<ViewId, String>>> =
             HashMap::new();
@@ -4296,8 +4568,8 @@ impl SidebarState {
                 let folded = self.folds.contains(Fold::Project(&machine, project));
                 let colour = colour_of(project);
                 let agent = |view: &FoundTerminal| agents.get(&view.key).copied();
-                let mut worktrees = Vec::with_capacity(known.worktrees.len());
-                for worktree in &known.worktrees {
+                let mut worktrees = Vec::with_capacity(known.worktrees().len());
+                for worktree in known.worktrees() {
                     let mut by_view: Vec<Shows<'_>> = Vec::with_capacity(worktree.views.len());
                     for view in worktree.shown() {
                         counts.views += 1;
@@ -5576,7 +5848,7 @@ impl SidebarState {
             .iter()
             .find(|it| it.project.id() == place.project.id())?;
         known
-            .worktrees
+            .worktrees()
             .iter()
             .find(|wt| wt.place == *place)
             .and_then(|wt| wt.flow.clone())
@@ -5590,7 +5862,7 @@ impl SidebarState {
     ) -> Option<Directory> {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.listed() == listed)?;
-        let worktree = known.worktrees.iter().find(|worktree| {
+        let worktree = known.worktrees().iter().find(|worktree| {
             worktree
                 .views
                 .iter()
@@ -5613,10 +5885,13 @@ impl SidebarState {
         let mut known = shelf(&self.shelves, machine).iter();
         let known = known.find(|it| it.project.id() == place.project.id())?;
         let worktree = known
-            .worktrees
+            .worktrees()
             .iter()
             .find(|worktree| worktree.place == place)?;
-        let (name, folder) = (worktree.name.clone(), Directory::from(&worktree.folder));
+        let (name, folder) = (
+            worktree.name.as_str().to_owned(),
+            Directory::from(&worktree.folder),
+        );
         let (branch, repository) = git_in(self.seen(machine).as_ref(), &folder);
         let row = WorktreeRow {
             place,
@@ -5863,7 +6138,7 @@ impl SidebarState {
                 let checked_out = pull_request_link(&pulls, worktree.folder.as_str());
                 checked_out.is_some_and(|it| it.is(link))
             };
-            let worktrees = seen.projects.iter().flat_map(|known| &known.worktrees);
+            let worktrees = seen.projects.iter().flat_map(Known::worktrees);
             let mut found = worktrees.filter(checks_out);
             let Some(worktree) = found.next() else {
                 continue;
@@ -5880,10 +6155,16 @@ impl SidebarState {
         if self.notice_on_its_way(&work) {
             return Asked::Nothing;
         }
+        let pulls = match Pulls::of(pull, self.agent.harness()) {
+            Ok(pulls) => pulls,
+            Err(why) => {
+                self.say(format!("menu: {work}: {why}"));
+                return Asked::Nothing;
+            }
+        };
         self.end_mode();
         let number = self.next_menu();
-        let (waiting, wants) =
-            WaitingMenu::start_pull(number, target, work, self.agent.harness(), pull);
+        let (waiting, wants) = WaitingMenu::start_pull(number, target, work, pulls);
         if origin == Origin::Views {
             let _ = self.let_go();
         }
@@ -6058,14 +6339,23 @@ impl SidebarState {
                         harness,
                         prompt,
                         go,
-                    } => Asked::StartFlow {
-                        on,
-                        worktree,
-                        mode,
-                        harness: harness.unwrap_or_else(|| self.agent.harness()),
-                        prompt,
-                        go,
-                    },
+                    } => {
+                        let picked = || FlowHarness::of(self.agent.harness());
+                        match harness.map_or_else(picked, Ok) {
+                            Ok(harness) => Asked::StartFlow {
+                                on,
+                                worktree,
+                                mode,
+                                harness,
+                                prompt,
+                                go,
+                            },
+                            Err(why) => {
+                                self.say_of(taken, format!("flow: {why}"));
+                                Asked::Nothing
+                            }
+                        }
+                    }
                     Done::ControlFlow {
                         on,
                         worktree,
@@ -6132,7 +6422,7 @@ impl SidebarState {
             Wants::Cloned(project) => {
                 let mut known = shelf(&self.shelves, &on).iter();
                 let known = known.find(|it| it.project.id() == project);
-                let refused = known.and_then(|it| it.unopened.refuses_new_worktree(&it.project));
+                let refused = known.and_then(Known::refuses_new_worktree);
                 if let Some(refused) = refused {
                     self.drop_menu_saying(number, format!("menu: {refused}"));
                 }
@@ -6379,12 +6669,18 @@ impl SidebarState {
             .find(|known| known.project.id() == project);
         let known = known.ok_or_else(unlisted)?;
         let worktrees = known
-            .worktrees
+            .worktrees()
             .iter()
             .map(|worktree| worktree.place.worktree)
             .collect();
-        let seen = known.worktrees.iter().flat_map(KnownWorktree::terminal_ids);
-        let seen_browsers = known.worktrees.iter().flat_map(KnownWorktree::browser_ids);
+        let seen = known
+            .worktrees()
+            .iter()
+            .flat_map(KnownWorktree::terminal_ids);
+        let seen_browsers = known
+            .worktrees()
+            .iter()
+            .flat_map(KnownWorktree::browser_ids);
         let session = listed.name().session().clone();
         Ok(Act::Project {
             session,
@@ -6396,9 +6692,7 @@ impl SidebarState {
     }
 
     fn worktree_closes(&self, on: &Machine, worktree: WorktreeId) -> Result<Act, String> {
-        let worktrees = shelf(&self.shelves, on)
-            .iter()
-            .flat_map(|known| &known.worktrees);
+        let worktrees = shelf(&self.shelves, on).iter().flat_map(Known::worktrees);
         let mut held = worktrees.filter(|it| it.place.worktree == worktree);
         let Some(found) = held.next() else {
             return Err(format!("worktree {worktree} is no longer listed"));
@@ -7912,6 +8206,155 @@ fn transcript(agent: &Agent) -> Transcript {
     }
 }
 
+fn remote_machine_name(machine: &Machine) -> Option<String> {
+    match machine {
+        Machine::Local => None,
+        Machine::Remote(destination) => Some(destination.to_string()),
+    }
+}
+
+fn fresh_cached_usage(
+    (harness, usage): &(agents::Harness, AgentUsage),
+    wall: SystemTime,
+) -> Option<(agents::Harness, AgentUsage)> {
+    let windows: Vec<_> = usage
+        .windows()
+        .iter()
+        .filter(|window| window.resets_at.is_none_or(|resets_at| resets_at > wall))
+        .cloned()
+        .collect();
+    AgentUsage::new(windows, None).map(|usage| (*harness, usage))
+}
+
+fn build_worktree_status(
+    worktree: &KnownWorktree,
+    seen: Option<&Seen<'_>>,
+) -> statusbar::WorktreeInfo {
+    let dir = worktree.folder.as_str();
+    let statuses = seen
+        .map(|s| git_statuses(s.git_statuses))
+        .unwrap_or_default();
+    let pulls = seen
+        .map(|s| pull_requests(s.pull_requests))
+        .unwrap_or_default();
+    let co = statuses
+        .get(dir)
+        .and_then(|status| checkout(status, pulls.get(dir)));
+    let branch = co
+        .as_ref()
+        .filter(|checkout| checkout.branch != worktree.name)
+        .map(|checkout| checkout.branch.as_str().to_owned());
+    let git_status = co
+        .as_ref()
+        .map(|checkout| checkout.status.clone())
+        .unwrap_or_default();
+    let changed = co.as_ref().and_then(|checkout| checkout.changed);
+    let pull_request = co
+        .as_ref()
+        .and_then(|checkout| checkout.pull_request.as_ref())
+        .map(|pr| {
+            let (verdict, conflicting, stale) = match pr.state {
+                NumberedState::Open {
+                    checks,
+                    conflicting,
+                    stale,
+                    ..
+                } => (checks, conflicting, stale),
+                NumberedState::Merged => (None, false, false),
+            };
+            statusbar::PullRequestInfo {
+                label: pr.shown(),
+                link: pr.link().cloned(),
+                colour: pr.colour(),
+                verdict,
+                conflicting,
+                stale,
+            }
+        });
+    statusbar::WorktreeInfo {
+        name: worktree.name.as_str().to_owned(),
+        branch,
+        git_status,
+        changed,
+        pull_request,
+        missing: worktree.seen == projects::Seen::Missing,
+    }
+}
+
+fn build_view_status(
+    focused: Option<&FocusedView>,
+    worktree: Option<&KnownWorktree>,
+    seen: Option<&Seen<'_>>,
+    wall: SystemTime,
+) -> Option<statusbar::ViewInfo> {
+    let focused = focused?;
+    match focused {
+        FocusedView::Welcome => Some(statusbar::ViewInfo::plain("welcome".to_owned())),
+        FocusedView::Review { title } => Some(statusbar::ViewInfo::labeled(
+            Some(icons::GIT),
+            title.clone(),
+        )),
+        FocusedView::Browser { id, title } => {
+            let label = title
+                .as_deref()
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    let wt = worktree?;
+                    wt.views.iter().find_map(|view| match view {
+                        KnownView::Browser(browser) if browser.id == *id => {
+                            Some(browser_label(browser))
+                        }
+                        KnownView::Browser(_) | KnownView::Terminal(_) => None,
+                    })
+                })
+                .unwrap_or_else(|| BROWSER_LABEL.to_owned());
+            Some(statusbar::ViewInfo::labeled(Some(icons::BROWSER), label))
+        }
+        FocusedView::Terminal { id, key } => {
+            let terminal = worktree?
+                .terminals()
+                .find(|term| key.is_some_and(|key| term.key == key) || term.id == *id)?;
+            let seated = seen.map(Seen::seated).unwrap_or_default();
+            if let Some(agent) = seated.get(&terminal.key).copied() {
+                let harness = agents::of(agent);
+                let icon = icons::agent(agent.runs_in()).and_then(icons::of);
+                let view_label = label(Some(agent), terminal);
+                let telemetry = agent.parsed_telemetry();
+                return Some(statusbar::ViewInfo {
+                    mark: Some(Mark::of(agent)),
+                    icon,
+                    label: view_label,
+                    harness,
+                    telemetry,
+                });
+            }
+            let shell = match &terminal.told {
+                Told::Doing(doing) => {
+                    Marked::of_shell(doing, wall).filter(|(marked, _)| marked.ended().is_none())
+                }
+                Told::Unhooked | Told::Unread => None,
+            };
+            let (marked, ran) = shell.unzip();
+            let ran = ran.flatten().filter(|cmd| !cmd.trim().is_empty());
+            let view_label = ran.unwrap_or_else(|| label(None, terminal));
+            let icon = terminal
+                .command
+                .as_deref()
+                .and_then(icons::program)
+                .and_then(icons::of);
+            Some(statusbar::ViewInfo {
+                mark: marked.map(|marked| marked.mark),
+                icon,
+                label: view_label,
+                harness: None,
+                telemetry: None,
+            })
+        }
+    }
+}
+
 fn browser_label(browser: &KnownBrowser) -> String {
     browser
         .url
@@ -8026,21 +8469,31 @@ pub fn short_cwd(path: &str) -> String {
     }
 }
 
-pub type Fit = (bool, Score);
-
-pub struct Finder<'a> {
-    fuzzy: Fuzzy,
-    anywhere: Fuzzy,
-    term: &'a str,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Fit {
+    exact: bool,
+    score: Score,
 }
 
-impl<'a> Finder<'a> {
-    pub fn new(term: &'a str, typos: Typos) -> Self {
-        Finder {
-            fuzzy: Fuzzy::new(term, typos),
-            anywhere: Fuzzy::anywhere(term, typos),
-            term,
-        }
+pub struct Finder {
+    fuzzy: Fuzzy,
+    anywhere: Fuzzy,
+    lower: String,
+}
+
+impl Finder {
+    #[must_use]
+    pub fn of(typed: &str, typos: Typos) -> Option<Self> {
+        (!typed.is_empty()).then(|| Finder {
+            fuzzy: Fuzzy::new(typed, typos),
+            anywhere: Fuzzy::anywhere(typed, typos),
+            lower: typed.to_lowercase(),
+        })
+    }
+
+    #[must_use]
+    pub fn term(&self) -> &str {
+        &self.lower
     }
 
     fn session(&self, name: &str) -> Option<(Fit, Vec<usize>)> {
@@ -8087,8 +8540,23 @@ impl<'a> Finder<'a> {
         )
     }
 
+    #[must_use]
     pub fn find(&self, shown: &str, also: &[Option<&str>]) -> Option<(Fit, Vec<usize>)> {
-        let exact = shown == self.term;
+        self.find_own(shown, None, also)
+    }
+
+    #[must_use]
+    pub fn find_own(
+        &self,
+        shown: &str,
+        own: Option<&str>,
+        also: &[Option<&str>],
+    ) -> Option<(Fit, Vec<usize>)> {
+        assert!(
+            own.is_none_or(|own| shown.ends_with(own)),
+            "own name is a suffix of shown"
+        );
+        let own = own.filter(|own| *own != shown);
         let best = |fuzzy: &Fuzzy| {
             also.iter()
                 .flatten()
@@ -8097,16 +8565,33 @@ impl<'a> Finder<'a> {
         };
         let other = best(&self.fuzzy);
         let Some((score, hits)) = self.fuzzy.hits(shown) else {
-            return Some(((exact, other?), Vec::new()));
+            return Some((
+                Fit {
+                    exact: false,
+                    score: other?,
+                },
+                Vec::new(),
+            ));
         };
+        let exact = shown.to_lowercase() == self.lower
+            || own.is_some_and(|own| own.to_lowercase() == self.lower);
+        let shown_score = own
+            .and_then(|own| self.fuzzy.score(own))
+            .map_or(score, |own| score.max(own));
         let fits = |score: Score, other: Option<Score>| other.is_none_or(|other| score >= other);
-        let lit = fits(score, other)
-            || self
-                .anywhere
-                .score(shown)
-                .is_some_and(|anywhere| fits(anywhere, best(&self.anywhere)));
-        let fit = (exact, other.map_or(score, |other| score.max(other)));
-        Some((fit, if lit { hits } else { Vec::new() }))
+        let anywhere = || {
+            let shown = self.anywhere.score(shown);
+            let own = own.and_then(|own| self.anywhere.score(own));
+            match (shown, own) {
+                (Some(shown), Some(own)) => Some(shown.max(own)),
+                (shown, own) => shown.or(own),
+            }
+        };
+        let lit = exact
+            || fits(shown_score, other)
+            || anywhere().is_some_and(|anywhere| fits(anywhere, best(&self.anywhere)));
+        let score = other.map_or(shown_score, |other| shown_score.max(other));
+        Some((Fit { exact, score }, if lit { hits } else { Vec::new() }))
     }
 }
 
@@ -8555,10 +9040,9 @@ fn row_lines(
             let gone = if *missing { MISSING } else { "" };
             let name = named.name();
             let line_room = width.saturating_sub(WORKTREE + gone.width() + reserve + 1);
-            let beside = match named {
-                Named::Branch(checkout) => Some(Beside::fitting(checkout, name, line_room)),
-                Named::Unbranched(_) | Named::Apart { .. } => None,
-            };
+            let beside = named
+                .same_branch()
+                .map(|checkout| Beside::fitting(checkout, name, line_room));
             let held = beside.as_ref().map_or(0, Beside::width);
             let status = beside.as_ref().map_or("", |beside| beside.status.as_str());
             let room = line_room.saturating_sub(beside.as_ref().map_or(0, Beside::taken));
@@ -8605,12 +9089,7 @@ fn row_lines(
                 spans.push(badge_span);
             }
             let mut lines = vec![Line::from(spans)];
-            if let Named::Apart { name, checkout } = named {
-                assert_ne!(
-                    name,
-                    checkout.branch.as_str(),
-                    "a name apart is not its branch"
-                );
+            if let Some(checkout) = named.apart() {
                 let at = lines.len();
                 let (drawn, numbered, branch_room) = checkout_line(*here, checkout, at, width);
                 lines.push(drawn);
@@ -14527,6 +15006,59 @@ mod tests {
     }
 
     #[test]
+    fn a_ship_picked_with_an_agent_that_runs_no_flow_says_why_and_pulls_nothing() {
+        let page = "https://github.com/lorenzolfm/lune/pull/5";
+        let mut sidebar = own_two_sessions();
+        sidebar
+            .edit(|state| state.agent.keep(agents::Harness::Codex))
+            .unwrap();
+        sidebar.focus(Keys::Sidebar, test_wall());
+        let target = sidebar.target().expect("a row is highlighted");
+        let work = Work::parse(page, None).expect("a pull request's link");
+        let shipped =
+            sidebar.pull_in_menu(target.clone(), work.clone(), Pull::Ship, Origin::Sidebar);
+        assert_eq!(shipped, Asked::Nothing);
+        let unrun = FlowHarness::of(agents::Harness::Codex).unwrap_err();
+        assert_eq!(sidebar.notice, Some(format!("menu: {work}: {unrun}")));
+        assert!(sidebar.open().is_none(), "no menu waits on a pull not made");
+        let pulled = sidebar.pull_in_menu(target, work, Pull::Worktree, Origin::Sidebar);
+        assert!(matches!(pulled, Asked::Pull { .. }), "{pulled:?}");
+    }
+
+    #[test]
+    fn a_flow_started_in_the_menu_runs_on_the_agent_picked_or_says_why_it_runs_none() {
+        let started = |picked: agents::Harness, keys: &str, last: KeyEvent| {
+            let mut sidebar = own_two_sessions();
+            sidebar.edit(|state| state.agent.keep(picked)).unwrap();
+            sidebar.focus(Keys::Sidebar, test_wall());
+            sidebar.light(Spot::Local(own_view_of("young", 2, 1)));
+            type_in(&mut sidebar, keys);
+            let asked = sidebar.key(&last, moment(160_000));
+            (asked, sidebar.notice.clone())
+        };
+        let enter = KeyEvent::from(KeyCode::Enter);
+        for (keys, last, prompt) in [("f", char('a'), None), ("fpdo it", enter, Some("do it"))] {
+            let (asked, notice) = started(agents::Harness::Pi, keys, last);
+            let Asked::StartFlow {
+                harness,
+                prompt: asks,
+                ..
+            } = asked
+            else {
+                panic!("{keys} starts a flow: {asked:?}");
+            };
+            assert_eq!(harness, FlowHarness::Pi, "{keys}");
+            assert_eq!(asks.as_deref(), prompt, "{keys}");
+            assert_eq!(notice, None, "{keys}");
+
+            let (asked, notice) = started(agents::Harness::Codex, keys, last);
+            assert_eq!(asked, Asked::Nothing, "{keys}");
+            let unrun = FlowHarness::of(agents::Harness::Codex).unwrap_err();
+            assert_eq!(notice, Some(format!("flow: {unrun}")), "{keys}");
+        }
+    }
+
+    #[test]
     fn a_menu_that_waits_goes_on_when_another_takes_its_place() {
         let waiting = || {
             let mut sidebar = own_two_sessions();
@@ -20062,5 +20594,47 @@ mod tests {
             panic!("expected worktree fallback aim");
         };
         assert!(matches!(target.as_ref(), Target::Worktree(_, row) if row.place.worktree == older));
+    }
+
+    #[test]
+    fn fresh_cached_usage_drops_expired_windows_and_session_cost() {
+        use lune_protocol::telemetry::{TelemetryText, UsageWindow, UsedPermille};
+
+        let wall = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_007);
+        let window = |label: &str, resets_at: Option<SystemTime>| UsageWindow {
+            label: TelemetryText::parse(label).unwrap(),
+            used_permille: UsedPermille::try_new(500).unwrap(),
+            resets_at,
+        };
+        let mixed = AgentUsage::new(
+            vec![
+                window("5h", Some(wall)),
+                window("7d", Some(wall + Duration::from_mins(1))),
+            ],
+            Some(420_000),
+        )
+        .unwrap();
+        let (harness, kept) =
+            fresh_cached_usage(&(agents::Harness::ClaudeCode, mixed), wall).unwrap();
+        assert_eq!(harness, agents::Harness::ClaudeCode);
+        assert_eq!(kept.windows().len(), 1);
+        assert_eq!(kept.windows()[0].label.as_str(), "7d");
+        assert_eq!(kept.session_cost_micro_usd(), None);
+
+        let all_expired = AgentUsage::new(
+            vec![window("5h", Some(wall - Duration::from_secs(1)))],
+            Some(420_000),
+        )
+        .unwrap();
+        assert_eq!(
+            fresh_cached_usage(&(agents::Harness::ClaudeCode, all_expired), wall),
+            None
+        );
+
+        let undated = AgentUsage::new(vec![window("5h", None)], Some(100_000)).unwrap();
+        let (_, undated_kept) =
+            fresh_cached_usage(&(agents::Harness::Antigravity, undated), wall).unwrap();
+        assert_eq!(undated_kept.windows().len(), 1);
+        assert_eq!(undated_kept.session_cost_micro_usd(), None);
     }
 }

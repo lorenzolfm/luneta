@@ -19,14 +19,17 @@ const PI: &str = "\u{f03ff}";
 
 const AGY: &str = "\u{f0674}";
 
+const CODEX: &str = "\u{f07b5}";
+
 const PYTHON: &str = "\u{e73c}";
 
-const GIT: &str = "\u{e702}";
+pub const GIT: &str = "\u{e702}";
 
-const ICONS: [(&str, &str); 13] = [
+const ICONS: [(&str, &str); 14] = [
     ("claude", CLAUDE),
     ("pi", PI),
     ("agy", AGY),
+    ("codex", CODEX),
     ("nvim", NEOVIM),
     ("vim", NEOVIM),
     ("cargo", "\u{e7a8}"),
@@ -44,6 +47,7 @@ pub const fn harness(harness: lune_domain::agent::Harness) -> &'static str {
         lune_domain::agent::Harness::ClaudeCode => CLAUDE,
         lune_domain::agent::Harness::Pi => PI,
         lune_domain::agent::Harness::Antigravity => AGY,
+        lune_domain::agent::Harness::Codex => CODEX,
     }
 }
 
@@ -52,6 +56,7 @@ pub fn agent(harness: Harness) -> Option<&'static str> {
         Harness::ClaudeCode => Some("claude"),
         Harness::Pi => Some("pi"),
         Harness::Antigravity => Some("agy"),
+        Harness::Codex => Some("codex"),
         Harness::Unspecified => None,
     }
 }

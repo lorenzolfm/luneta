@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, File, Metadata, OpenOptions, Permissions, TryLockError};
 use std::io::{self, ErrorKind, Read as _, Write as _};
+use std::num::NonZeroU64;
 use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,6 +11,10 @@ use std::time::{Duration, Instant, SystemTime};
 use lune_domain::agent::{Declared, Harness, Rung};
 use lune_domain::mux::TerminalKey;
 use lune_protocol::said::Said;
+use lune_protocol::telemetry::{
+    AgentTelemetry, AgentUsage, ContextWindow, TelemetryText, USAGE_WINDOWS_MAX, UsageWindow,
+    UsedPermille, cost_usd_to_micro_usd, parse_rfc3339_utc, strip_effort_suffix,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -128,6 +133,10 @@ struct Payload {
     conversation_title: Option<String>,
     agent_state: Option<String>,
     tool_confirmation_pending: Option<bool>,
+    model: Option<Value>,
+    context_window: Option<Value>,
+    quota: Option<Value>,
+    cost: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -140,6 +149,7 @@ struct Snapshot {
     session_id: Option<Said>,
     name: Option<Name>,
     status: Option<ActiveStatus>,
+    telemetry: Option<AgentTelemetry>,
     modified: SystemTime,
     proof: Proof,
 }
@@ -358,6 +368,156 @@ impl Payload {
         assert!(name.auto().is_some());
         Some(name)
     }
+
+    fn telemetry(&self, modified: SystemTime) -> Option<AgentTelemetry> {
+        let model_obj = self.model.as_ref().and_then(Value::as_object);
+        let effort = model_obj
+            .and_then(|model| model.get("effort"))
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+            .and_then(|text| TelemetryText::parse(&text));
+        let model = model_obj
+            .and_then(|model| {
+                model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .filter(|raw| !raw.trim().is_empty())
+                    .or_else(|| model.get("id").and_then(Value::as_str))
+            })
+            .map(|raw| match &effort {
+                Some(effort) => strip_effort_suffix(raw, effort.as_str()),
+                None => raw,
+            })
+            .and_then(TelemetryText::parse);
+        let context = self.context_window.as_ref().and_then(parse_context);
+        let usage = parse_usage(self.quota.as_ref(), self.cost.as_ref(), modified);
+        AgentTelemetry::new(model, effort, context, usage)
+    }
+}
+
+fn parse_nonneg_secs(value: &Value) -> Option<u64> {
+    if let Some(secs) = value.as_u64() {
+        return Some(secs);
+    }
+    let secs = value
+        .as_f64()
+        .filter(|secs| secs.is_finite() && *secs >= 0.0)?;
+    let rounded = secs.round();
+    (rounded <= u64::MAX as f64).then_some(rounded as u64)
+}
+
+fn parse_context(raw: &Value) -> Option<ContextWindow> {
+    let raw = raw.as_object()?;
+    let window_tokens = raw
+        .get("context_window_size")
+        .and_then(Value::as_u64)
+        .and_then(NonZeroU64::new);
+    let used_tokens = raw
+        .get("current_usage")
+        .and_then(Value::as_object)
+        .and_then(|usage| {
+            let input = usage.get("input_tokens").and_then(Value::as_u64);
+            let cache_creation = usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64);
+            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_u64);
+            if input.is_none() && cache_creation.is_none() && cache_read.is_none() {
+                return None;
+            }
+            Some(
+                input
+                    .unwrap_or(0)
+                    .saturating_add(cache_creation.unwrap_or(0))
+                    .saturating_add(cache_read.unwrap_or(0)),
+            )
+        });
+    let used_permille = raw
+        .get("used_percentage")
+        .and_then(Value::as_f64)
+        .and_then(UsedPermille::of_percent)
+        .or_else(|| Some(UsedPermille::of_ratio(used_tokens?, window_tokens?)))?;
+    Some(ContextWindow {
+        used_permille,
+        window_tokens,
+        used_tokens,
+    })
+}
+
+fn short_quota_label(bucket: &str) -> Option<TelemetryText> {
+    let trimmed = bucket.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    let short = if lowered.ends_with("weekly") || lowered.ends_with("7d") {
+        "7d"
+    } else if lowered.ends_with("daily") || lowered.ends_with("24h") {
+        "1d"
+    } else if lowered.contains("five_hour")
+        || lowered.contains("five-hour")
+        || lowered.ends_with("5h")
+    {
+        "5h"
+    } else {
+        trimmed
+            .strip_prefix("gemini-")
+            .or_else(|| trimmed.strip_prefix("gemini_"))
+            .or_else(|| trimmed.strip_prefix("antigravity-"))
+            .or_else(|| trimmed.strip_prefix("antigravity_"))
+            .unwrap_or(trimmed)
+    };
+    TelemetryText::parse(short)
+}
+
+fn parse_usage(
+    quotas: Option<&Value>,
+    cost: Option<&Value>,
+    modified: SystemTime,
+) -> Option<AgentUsage> {
+    let mut windows = Vec::new();
+    if let Some(quotas) = quotas.and_then(Value::as_object) {
+        let mut buckets: Vec<(&str, &Value)> = quotas
+            .iter()
+            .map(|(bucket, value)| (bucket.as_str(), value))
+            .collect();
+        buckets.sort_unstable_by_key(|(a, _)| *a);
+        for (bucket, entry) in buckets {
+            if windows.len() >= USAGE_WINDOWS_MAX {
+                break;
+            }
+            let Some(quota) = entry.as_object() else {
+                continue;
+            };
+            let Some(remaining) = quota.get("remaining_fraction").and_then(Value::as_f64) else {
+                continue;
+            };
+            let Some(used_permille) = UsedPermille::of_remaining_fraction(remaining) else {
+                continue;
+            };
+            let Some(label) = short_quota_label(bucket) else {
+                continue;
+            };
+            let resets_at = quota
+                .get("reset_time")
+                .and_then(Value::as_str)
+                .and_then(parse_rfc3339_utc)
+                .or_else(|| {
+                    quota
+                        .get("reset_in_seconds")
+                        .and_then(parse_nonneg_secs)
+                        .and_then(|secs| modified.checked_add(Duration::from_secs(secs)))
+                });
+            windows.push(UsageWindow {
+                label,
+                used_permille,
+                resets_at,
+            });
+        }
+    }
+    assert!(windows.len() <= USAGE_WINDOWS_MAX);
+    let session_cost_micro_usd = cost
+        .and_then(Value::as_object)
+        .and_then(|cost| cost.get("total_usd"))
+        .and_then(Value::as_f64)
+        .and_then(cost_usd_to_micro_usd);
+    AgentUsage::new(windows, session_cost_micro_usd)
 }
 
 fn state_of(state: &Payload) -> Option<ActiveStatus> {
@@ -403,6 +563,7 @@ fn reported(
         terminal,
     };
     ReportedAgent::new(READS, id, sighting, update, snapshot.proof)
+        .with_telemetry(snapshot.telemetry)
 }
 
 fn update_of(status: Option<ActiveStatus>, modified: SystemTime) -> RungUpdate {
@@ -473,11 +634,13 @@ fn read(path: &Path, start: &str, started: SystemTime) -> io::Result<Option<Snap
         ));
     };
     let status = state_of(&envelope.state);
+    let telemetry = envelope.state.telemetry(modified);
     Ok(Some(Snapshot {
         cwd,
         session_id: envelope.state.session_id(),
         name: envelope.state.name(),
         status,
+        telemetry,
         modified,
         proof,
     }))
@@ -943,6 +1106,10 @@ mod tests {
             conversation_title: None,
             agent_state: agent_state.map(str::to_owned),
             tool_confirmation_pending: pending,
+            model: None,
+            context_window: None,
+            quota: None,
+            cost: None,
         };
         assert_eq!(
             state_of(&state(Some("idle"), None)),
@@ -1219,6 +1386,10 @@ mod tests {
             conversation_title: None,
             agent_state: None,
             tool_confirmation_pending: None,
+            model: None,
+            context_window: None,
+            quota: None,
+            cost: None,
         };
         assert_eq!(
             make(Some("  /w/one  "), Some("/w/two"))
@@ -1255,6 +1426,10 @@ mod tests {
             conversation_title: Some("  Feature parity  ".to_owned()),
             agent_state: Some("working".to_owned()),
             tool_confirmation_pending: None,
+            model: None,
+            context_window: None,
+            quota: None,
+            cost: None,
         };
         let name = payload.name().expect("non-empty title produces a Name");
         assert_eq!(name.source, Some(Source::Auto));
@@ -1318,5 +1493,111 @@ mod tests {
         fs::write(&state_file, "{truncated").unwrap();
         let during_torn = files.scan();
         assert_eq!(during_torn, first);
+    }
+
+    #[test]
+    fn payload_parses_telemetry_model_context_quota_and_cost() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_777_000_007);
+        let raw = json!({
+            "cwd": "/w",
+            "conversation_id": "c1",
+            "agent_state": "working",
+            "model": {
+                "id": "claude-opus-4-6-high",
+                "display_name": "Claude Opus 4.6 (High)",
+                "effort": "high"
+            },
+            "context_window": {
+                "context_window_size": 1_000_000,
+                "used_percentage": 12.4,
+                "current_usage": {
+                    "input_tokens": 100_000,
+                    "cache_read_input_tokens": 24_000
+                }
+            },
+            "quota": {
+                "claude": {
+                    "remaining_fraction": 0.65,
+                    "reset_time": "2026-05-01T12:00:00Z"
+                },
+                "gemini_pro": {
+                    "remaining_fraction": 0.20,
+                    "reset_in_seconds": 3600
+                }
+            },
+            "cost": {
+                "total_usd": 0.42
+            }
+        });
+        let payload: Payload = serde_json::from_value(raw).unwrap();
+        let telemetry = payload.telemetry(now).expect("telemetry is present");
+        assert_eq!(
+            telemetry.model().map(TelemetryText::as_str),
+            Some("Claude Opus 4.6")
+        );
+        assert_eq!(telemetry.effort().map(TelemetryText::as_str), Some("high"));
+        let context = telemetry.context().expect("context is present");
+        assert_eq!(context.used_permille.get(), 124);
+        assert_eq!(context.window_tokens.map(NonZeroU64::get), Some(1_000_000));
+        assert_eq!(context.used_tokens, Some(124_000));
+        let usage = telemetry.usage().expect("usage is present");
+        assert_eq!(usage.windows().len(), 2);
+        assert_eq!(usage.windows()[0].label.as_str(), "claude");
+        assert_eq!(usage.windows()[0].used_permille.get(), 350);
+        assert!(usage.windows()[0].resets_at.is_some());
+        assert_eq!(usage.windows()[1].label.as_str(), "pro");
+        assert_eq!(usage.windows()[1].used_permille.get(), 800);
+        assert_eq!(
+            usage.windows()[1].resets_at,
+            Some(now + Duration::from_hours(1))
+        );
+        assert_eq!(usage.session_cost_micro_usd(), Some(420_000));
+    }
+
+    #[test]
+    fn malformed_telemetry_fields_never_drop_agy_agent_parsing() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_777_000_007);
+        let raw = json!({
+            "procStart": "42",
+            "state": {
+                "cwd": "/w",
+                "conversation_id": "c2",
+                "agent_state": "working",
+                "model": 123,
+                "context_window": {
+                    "context_window_size": -1,
+                    "used_percentage": 42.5,
+                    "current_usage": "bad"
+                },
+                "quota": {
+                    "bad_null": null,
+                    "claude": {
+                        "remaining_fraction": 0.5,
+                        "reset_in_seconds": -5
+                    },
+                    "gemini_flash": {
+                        "remaining_fraction": 0.25,
+                        "reset_in_seconds": 120.4
+                    }
+                },
+                "cost": "n/a"
+            }
+        });
+        let envelope: Envelope = serde_json::from_value(raw).unwrap();
+        assert_eq!(envelope.state.cwd().unwrap().as_str(), "/w");
+        assert_eq!(state_of(&envelope.state), Some(ActiveStatus::Working));
+        let telemetry = envelope
+            .state
+            .telemetry(now)
+            .expect("valid siblings remain");
+        assert_eq!(telemetry.model(), None);
+        assert_eq!(telemetry.context().unwrap().used_permille.get(), 425);
+        assert_eq!(telemetry.context().unwrap().window_tokens, None);
+        let windows = telemetry.usage().unwrap().windows();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label.as_str(), "claude");
+        assert_eq!(windows[0].resets_at, None);
+        assert_eq!(windows[1].label.as_str(), "flash");
+        assert_eq!(windows[1].resets_at, Some(now + Duration::from_mins(2)));
     }
 }

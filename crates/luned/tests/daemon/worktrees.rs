@@ -211,6 +211,35 @@ fn a_branch_starts_in_a_worktree_of_the_clone_wt_made_and_only_there() {
 }
 
 #[test]
+fn a_branch_shipped_on_an_agent_that_runs_no_flow_is_refused_before_its_worktree_is_made() {
+    let owned = Owned::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let scratch = fs::canonicalize(scratch.path()).unwrap();
+    let (up, clone) = (scratch.join("up"), scratch.join("n"));
+    cloned_as_wt(&scratch, &up, &clone);
+    let (main, feat) = (clone.join("main"), clone.join("feat"));
+    let state = owned.host.home.path().join(".local/state/lune");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(state.join("agent"), "codex\n").unwrap();
+
+    let mut shipped = owned.host.vars().command(&LUNE);
+    luned::local_git(&mut shipped);
+    shipped.current_dir(&main).args(["start", "feat", "--ship"]);
+    let why = refused(&shipped.output().unwrap());
+    assert!(why.starts_with("lune: no flow runs on codex: "), "{why}");
+    assert!(
+        !feat.exists(),
+        "no worktree is made for a flow that starts on nothing"
+    );
+
+    assert_eq!(
+        said(&started(&owned.host, &main, "feat", &[])),
+        shown(&feat),
+        "the branch starts on Codex once no flow is asked of it"
+    );
+}
+
+#[test]
 fn a_project_asked_for_at_a_worktree_is_its_clone_s_and_a_branch_joins_it() {
     let owned = Owned::new();
     let host = &owned.host;

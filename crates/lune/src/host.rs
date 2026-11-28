@@ -22,10 +22,12 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{self, FlowBadgeKind, FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{self, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId};
 use lune_domain::rows;
+use lune_protocol::telemetry::AgentUsage;
 use luned::api::{Host, Version};
 use luned::asks::Marked;
 use luned::changes::Unchanged;
@@ -81,13 +83,14 @@ use crate::reach::{self, Luned};
 use crate::rebase;
 use crate::review::{self, LoadedDiff, ReviewAction, RibbonCacheKey, RibbonOverlay};
 use crate::sidebar::{
-    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, Seat, SeatedLayout,
-    Sidebar, SidebarView, Sitting, ViewKey,
+    self, Asked, Floating, HereAgent, Holding, Keys, Listed, Place, Reorder, RightTarget, Seat,
+    SeatedLayout, Sidebar, SidebarView, Sitting, SpinnerFrame, ViewKey,
 };
 use crate::skills::{self, Skill, Skills};
 use crate::speech::{self, Speech, Spoken};
 use crate::spots::{Burst, Drawn, DrawnHover, Hit, Settling, Spots};
 use crate::state;
+use crate::statusbar;
 use crate::viewed::{self, Across, Heeded, Viewed};
 use crate::width::Width;
 use crate::worktrees::{self, Arrival, Landing};
@@ -735,6 +738,7 @@ struct Hover {
     pointer_shape: Option<embedded::PointerShape>,
     drawn: DrawnHover,
     aloud: Option<Rect>,
+    bar: Option<Rect>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -748,6 +752,7 @@ struct Painted {
     at: Moment,
     cadence: Cadence,
     sidebar_view: SidebarView,
+    status_bar: statusbar::Snapshot,
 }
 
 #[derive(Debug, Default)]
@@ -756,7 +761,7 @@ enum Pacing {
     Unpainted,
     Drawn {
         dirty: bool,
-        painted: Painted,
+        painted: Box<Painted>,
     },
 }
 
@@ -810,6 +815,8 @@ pub struct App {
     settling: Settling,
     drawn: Drawn,
     drawn_aloud: Spots<aloud::Button>,
+    drawn_bar_links: Spots<pull::Link>,
+    last_usage: Option<(agents::Harness, AgentUsage)>,
     pointer: Option<Position>,
     pointer_shape: Option<embedded::PointerShape>,
     pending_graphics: Vec<u8>,
@@ -1255,6 +1262,8 @@ impl App {
             settling: Settling::default(),
             drawn: Drawn::Nothing,
             drawn_aloud: Spots::default(),
+            drawn_bar_links: Spots::default(),
+            last_usage: None,
             pointer: None,
             pointer_shape: None,
             pending_graphics: Vec::new(),
@@ -1483,16 +1492,26 @@ fn run_loop<W: io::Write>(
     }
 }
 
-fn areas(frame: Rect, own: u16) -> (Rect, Rect) {
+fn areas(frame: Rect, own: u16) -> (Rect, Rect, Rect) {
+    let bar_rows = if frame.height > statusbar::ROWS {
+        statusbar::ROWS
+    } else {
+        0
+    };
+    let top_height = frame.height - bar_rows;
     let sidebar = own.min(frame.width / 2);
-    let left = Rect::new(frame.x, frame.y, sidebar, frame.height);
+    let left = Rect::new(frame.x, frame.y, sidebar, top_height);
     let right = Rect::new(
         frame.x + sidebar,
         frame.y,
         frame.width - sidebar,
-        frame.height,
+        top_height,
     );
-    (left, right)
+    let bar = Rect::new(frame.x, frame.y + top_height, frame.width, bar_rows);
+    assert_eq!(left.height + bar.height, frame.height);
+    assert_eq!(right.height + bar.height, frame.height);
+    assert_eq!(left.width + right.width, frame.width);
+    (left, right, bar)
 }
 
 struct Size {
@@ -1628,6 +1647,7 @@ impl App {
                 self.check_flow_transitions();
                 self.sidebar.heard(host, now.system);
                 self.seat(now.system);
+                self.record_usage();
                 if review_status != self.diff.git_status {
                     self.diff.git_status = review_status;
                     self.maybe_fetch_diff(true);
@@ -1639,7 +1659,9 @@ impl App {
                 if let Some(sayings) = self.sidebar.sayings() {
                     self.aloud.hear(sayings, self.desktop.reads_aloud());
                 }
-                changed || matches!(self.over, Some(Over::Picker(_))) || self.sidebar_changed()
+                changed
+                    || matches!(self.over, Some(Over::Picker(_)))
+                    || self.chrome_changed(now.system)
             }
             Event::Daemon(Err(why)) => self.sidebar.lost(why),
             Event::Notice(notice) => {
@@ -1881,11 +1903,54 @@ impl App {
         Ok(())
     }
 
+    fn right_target(&self) -> RightTarget {
+        match self.pane.right() {
+            None => RightTarget::None,
+            Some(Right::Home(shown)) => RightTarget::Home {
+                on: shown.on.clone(),
+                project: shown.project,
+            },
+            Some(Right::Worktree(viewed)) => RightTarget::Worktree {
+                on: viewed.machine().clone(),
+                worktree: viewed.worktree(),
+                focused: viewed.focused_view(),
+            },
+        }
+    }
+
+    fn record_usage(&mut self) {
+        let target = self.right_target();
+        if let Some(usage) = self.sidebar.focused_subscription_usage(&target) {
+            self.last_usage = Some(usage);
+        }
+    }
+
+    fn status_bar_snapshot(&self, wall: SystemTime) -> statusbar::Snapshot {
+        let target = self.right_target();
+        let sidebar_focused = self.pane.side() == SplitSide::Sidebar;
+        let sidebar_collapsed = self.pane.collapsed();
+        self.sidebar.status_bar(
+            &target,
+            self.last_usage.as_ref(),
+            sidebar_focused,
+            sidebar_collapsed,
+            wall,
+        )
+    }
+
     fn sidebar_changed(&self) -> bool {
         let Some(painted) = self.pacing.clean() else {
             return false;
         };
         painted.sidebar_view != self.sidebar.view()
+    }
+
+    fn chrome_changed(&self, wall: SystemTime) -> bool {
+        let Some(painted) = self.pacing.clean() else {
+            return false;
+        };
+        painted.sidebar_view != self.sidebar.view()
+            || painted.status_bar != self.status_bar_snapshot(wall)
     }
 
     fn relist(&mut self) {
@@ -2016,10 +2081,12 @@ impl App {
                 pointer_shape: None,
                 drawn: DrawnHover::None,
                 aloud: None,
+                bar: None,
             };
         };
-        let (_, right) = self.areas();
-        let spot = (!self.covered() && right.contains(pointer)).then(|| attached::Spot {
+        let (_, right, _) = self.areas();
+        let covered = self.covered();
+        let spot = (!covered && right.contains(pointer)).then(|| attached::Spot {
             row: pointer.y - right.y,
             column: pointer.x - right.x,
         });
@@ -2028,11 +2095,15 @@ impl App {
             .viewed()
             .and_then(|viewed| viewed.pointer_shape(spot))
             .cloned();
+        let bar = (!covered)
+            .then(|| self.drawn_bar_links.hovered(pointer))
+            .flatten();
         Hover {
             link,
             pointer_shape,
             drawn: self.drawn.hovered(pointer),
             aloud: self.drawn_aloud.hovered(pointer),
+            bar,
         }
     }
 
@@ -2804,8 +2875,13 @@ impl App {
             }
         }
         let button = || self.drawn_aloud.at(at).copied().map(Hit::Aloud);
+        let bar_link = || {
+            (!self.covered())
+                .then(|| self.drawn_bar_links.at(at).cloned().map(Hit::Number))
+                .flatten()
+        };
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && let Some(hit) = self.drawn.at(at).or_else(button)
+            && let Some(hit) = self.drawn.at(at).or_else(button).or_else(bar_link)
         {
             self.burst = Some(Burst::new(at, now.steady));
             self.hit(hit, now);
@@ -2894,13 +2970,19 @@ impl App {
             }
             None => {}
         }
-        let (sidebar, right) = self.areas();
+        let (sidebar, right, bar) = self.areas();
         if matches!(self.held, Held::Edge { .. }) && self.resize(mouse) {
             return;
         }
-        let over_session = mouse.column >= right.x;
         let held =
             matches!(self.held, Held::Session | Held::WorktreeSelecting) || self.home_pressed();
+        if !held && !self.sidebar.pressed() && bar.contains(at) {
+            if down {
+                self.held = Held::Taken;
+            }
+            return;
+        }
+        let over_session = mouse.column >= right.x;
         if held || (over_session && !self.sidebar.pressed()) {
             let of_a_press = matches!(mouse.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_));
             if of_a_press && self.last_press != LastPress::Session {
@@ -2989,7 +3071,7 @@ impl App {
     }
 
     fn session_cell(&self, mouse: MouseEvent) -> attached::Spot {
-        let (_, right) = self.areas();
+        let (_, right, _) = self.areas();
         let column = mouse
             .column
             .saturating_sub(right.x)
@@ -3432,7 +3514,7 @@ impl App {
         on: Machine,
         worktree: WorktreeId,
         mode: FlowMode,
-        harness: agents::Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
     ) {
         let (luned, events) = (self.luned.clone(), self.events.clone());
@@ -4277,6 +4359,7 @@ impl App {
             right.focus_view(terminal);
         }
         self.seat(now);
+        self.record_usage();
         let _ = self.sync_tabs();
     }
 
@@ -4420,6 +4503,7 @@ impl App {
             }
         };
         self.seat(now);
+        self.record_usage();
         dirty | self.sync_tabs()
     }
 
@@ -4575,7 +4659,7 @@ impl App {
         }
     }
 
-    fn areas(&self) -> (Rect, Rect) {
+    fn areas(&self) -> (Rect, Rect, Rect) {
         let own = if self.pane.collapsed() {
             sidebar::COLLAPSED
         } else {
@@ -4585,7 +4669,7 @@ impl App {
     }
 
     fn sync_areas(&mut self) {
-        let (sidebar, right) = self.areas();
+        let (sidebar, right, _) = self.areas();
         if self.pane.collapsed() {
             self.sidebar.collapse(sidebar);
         } else {
@@ -4753,7 +4837,7 @@ impl App {
         let painted = self.draw_at(terminal, now)?;
         self.pacing = Pacing::Drawn {
             dirty: false,
-            painted,
+            painted: Box::new(painted),
         };
         Ok(())
     }
@@ -4798,7 +4882,7 @@ impl App {
             execute!(terminal.backend_mut(), cursor_style(cursor))?;
             self.cursor = Some(cursor);
         }
-        let (_, right_area) = self.areas();
+        let (_, right_area, _) = self.areas();
         let covered = self.covered();
         let hover = self
             .pointer
@@ -4887,7 +4971,7 @@ impl App {
         self.settling.drawn(&self.drawn_aloud, now.steady);
         self.pacing = Pacing::Drawn {
             dirty: false,
-            painted,
+            painted: Box::new(painted),
         };
     }
 
@@ -4902,17 +4986,22 @@ impl App {
             frame_area, self.frame,
             "the app's layout matches the frame it paints"
         );
-        let (expected_sidebar, expected_right) = self.areas();
-        let clean = attached::Clean::of_frame(frame);
-        let ((sidebar, beside), right_clean) =
-            clean.paint_left(expected_sidebar.width, |buffer, sidebar| {
+        let (expected_sidebar, expected_right, expected_bar) = self.areas();
+        let (top_clean, bar) = attached::Clean::of_frame(frame).trim_bottom(expected_bar.height);
+        assert_eq!(
+            bar, expected_bar,
+            "the painted status bar matches its laid-out area"
+        );
+        let ((sidebar, beside, sidebar_spinning), right_clean) =
+            top_clean.paint_left(expected_sidebar.width, |buffer, sidebar| {
                 assert_eq!(
                     sidebar, expected_sidebar,
                     "the painted sidebar matches the laid-out area"
                 );
                 let (drawn, sidebar_cadence) = self.sidebar.draw(buffer, sidebar, now.system);
+                let spinning = sidebar_cadence.spinning();
                 cadence.merge(sidebar_cadence);
-                (sidebar, drawn)
+                (sidebar, drawn, spinning)
             });
         let right = right_clean.area();
         assert_eq!(
@@ -4989,10 +5078,22 @@ impl App {
                 None => beside,
             },
         };
+        let bar_snapshot = self.status_bar_snapshot(now.system);
+        let bar_spinner = if sidebar_spinning {
+            sidebar::frame(now.system)
+        } else {
+            SpinnerFrame::REST
+        };
+        let (bar_links, bar_cadence) =
+            statusbar::draw(buffer, bar, &bar_snapshot, bar_spinner, now.system);
+        cadence.merge(bar_cadence);
         let aloud_buttons = self.sidebar.aloud_buttons().clone();
         if let Some(pointer) = self.pointer {
             drawn.light(buffer, pointer);
             aloud_buttons.light(buffer, pointer);
+            if !covered {
+                bar_links.raise(buffer, pointer);
+            }
         }
         let cursor_position = matches!(self.holder(), Holder::Terminal)
             .then_some(cursor)
@@ -5001,10 +5102,12 @@ impl App {
             frame.set_cursor_position(cursor);
         }
         self.drawn = drawn;
+        self.drawn_bar_links = bar_links;
         let painted = Painted {
             at: now,
             cadence,
             sidebar_view: self.sidebar.view(),
+            status_bar: bar_snapshot,
         };
         (painted, cursor_position, aloud_buttons)
     }
@@ -7206,7 +7309,7 @@ mod tests {
         .unwrap();
         app.go_worktree(&Machine::Local, WorktreeId::of(100).unwrap(), None, system);
         app.draw_due(&mut terminal, at(20)).unwrap();
-        let (_, right) = app.areas();
+        let (_, right, _) = app.areas();
         let left = MouseButton::Left;
 
         app.handle_at(
@@ -7948,5 +8051,101 @@ mod tests {
         );
         app.tick(at(second));
         assert!(drew(&mut app, &mut terminal, &written, at(second)));
+    }
+
+    #[test]
+    fn status_bar_updates_on_telemetry_changes_and_blocks_clicks_from_session() {
+        let (mut terminal, written) = test_terminal(120, 12);
+        let (mut app, _inbox, _state) = test_app(120, 12);
+        let start = Instant::now();
+        let system = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_007);
+        let at = |offset| Moment {
+            steady: start + offset,
+            system: system + offset,
+        };
+
+        let make_host = |used_permille: u32| {
+            let mut host = busy_host(1, "Work on status bar");
+            host.agents[0].telemetry = Some(luned::api::AgentTelemetry {
+                model: Some("Opus 4.7".to_owned()),
+                effort: Some("high".to_owned()),
+                context: Some(luned::api::ContextWindow {
+                    used_permille: 19,
+                    window_tokens: Some(1_000_000),
+                    used_tokens: Some(19_000),
+                }),
+                usage: Some(luned::api::AgentUsage {
+                    windows: vec![luned::api::UsageWindow {
+                        label: "5h".to_owned(),
+                        used_permille,
+                        resets_at: None,
+                    }],
+                    session_cost_micro_usd: None,
+                }),
+            });
+            host
+        };
+
+        app.handle_at(
+            Event::Daemon(Ok(make_host(350))),
+            &mut terminal,
+            at(Duration::ZERO),
+        )
+        .unwrap();
+        app.go_worktree(
+            &Machine::Local,
+            WorktreeId::of(100).unwrap(),
+            None,
+            at(Duration::ZERO).system,
+        );
+        app.give(SplitSide::Collapsed, None, at(Duration::ZERO).system);
+        app.tick(at(Duration::ZERO));
+        assert!(drew(&mut app, &mut terminal, &written, at(Duration::ZERO)));
+
+        let mut screen = Term::new(Config::default(), &TermSize::new(120, 12), VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        let mut bottom_row = |written: &Written| -> String {
+            for write in written.borrow_mut().drain(..) {
+                parser.advance(&mut screen, &write);
+            }
+            (0..120)
+                .map(|column| screen.grid()[Point::new(Line(11), Column(column))].c)
+                .collect()
+        };
+        let initial_bar = bottom_row(&written);
+        assert!(initial_bar.contains("☾ ⠋1 › lune › main"), "{initial_bar}");
+        assert!(initial_bar.contains("5h 35%"), "{initial_bar}");
+
+        let later = Duration::from_secs(1);
+        app.handle_at(Event::Daemon(Ok(make_host(420))), &mut terminal, at(later))
+            .unwrap();
+        app.tick(at(later));
+        assert!(
+            drew(&mut app, &mut terminal, &written, at(later)),
+            "usage telemetry update redraws the status bar"
+        );
+        let updated_bar = bottom_row(&written);
+        assert!(updated_bar.contains("5h 42%"), "{updated_bar}");
+
+        let (_, _, bar) = app.areas();
+        assert_eq!(bar.height, statusbar::ROWS);
+        let click_at = later + Duration::from_millis(50);
+        app.handle_at(
+            Event::Input(Input::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: bar.x + 2,
+                row: bar.y,
+                modifiers: KeyModifiers::NONE,
+            })),
+            &mut terminal,
+            at(click_at),
+        )
+        .unwrap();
+        assert_eq!(
+            app.held,
+            Held::Taken,
+            "clicking the status bar must not capture session or expand collapsed sidebar"
+        );
+        assert!(app.pane.collapsed());
     }
 }

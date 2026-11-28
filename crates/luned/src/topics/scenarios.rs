@@ -7,7 +7,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, SystemTime};
 
-    use lune_domain::agent::{Declared, Harness, TopicSource};
+    use lune_domain::agent::{Declared, Harness, OscReads, TopicSource};
     use lune_domain::mux::TerminalKey;
     use lune_protocol::said::Said;
     use serde::Deserialize;
@@ -322,6 +322,7 @@ mod tests {
                         Harness::ClaudeCode => claude::READS,
                         Harness::Pi => pi::READS,
                         Harness::Antigravity => agy::READS,
+                        Harness::Codex => OscReads::of(Harness::Codex).declared(),
                     };
                     let mut topics = Topics::new(Folders::default(), began());
                     let agent = [seated_agent(harness, reads, SESSION_ID)];

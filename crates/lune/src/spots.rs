@@ -112,7 +112,7 @@ impl<S> Spots<S> {
         }
     }
 
-    fn raise(&self, buffer: &mut Buffer, pointer: Position) {
+    pub fn raise(&self, buffer: &mut Buffer, pointer: Position) {
         let Some((area, _)) = self.0.iter().find(|(area, _)| area.contains(pointer)) else {
             return;
         };

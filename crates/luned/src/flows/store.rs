@@ -297,7 +297,7 @@ pub fn remove_run_files(paths: &[PathBuf]) {
 
 #[cfg(test)]
 mod tests {
-    use lune_domain::agent::Harness;
+    use lune_domain::agent::FlowHarness;
     use lune_domain::flows::{FlowEntry, FlowMode, FlowSpec};
     use lune_domain::projects::WorktreeId;
 
@@ -315,7 +315,7 @@ mod tests {
                 WorktreeId::of(42).unwrap(),
                 FlowSpec::default_spec(),
                 FlowMode::Unattended,
-                Harness::ClaudeCode,
+                FlowHarness::ClaudeCode,
                 FlowEntry::PullRequest,
             )
             .unwrap();

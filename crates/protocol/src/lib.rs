@@ -10,6 +10,7 @@ pub mod release;
 pub mod said;
 pub mod shell;
 pub mod socket;
+pub mod telemetry;
 pub mod turn;
 pub mod unread;
 pub mod watch;
@@ -159,6 +160,13 @@ impl v1::Agent {
         let topic = self.topic.as_deref()?.trim();
         (!topic.is_empty()).then_some(topic)
     }
+
+    #[must_use]
+    pub fn parsed_telemetry(&self) -> Option<telemetry::AgentTelemetry> {
+        self.telemetry
+            .as_ref()
+            .and_then(telemetry::AgentTelemetry::of_api)
+    }
 }
 
 impl v1::Project {
@@ -183,7 +191,7 @@ impl v1::Harness {
     pub fn prompt_word(self) -> Option<&'static str> {
         match self {
             v1::Harness::ClaudeCode => Some("cli"),
-            v1::Harness::Pi | v1::Harness::Antigravity => Some("tui"),
+            v1::Harness::Pi | v1::Harness::Antigravity | v1::Harness::Codex => Some("tui"),
             v1::Harness::Unspecified => None,
         }
     }

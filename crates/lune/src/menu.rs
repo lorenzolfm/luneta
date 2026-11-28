@@ -4,6 +4,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
@@ -203,6 +204,39 @@ pub enum Pull {
     Worktree,
     Agent,
     Ship,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pulls {
+    Worktree,
+    Agent(Harness),
+    Ship(FlowHarness),
+}
+
+impl Pulls {
+    pub fn of(pull: Pull, agent: Harness) -> Result<Pulls, String> {
+        match pull {
+            Pull::Worktree => Ok(Pulls::Worktree),
+            Pull::Agent => Ok(Pulls::Agent(agent)),
+            Pull::Ship => FlowHarness::of(agent).map(Pulls::Ship),
+        }
+    }
+
+    const fn pull(self) -> Pull {
+        match self {
+            Pulls::Worktree => Pull::Worktree,
+            Pulls::Agent(_) => Pull::Agent,
+            Pulls::Ship(_) => Pull::Ship,
+        }
+    }
+
+    const fn agent(self) -> Option<Harness> {
+        match self {
+            Pulls::Worktree => None,
+            Pulls::Agent(agent) => Some(agent),
+            Pulls::Ship(flow) => Some(flow.harness()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1510,7 +1544,7 @@ pub enum Wants {
     MakeAndShip {
         cwd: Directory,
         name: String,
-        harness: Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
     },
 }
@@ -1563,7 +1597,7 @@ pub enum Done {
         on: Machine,
         worktree: WorktreeId,
         mode: FlowMode,
-        harness: Option<Harness>,
+        harness: Option<FlowHarness>,
         prompt: Option<String>,
         go: Option<Place>,
     },
@@ -1692,8 +1726,7 @@ enum WaitingStage {
     },
     Pulling {
         work: Work,
-        agent: Harness,
-        pull: Pull,
+        pulls: Pulls,
     },
     OpeningPulled {
         work: Work,
@@ -1938,14 +1971,17 @@ impl InteractiveMenu {
                 worktree,
                 mode,
                 prompt: false,
-            } => Did::Closed(Done::StartFlow {
-                on: target.machine().clone(),
-                worktree,
-                mode,
-                harness: Some(keys.agent.harness()),
-                prompt: None,
-                go: None,
-            }),
+            } => match FlowHarness::of(keys.agent.harness()) {
+                Ok(harness) => Did::Closed(Done::StartFlow {
+                    on: target.machine().clone(),
+                    worktree,
+                    mode,
+                    harness: Some(harness),
+                    prompt: None,
+                    go: None,
+                }),
+                Err(why) => wrong(format!("flow: {why}")),
+            },
             Offer::FlowControl(worktree, control) => Did::Closed(Done::ControlFlow {
                 on: target.machine().clone(),
                 worktree,
@@ -2074,12 +2110,13 @@ impl InteractiveMenu {
                 )
             }
             InteractiveStage::PullChoosing { work, agent, wrong } => {
-                match Pull::pressed(key, &work) {
-                    Some(pull) => {
+                match Pull::pressed(key, &work).map(|pull| Pulls::of(pull, agent)) {
+                    Some(Ok(pulls)) => {
                         let (waiting, wants) =
-                            WaitingMenu::start_pull(number, target.clone(), work, agent, pull);
+                            WaitingMenu::start_pull(number, target.clone(), work, pulls);
                         Did::Stays(Menu::Waiting(waiting), wants)
                     }
+                    Some(Err(why)) => unstarted(&work, &why),
                     None => stays(
                         InteractiveStage::PullChoosing { work, agent, wrong },
                         Wants::Nothing,
@@ -2376,11 +2413,10 @@ impl WaitingMenu {
         number: MenuId,
         target: Target,
         work: Work,
-        agent: Harness,
-        pull: Pull,
+        pulls: Pulls,
     ) -> (WaitingMenu, Wants) {
-        let wants = Wants::Pull(work.clone(), pull.wanted(Asks::of(&work)));
-        let stage = WaitingStage::Pulling { work, agent, pull };
+        let wants = Wants::Pull(work.clone(), pulls.pull().wanted(Asks::of(&work)));
+        let stage = WaitingStage::Pulling { work, pulls };
         (
             WaitingMenu {
                 number,
@@ -2472,7 +2508,7 @@ impl WaitingMenu {
             WaitingStage::Reading { ended, .. } => reading(ended),
             WaitingStage::Fetching { page, .. } => fetching(page.number()),
             WaitingStage::Rebasing { branch, .. } => rebasing(branch),
-            WaitingStage::Pulling { work, pull, .. } => match pull.wanted(Asks::of(work)) {
+            WaitingStage::Pulling { work, pulls } => match pulls.pull().wanted(Asks::of(work)) {
                 Wanted::AtHead => format!("Syncing {}…", work.tab()),
                 Wanted::AsItIs => format!("Making a worktree of {}…", work.tab()),
             },
@@ -2494,8 +2530,7 @@ impl WaitingMenu {
     pub fn off_branch(&self, found: &Result<Found, String>) -> Option<String> {
         let WaitingStage::Pulling {
             work,
-            pull: Pull::Worktree,
-            ..
+            pulls: Pulls::Worktree,
         } = &self.stage
         else {
             return None;
@@ -2577,7 +2612,7 @@ impl WaitingMenu {
             target,
             stage,
         } = self;
-        let WaitingStage::Pulling { work, agent, pull } = stage else {
+        let WaitingStage::Pulling { work, pulls } = stage else {
             return Did::Stays(
                 Menu::Waiting(WaitingMenu {
                     number,
@@ -2601,7 +2636,7 @@ impl WaitingMenu {
             Ok(found) => found,
             Err(why) => return Did::Closed(Done::Wrong(format!("menu: {work}: {why}"))),
         };
-        if let (Pull::Agent | Pull::Ship, true) = (pull, moved_off) {
+        if let (Some(agent), true) = (pulls.agent(), moved_off) {
             let off = work.off_branch(branch.as_deref());
             let wrong = Some(format!(
                 "{folder} is {off}, so no agent starts there; w opens it"
@@ -2616,7 +2651,7 @@ impl WaitingMenu {
                 Wants::Nothing,
             );
         }
-        if pull == Pull::Ship {
+        if let Pulls::Ship(harness) = pulls {
             let prompt = match &readied {
                 Readied::Link(link) => match link.kind() {
                     Kind::Issue => Some(format!("{TACKLE} {}", link.url())),
@@ -2631,7 +2666,7 @@ impl WaitingMenu {
                         on,
                         worktree: view.worktree().worktree,
                         mode: FlowMode::Unattended,
-                        harness: Some(agent),
+                        harness: Some(harness),
                         prompt,
                         go: Some(Place::View(view)),
                     })
@@ -2640,7 +2675,7 @@ impl WaitingMenu {
                     let wants = Wants::MakeAndShip {
                         cwd: folder,
                         name: work.tab(),
-                        harness: agent,
+                        harness,
                         prompt,
                     };
                     let stage = WaitingStage::OpeningPulled { work };
@@ -2655,13 +2690,13 @@ impl WaitingMenu {
                 }
             };
         }
-        let argv = match (pull, &readied) {
-            (Pull::Worktree | Pull::Ship, _) => None,
-            (Pull::Agent, Readied::Link(link)) => Some(match Asks::of_link(link) {
+        let argv = match (pulls, &readied) {
+            (Pulls::Worktree | Pulls::Ship(_), _) => None,
+            (Pulls::Agent(agent), Readied::Link(link)) => Some(match Asks::of_link(link) {
                 Asks::Review => agents::on_skill(agent, REVIEW, Some(&link.url())),
                 Asks::Tackle => Argv::on_words(agent, format!("{TACKLE} {}", link.url()), &[]),
             }),
-            (Pull::Agent, Readied::File { real }) => {
+            (Pulls::Agent(agent), Readied::File { real }) => {
                 let words = format!("{TACKLE} {real}");
                 Some(Argv::on_words(agent, words, &[real.as_str()]))
             }
@@ -4457,6 +4492,9 @@ mod tests {
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(Harness::Antigravity));
         assert_eq!(line(&menu, 31), " \u{f0674} agy  <TAB> another agent");
+        let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
+        assert_eq!(wants, Wants::Keep(Harness::Codex));
+        assert_eq!(line(&menu, 31), " \u{f07b5} codex  <TAB> another agent");
         let (menu, wants) = stays(menu.key(&KeyEvent::from(KeyCode::Tab)));
         assert_eq!(wants, Wants::Keep(CLAUDE));
         assert_eq!(line(&menu, 31), " \u{ec82} claude  <TAB> another agent");
@@ -6392,6 +6430,50 @@ mod tests {
     }
 
     #[test]
+    fn f_ships_on_the_agent_picked_and_one_that_runs_no_flow_is_refused_before_a_worktree_is_made()
+    {
+        let ready = |at| Ready {
+            at,
+            folder: directory("/w/cdk/feat"),
+            branch: None,
+            moved_off: false,
+            work: Readied::Link(pull_request()),
+        };
+        let shipping = |agent| InteractiveMenu::pull(id(), view_row(), link(), agent);
+        let (menu, wants) = waits(shipping(Harness::Pi).key(&char('f')));
+        assert_eq!(wants, Wants::Pull(link(), Wanted::AsItIs));
+        let (_, wants) = waits(menu.pulled(Ok(here(ready(At::Unopened)))));
+        assert_eq!(
+            wants,
+            Wants::MakeAndShip {
+                cwd: directory("/w/cdk/feat"),
+                name: "#2736".to_owned(),
+                harness: FlowHarness::Pi,
+                prompt: None,
+            }
+        );
+        let (menu, _) = waits(shipping(Harness::Pi).key(&char('f')));
+        let there = At::There(sidebar::TerminalPlace::new_in("cdk", 2, 1, 9));
+        let done = closed(menu.pulled(Ok(here(ready(there)))));
+        let Done::StartFlow { harness, go, .. } = done else {
+            panic!("a worktree that is open ships where it is: {done:?}");
+        };
+        assert_eq!(harness, Some(FlowHarness::Pi));
+        assert_eq!(go, Some(Place::View(ViewPlace::new_in("cdk", 2, 1, 9))));
+
+        let unrun = FlowHarness::of(Harness::Codex).unwrap_err();
+        assert_eq!(
+            closed(shipping(Harness::Codex).key(&char('f'))),
+            Done::Wrong(format!("menu: {}: {unrun}", link())),
+            "nothing is pulled for a flow that cannot start"
+        );
+        for other in ['r', 'w'] {
+            let (menu, _) = waits(shipping(Harness::Codex).key(&char(other)));
+            assert!(menu.pulling(), "{other} asks no flow of Codex");
+        }
+    }
+
+    #[test]
     fn the_menu_for_a_file_has_a_key_for_a_worktree_and_one_to_tackle_it() {
         let file = || {
             let from = Directory::parse("/w/cdk/main".to_owned()).unwrap();
@@ -6561,10 +6643,19 @@ mod tests {
                 on: Machine::Local,
                 worktree: worktree(),
                 mode: FlowMode::Unattended,
-                harness: Some(CLAUDE),
+                harness: Some(FlowHarness::ClaudeCode),
                 prompt: None,
                 go: None,
             }
+        );
+        let on_codex = Picked::ByYou(Harness::Codex);
+        let codex = Menu::open(id(), worktree_on(Machine::Local), Some('f'), on_codex);
+        let (menu, _) = stays(codex.expect("the flow key"));
+        let unrun = FlowHarness::of(Harness::Codex).unwrap_err();
+        assert_eq!(
+            closed(menu.key(&char('a'))),
+            Done::Wrong(format!("flow: {unrun}")),
+            "a flow is asked of no agent that runs none"
         );
 
         let paused_flow = FlowRow {

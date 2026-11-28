@@ -215,6 +215,7 @@ fn synthesized_builtin(harness: Harness) -> Option<BuiltinRule> {
     match harness {
         Harness::ClaudeCode => Some(BuiltinRule::Claude),
         Harness::Antigravity => Some(BuiltinRule::Agy),
+        Harness::Codex => Some(BuiltinRule::Codex),
         Harness::Pi => None,
     }
 }

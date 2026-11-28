@@ -1,0 +1,18 @@
+{
+  "recorded": {
+    "agent": "codex codex-cli 0.172.0",
+    "by": "dev record-status",
+    "on": "2026-11-28"
+  },
+  "steps": {
+    "error": "\u001b]7501;state=working:app=codex\u001b\\\u001b]7501;state=error:app=codex\u001b\\",
+    "exit": "\u001b]7501;state=clear\u001b\\",
+    "finish": "\u001b]7501;state=done:app=codex\u001b\\",
+    "interrupt": "\u001b]7501;state=idle:app=codex\u001b\\",
+    "permission": "\u001b]7501;state=idle:app=codex\u001b\\\u001b]7501;state=working:app=codex\u001b\\\u001b]7501;state=blocked:app=codex:kind=permission\u001b\\",
+    "prompt": "\u001b]7501;state=working:app=codex\u001b\\",
+    "question": "\u001b]7501;state=working:app=codex\u001b\\\u001b]7501;state=blocked:app=codex:kind=question\u001b\\",
+    "reject": "\u001b]7501;state=working:app=codex\u001b\\\u001b]7501;state=idle:app=codex\u001b\\",
+    "start": "\u001b]7501;state=idle:app=codex\u001b\\\u001b]7501;state=working:app=codex\u001b\\\u001b]7501;state=idle:app=codex\u001b\\"
+  }
+}

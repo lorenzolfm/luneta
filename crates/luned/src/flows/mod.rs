@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{
     AgentStage, FLOW_NAME_DEFAULT, FLOWS_MAX, FlowControl, FlowEffect, FlowEntry, FlowEvent,
     FlowMode, FlowPhase, FlowRegistry, FlowRun, FlowSummary, SessionId, TerminalExit,
@@ -70,7 +70,7 @@ pub enum Command {
         dir: String,
         flow_name: Option<String>,
         mode: FlowMode,
-        harness: Harness,
+        harness: FlowHarness,
         entry: FlowEntry,
         answer: oneshot::Sender<Result<api::FlowSummary, String>>,
     },
@@ -187,7 +187,7 @@ pub fn start(
 fn pi_sessions_kept(registry: &FlowRegistry) -> Vec<PathBuf> {
     registry
         .iter()
-        .filter(|(_, run)| run.harness == Harness::Pi)
+        .filter(|(_, run)| run.harness == FlowHarness::Pi)
         .filter_map(|(_, run)| run.resume_session())
         .map(|session| PathBuf::from(session.as_str()))
         .collect()
@@ -325,7 +325,7 @@ enum StepPrompt {
 }
 
 impl StepPrompt {
-    fn texts(self, harness: Harness) -> (String, Option<String>) {
+    fn texts(self, harness: FlowHarness) -> (String, Option<String>) {
         match self {
             StepPrompt::Stage { dir, stage, pr_url } => {
                 ops::stage_prompts(&dir, harness, &stage, pr_url.as_ref())
@@ -461,7 +461,7 @@ impl Actor {
         worktree: WorktreeId,
         flow_name: Option<&str>,
         mode: FlowMode,
-        harness: Harness,
+        harness: FlowHarness,
         entry: FlowEntry,
         worker_tx: &SyncSender<WorkerDone>,
     ) -> Result<api::FlowSummary, String> {
@@ -1164,7 +1164,7 @@ impl Actor {
         &mut self,
         worktree: WorktreeId,
         view_name: String,
-        harness: Harness,
+        harness: FlowHarness,
         prompt: StepPrompt,
         timeout_secs: u64,
         worker_tx: &SyncSender<WorkerDone>,
@@ -1173,8 +1173,8 @@ impl Actor {
         self.steps_opened_count = self.steps_opened_count.wrapping_add(1);
         let stamp = store::step_stamp(std::process::id(), worktree, self.steps_opened_count);
         let pi_session = match harness {
-            Harness::Pi => self.store.pi_session_file(&stamp).map(Some),
-            Harness::ClaudeCode | Harness::Antigravity => Ok(None),
+            FlowHarness::Pi => self.store.pi_session_file(&stamp).map(Some),
+            FlowHarness::ClaudeCode | FlowHarness::Antigravity => Ok(None),
         };
         let (run_dir, pi_session) =
             match self.store.run_dir().and_then(|dir| Ok((dir, pi_session?))) {
@@ -1244,7 +1244,7 @@ impl Actor {
         &mut self,
         worktree: WorktreeId,
         view_name: String,
-        harness: Harness,
+        harness: FlowHarness,
         session_id: Option<&SessionId>,
         fallback_view: Option<ViewId>,
         stopped_view: Option<ViewId>,
@@ -1429,7 +1429,7 @@ pub fn summary_to_api(summary: &FlowSummary) -> api::FlowSummary {
         worktree: summary.worktree.get(),
         flow_name: summary.flow_name.clone(),
         mode: summary.mode.to_api().into(),
-        harness: summary.harness.to_api().into(),
+        harness: summary.harness.harness().to_api().into(),
         step_number: summary.step_number,
         step_total: summary.step_total,
         stage_label: summary.stage_label.clone(),
@@ -1554,7 +1554,7 @@ mod tests {
                     wt(1),
                     Some(&spec.name),
                     mode,
-                    Harness::ClaudeCode,
+                    FlowHarness::ClaudeCode,
                     FlowEntry::PullRequest,
                     &self.worker_tx,
                 )
@@ -1607,7 +1607,7 @@ mod tests {
             wt(1),
             Some(&spec.name),
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
             &h.worker_tx,
         );
@@ -1778,7 +1778,7 @@ mod tests {
                 wt(1),
                 Some(&spec.name),
                 FlowMode::Unattended,
-                Harness::Pi,
+                FlowHarness::Pi,
                 FlowEntry::PullRequest,
                 &h.worker_tx,
             )

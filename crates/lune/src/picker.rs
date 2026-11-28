@@ -14,7 +14,9 @@ use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
-use lune_domain::projects::{self, OwnedFolder, ProjectId, ProjectName, Used};
+use lune_domain::projects::{self, OwnedFolder, ProjectId, ProjectName, Used, WorktreeId};
+use lune_domain::rows::Unopened;
+use lune_protocol::said::Said;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
@@ -107,39 +109,61 @@ pub struct Shelved {
 pub struct Housed {
     pub project: ProjectRow,
     pub dir: projects::Dir,
-    pub worktrees: Vec<Worktree>,
-    pub unopened: Unopened,
+    pub holds: Holds,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unopened {
-    Folder,
-    Unlisted(String),
-    Listed(Vec<projects::Dir>),
+#[derive(Clone, Debug)]
+pub enum Holds {
+    Folder(Worktree),
+    Clone {
+        worktrees: Vec<Worktree>,
+        unopened: Unopened,
+    },
 }
 
-impl Unopened {
-    #[must_use]
-    pub fn refuses_new_worktree(&self, project: &ProjectRow) -> Option<String> {
-        match self {
-            Unopened::Folder => Some(projects::folder_has_one_worktree(project.listed().name())),
-            Unopened::Unlisted(_) | Unopened::Listed(_) => None,
+impl Housed {
+    fn place(&self, worktree: WorktreeId) -> WorktreePlace {
+        WorktreePlace {
+            project: self.project.clone(),
+            worktree,
         }
     }
 
-    #[must_use]
-    pub fn folders(&self) -> &[projects::Dir] {
-        match self {
-            Unopened::Listed(folders) => folders,
-            Unopened::Folder | Unopened::Unlisted(_) => &[],
+    fn worktrees(&self) -> &[Worktree] {
+        match &self.holds {
+            Holds::Folder(own) => std::slice::from_ref(own),
+            Holds::Clone { worktrees, .. } => worktrees,
+        }
+    }
+
+    fn unopened_folders(&self) -> &[projects::Dir] {
+        match &self.holds {
+            Holds::Clone {
+                unopened: Unopened::Listed(folders),
+                ..
+            } => folders,
+            Holds::Folder(_)
+            | Holds::Clone {
+                unopened: Unopened::Unlisted(_),
+                ..
+            } => &[],
+        }
+    }
+
+    fn refuses_new_worktree(&self) -> Option<String> {
+        match &self.holds {
+            Holds::Folder(_) => Some(projects::folder_has_one_worktree(
+                self.project.listed().name(),
+            )),
+            Holds::Clone { .. } => None,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Worktree {
-    pub place: WorktreePlace,
-    pub named: sidebar::Named<String>,
+    pub id: WorktreeId,
+    pub named: sidebar::Named<Said>,
     pub folder: projects::Dir,
     pub used: Option<Used>,
     pub terminals: Vec<TerminalKey>,
@@ -450,30 +474,56 @@ pub enum Goes {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Lone {
-    Folder(Directory),
     Clone,
     NoneOpen,
     Unlisted(String),
 }
 
 impl Lone {
-    fn of(housed: &Housed) -> Option<Lone> {
-        if !housed.worktrees.is_empty() {
-            return None;
-        }
-        match &housed.unopened {
-            Unopened::Folder => Some(Lone::Folder((&housed.dir).into())),
-            Unopened::Listed(folders) if folders.is_empty() => Some(Lone::Clone),
-            Unopened::Listed(_) => Some(Lone::NoneOpen),
-            Unopened::Unlisted(why) => Some(Lone::Unlisted(why.clone())),
+    fn of(unopened: &Unopened) -> Lone {
+        match unopened {
+            Unopened::Listed(folders) if folders.is_empty() => Lone::Clone,
+            Unopened::Listed(_) => Lone::NoneOpen,
+            Unopened::Unlisted(why) => Lone::Unlisted(why.clone()),
         }
     }
 
     fn tag(&self) -> &'static str {
         match self {
-            Lone::Folder(_) | Lone::Clone => "no worktree",
+            Lone::Clone => "no worktree",
             Lone::NoneOpen => "none open",
             Lone::Unlisted(_) => "not listed",
+        }
+    }
+}
+
+mod label {
+    #[derive(Clone, Debug)]
+    pub(super) struct Named {
+        text: String,
+        own_start: usize,
+    }
+
+    impl Named {
+        pub(super) fn whole(text: String) -> Self {
+            Self { text, own_start: 0 }
+        }
+
+        pub(super) fn placed(project: &str, own: &str) -> Self {
+            let mut text = String::with_capacity(project.len() + " › ".len() + own.len());
+            text.push_str(project);
+            text.push_str(" › ");
+            let own_start = text.len();
+            text.push_str(own);
+            Self { text, own_start }
+        }
+
+        pub(super) fn shown(&self) -> &str {
+            &self.text
+        }
+
+        pub(super) fn own(&self) -> &str {
+            &self.text[self.own_start..]
         }
     }
 }
@@ -481,71 +531,31 @@ impl Lone {
 #[derive(Clone, Debug)]
 struct Row {
     key: Key,
-    name: String,
-    lead: usize,
+    name: label::Named,
     hits: Vec<usize>,
     rules: Rules,
 }
 
 impl Row {
     fn plain(key: Key, name: String) -> Row {
-        Row {
-            key,
-            name,
-            lead: 0,
-            hits: Vec::new(),
-            rules: Rules::default(),
-        }
+        Row::named(key, label::Named::whole(name), Vec::new())
     }
 
-    fn named(key: Key, named: Named, hits: Vec<usize>) -> Row {
-        let Named { text: name, lead } = named;
+    fn named(key: Key, name: label::Named, hits: Vec<usize>) -> Row {
         Row {
             key,
             name,
-            lead,
             hits,
             rules: Rules::default(),
         }
     }
 
+    fn shown(&self) -> &str {
+        self.name.shown()
+    }
+
     fn own(&self) -> &str {
-        &self.name[self.lead..]
-    }
-}
-
-#[derive(Clone, Debug)]
-struct Named {
-    text: String,
-    lead: usize,
-}
-
-impl Named {
-    fn whole(text: String) -> Named {
-        Named { text, lead: 0 }
-    }
-
-    fn placed(project: &str, own: &str) -> Named {
-        let lead = format!("{project} › ");
-        Named {
-            lead: lead.len(),
-            text: lead + own,
-        }
-    }
-}
-
-struct Search<'a> {
-    finder: Finder<'a>,
-    term: String,
-}
-
-impl<'a> Search<'a> {
-    fn of(typed: &'a str, typos: Typos) -> Option<Search<'a>> {
-        let term = typed.to_lowercase();
-        (!typed.is_empty()).then(|| Search {
-            finder: Finder::new(typed, typos),
-            term,
-        })
+        self.name.own()
     }
 }
 
@@ -744,13 +754,7 @@ type Looked = (Machine, Listed, Option<TerminalKey>);
 
 type Located = (Machine, Directory);
 
-type Found = (Option<Used>, Named, Vec<String>, Key);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Naming {
-    Bare,
-    InProject,
-}
+type Found = (Option<Used>, label::Named, Vec<String>, Key);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fill {
@@ -940,10 +944,10 @@ impl Picker {
     }
 
     fn worktree(&self, on: &Machine, place: &WorktreePlace) -> Option<&Worktree> {
-        let worktrees = &self.housed(on, &place.project)?.worktrees;
+        let worktrees = self.housed(on, &place.project)?.worktrees();
         worktrees
             .iter()
-            .find(|worktree| worktree.place.worktree == place.worktree)
+            .find(|worktree| worktree.id == place.worktree)
     }
 
     fn row_worktree(&self, on: &Machine, place: &WorktreePlace) -> &Worktree {
@@ -1450,14 +1454,6 @@ impl Picker {
                 place: Place::Worktree(place.clone()),
             },
             Key::Project { on, project, lone } => match lone {
-                Lone::Folder(folder) => {
-                    let (on, project, folder) = (on.clone(), project.clone(), folder.clone());
-                    Picked::Add {
-                        on,
-                        project,
-                        folder,
-                    }
-                }
                 Lone::Clone => {
                     let (chain, on) = (Chain::branch(project.id()), on.clone());
                     let aimed = Aimed::Project(project.clone());
@@ -1597,7 +1593,7 @@ impl Picker {
             return None;
         }
         let housed = self.housed(target.machine(), &target.project()?)?;
-        housed.unopened.refuses_new_worktree(&housed.project)
+        housed.refuses_new_worktree()
     }
 
     fn run(&self, action: Action) -> Option<Run> {
@@ -1634,24 +1630,24 @@ impl Picker {
         }
     }
 
-    fn action_rows(&self, search: Option<&Search<'_>>) -> Vec<Row> {
+    fn action_rows(&self, finder: Option<&Finder>) -> Vec<Row> {
         if let Some(pasted) = self.pasted_rows() {
             return pasted;
         }
         let fitting = Action::ALL
             .into_iter()
             .filter_map(|it| Some((it, self.run(it)?)));
-        let worktrees = self.listed_worktrees(search.map(|it| &it.finder), Naming::InProject);
+        let worktrees = self.listed_worktrees(finder);
         let worktrees = worktrees
             .into_iter()
             .filter(|row| !matches!(row.key, Key::Machine { .. }));
-        let Some(search) = search else {
+        let Some(finder) = finder else {
             let row = |(action, run)| Row::plain(Key::Action(action, run), titled(action));
             let rows = fitting.map(row);
             return rows.chain(worktrees).collect();
         };
         let mut found: Vec<(Tier, Fit, Row)> = fitting
-            .filter_map(|(action, run)| found_action(search, action, run))
+            .filter_map(|(action, run)| found_action(finder, action, run))
             .collect();
         found.sort_by_key(|(tier, fit, _)| (*tier, Reverse(*fit)));
         let actions = found
@@ -1659,7 +1655,7 @@ impl Picker {
             .map(|(tier, _, row)| (tier, Kind::Action, row));
         let place = |row: Row| {
             (
-                tier_of(search, &row.name, Some(row.own())),
+                tier_of(finder, row.shown(), Some(row.own())),
                 Kind::Place,
                 row,
             )
@@ -1696,8 +1692,8 @@ impl Picker {
                     ViewKey::Browser(_) => "browser".to_owned(),
                 };
                 let housed = self.housed(on, &row.worktree.project);
-                let mut worktrees = housed.iter().flat_map(|housed| &housed.worktrees);
-                match worktrees.find(|worktree| worktree.place == row.worktree) {
+                let mut worktrees = housed.iter().flat_map(|housed| housed.worktrees());
+                match worktrees.find(|worktree| worktree.id == row.worktree.worktree) {
                     Some(worktree) => {
                         let named = in_project(project, worktree.named.name());
                         format!("{named} · {view}")
@@ -1733,8 +1729,7 @@ impl Picker {
             return Vec::new();
         };
         let named = housed
-            .unopened
-            .folders()
+            .unopened_folders()
             .iter()
             .filter(|folder| folder.last() == self.term);
         let found: Vec<Found> = named
@@ -1745,7 +1740,7 @@ impl Picker {
 
     fn new_key(&self) -> Option<Result<Key, String>> {
         let (on, housed) = self.here_project()?;
-        if let Some(why) = housed.unopened.refuses_new_worktree(&housed.project) {
+        if let Some(why) = housed.refuses_new_worktree() {
             return Some(Err(why));
         }
         let (on, project) = (on.clone(), housed.project.clone());
@@ -1874,25 +1869,25 @@ impl Picker {
     fn rebuild(&mut self, snap: bool) {
         let ruled = !self.listing.remotes.is_empty();
         let agents = Typos::found(|typos| {
-            let search = Search::of(&self.term, typos);
+            let finder = Finder::of(&self.term, typos);
             let mut agents = Vec::new();
             for (on, runs) in self.each() {
                 let rule = ruled.then(|| self.machine_name(&on));
-                let found = self.agent_rows(search.as_ref().map(|it| &it.finder), &on, runs);
+                let found = self.agent_rows(finder.as_ref(), &on, runs);
                 grouped(&mut agents, found, rule);
             }
             agents
         });
         let mut worktrees = Typos::found(|typos| {
-            let search = Search::of(&self.term, typos);
-            self.worktree_rows(search.as_ref().map(|it| &it.finder))
+            let finder = Finder::of(&self.term, typos);
+            self.worktree_rows(finder.as_ref())
         });
         if worktrees.is_empty() && self.scope.is_none() {
             worktrees = self.typed_rows();
         }
         let (projects, aimed) = self.project_rows();
         let mut actions =
-            Typos::found(|typos| self.action_rows(Search::of(&self.term, typos).as_ref()));
+            Typos::found(|typos| self.action_rows(Finder::of(&self.term, typos).as_ref()));
         if actions.is_empty() && !self.term.is_empty() {
             actions = self.typed_rows();
         }
@@ -1915,14 +1910,14 @@ impl Picker {
         self.follow();
     }
 
-    fn worktree_rows(&self, finder: Option<&Finder<'_>>) -> Vec<Row> {
+    fn worktree_rows(&self, finder: Option<&Finder>) -> Vec<Row> {
         if let Some(Scope { on, project, .. }) = &self.scope {
             return self.worktree_rows_scoped(finder, on, *project);
         }
-        self.listed_worktrees(finder, Naming::Bare)
+        self.listed_worktrees(finder)
     }
 
-    fn listed_worktrees(&self, finder: Option<&Finder<'_>>, naming: Naming) -> Vec<Row> {
+    fn listed_worktrees(&self, finder: Option<&Finder>) -> Vec<Row> {
         let tagged = self.tagged();
         let mut found = Vec::new();
         let mut machines = Vec::new();
@@ -1936,43 +1931,37 @@ impl Picker {
             }
             for housed in &shelved.projects {
                 let project = housed.project.listed().name().as_str();
-                if let Some(lone) = Lone::of(housed) {
-                    assert!(
-                        housed.worktrees.is_empty(),
-                        "{project} alone has no worktree open"
-                    );
-                    let unopened = housed.unopened.folders();
-                    match lone {
-                        Lone::NoneOpen => {
-                            assert!(!unopened.is_empty(), "{project} has worktrees, none open");
-                        }
-                        Lone::Folder(_) | Lone::Clone | Lone::Unlisted(_) => {
-                            assert!(unopened.is_empty(), "{project} alone lists no worktree");
-                        }
-                    }
+                if let Holds::Clone {
+                    worktrees,
+                    unopened,
+                } = &housed.holds
+                    && worktrees.is_empty()
+                {
                     let (on, row) = (on.clone(), housed.project.clone());
                     let key = Key::Project {
                         on,
                         project: row,
-                        lone,
+                        lone: Lone::of(unopened),
                     };
                     let dir = sidebar::short_cwd(housed.dir.as_str());
-                    found.push((None, Named::whole(project.to_owned()), vec![dir], key));
+                    found.push((
+                        None,
+                        label::Named::whole(project.to_owned()),
+                        vec![dir],
+                        key,
+                    ));
+                    continue;
                 }
-                for worktree in &housed.worktrees {
-                    let bare = worktree.named.name();
-                    let (name, mut also) = match naming {
-                        Naming::Bare => (
-                            Named::whole(bare.to_owned()),
-                            vec![in_project(project, bare)],
-                        ),
-                        Naming::InProject => (Named::placed(project, bare), Vec::new()),
+                for worktree in housed.worktrees() {
+                    let name = label::Named::placed(project, worktree.named.name());
+                    let folder = sidebar::short_cwd(worktree.folder.as_str());
+                    let also = match worktree.named.apart() {
+                        Some(branch) => vec![branch.as_str().to_owned(), folder],
+                        None => vec![folder],
                     };
-                    also.extend(worktree.named.apart().cloned());
-                    also.push(sidebar::short_cwd(worktree.folder.as_str()));
                     let key = Key::Worktree {
                         on: on.clone(),
-                        place: worktree.place.clone(),
+                        place: housed.place(worktree.id),
                     };
                     found.push((worktree.used, name, also, key));
                 }
@@ -1988,7 +1977,7 @@ impl Picker {
 
     fn worktree_rows_scoped(
         &self,
-        finder: Option<&Finder<'_>>,
+        finder: Option<&Finder>,
         on: &Machine,
         project: ProjectId,
     ) -> Vec<Row> {
@@ -2003,13 +1992,13 @@ impl Picker {
         matched(finder, candidates_of(&found))
     }
 
-    fn agent_rows(&self, finder: Option<&Finder<'_>>, on: &Machine, runs: &Runs) -> Vec<Row> {
+    fn agent_rows(&self, finder: Option<&Finder>, on: &Machine, runs: &Runs) -> Vec<Row> {
         let yours = self.here_view(on);
         let agents = runs
             .agents
             .iter()
             .filter(|seated| yours.is_none_or(|here| !seated.place.matches_view(here)));
-        let agents: Vec<(Named, Vec<Option<&str>>, Key)> = agents
+        let agents: Vec<(label::Named, Vec<Option<&str>>, Key)> = agents
             .map(|seated| {
                 let session = seated.place.listed().name().as_str();
                 let also = vec![Some(session), Some(seated.dir.as_str())];
@@ -2017,7 +2006,11 @@ impl Picker {
                     on: on.clone(),
                     place: seated.place.clone(),
                 };
-                (Named::whole(agent_name(&runs.agents, seated)), also, key)
+                (
+                    label::Named::whole(agent_name(&runs.agents, seated)),
+                    also,
+                    key,
+                )
             })
             .collect();
         matched(finder, agents.into_iter())
@@ -2032,14 +2025,14 @@ impl Picker {
             let per_machine = machines.iter().filter_map(|on| {
                 let taken = self.taken(on);
                 let projects = self.projects_on(on);
-                let mut kept: Vec<(&Housed, Option<(Used, &WorktreePlace)>)> = projects
+                let mut kept: Vec<(&Housed, Option<(Used, WorktreeId)>)> = projects
                     .iter()
                     .map(|housed| (housed, last_used(housed)))
                     .collect();
                 kept.sort_by_key(|(_, last)| Reverse(last.map(|(used, _)| used)));
                 let kept = kept.into_iter().map(|(housed, last)| {
                     let goes = match last {
-                        Some((_, place)) => Goes::Last(place.clone()),
+                        Some((_, id)) => Goes::Last(housed.place(id)),
                         None => Goes::Home(housed.project.clone()),
                     };
                     let name = housed.project.listed().name().to_string();
@@ -2327,7 +2320,8 @@ impl Picker {
             Key::Worktree { on, place } => {
                 let worktree = self.row_worktree(on, place);
                 let away = self.shelved(on).and_then(|shelved| shelved.away);
-                let spare = width.saturating_sub(fixed(0) + row.name.width().min(width / 3));
+                let usable = width.saturating_sub(fixed(0));
+                let spare = usable.saturating_sub(row.shown().width().min(usable / 2));
                 let style = if away.is_some() { dim } else { grey };
                 let branch = worktree.named.apart().into_iter();
                 let right = branch.map(|branch| Span::styled(sidebar::cut(branch, spare), style));
@@ -2372,7 +2366,7 @@ impl Picker {
                     .since
                     .map_or_default(|since| sidebar::age(since, now));
                 let mut right = Vec::new();
-                if width >= row.name.width() + seated.dir.width() + age.width() + 10 {
+                if width >= row.shown().width() + seated.dir.width() + age.width() + 10 {
                     right.push(Span::styled(
                         seated.dir.clone(),
                         Style::new().fg(moonlight::MUTE),
@@ -2414,7 +2408,7 @@ impl Picker {
         let right_width: usize = right.iter().map(|span| span.content.width()).sum();
         let lead_width = lead.as_ref().map_or(0, |lead| lead.content.width() + 1);
         let room = width.saturating_sub(fixed(lead_width) + right_width);
-        let (name, named) = sidebar::lit(&row.name, room, Keep::Start, &row.hits, name_style);
+        let (name, named) = sidebar::lit(row.shown(), room, Keep::Start, &row.hits, name_style);
         let mut spans = vec![Span::raw(" ")];
         if let Some(lead) = lead {
             spans.push(lead);
@@ -2465,10 +2459,16 @@ impl Picker {
             return "luned keeps that project no more".to_owned();
         };
         let name = housed.project.listed().name();
-        match &housed.unopened {
-            Unopened::Folder => projects::folder_has_one_worktree(name),
-            Unopened::Unlisted(why) => unlisted(name, why),
-            Unopened::Listed(_) => "every worktree is open".to_owned(),
+        match &housed.holds {
+            Holds::Folder(_) => projects::folder_has_one_worktree(name),
+            Holds::Clone {
+                unopened: Unopened::Unlisted(why),
+                ..
+            } => unlisted(name, why),
+            Holds::Clone {
+                unopened: Unopened::Listed(_),
+                ..
+            } => "every worktree is open".to_owned(),
         }
     }
 
@@ -2509,12 +2509,7 @@ impl Picker {
         let dim = Style::new().add_modifier(Modifier::DIM);
         let Some(row) = self.rows().selected() else {
             let mut lines = vec![Line::styled(" nothing highlighted", grey)];
-            let makes = |(_, housed): (_, &Housed)| {
-                housed
-                    .unopened
-                    .refuses_new_worktree(&housed.project)
-                    .is_none()
-            };
+            let makes = |(_, housed): (_, &Housed)| housed.refuses_new_worktree().is_none();
             let offers = self.list == List::Worktrees && self.scope.is_none();
             if offers && self.here_project().is_some_and(makes) {
                 lines.push(Line::default());
@@ -2530,17 +2525,17 @@ impl Picker {
         };
         let (title, right, caption, looked) = match &row.key {
             Key::Housed { on, dir, .. } => {
-                self.draw_contents(buffer, area, &row.name, on, &dir.into());
+                self.draw_contents(buffer, area, row.shown(), on, &dir.into());
                 return cadence;
             }
             Key::Repository { on, repository, .. } => {
-                self.draw_contents(buffer, area, &row.name, on, &repository.path().into());
+                self.draw_contents(buffer, area, row.shown(), on, &repository.path().into());
                 return cadence;
             }
             Key::Unopened {
                 on, folder: path, ..
             } => {
-                self.draw_contents(buffer, area, &row.name, on, path);
+                self.draw_contents(buffer, area, row.shown(), on, path);
                 return cadence;
             }
             Key::Folder { on, folder } => {
@@ -2552,7 +2547,7 @@ impl Picker {
                      is in, and goes to it. In a folder of a project already, it goes to that \
                      project",
                 );
-                framed(buffer, area, &row.name, "", said(caption, &words));
+                framed(buffer, area, row.shown(), "", said(caption, &words));
                 return cadence;
             }
             Key::New {
@@ -2565,7 +2560,7 @@ impl Picker {
                      and any other is made from the default branch",
                 );
                 let lines = said(vec![Span::styled(" new", grey)], &words);
-                framed(buffer, area, &row.name, "", lines);
+                framed(buffer, area, row.shown(), "", lines);
                 return cadence;
             }
             Key::Project { on, project, lone } => {
@@ -2574,7 +2569,6 @@ impl Picker {
                 caption.push(Span::styled(lone.tag(), grey));
                 let name = project.listed().name();
                 let words = match lone {
-                    Lone::Folder(folder) => format!("Enter starts a worktree in {folder}"),
                     Lone::Clone => format!(
                         "{name} is a clone with no worktree: Enter asks for a branch and makes \
                          its worktree, as n w does",
@@ -2585,7 +2579,7 @@ impl Picker {
                     ),
                     Lone::Unlisted(why) => unlisted(name, why),
                 };
-                framed(buffer, area, &row.name, "", said(caption, &words));
+                framed(buffer, area, row.shown(), "", said(caption, &words));
                 return cadence;
             }
             Key::Machine { on } => {
@@ -2593,12 +2587,12 @@ impl Picker {
                     Some(why) => format!("{why}, and heard of no project there before"),
                     None => format!("luned on {} keeps no project", self.machine_name(on)),
                 };
-                framed(buffer, area, &row.name, "", said(Vec::new(), &words));
+                framed(buffer, area, row.shown(), "", said(Vec::new(), &words));
                 return cadence;
             }
             Key::Worktree { on, place } => {
                 let worktree = self.row_worktree(on, place);
-                let title = in_project(place.project.listed().name(), worktree.named.name());
+                let title = row.shown().to_owned();
                 let count = worktree.terminals.len();
                 let right = if count == 1 {
                     "1 terminal".to_owned()
@@ -2647,7 +2641,12 @@ impl Picker {
                     ]);
                 }
                 let looked = (on.clone(), place.listed().clone(), Some(place.terminal()));
-                (row.name.clone(), String::new(), Line::from(caption), looked)
+                (
+                    row.shown().to_owned(),
+                    String::new(),
+                    Line::from(caption),
+                    looked,
+                )
             }
         };
         let peek = self.peeks.get(&looked);
@@ -2727,11 +2726,6 @@ impl Picker {
                     ..
                 } if self.is_shown(on, place) => Ok("you are in it".to_owned()),
                 Key::Worktree { on, .. } | Key::Housed { on, .. } => Ok(there("Go", on)),
-                Key::Project {
-                    on,
-                    lone: Lone::Folder(_),
-                    ..
-                } => Ok(there("Start a worktree", on)),
                 Key::Project {
                     on,
                     lone: Lone::Clone,
@@ -2847,13 +2841,13 @@ fn titled(action: Action) -> String {
         .map_or_default(|first| first.to_uppercase().chain(chars).collect())
 }
 
-fn tier(search: &Search<'_>, text: &str, own: Option<&str>) -> Option<(Tier, Fit, Vec<usize>)> {
-    let (fit, hits) = search.finder.find(text, &[])?;
-    Some((tier_of(search, text, own), fit, hits))
+fn tier(finder: &Finder, text: &str, own: Option<&str>) -> Option<(Tier, Fit, Vec<usize>)> {
+    let (fit, hits) = finder.find(text, &[])?;
+    Some((tier_of(finder, text, own), fit, hits))
 }
 
-fn tier_of(search: &Search<'_>, text: &str, own: Option<&str>) -> Tier {
-    let term = search.term.as_str();
+fn tier_of(finder: &Finder, text: &str, own: Option<&str>) -> Tier {
+    let term = finder.term();
     let lower = text.to_lowercase();
     let own = own.map(str::to_lowercase);
     let words = lower.match_indices([' ', '/', '-']).map(|(at, _)| at + 1);
@@ -2871,21 +2865,15 @@ fn tier_of(search: &Search<'_>, text: &str, own: Option<&str>) -> Tier {
     }
 }
 
-fn found_action(search: &Search<'_>, action: Action, run: Run) -> Option<(Tier, Fit, Row)> {
+fn found_action(finder: &Finder, action: Action, run: Run) -> Option<(Tier, Fit, Row)> {
     let Spec { keywords, .. } = action.spec();
     let title = titled(action);
     let key = Key::Action(action, run);
-    let row = |name, hits| Row {
-        key: key.clone(),
-        name,
-        lead: 0,
-        hits,
-        rules: Rules::default(),
-    };
-    let named = tier(search, &title, Some(title.trim_start_matches('/')));
+    let row = |name, hits| Row::named(key.clone(), label::Named::whole(name), hits);
+    let named = tier(finder, &title, Some(title.trim_start_matches('/')));
     let keyword = keywords
         .iter()
-        .filter_map(|it| Some((tier(search, it, None)?, *it)));
+        .filter_map(|it| Some((tier(finder, it, None)?, *it)));
     let keyword = keyword.min_by_key(|((tier, fit, _), _)| (*tier, Reverse(*fit)));
     match (named, keyword) {
         (Some((by_name, fit, hits)), Some(((by_keyword, ..), _))) if by_name <= by_keyword => {
@@ -2930,15 +2918,14 @@ fn grouped(into: &mut Vec<Row>, mut rows: Vec<Row>, rule: Option<String>) -> Opt
 
 fn unopened_of<'a>(on: &'a Machine, housed: &'a Housed) -> impl Iterator<Item = Found> {
     housed
-        .unopened
-        .folders()
+        .unopened_folders()
         .iter()
         .map(move |unopened| unopened_found(on, housed, unopened))
 }
 
 fn unopened_found(on: &Machine, housed: &Housed, unopened: &projects::Dir) -> Found {
     let project = housed.project.listed().name().as_str();
-    let name = Named::placed(project, unopened.last());
+    let name = label::Named::placed(project, unopened.last());
     let folder = sidebar::short_cwd(unopened.as_str());
     let (row, at) = (housed.project.clone(), unopened.into());
     let key = Key::Unopened {
@@ -2949,7 +2936,7 @@ fn unopened_found(on: &Machine, housed: &Housed, unopened: &projects::Dir) -> Fo
     (None, name, vec![UNOPENED.to_owned(), folder], key)
 }
 
-fn candidates_of(found: &[Found]) -> impl Iterator<Item = (Named, Vec<Option<&str>>, Key)> {
+fn candidates_of(found: &[Found]) -> impl Iterator<Item = (label::Named, Vec<Option<&str>>, Key)> {
     found.iter().map(|(_, name, also, key)| {
         (
             name.clone(),
@@ -2960,8 +2947,8 @@ fn candidates_of(found: &[Found]) -> impl Iterator<Item = (Named, Vec<Option<&st
 }
 
 fn matched<'a>(
-    finder: Option<&Finder<'_>>,
-    candidates: impl Iterator<Item = (Named, Vec<Option<&'a str>>, Key)>,
+    finder: Option<&Finder>,
+    candidates: impl Iterator<Item = (label::Named, Vec<Option<&'a str>>, Key)>,
 ) -> Vec<Row> {
     let Some(finder) = finder else {
         let row = |(named, _, key)| Row::named(key, named, Vec::new());
@@ -2969,7 +2956,7 @@ fn matched<'a>(
     };
     let mut found: Vec<(Fit, Row)> = Vec::new();
     for (named, also, key) in candidates {
-        if let Some((fit, hits)) = finder.find(&named.text, &also) {
+        if let Some((fit, hits)) = finder.find_own(named.shown(), Some(named.own()), &also) {
             found.push((fit, Row::named(key, named, hits)));
         }
     }
@@ -2977,11 +2964,11 @@ fn matched<'a>(
     found.into_iter().map(|(_, row)| row).collect()
 }
 
-fn last_used(housed: &Housed) -> Option<(Used, &WorktreePlace)> {
+fn last_used(housed: &Housed) -> Option<(Used, WorktreeId)> {
     let used = housed
-        .worktrees
+        .worktrees()
         .iter()
-        .filter_map(|it| Some((it.used?, &it.place)));
+        .filter_map(|it| Some((it.used?, it.id)));
     used.max_by_key(|(used, _)| *used)
 }
 
@@ -3023,13 +3010,7 @@ fn place_rows(
                 "a hit is in the path"
             );
             let exact = name == term || path.last() == term;
-            let row = Row {
-                key,
-                name,
-                lead: 0,
-                hits,
-                rules: Rules::default(),
-            };
+            let row = Row::named(key, label::Named::whole(name), hits);
             matched.push(Matched {
                 exact,
                 score,
@@ -3048,7 +3029,7 @@ fn place_line(row: &Row, path: &str, style: Style, width: usize) -> Line<'static
         "a row's hits are in its path"
     );
     let name = sidebar::cut(
-        &row.name,
+        row.shown(),
         width.saturating_sub(4 + path.width()).max(width / 3),
     );
     let room = width.saturating_sub(4 + name.width());
@@ -3344,23 +3325,25 @@ mod tests {
         ProjectRow::new(name, id)
     }
 
+    fn non_empty(text: &str) -> Said {
+        Said::new(text.to_owned()).unwrap()
+    }
+
+    fn worktree_id(project: u64, worktree: u64) -> WorktreeId {
+        WorktreeId::of(project * 10 + worktree).unwrap()
+    }
+
     fn place(project: &str, id: u64, worktree: u64) -> WorktreePlace {
-        let worktree = WorktreeId::of(id * 10 + worktree).unwrap();
         WorktreePlace {
             project: self::project(project, id),
-            worktree,
+            worktree: worktree_id(id, worktree),
         }
     }
 
-    fn worktree(
-        place: WorktreePlace,
-        name: &str,
-        used: Option<u64>,
-        terminals: &[u32],
-    ) -> Worktree {
+    fn worktree(id: WorktreeId, name: &str, used: Option<u64>, terminals: &[u32]) -> Worktree {
         Worktree {
-            place,
-            named: sidebar::Named::Unbranched(name.to_owned()),
+            id,
+            named: sidebar::Named::of(non_empty(name), None),
             folder: projects::Dir::parse(&format!("/home/you/{name}")).unwrap(),
             used: used.map(|at| Used::read(at * 1_000).unwrap()),
             terminals: terminals.iter().map(|id| terminal_key(*id)).collect(),
@@ -3368,18 +3351,42 @@ mod tests {
     }
 
     fn branched(worktree: &mut Worktree, branch: &str) {
-        let name = worktree.named.name().to_owned();
-        worktree.named = sidebar::Named::of(name, Some(branch.to_owned()));
+        let name = non_empty(worktree.named.name());
+        worktree.named = sidebar::Named::of(name, Some(non_empty(branch)));
+    }
+
+    fn worktrees_mut(housed: &mut Housed) -> &mut [Worktree] {
+        match &mut housed.holds {
+            Holds::Folder(own) => std::slice::from_mut(own),
+            Holds::Clone { worktrees, .. } => worktrees,
+        }
+    }
+
+    fn set_unopened(housed: &mut Housed, unopened: Unopened) {
+        let Holds::Clone { unopened: held, .. } = &mut housed.holds else {
+            panic!("only a clone holds unopened worktrees");
+        };
+        *held = unopened;
     }
 
     fn housed(name: &str, id: u64, worktrees: Vec<Worktree>) -> Housed {
         let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
-        let unopened = Unopened::Listed(Vec::new());
         Housed {
             project: project(name, id),
             dir,
-            worktrees,
-            unopened,
+            holds: Holds::Clone {
+                worktrees,
+                unopened: Unopened::Listed(Vec::new()),
+            },
+        }
+    }
+
+    fn housed_folder(name: &str, id: u64, own: Worktree) -> Housed {
+        let dir = projects::Dir::parse(&format!("/home/you/{name}")).unwrap();
+        Housed {
+            project: project(name, id),
+            dir,
+            holds: Holds::Folder(own),
         }
     }
 
@@ -3408,9 +3415,9 @@ mod tests {
             "lune",
             1,
             vec![
-                worktree(main_place(), "main", Some(30), &[1, 2]),
-                worktree(fix(), "fix", Some(50), &[5, 3]),
-                worktree(place("lune", 1, 3), "docs", None, &[]),
+                worktree(main_place().worktree, "main", Some(30), &[1, 2]),
+                worktree(fix().worktree, "fix", Some(50), &[5, 3]),
+                worktree(worktree_id(1, 3), "docs", None, &[]),
             ],
         )
     }
@@ -3419,7 +3426,11 @@ mod tests {
         let projects = vec![
             lune(),
             housed("notes", 2, Vec::new()),
-            housed("web", 3, vec![worktree(api(), "api", Some(40), &[4])]),
+            housed(
+                "web",
+                3,
+                vec![worktree(api().worktree, "api", Some(40), &[4])],
+            ),
         ];
         let at = ViewPlace::new(fix(), ViewKey::terminal(3));
         Listing {
@@ -3695,22 +3706,31 @@ mod tests {
     #[test]
     fn the_worktrees_go_by_their_last_use_and_an_empty_project_is_one_row() {
         let mut listing = works();
-        branched(&mut listing.shelves[0].projects[2].worktrees[0], "feat/api");
+        branched(
+            &mut worktrees_mut(&mut listing.shelves[0].projects[2])[0],
+            "feat/api",
+        );
         let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local, at_host());
         let on = Machine::Local;
         assert_eq!(picker.asks(), [Ask::Repositories { on, ask: 1 }]);
-        let shown = ["fix", "api", "main", "docs", "notes"];
+        let shown = [
+            "lune › fix",
+            "web › api",
+            "lune › main",
+            "lune › docs",
+            "notes",
+        ];
         assert_eq!(rows(&picker), shown);
         let (lines, _) = list(&picker);
         assert!(lines[0].ends_with("─ here"), "{lines:?}");
         let words: Vec<&str> = lines[1].split_whitespace().collect();
         assert_eq!(
             words,
-            ["api", "feat/api"],
-            "its name and its branch, and nothing else"
+            ["web", "›", "api", "feat/api"],
+            "its project, its name and its branch, and nothing else"
         );
         assert!(lines[4].ends_with("no worktree"), "{lines:?}");
-        assert_eq!(lit(&picker), "api");
+        assert_eq!(lit(&picker), "web › api");
         assert!(said(&picker).contains("<ENTER> Go"), "{}", said(&picker));
         assert_eq!(
             press(&mut picker, KeyCode::Enter),
@@ -3722,10 +3742,13 @@ mod tests {
         down_to(&mut picker, "notes");
 
         let mut later = works();
-        let shelf = &mut later.shelves[0].projects[0].worktrees;
+        let shelf = worktrees_mut(&mut later.shelves[0].projects[0]);
         shelf[0].used = Some(Used::read(60_000).unwrap());
         picker.listed(later);
-        assert_eq!(rows(&picker)[..3], ["main", "fix", "api"]);
+        assert_eq!(
+            rows(&picker)[..3],
+            ["lune › main", "lune › fix", "web › api"]
+        );
         assert_eq!(lit(&picker), "notes");
     }
 
@@ -3733,12 +3756,24 @@ mod tests {
     fn a_long_branch_is_cut_and_leaves_the_name_its_share_of_the_row() {
         let long = format!("feat/{}", "x".repeat(120));
         let mut listing = works();
-        branched(&mut listing.shelves[0].projects[2].worktrees[0], &long);
-        branched(&mut listing.shelves[0].projects[0].worktrees[1], &long);
+        branched(
+            &mut worktrees_mut(&mut listing.shelves[0].projects[2])[0],
+            &long,
+        );
+        branched(
+            &mut worktrees_mut(&mut listing.shelves[0].projects[0])[1],
+            &long,
+        );
+        let mut wide = worktree(worktree_id(4, 1), "fix", Some(35), &[6]);
+        branched(&mut wide, &long);
+        listing.shelves[0]
+            .projects
+            .push(housed("antigravity-cli", 4, vec![wide]));
         let picker = Picker::open(1, List::Worktrees, listing, Machine::Local, at_host());
         let (lines, _) = list(&picker);
         let width = usize::from(parts().0.width);
-        for (line, name) in lines.iter().zip(["fix", "api"]) {
+        let expected = ["lune › fix", "web › api", "antigravity-cli › fix"];
+        for (line, name) in lines.iter().zip(expected) {
             assert!(line.starts_with(&format!("{name} ")), "{lines:?}");
             assert!(line.ends_with('…'), "the branch is cut: {lines:?}");
             assert!(line.width() < width, "{line:?} fits its row");
@@ -3753,8 +3788,8 @@ mod tests {
     fn a_long_name_on_the_shown_row_is_cut_and_leaves_the_rule_and_the_branch_their_room() {
         let width = usize::from(parts().0.width);
         let mut listing = works();
-        let shown = &mut listing.shelves[0].projects[0].worktrees[1];
-        shown.named = sidebar::Named::of("f".repeat(width), Some("main".to_owned()));
+        let shown = &mut worktrees_mut(&mut listing.shelves[0].projects[0])[1];
+        shown.named = sidebar::Named::of(non_empty(&"f".repeat(width)), Some(non_empty("main")));
         let picker = Picker::open(1, List::Worktrees, listing, Machine::Local, at_host());
         let (lines, _) = list(&picker);
         assert!(lines[0].ends_with("f… ─ here main"), "{lines:?}");
@@ -3768,19 +3803,22 @@ mod tests {
     #[test]
     fn a_worktree_named_for_its_branch_says_the_name_once() {
         let mut listing = works();
-        branched(&mut listing.shelves[0].projects[2].worktrees[0], "api");
+        branched(
+            &mut worktrees_mut(&mut listing.shelves[0].projects[2])[0],
+            "api",
+        );
         let mut picker = Picker::open(1, List::Worktrees, listing, Machine::Local, at_host());
         let (lines, _) = list(&picker);
-        assert_eq!(lines[1], "api", "{lines:?}");
+        assert_eq!(lines[1], "web › api", "{lines:?}");
         typed(&mut picker, "api");
-        assert_eq!(rows(&picker), ["api"]);
+        assert_eq!(rows(&picker), ["web › api"]);
     }
 
     #[test]
-    fn a_project_with_no_worktree_starts_its_folder_asks_its_clone_a_branch_or_says_why_not() {
+    fn a_clone_with_no_worktree_asks_a_branch_or_says_why_not_and_a_folder_lists_its_own() {
         let alone = |unopened: Unopened| {
             let mut listing = works();
-            listing.shelves[0].projects[1].unopened = unopened;
+            set_unopened(&mut listing.shelves[0].projects[1], unopened);
             let mut picker = opened(listing);
             down_to(&mut picker, "notes");
             picker
@@ -3788,25 +3826,15 @@ mod tests {
         let preview = |picker: &Picker| text(&drawn(picker), parts().1).join(" ");
         let tagged = |picker: &Picker, tag: &str| list(picker).1.unwrap().ends_with(tag);
 
-        let mut folder = alone(Unopened::Folder);
-        assert!(tagged(&folder, "no worktree"), "{:?}", list(&folder));
+        let mut folder = works();
+        let own = worktree(worktree_id(2, 1), "notes", Some(5), &[6]);
+        folder.shelves[0].projects[1] = housed_folder("notes", 2, own);
+        let picker = opened(folder);
         assert!(
-            said(&folder).contains("<ENTER> Start a worktree"),
-            "{}",
-            said(&folder)
+            rows(&picker).contains(&"notes › notes".to_owned()),
+            "a folder project lists its single worktree: {:?}",
+            rows(&picker)
         );
-        let shown = preview(&folder);
-        assert!(
-            shown.contains("Enter starts a worktree in /home/you/notes"),
-            "{shown}"
-        );
-        let at = directory("/home/you/notes");
-        let added = Picked::Add {
-            on: Machine::Local,
-            project: project("notes", 2),
-            folder: at,
-        };
-        assert_eq!(press(&mut folder, KeyCode::Enter), added);
 
         let mut clone = alone(Unopened::Listed(Vec::new()));
         assert!(tagged(&clone, "no worktree"), "{:?}", list(&clone));
@@ -3876,15 +3904,27 @@ mod tests {
         let folder = |at: &str| projects::Dir::parse(at).unwrap();
         let projects = &mut listing.shelves[0].projects;
         let lune = |it: &str| folder(&format!("/home/you/lune/{it}"));
-        projects[0].unopened = Unopened::Listed(vec![lune("old"), lune("spike")]);
-        projects[2].unopened = Unopened::Listed(vec![folder("/home/you/web/legacy")]);
+        set_unopened(
+            &mut projects[0],
+            Unopened::Listed(vec![lune("old"), lune("spike")]),
+        );
+        set_unopened(
+            &mut projects[2],
+            Unopened::Listed(vec![folder("/home/you/web/legacy")]),
+        );
         listing
     }
 
     #[test]
     fn super_j_lists_the_open_worktrees_alone_and_a_project_with_none_open_once() {
         let mut picker = opened(with_unopened(works()));
-        let open = ["fix", "api", "main", "docs", "notes"];
+        let open = [
+            "lune › fix",
+            "web › api",
+            "lune › main",
+            "lune › docs",
+            "notes",
+        ];
         assert_eq!(
             rows(&picker),
             open,
@@ -3947,7 +3987,10 @@ mod tests {
     fn none_open() -> Listing {
         let mut listing = with_unopened(works());
         let jots = projects::Dir::parse("/home/you/notes/jots").unwrap();
-        listing.shelves[0].projects[1].unopened = Unopened::Listed(vec![jots]);
+        set_unopened(
+            &mut listing.shelves[0].projects[1],
+            Unopened::Listed(vec![jots]),
+        );
         listing
     }
 
@@ -3959,7 +4002,13 @@ mod tests {
         typed(&mut picker, "jo");
         assert_eq!(rows(&picker), ["notes › jots"]);
         assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
-        let open = ["fix", "api", "main", "docs", "notes"];
+        let open = [
+            "lune › fix",
+            "web › api",
+            "lune › main",
+            "lune › docs",
+            "notes",
+        ];
         assert_eq!(
             rows(&picker),
             open,
@@ -4005,7 +4054,13 @@ mod tests {
             "back in the palette, on notes"
         );
         assert_eq!(press(&mut picker, KeyCode::Tab), Picked::Nothing);
-        let open = ["fix", "api", "main", "docs", "notes"];
+        let open = [
+            "lune › fix",
+            "web › api",
+            "lune › main",
+            "lune › docs",
+            "notes",
+        ];
         assert_eq!(
             rows(&picker),
             open,
@@ -4040,34 +4095,43 @@ mod tests {
             "o w makes no worktree: {shown}"
         );
         let mut all_open = works();
-        let web = with_unopened(works()).shelves[0].projects[2]
-            .unopened
-            .clone();
-        all_open.shelves[0].projects[2].unopened = web;
+        set_unopened(
+            &mut all_open.shelves[0].projects[2],
+            Unopened::Listed(vec![projects::Dir::parse("/home/you/web/legacy").unwrap()]),
+        );
         let picker = Picker::opening(2, all_open, (Machine::Local, lune), at_host());
         assert_eq!(rows(&picker), ["every worktree is open"]);
-        let said_of = |number: u64, unopened: Unopened| {
-            let mut listing = works();
-            listing.shelves[0].projects[0].unopened = unopened;
-            let picker = Picker::opening(number, listing, (Machine::Local, lune), at_host());
-            rows(&picker)
-        };
-        let unlisted = Unopened::Unlisted("not listed yet".to_owned());
+        let mut unlisted = works();
+        set_unopened(
+            &mut unlisted.shelves[0].projects[0],
+            Unopened::Unlisted("not listed yet".to_owned()),
+        );
+        let picker = Picker::opening(3, unlisted, (Machine::Local, lune), at_host());
         let said = "lune's worktrees: not listed yet";
         assert_eq!(
-            said_of(3, unlisted),
+            rows(&picker),
             [said],
             "a clone not listed yet is not said all open"
         );
+        let mut folder = works();
+        folder.shelves[0].projects[0] = housed_folder(
+            "lune",
+            1,
+            worktree(fix().worktree, "fix", Some(50), &[5, 3]),
+        );
+        let picker = Picker::opening(4, folder, (Machine::Local, lune), at_host());
         let said = "lune is a folder, and its own is its one worktree";
-        assert_eq!(said_of(4, Unopened::Folder), [said]);
+        assert_eq!(rows(&picker), [said]);
     }
 
     #[test]
     fn o_w_lists_no_other_machine_even_one_that_keeps_no_project() {
         let mut listing = machines();
         let old = projects::Dir::parse("/home/you/lune/old").unwrap();
-        listing.shelves[0].projects[0].unopened = Unopened::Listed(vec![old]);
+        set_unopened(
+            &mut listing.shelves[0].projects[0],
+            Unopened::Listed(vec![old]),
+        );
         let lune = project("lune", 1).id();
         let picker = Picker::opening(1, listing, (Machine::Local, lune), at_host());
         assert_eq!(rows(&picker), ["lune › old"]);
@@ -4121,16 +4185,16 @@ mod tests {
         assert_eq!(tab, Some(Pick::Key(KeyEvent::from(KeyCode::Tab))));
         assert_eq!(clicks(&picker, "<↓↑>").1, None);
         let main = go(Machine::Local, main_place());
-        assert_eq!(picker.click(row("main")), main);
-        assert_eq!(picker.click(row("fix")), Picked::Close);
+        assert_eq!(picker.click(row("lune › main")), main);
+        assert_eq!(picker.click(row("lune › fix")), Picked::Close);
         typed(&mut picker, "api");
-        assert_eq!(picker.click(row("main")), Picked::Nothing);
+        assert_eq!(picker.click(row("lune › main")), Picked::Nothing);
         press(&mut picker, KeyCode::Backspace);
         press(&mut picker, KeyCode::Backspace);
         press(&mut picker, KeyCode::Backspace);
-        assert_eq!(picker.click(row("main")), main);
+        assert_eq!(picker.click(row("lune › main")), main);
         control(&mut picker, 'r');
-        assert_eq!(picker.click(row("api")), Picked::Nothing);
+        assert_eq!(picker.click(row("web › api")), Picked::Nothing);
         let rename = clicks(&picker, "<ENTER>").1;
         assert_eq!(rename, Some(Pick::Key(KeyEvent::from(KeyCode::Enter))));
     }
@@ -4138,7 +4202,7 @@ mod tests {
     #[test]
     fn no_row_is_a_spot_while_a_close_waits_or_asks() {
         let mut picker = opened(works());
-        down_to(&mut picker, "main");
+        down_to(&mut picker, "lune › main");
         assert!(matches!(
             press(&mut picker, KeyCode::Delete),
             Picked::Plan { .. }
@@ -4169,12 +4233,86 @@ mod tests {
 
     #[test]
     fn what_is_typed_narrows_the_list_and_enter_makes_the_worktree_of_a_branch_no_row_matches() {
+        let mut shared = works();
+        let api_main = worktree(worktree_id(4, 1), "main", Some(10), &[6]);
+        shared.shelves[0]
+            .projects
+            .push(housed("api", 4, vec![api_main]));
+        let mut picker = opened(shared);
+        typed(&mut picker, "main");
+        assert_eq!(rows(&picker), ["lune › main", "api › main"]);
+        retyped(&mut picker, "api");
+        assert_eq!(rows(&picker), ["web › api", "api › main"]);
+        assert_eq!(found(&picker)[0].1, "api");
+        assert_eq!(found(&picker)[1].1, "api");
+        let mut cased = works();
+        cased.shelves[0].projects.push(housed(
+            "Ops",
+            4,
+            vec![
+                worktree(worktree_id(4, 1), "Api-v2", Some(90), &[6]),
+                worktree(worktree_id(4, 2), "Api", Some(10), &[7]),
+            ],
+        ));
+        cased.shelves[0].projects.push(housed(
+            "Api",
+            5,
+            vec![worktree(worktree_id(5, 1), "main", Some(80), &[8])],
+        ));
+        let mut cased_picker = opened(cased);
+        typed(&mut cased_picker, "ops › api");
+        assert_eq!(rows(&cased_picker), ["Ops › Api", "Ops › Api-v2"]);
+        retyped(&mut cased_picker, "Api");
+        assert_eq!(
+            rows(&cased_picker),
+            ["Ops › Api", "Ops › Api-v2", "Api › main"]
+        );
+        assert!(Finder::of("", Typos::None).is_none());
+
+        let mut ranked = works();
+        let mut scratch = worktree(worktree_id(4, 1), "scratch", Some(10), &[6]);
+        branched(&mut scratch, "fix-old");
+        let mut renamed_api = worktree(worktree_id(4, 2), "Api", Some(20), &[7]);
+        renamed_api.folder = projects::Dir::parse("/home/you/ops/api").unwrap();
+        branched(&mut renamed_api, "api-v2");
+        let mut dot = worktree(worktree_id(4, 3), ".Github", Some(15), &[8]);
+        dot.folder = projects::Dir::parse("/home/you/ops/.github").unwrap();
+        branched(&mut dot, ".github-ci");
+        ranked.shelves[0].projects.push(housed(
+            "ops",
+            4,
+            vec![
+                worktree(worktree_id(4, 4), "fix-875", Some(50), &[9]),
+                scratch,
+                renamed_api,
+                dot,
+            ],
+        ));
+        let mut ranked_picker = opened(ranked);
+        typed(&mut ranked_picker, "fix-");
+        assert_eq!(rows(&ranked_picker), ["ops › fix-875", "ops › scratch"]);
+        assert_eq!(found(&ranked_picker)[0].1, "fix-");
+        assert_eq!(found(&ranked_picker)[1].1, "");
+        retyped(&mut ranked_picker, "api");
+        assert_eq!(rows(&ranked_picker), ["web › api", "ops › Api"]);
+        assert_eq!(found(&ranked_picker)[1].1, "Api");
+        retyped(&mut ranked_picker, "ap");
+        assert_eq!(rows(&ranked_picker), ["web › api", "ops › Api"]);
+        assert_eq!(found(&ranked_picker)[1].1, "Ap");
+        retyped(&mut ranked_picker, ".git");
+        assert_eq!(rows(&ranked_picker), ["ops › .Github"]);
+        assert_eq!(found(&ranked_picker)[0].1, ".Git");
+
         let mut picker = opened(works());
         typed(&mut picker, "api");
-        assert_eq!(rows(&picker), ["api"]);
+        assert_eq!(rows(&picker), ["web › api"]);
+        assert_eq!(found(&picker)[0].1, "api");
         retyped(&mut picker, "lune");
-        assert_eq!(rows(&picker), ["fix", "main", "docs"]);
-        assert_eq!(lit(&picker), "fix");
+        assert_eq!(rows(&picker), ["lune › fix", "lune › main", "lune › docs"]);
+        assert_eq!(lit(&picker), "lune › fix");
+        assert!(found(&picker)[0].1.starts_with("lune─"));
+        assert_eq!(found(&picker)[1].1, "lune");
+        assert_eq!(found(&picker)[2].1, "lune");
         retyped(&mut picker, "zzz");
         let (lines, lit) = list(&picker);
         let new = lines[0].starts_with("+ zzz ") && lines[0].ends_with(" new worktree");
@@ -4208,7 +4346,11 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);
 
         let mut folder = works();
-        folder.shelves[0].projects[0].unopened = Unopened::Folder;
+        folder.shelves[0].projects[0] = housed_folder(
+            "lune",
+            1,
+            worktree(fix().worktree, "fix", Some(50), &[5, 3]),
+        );
         let mut picker = opened(folder);
         typed(&mut picker, "zzz");
         assert_eq!(list(&picker).0, [r#"no match for "zzz""#]);
@@ -4254,7 +4396,7 @@ mod tests {
     #[test]
     fn del_on_a_worktree_plans_its_close_as_d_d_does() {
         let mut picker = opened(works());
-        assert_eq!(lit(&picker), "api");
+        assert_eq!(lit(&picker), "web › api");
         let session = api().project.listed().clone();
         let scope = close::Scope::Worktree(api().worktree);
         let planning = Picked::Plan {
@@ -4321,13 +4463,13 @@ mod tests {
             "{asked}"
         );
         assert_eq!(press(&mut picker, KeyCode::Esc), Picked::Nothing);
-        assert_eq!(lit(&picker), "api", "Esc goes back to the list");
+        assert_eq!(lit(&picker), "web › api", "Esc goes back to the list");
 
         press(&mut picker, KeyCode::Up);
         control(&mut picker, 'r');
         let mut renamed_fix = works();
-        let relisted = &mut renamed_fix.shelves[0].projects[0].worktrees[1];
-        relisted.named = sidebar::Named::Unbranched("fixed".to_owned());
+        let relisted = &mut worktrees_mut(&mut renamed_fix.shelves[0].projects[0])[1];
+        relisted.named = sidebar::Named::of(non_empty("fixed"), None);
         picker.listed(renamed_fix);
         typed(&mut picker, "patch");
         let input = drawn(&picker);
@@ -4384,7 +4526,7 @@ mod tests {
         let from_row = |to: &str| {
             let mut picker = opened(works());
             press(&mut picker, KeyCode::Up);
-            assert_eq!(lit(&picker), "fix");
+            assert_eq!(lit(&picker), "lune › fix");
             control(&mut picker, 'r');
             typed(&mut picker, to);
             (press(&mut picker, KeyCode::Enter), picker)
@@ -4430,11 +4572,11 @@ mod tests {
             vec![housed(
                 "old",
                 5,
-                vec![worktree(place("old", 5, 1), "stale", Some(10), &[7])],
+                vec![worktree(worktree_id(5, 1), "stale", Some(10), &[7])],
             )],
         );
         far.away = Some("unreachable");
-        let gateway = worktree(place("api", 4, 1), "gateway", Some(60), &[6]);
+        let gateway = worktree(worktree_id(4, 1), "gateway", Some(60), &[6]);
         let shelves = vec![
             shelved(Machine::Local, vec![lune()]),
             shelved(nixos(), vec![housed("api", 4, vec![gateway])]),
@@ -4456,14 +4598,24 @@ mod tests {
     #[test]
     fn every_machine_s_worktrees_are_listed_an_unreachable_one_s_greyed() {
         let mut listing = machines();
-        branched(&mut listing.shelves[2].projects[0].worktrees[0], "relics");
+        branched(
+            &mut worktrees_mut(&mut listing.shelves[2].projects[0])[0],
+            "relics",
+        );
         let mut picker = opened(listing);
-        let shown = ["gateway", "fix", "main", "stale", "docs", "mini"];
+        let shown = [
+            "api › gateway",
+            "lune › fix",
+            "lune › main",
+            "old › stale",
+            "lune › docs",
+            "mini",
+        ];
         assert_eq!(rows(&picker), shown);
         let (lines, _) = list(&picker);
         let stale: Vec<&str> = lines[3].split_whitespace().collect();
-        assert_eq!([lines[0].as_str()], ["gateway"], "no machine tag");
-        assert_eq!(stale, ["stale", "relics"], "no machine tag");
+        assert_eq!([lines[0].as_str()], ["api › gateway"], "no machine tag");
+        assert_eq!(stale, ["old", "›", "stale", "relics"], "no machine tag");
         assert!(lines[5].ends_with("no projects"), "{lines:?}");
         let buffer = drawn(&picker);
         let (results, _) = parts();
@@ -4476,10 +4628,11 @@ mod tests {
             let y = results.y + u16::try_from(y).unwrap();
             buffer[(results.x + 1, y)].modifier.contains(Modifier::DIM)
         };
-        assert!(dimmed("stale") && !dimmed("main"));
+        assert!(dimmed("old › stale"));
+        assert!(!dimmed("lune › main"));
         let at = shown
             .iter()
-            .position(|line| line.starts_with("stale"))
+            .position(|line| line.starts_with("old › stale"))
             .expect("a row");
         let last = buffer[(results.right() - 2, results.y + u16::try_from(at).unwrap())].clone();
         assert_eq!(last.symbol(), "s", "stale's branch ends its row");
@@ -4487,7 +4640,7 @@ mod tests {
             last.modifier.contains(Modifier::DIM),
             "and is dimmed with it"
         );
-        assert_eq!(lit(&picker), "gateway");
+        assert_eq!(lit(&picker), "api › gateway");
         assert!(
             said(&picker).contains("<ENTER> Go on nixos"),
             "{}",
@@ -4517,7 +4670,7 @@ mod tests {
         let gw = menu::Rename::Worktree(gateway.worktree, Some(Name::parse("gw").unwrap()));
         assert_eq!(press(&mut picker, KeyCode::Enter), renamed(nixos(), gw));
 
-        down_to(&mut picker, "stale");
+        down_to(&mut picker, "old › stale");
         let far = Machine::Remote("far".parse().unwrap());
         assert_eq!(
             press(&mut picker, KeyCode::Enter),
@@ -5360,7 +5513,10 @@ mod tests {
     #[test]
     fn the_palette_names_a_worktree_in_its_project_and_a_typed_project_starts_it() {
         let mut listing = works();
-        branched(&mut listing.shelves[0].projects[2].worktrees[0], "feat/api");
+        branched(
+            &mut worktrees_mut(&mut listing.shelves[0].projects[2])[0],
+            "feat/api",
+        );
         let mut picker = palette_on(listing, at_fix(Origin::Views));
         typed(&mut picker, "web");
         let (shown, _) = shown_actions(&picker);
@@ -5538,7 +5694,7 @@ mod tests {
     fn a_worktree_whose_name_the_query_starts_ranks_over_an_action_with_a_later_word_it_starts() {
         for name in ["launch", "launch › retry"] {
             let mut listing = works();
-            let launch = worktree(place("site", 4, 1), name, Some(10), &[5]);
+            let launch = worktree(worktree_id(4, 1), name, Some(10), &[5]);
             listing.shelves[0]
                 .projects
                 .push(housed("site", 4, vec![launch]));
@@ -5557,7 +5713,7 @@ mod tests {
     #[test]
     fn a_typed_phrase_ranks_the_action_it_starts_over_a_worktree_it_fits_loosely() {
         let mut listing = works();
-        let mapper = worktree(place("renew", 4, 1), "mapper", Some(10), &[5]);
+        let mapper = worktree(worktree_id(4, 1), "mapper", Some(10), &[5]);
         listing.shelves[0]
             .projects
             .push(housed("renew", 4, vec![mapper]));
@@ -5586,8 +5742,8 @@ mod tests {
             "the target is named over the input: {asked}"
         );
         let mut renamed = works();
-        let relisted = &mut renamed.shelves[0].projects[0].worktrees[1];
-        relisted.named = sidebar::Named::Unbranched("fixed".to_owned());
+        let relisted = &mut worktrees_mut(&mut renamed.shelves[0].projects[0])[1];
+        relisted.named = sidebar::Named::of(non_empty("fixed"), None);
         picker.listed(renamed);
         let asked = said(&picker);
         assert!(
@@ -5658,7 +5814,11 @@ mod tests {
         assert_eq!(press(&mut picker, KeyCode::Enter), unread);
 
         let mut listing = works();
-        listing.shelves[0].projects[0].unopened = Unopened::Folder;
+        listing.shelves[0].projects[0] = housed_folder(
+            "lune",
+            1,
+            worktree(fix().worktree, "fix", Some(50), &[5, 3]),
+        );
         let mut picker = palette_on(listing, at_fix(Origin::Views));
         typed(&mut picker, "new worktree");
         assert_eq!(press(&mut picker, KeyCode::Enter), Picked::Nothing);

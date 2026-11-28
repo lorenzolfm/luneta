@@ -33,7 +33,7 @@ const fn osc_7501(harness: Harness) -> Reading {
     }
 }
 
-const READINGS: [Reading; 6] = [
+const READINGS: [Reading; 7] = [
     osc_7501(Harness::ClaudeCode),
     Reading {
         reads: claude::READS,
@@ -49,6 +49,7 @@ const READINGS: [Reading; 6] = [
         reads: agy::READS,
         heard: heard_agy_hook,
     },
+    osc_7501(Harness::Codex),
 ];
 
 const fn reads_each_declared_rung_once(readings: &[Reading]) -> bool {
