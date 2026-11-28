@@ -3975,7 +3975,7 @@ impl SidebarState {
     ) -> Option<(&Known, &KnownWorktree)> {
         for known in shelf(&self.shelves, on) {
             if let Some(wt) = known
-                .worktrees
+                .worktrees()
                 .iter()
                 .find(|wt| wt.place.worktree == worktree)
             {
@@ -8241,7 +8241,7 @@ fn build_worktree_status(
         .and_then(|status| checkout(status, pulls.get(dir)));
     let branch = co
         .as_ref()
-        .filter(|checkout| checkout.branch.as_str() != worktree.name)
+        .filter(|checkout| checkout.branch != worktree.name)
         .map(|checkout| checkout.branch.as_str().to_owned());
     let git_status = co
         .as_ref()
@@ -8271,7 +8271,7 @@ fn build_worktree_status(
             }
         });
     statusbar::WorktreeInfo {
-        name: worktree.name.clone(),
+        name: worktree.name.as_str().to_owned(),
         branch,
         git_status,
         changed,
