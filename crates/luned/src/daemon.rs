@@ -41,19 +41,19 @@ use crate::api::list_repositories_response::Repository;
 use crate::api::list_skills_response::Skill;
 use crate::api::make_worktree_response::Landed;
 use crate::api::{
-    self, AnswerRequest, AskRequest, AskResponse, ChangeProjectsRequest, ChangeProjectsResponse,
-    FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse, IssueRepositoriesRequest,
-    IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse, KeepImageRequest,
-    KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse,
-    ListContentsRequest, ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse,
-    ListResumeRequest, ListResumeResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
-    ListWorkResponse, MakeWorktreeRequest, MakeWorktreeResponse, PasteRequest, PasteResponse,
-    PruneRequest, PruneResponse, PrunesRequest, PrunesResponse, ReadDiffRequest, ReadDiffResponse,
-    RebaseRequest, RebaseResponse, ReloadResumeRequest, ReloadResumeResponse, SayRequest,
-    ShowRequest, ShowResponse, TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest,
-    WaitingResponse,
+    self, AnswerRequest, AskRequest, AskResponse, AskReviewRequest, ChangeProjectsRequest,
+    ChangeProjectsResponse, FileIssueRequest, FileIssueResponse, FramesRequest, InfoResponse,
+    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepChecksResponse,
+    KeepImageRequest, KeepImageResponse, KeepPrintedRequest, KeepPrintedResponse,
+    ListAgentsResponse, ListContentsRequest, ListContentsResponse, ListRepositoriesRequest,
+    ListRepositoriesResponse, ListResumeRequest, ListResumeResponse, ListSkillsRequest,
+    ListSkillsResponse, ListWorkRequest, ListWorkResponse, MakeWorktreeRequest,
+    MakeWorktreeResponse, PasteRequest, PasteResponse, PruneRequest, PruneResponse, PrunesRequest,
+    PrunesResponse, ReadDiffRequest, ReadDiffResponse, RebaseRequest, RebaseResponse,
+    ReloadResumeRequest, ReloadResumeResponse, SayRequest, ShowRequest, ShowResponse,
+    TranscriptEndsRequest, TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
-use crate::asks::{Asked, Step};
+use crate::asks::{AskMode, Asked, ReviewAsk, SessionModes, Step};
 use crate::checks::{Failing, Log};
 use crate::core::{self, AllSnapshot, Command, LocalSnapshot, Wakes, WatchDecision};
 use crate::directory::Directory;
@@ -193,7 +193,8 @@ pub async fn serve(
     detached: bool,
 ) -> io::Result<()> {
     let (listener, bound) = claim.bind()?;
-    let devices_file = if projects.is_ok() {
+    let projects_kept = projects.is_ok();
+    let devices_file = if projects_kept {
         let devices_file = tailnet::in_own_home()
             .and_then(|()| state::path(devices::FILE).map_err(|unset| unset.to_string()));
         if let Err(why) = &devices_file {
@@ -203,6 +204,7 @@ pub async fn serve(
     } else {
         None
     };
+    let ask_sessions = Arc::new(SessionModes::open(projects_kept));
     let started = SystemTime::now();
     let (wake_git, git_woken) = mpsc::sync_channel(1);
     let (wake_github, github_woken) = mpsc::sync_channel(1);
@@ -246,7 +248,7 @@ pub async fn serve(
         owns,
         SWEEP,
     )?;
-    git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
+    let git_refresher = git::follow(core.clone(), wake_git, git_woken, GIT_STATUS_SWEEP)?;
     fetches::follow(core.clone(), FETCH_SWEEP)?;
     let rests = github::Rests {
         pending: PENDING_CHECKS_SWEEP,
@@ -257,12 +259,15 @@ pub async fn serve(
     let folder = claim.folder.clone();
     let standing = watchers.standing.subscribe();
     remote::follow(core.clone(), standing, SWEEP, folder, Arc::clone(&bridges))?;
-    if let Some(claude) = &claude_folder {
-        let projects = claude.join("projects");
+    let transcript_folders = transcripts::Folders {
+        claude: claude_folder.clone(),
+        agy: agy_folder.clone(),
+    };
+    if transcript_folders.any() {
         topics::follow(
             core.clone(),
             watchers.shown.subscribe(),
-            projects,
+            transcript_folders,
             started,
             SWEEP,
         )?;
@@ -283,6 +288,8 @@ pub async fn serve(
         bridges,
         layouts,
         listings,
+        git_refresher,
+        ask_sessions,
     });
     let (begun, beginning) = oneshot::channel();
     let (closing, closed) = tokio::sync::watch::channel(false);
@@ -630,6 +637,8 @@ struct Host {
     bridges: Arc<Bridges>,
     layouts: SyncSender<layouts::Command>,
     listings: Arc<work::Listings>,
+    git_refresher: git::Refresher,
+    ask_sessions: Arc<SessionModes>,
 }
 
 #[tonic::async_trait]
@@ -918,7 +927,7 @@ impl Daemon for Host {
             claude: self.claude_folder.clone(),
             agy: self.agy_folder.clone(),
         };
-        if folders.claude.is_none() && folders.agy.is_none() {
+        if !folders.any() {
             return Ok(Response::new(TranscriptEndsResponse::default()));
         }
         let read = task::spawn_blocking(move || reading.ends(&folders)).await;
@@ -941,7 +950,39 @@ impl Daemon for Host {
             let steps = daemon.ask(asked.asked(None)).await?.into_inner();
             return Ok(Response::new(Box::pin(steps)));
         }
-        let steps = talked(move |wanted, hear| asked.talk(wanted, hear));
+        let mode = asked.mode();
+        if let Some(session) = asked.resumed() {
+            self.ask_sessions
+                .check_resume(session, mode)
+                .map_err(Status::failed_precondition)?;
+        }
+        let sessions = Arc::clone(&self.ask_sessions);
+        let steps = talked(sessions, mode, move |wanted, hear| asked.talk(wanted, hear));
+        Ok(Response::new(Box::pin(steps)))
+    }
+
+    type AskReviewStream = Pin<Box<dyn Stream<Item = Result<AskResponse, Status>> + Send>>;
+
+    async fn ask_review(
+        &self,
+        request: Request<AskReviewRequest>,
+    ) -> Result<Response<Self::AskReviewStream>, Status> {
+        let (on, asked) =
+            ReviewAsk::of_api(request.into_inner()).map_err(Status::invalid_argument)?;
+        if let Some(mut daemon) = self.bridged(on).await? {
+            let steps = daemon.ask_review(asked.to_api(None)).await?.into_inner();
+            return Ok(Response::new(Box::pin(steps)));
+        }
+        if let Some(session) = asked.resumed() {
+            self.ask_sessions
+                .check_resume(session, AskMode::Review)
+                .map_err(Status::failed_precondition)?;
+        }
+        let sessions = Arc::clone(&self.ask_sessions);
+        let asked = Asked::from(asked);
+        let steps = talked(sessions, AskMode::Review, move |wanted, hear| {
+            asked.talk(wanted, hear)
+        });
         Ok(Response::new(Box::pin(steps)))
     }
 
@@ -1037,15 +1078,56 @@ impl Daemon for Host {
         let branch = branch
             .map(|branch| Said::new(branch).ok_or_else(unnamed))
             .transpose()?;
-        if let Some(mut daemon) = self.bridged(on).await? {
+        if let Some((destination, bridging)) = self.bridge(on).await? {
+            let mut daemon = bridging.daemon;
             let asked = rebases::asked(None, &dir, branch.as_ref());
             let answer = daemon.rebase(asked).await?.into_inner();
-            return Ok(Response::new(Box::pin(answer)));
+            let synced = sync_bridged_rebase(
+                Arc::clone(&self.bridges),
+                Arc::clone(&self.watchers),
+                destination,
+                answer,
+                git::REFRESH_WAIT_MAX,
+            );
+            return Ok(Response::new(Box::pin(synced)));
         }
+        let git_refresher = self.git_refresher.clone();
         let answer = late(move || {
-            let rebased = rebases::rebase(&dir, branch.as_ref());
-            let rebased = rebased.map_err(rebases::Unrebased::status)?;
-            Ok(rebased.to_api())
+            let attempt = rebases::rebase_at(&dir, branch.as_ref());
+            let refresh_dir = attempt.top.as_ref().unwrap_or(&dir);
+            let refresh = match git_refresher.refresh(refresh_dir) {
+                git::RefreshOutcome::Refreshed(version) => {
+                    rebases::StatusRefresh::Refreshed(version)
+                }
+                git::RefreshOutcome::Untracked => rebases::StatusRefresh::Untracked,
+                git::RefreshOutcome::Failed => {
+                    log::say(&format!(
+                        "git refresh of {refresh_dir} failed, leaving it to the next sweep"
+                    ));
+                    rebases::StatusRefresh::Stale
+                }
+                git::RefreshOutcome::Full => {
+                    log::say(&format!(
+                        "git refresh queue is full, leaving {refresh_dir} to the next sweep"
+                    ));
+                    rebases::StatusRefresh::Stale
+                }
+                git::RefreshOutcome::TimedOut => {
+                    log::say(&format!(
+                        "git refresh of {refresh_dir} did not finish within {:?}",
+                        git::REFRESH_WAIT_MAX
+                    ));
+                    rebases::StatusRefresh::Stale
+                }
+                git::RefreshOutcome::Disconnected => {
+                    log::say(&format!(
+                        "git watcher ended before refreshing {refresh_dir}"
+                    ));
+                    rebases::StatusRefresh::Stale
+                }
+            };
+            let rebased = attempt.outcome.map_err(rebases::Unrebased::status)?;
+            Ok(rebased.to_api_with(refresh))
         });
         Ok(Response::new(Box::pin(answer)))
     }
@@ -1508,6 +1590,122 @@ fn ended_by(
     Box::pin(answer.chain(refusal))
 }
 
+type RebaseWait = Pin<Box<dyn Future<Output = RebaseResponse> + Send>>;
+
+struct SyncedRebase<S> {
+    bridges: Arc<Bridges>,
+    watchers: Arc<Watchers>,
+    destination: Destination,
+    answer: Option<S>,
+    wait: Duration,
+    waiting: Option<RebaseWait>,
+}
+
+impl<S> Stream for SyncedRebase<S>
+where
+    S: Stream<Item = Result<RebaseResponse, Status>> + Unpin,
+{
+    type Item = Result<RebaseResponse, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(waiting) = self.waiting.as_mut() {
+            return match waiting.as_mut().poll(context) {
+                Poll::Ready(response) => {
+                    self.waiting = None;
+                    Poll::Ready(Some(Ok(response)))
+                }
+                Poll::Pending => Poll::Pending,
+            };
+        }
+        let Some(answer) = self.answer.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match Pin::new(answer).poll_next(context) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => {
+                self.answer = None;
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(status))) => {
+                self.answer = None;
+                Poll::Ready(Some(Err(status)))
+            }
+            Poll::Ready(Some(Ok(response))) => {
+                let Some(api::rebase_response::StatusRefresh::RefreshedAt(raw)) =
+                    response.status_refresh
+                else {
+                    return Poll::Ready(Some(Ok(response)));
+                };
+                match LocalVersion::of_api(raw) {
+                    Ok(target) => {
+                        let mut waiting = Box::pin(wait_bridged_rebase(
+                            Arc::clone(&self.bridges),
+                            Arc::clone(&self.watchers),
+                            self.destination.clone(),
+                            target,
+                            self.wait,
+                            response,
+                        ));
+                        match waiting.as_mut().poll(context) {
+                            Poll::Ready(response) => Poll::Ready(Some(Ok(response))),
+                            Poll::Pending => {
+                                self.waiting = Some(waiting);
+                                Poll::Pending
+                            }
+                        }
+                    }
+                    Err(why) => {
+                        self.answer = None;
+                        Poll::Ready(Some(Err(Status::internal(format!(
+                            "invalid rebase refresh version: {why}"
+                        )))))
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn wait_bridged_rebase(
+    bridges: Arc<Bridges>,
+    watchers: Arc<Watchers>,
+    destination: Destination,
+    target: LocalVersion,
+    wait: Duration,
+    mut response: RebaseResponse,
+) -> RebaseResponse {
+    assert!(!wait.is_zero());
+    let _waits = watchers.waits(Waiter::Client(ClientWaiter::Client));
+    if !bridges.wait_synced(&destination, target, wait).await {
+        log::say(&format!(
+            "{destination}: local remote cache did not reach {target} within {wait:?}"
+        ));
+        response.status_refresh = Some(api::rebase_response::StatusRefresh::Stale(()));
+    }
+    response
+}
+
+fn sync_bridged_rebase<S>(
+    bridges: Arc<Bridges>,
+    watchers: Arc<Watchers>,
+    destination: Destination,
+    answer: S,
+    wait: Duration,
+) -> SyncedRebase<S>
+where
+    S: Stream<Item = Result<RebaseResponse, Status>> + Unpin,
+{
+    assert!(!wait.is_zero());
+    SyncedRebase {
+        bridges,
+        watchers,
+        destination,
+        answer: Some(answer),
+        wait,
+        waiting: None,
+    }
+}
+
 fn late<T, J>(job: J) -> ReceiverStream<Result<T, Status>>
 where
     T: Send + 'static,
@@ -1544,7 +1742,11 @@ fn unready(why: Unready) -> Status {
     }
 }
 
-fn talked<T>(talk: T) -> ReceiverStream<Result<AskResponse, Status>>
+fn talked<T>(
+    sessions: Arc<SessionModes>,
+    mode: AskMode,
+    talk: T,
+) -> ReceiverStream<Result<AskResponse, Status>>
 where
     T: FnOnce(&program::Wanted, &dyn Fn(Step)) -> Option<Result<(), String>> + Send + 'static,
 {
@@ -1569,6 +1771,9 @@ where
     let failed = heard.clone();
     let talking = task::spawn_blocking(move || {
         let hear = |step: Step| {
+            if let Step::Session(session) = &step {
+                sessions.record(session.clone(), mode);
+            }
             let _ = heard.blocking_send(Ok(step.answer()));
         };
         if let Some(Err(why)) = talk(&wanted, &hear) {
@@ -1956,14 +2161,16 @@ mod tests {
     use tokio_stream::StreamExt as _;
     use tonic::{Code, Request};
 
-    use super::{Alone, ClientWaiter, Host, UNTALKED, Waiter, Watchers, talked};
+    use super::{
+        Alone, ClientWaiter, Host, UNTALKED, Waiter, Watchers, sync_bridged_rebase, talked,
+    };
     use crate::api::daemon_server::Daemon as _;
     use crate::api::watch_local_response::Answer as LocalAnswer;
     use crate::api::watch_response::Answer;
     use crate::api::{
         self, LocalVersion, Version, WatchChangesRequest, WatchLocalChangesRequest, WatchRequest,
     };
-    use crate::asks::Step;
+    use crate::asks::{AskMode, SessionModes, Step};
     use crate::core::{self, Wakes};
     use crate::remote::Standing;
 
@@ -2064,10 +2271,14 @@ mod tests {
             .build()
             .unwrap();
         let ended: Vec<_> = runtime.block_on(async {
-            let steps = talked(|_, hear| {
-                hear(Step::Said("Looking.".to_owned()));
-                panic!("the runner of the turn fails");
-            });
+            let steps = talked(
+                Arc::new(SessionModes::in_memory()),
+                AskMode::General,
+                |_, hear| {
+                    hear(Step::Said("Looking.".to_owned()));
+                    panic!("the runner of the turn fails");
+                },
+            );
             steps.collect().await
         });
         let [Ok(heard), Err(failed)] = ended.as_slice() else {
@@ -2084,6 +2295,7 @@ mod tests {
     fn a_watch_timeout_answers_unchanged_only_after_the_core_parked_it() {
         let host_with = |core| {
             let (layouts, _laid) = mpsc::sync_channel(1);
+            let git_refresher = crate::git::Refresher::disconnected();
             Host {
                 started: SystemTime::now(),
                 claude_folder: None,
@@ -2093,6 +2305,8 @@ mod tests {
                 bridges: Arc::default(),
                 layouts,
                 listings: Arc::default(),
+                git_refresher,
+                ask_sessions: Arc::new(SessionModes::in_memory()),
             }
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2225,6 +2439,158 @@ mod tests {
                 Some(version.to_api())
             );
             assert_eq!(legacy_stalled.unwrap_err().code(), Code::DeadlineExceeded);
+        });
+    }
+
+    #[test]
+    fn bridged_rebase_stream_cancels_upstream_on_drop_and_syncs_status_refresh() {
+        use std::num::NonZeroU32;
+        use std::pin::Pin;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+
+        use lune_protocol::watch::LocalVersion as ProtocolLocalVersion;
+        use tokio_stream::Stream as _;
+        use tokio_stream::wrappers::ReceiverStream;
+
+        use crate::api::RebaseResponse;
+        use crate::api::rebase_response::{Came as Told, StatusRefresh as RefreshTold};
+        use crate::remote::{Bridges, Destination, TestBridge};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let far: Destination = "far".parse().unwrap();
+            let bridges = Arc::new(Bridges::default());
+            let watchers = Arc::new(Watchers::default());
+            let target = ProtocolLocalVersion::new(NonZeroU32::new(7).unwrap(), 3);
+            let response_with = |refresh| RebaseResponse {
+                branch: "fix".to_owned(),
+                onto: "origin/main".to_owned(),
+                came: Some(Told::Already(())),
+                status_refresh: Some(refresh),
+            };
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            let synced = sync_bridged_rebase(
+                Arc::clone(&bridges),
+                Arc::clone(&watchers),
+                far.clone(),
+                ReceiverStream::new(rx),
+                Duration::from_secs(5),
+            );
+            assert!(!tx.is_closed());
+            drop(synced);
+            assert!(
+                tx.is_closed(),
+                "dropping bridged rebase stream drops the upstream stream immediately"
+            );
+
+            let bridge = TestBridge::new(Arc::clone(&bridges), far.clone());
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.send(Ok(response_with(RefreshTold::RefreshedAt(target.to_api()))))
+                .await
+                .unwrap();
+            let mut synced = sync_bridged_rebase(
+                Arc::clone(&bridges),
+                Arc::clone(&watchers),
+                far.clone(),
+                ReceiverStream::new(rx),
+                Duration::from_secs(5),
+            );
+            let first =
+                std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut synced).poll_next(cx))).await;
+            assert!(first.is_pending());
+            assert_eq!(*watchers.standing.borrow(), Standing::Kept);
+            assert_eq!(watchers.clients.waiting.load(Ordering::Relaxed), 1);
+            assert!(!tx.is_closed());
+            drop(synced);
+            assert!(
+                tx.is_closed(),
+                "dropping bridged rebase while waiting for cache drops the upstream stream"
+            );
+            assert_eq!(
+                watchers.clients.waiting.load(Ordering::Relaxed),
+                0,
+                "dropping bridged rebase releases the client watcher guard"
+            );
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.send(Ok(response_with(RefreshTold::RefreshedAt(LocalVersion {
+                pid: 0,
+                seq: 1,
+            }))))
+            .await
+            .unwrap();
+            let mut synced = sync_bridged_rebase(
+                Arc::clone(&bridges),
+                Arc::clone(&watchers),
+                far.clone(),
+                ReceiverStream::new(rx),
+                Duration::from_secs(5),
+            );
+            let err = synced.next().await.unwrap().unwrap_err();
+            assert_eq!(err.code(), Code::Internal);
+            assert!(
+                err.message().starts_with("invalid rebase refresh version:"),
+                "{}",
+                err.message()
+            );
+            assert!(
+                !err.message().contains("far:"),
+                "bridged status error does not duplicate the destination prefix: {}",
+                err.message()
+            );
+            assert!(tx.is_closed());
+            assert!(synced.next().await.is_none());
+
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.send(Ok(response_with(RefreshTold::RefreshedAt(target.to_api()))))
+                .await
+                .unwrap();
+            let mut synced = sync_bridged_rebase(
+                Arc::clone(&bridges),
+                Arc::clone(&watchers),
+                far.clone(),
+                ReceiverStream::new(rx),
+                Duration::from_secs(5),
+            );
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut synced).poll_next(cx))).await;
+            assert!(pending.is_pending());
+            assert_eq!(watchers.clients.waiting.load(Ordering::Relaxed), 1);
+            bridge.synced(Some(target));
+            let delivered = synced.next().await.unwrap().unwrap();
+            assert_eq!(
+                delivered.status_refresh,
+                Some(RefreshTold::RefreshedAt(target.to_api()))
+            );
+            assert_eq!(watchers.clients.waiting.load(Ordering::Relaxed), 0);
+            drop(tx);
+            assert!(synced.next().await.is_none());
+
+            let later = ProtocolLocalVersion::new(NonZeroU32::new(7).unwrap(), 4);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.send(Ok(response_with(RefreshTold::RefreshedAt(later.to_api()))))
+                .await
+                .unwrap();
+            let mut synced = sync_bridged_rebase(
+                Arc::clone(&bridges),
+                Arc::clone(&watchers),
+                far,
+                ReceiverStream::new(rx),
+                Duration::from_secs(5),
+            );
+            let pending =
+                std::future::poll_fn(|cx| Poll::Ready(Pin::new(&mut synced).poll_next(cx))).await;
+            assert!(pending.is_pending());
+            assert_eq!(watchers.clients.waiting.load(Ordering::Relaxed), 1);
+            drop(bridge);
+            let stale = synced.next().await.unwrap().unwrap();
+            assert_eq!(stale.status_refresh, Some(RefreshTold::Stale(())));
+            assert_eq!(watchers.clients.waiting.load(Ordering::Relaxed), 0);
         });
     }
 }

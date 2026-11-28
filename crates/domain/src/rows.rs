@@ -154,23 +154,6 @@ impl Terminal {
             Found::Lost | Found::Looking => None,
         }
     }
-
-    fn title(&self) -> Option<String> {
-        match &self.found {
-            Found::Running {
-                titled, command, ..
-            } => titled
-                .as_ref()
-                .and_then(|titled| titled.topic.as_ref())
-                .or(command.as_ref())
-                .map(|said| said.as_str().to_owned()),
-            Found::Ended { titled, .. } => titled
-                .as_ref()
-                .and_then(|titled| titled.topic.as_ref())
-                .map(|s| s.as_str().to_owned()),
-            Found::Unlisted(_) | Found::Lost | Found::Looking => None,
-        }
-    }
 }
 
 impl Worktree {
@@ -185,13 +168,6 @@ impl Worktree {
     #[must_use]
     pub fn view(&self, view: ViewId) -> Option<&View> {
         self.views.iter().find(|it| it.id() == view)
-    }
-
-    #[must_use]
-    pub fn titles(&self) -> BTreeMap<ViewId, String> {
-        self.terminals()
-            .filter_map(|it| Some((it.id, it.title()?)))
-            .collect()
     }
 }
 
@@ -301,7 +277,7 @@ pub fn listed(kept: &[api::Project]) -> Result<Vec<Project>, String> {
         }
         for worktree in project.worktrees() {
             if !seen_worktrees.insert(worktree.id) {
-                return Err(format!("two worktrees have id {}", worktree.id));
+                return Err(format!("two worktrees share id {}", worktree.id));
             }
             for view in &worktree.views {
                 if !seen_views.insert(view.id()) {
@@ -462,6 +438,7 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
             }
         }
         let mut views = Vec::with_capacity(said_views.items.len());
+        let mut view_ids = BTreeSet::new();
         for view in &said_views.items {
             let parsed = match view.kind.as_ref() {
                 Some(api::worktree::view::Kind::TerminalId(raw)) => {
@@ -481,6 +458,12 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
                     ));
                 }
             };
+            if !view_ids.insert(parsed.id()) {
+                return Err(format!(
+                    "worktree {named} has two views with id {}",
+                    parsed.id()
+                ));
+            }
             views.push(parsed);
         }
         if let Some((extra, _)) = terminals.into_iter().next() {
@@ -493,16 +476,34 @@ fn worktree(worktree: &api::Worktree, tab: u32, of: &str) -> Result<Worktree, St
             said_views.items.len(),
             "every view said is read"
         );
+        assert_eq!(
+            view_ids.len(),
+            views.len(),
+            "every view in a worktree has a distinct id"
+        );
         views
     } else {
         let mut views = Vec::with_capacity(worktree.terminals.len());
+        let mut view_ids = BTreeSet::new();
         for terminal in &worktree.terminals {
-            views.push(View::Terminal(parse_terminal(terminal, named)?));
+            let parsed = parse_terminal(terminal, named)?;
+            if !view_ids.insert(parsed.id) {
+                return Err(format!(
+                    "worktree {named} has two views with id {}",
+                    parsed.id
+                ));
+            }
+            views.push(View::Terminal(parsed));
         }
         assert_eq!(
             views.len(),
             worktree.terminals.len(),
             "every terminal said is read"
+        );
+        assert_eq!(
+            view_ids.len(),
+            views.len(),
+            "every view in a worktree has a distinct id"
         );
         views
     };
@@ -709,6 +710,25 @@ mod tests {
             .terminals
             .push(terminal(24, terminal::Found::Key(key(4)), None));
         assert_eq!(read(&kept), Err("two views hold terminal 4".to_owned()));
+    }
+
+    #[test]
+    fn projects_that_duplicate_a_worktree_or_view_id_are_refused() {
+        let mut duplicate_worktree = kept();
+        rows(&mut duplicate_worktree)[1].id = 11;
+        assert_eq!(
+            read(&duplicate_worktree),
+            Err("two worktrees share id 000000000000000b".to_owned())
+        );
+
+        let mut duplicate_view = kept();
+        rows(&mut duplicate_view)[0]
+            .terminals
+            .push(terminal(21, terminal::Found::Lost(()), None));
+        assert_eq!(
+            read(&duplicate_view),
+            Err("worktree main has two views with id 0000000000000015".to_owned())
+        );
     }
 
     #[test]
@@ -1058,14 +1078,6 @@ mod tests {
             worktree_row.view(ViewId::of(21).unwrap()),
             Some(View::Terminal(_))
         ));
-        assert_eq!(
-            worktree_row
-                .titles()
-                .get(&ViewId::of(21).unwrap())
-                .map(String::as_str),
-            Some("Fixing")
-        );
-        assert_eq!(worktree_row.titles().get(&browser_30), None);
 
         let bad_cases = [
             ApiView { kind: None },
@@ -1121,7 +1133,7 @@ mod tests {
         assert!(
             read(&duplicate_browser_same_worktree)
                 .unwrap_err()
-                .contains("two views have id")
+                .contains("has two views with id")
         );
 
         let mut duplicate_across_worktrees = kept();

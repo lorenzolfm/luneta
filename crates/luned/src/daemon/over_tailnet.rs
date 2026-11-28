@@ -7,15 +7,15 @@ use super::Host;
 use crate::api::change_projects_request::Change;
 use crate::api::daemon_server::Daemon;
 use crate::api::{
-    self, AnswerRequest, AskRequest, ChangeProjectsRequest, ChangeProjectsResponse,
-    FileIssueRequest, FramesRequest, InfoResponse, IssueRepositoriesRequest,
-    IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest, KeepPrintedRequest,
-    KeepPrintedResponse, ListAgentsResponse, ListContentsRequest, ListContentsResponse,
-    ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest, ListResumeResponse,
-    ListSkillsRequest, ListSkillsResponse, ListWorkRequest, MakeWorktreeRequest, PasteRequest,
-    PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest, ReloadResumeRequest,
-    ReloadResumeResponse, SayRequest, ShowRequest, TranscriptEndsRequest, TranscriptEndsResponse,
-    WaitingRequest, WaitingResponse,
+    self, AnswerRequest, AskRequest, AskReviewRequest, ChangeProjectsRequest,
+    ChangeProjectsResponse, FileIssueRequest, FramesRequest, InfoResponse,
+    IssueRepositoriesRequest, IssueRepositoriesResponse, KeepChecksRequest, KeepImageRequest,
+    KeepPrintedRequest, KeepPrintedResponse, ListAgentsResponse, ListContentsRequest,
+    ListContentsResponse, ListRepositoriesRequest, ListRepositoriesResponse, ListResumeRequest,
+    ListResumeResponse, ListSkillsRequest, ListSkillsResponse, ListWorkRequest,
+    MakeWorktreeRequest, PasteRequest, PruneRequest, PrunesRequest, ReadDiffRequest, RebaseRequest,
+    ReloadResumeRequest, ReloadResumeResponse, SayRequest, ShowRequest, TranscriptEndsRequest,
+    TranscriptEndsResponse, WaitingRequest, WaitingResponse,
 };
 use crate::mux::own::api::FromViewer;
 
@@ -83,6 +83,7 @@ fn served_said(said: &FromViewer) -> Result<(), Status> {
 
 #[tonic::async_trait]
 impl Daemon for OverTailnet {
+    type AskReviewStream = <Host as Daemon>::AskReviewStream;
     type AskStream = <Host as Daemon>::AskStream;
     type FileIssueStream = <Host as Daemon>::FileIssueStream;
     type FramesStream = <Host as Daemon>::FramesStream;
@@ -102,7 +103,17 @@ impl Daemon for OverTailnet {
     }
 
     async fn ask(&self, request: Request<AskRequest>) -> Result<Response<Self::AskStream>, Status> {
+        if request.get_ref().review_only {
+            return Err(unserved("Ask review_only"));
+        }
         Daemon::ask(&*self.0, request).await
+    }
+
+    async fn ask_review(
+        &self,
+        _: Request<AskReviewRequest>,
+    ) -> Result<Response<Self::AskReviewStream>, Status> {
+        Err(unserved("AskReview"))
     }
 
     async fn change_projects(
@@ -466,6 +477,7 @@ mod tests {
             let socket = folder.path().join("tailnet.sock");
             let (core, questions) = mpsc::sync_channel(1);
             let (layouts, laid) = mpsc::sync_channel(1);
+            let git_refresher = crate::git::Refresher::disconnected();
             let host = Host {
                 started: SystemTime::now(),
                 claude_folder: None,
@@ -475,6 +487,8 @@ mod tests {
                 bridges: Arc::default(),
                 layouts,
                 listings: Arc::default(),
+                git_refresher,
+                ask_sessions: Arc::new(crate::asks::SessionModes::in_memory()),
             };
             let incoming = UnixListenerStream::new(UnixListener::bind(&socket).unwrap());
             let served =
@@ -552,6 +566,23 @@ mod tests {
                     "ReadDiff",
                     device
                         .read_diff(api::ReadDiffRequest::default())
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "AskReview",
+                    device
+                        .ask_review(api::AskReviewRequest::default())
+                        .await
+                        .map(drop),
+                ),
+                (
+                    "Ask review_only",
+                    device
+                        .ask(api::AskRequest {
+                            review_only: true,
+                            ..Default::default()
+                        })
                         .await
                         .map(drop),
                 ),

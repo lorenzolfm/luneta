@@ -20,6 +20,7 @@ service Daemon {
   rpc ListContents(ListContentsRequest) returns (ListContentsResponse);
   rpc TranscriptEnds(TranscriptEndsRequest) returns (TranscriptEndsResponse);
   rpc Ask(AskRequest) returns (stream AskResponse);
+  rpc AskReview(AskReviewRequest) returns (stream AskResponse);
   rpc Paste(PasteRequest) returns (stream PasteResponse);
   rpc KeepImage(stream KeepImageRequest) returns (stream KeepImageResponse);
   rpc Say(SayRequest) returns (google.protobuf.Empty);
@@ -156,6 +157,25 @@ message AskRequest {
   repeated uint32 marked_issues = 8;
   repeated uint32 marked_pulls = 9;
   bool review_only = 10;
+}
+
+message AskReviewRequest {
+  On on = 1;
+  optional string cwd = 2;
+  oneof turn {
+    Start start = 3;
+    FollowUp follow_up = 4;
+  }
+
+  message Start {
+    string context = 1;
+    string words = 2;
+  }
+
+  message FollowUp {
+    string resumed = 1;
+    string words = 2;
+  }
 }
 
 message AskResponse {
@@ -694,6 +714,11 @@ message RebaseResponse {
     google.protobuf.Empty already = 3;
     Clean clean = 4;
     Stopped stopped = 5;
+  }
+  oneof status_refresh {
+    LocalVersion refreshed_at = 6;
+    google.protobuf.Empty untracked = 7;
+    google.protobuf.Empty stale = 8;
   }
 
   message Clean {

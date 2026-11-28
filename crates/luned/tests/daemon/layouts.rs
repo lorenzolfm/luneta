@@ -148,7 +148,7 @@ impl<'a> Shown<'a> {
         shown
     }
 
-    fn ask(&self, event: Event) {
+    pub fn ask(&self, event: Event) {
         self.asks
             .try_send(ShowRequest {
                 event: Some(event),
@@ -209,7 +209,7 @@ impl<'a> Shown<'a> {
         laid.views.iter().map(|view| view.id).collect()
     }
 
-    fn until(&mut self, what: &str, mut done: impl FnMut(&Laid) -> bool) -> Laid {
+    pub fn until(&mut self, what: &str, mut done: impl FnMut(&Laid) -> bool) -> Laid {
         if let Some(laid) = &self.laid
             && done(laid)
         {

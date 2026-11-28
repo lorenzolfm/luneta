@@ -1,10 +1,13 @@
 use std::collections::BTreeSet;
+use std::fmt;
 use std::num::NonZeroUsize;
 use std::ops::{Range, RangeInclusive};
 use std::sync::Arc;
 
-use crate::layout::{LeftRow, RightRow, SplitLayout, SplitLine, UnifiedLayout, UnifiedRow};
-use crate::patch::{FilePath, Patch};
+use crate::layout::{
+    ContextRef, LeftRow, RightRow, SplitLayout, SplitLine, UnifiedLayout, UnifiedRow,
+};
+use crate::patch::{Block, FileBody, FileChange, FilePatch, FilePath, Hunk, LINE_BYTES_MAX, Patch};
 use crate::ribbon::GUTTER_COLS;
 use crate::tree::{FileTree, TreeNode};
 
@@ -24,11 +27,23 @@ pub const EXCERPT_BYTES_MAX: usize = 16 * 1024;
 
 const EXCERPT_TRUNCATED_MARKER: &str = "... [truncated]";
 
+const EXCERPT_NEWLINE_BYTES: usize = 1;
+
+const EXCERPT_CONTENT_BYTES_MAX: usize =
+    EXCERPT_BYTES_MAX - EXCERPT_TRUNCATED_MARKER.len() - EXCERPT_NEWLINE_BYTES;
+
 const _: () = assert!(SPLIT_HARD_MIN_WIDTH <= SPLIT_MIN_WIDTH);
 const _: () = assert!(SEARCH_QUERY_BYTES_MAX > 0);
 const _: () = assert!(SEARCH_MATCHES_MAX > 0);
 const _: () = assert!(EXCERPT_LINES_MAX > 0);
 const _: () = assert!(EXCERPT_BYTES_MAX >= EXCERPT_TRUNCATED_MARKER.len() + 64);
+const _: () = assert!(
+    EXCERPT_CONTENT_BYTES_MAX + EXCERPT_NEWLINE_BYTES + EXCERPT_TRUNCATED_MARKER.len()
+        == EXCERPT_BYTES_MAX
+);
+const _: () =
+    assert!(LINE_BYTES_MAX + "Renamed from  with no content changes".len() <= EXCERPT_BYTES_MAX);
+const _: () = assert!(LINE_BYTES_MAX + 64 <= EXCERPT_CONTENT_BYTES_MAX);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LayoutMode {
@@ -44,21 +59,68 @@ pub enum ActiveLayout {
     Unified,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Sidebar {
-    Closed,
-    Open { focused: bool },
-}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchQuery(String);
 
-impl Sidebar {
+impl SearchQuery {
     #[must_use]
-    pub const fn is_open(self) -> bool {
-        matches!(self, Sidebar::Open { .. })
+    pub fn new(raw: String) -> Option<SearchQuery> {
+        (!raw.is_empty() && raw.len() <= SEARCH_QUERY_BYTES_MAX).then_some(SearchQuery(raw))
     }
 
     #[must_use]
-    pub const fn is_focused(self) -> bool {
-        matches!(self, Sidebar::Open { focused: true })
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedSearch {
+    query: SearchQuery,
+    found: Option<SearchMatches>,
+}
+
+impl CommittedSearch {
+    #[must_use]
+    pub fn query(&self) -> &str {
+        self.query.as_str()
+    }
+
+    #[must_use]
+    pub fn found(&self) -> Option<&SearchMatches> {
+        self.found.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ViewerFocus {
+    Diff {
+        selection_anchor: Option<usize>,
+    },
+    SearchEditing {
+        query: String,
+        found: Option<SearchMatches>,
+    },
+    Tree,
+}
+
+impl ViewerFocus {
+    #[must_use]
+    pub const fn is_tree(&self) -> bool {
+        matches!(self, ViewerFocus::Tree)
+    }
+
+    #[must_use]
+    pub const fn is_search_editing(&self) -> bool {
+        matches!(self, ViewerFocus::SearchEditing { .. })
+    }
+
+    #[must_use]
+    pub const fn selection_anchor(&self) -> Option<usize> {
+        match self {
+            ViewerFocus::Diff { selection_anchor } => *selection_anchor,
+            ViewerFocus::SearchEditing { .. } | ViewerFocus::Tree => None,
+        }
     }
 }
 
@@ -121,51 +183,6 @@ impl SearchMatches {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum SearchState {
-    #[default]
-    Idle,
-    Editing {
-        query: String,
-        found: Option<SearchMatches>,
-    },
-    Committed {
-        query: String,
-        found: Option<SearchMatches>,
-    },
-}
-
-impl SearchState {
-    #[must_use]
-    pub const fn is_editing(&self) -> bool {
-        matches!(self, SearchState::Editing { .. })
-    }
-
-    #[must_use]
-    pub const fn is_visible(&self) -> bool {
-        !matches!(self, SearchState::Idle)
-    }
-
-    #[must_use]
-    pub fn query(&self) -> Option<&str> {
-        match self {
-            SearchState::Idle => None,
-            SearchState::Editing { query, .. } => (!query.is_empty()).then_some(query.as_str()),
-            SearchState::Committed { query, .. } => Some(query.as_str()),
-        }
-    }
-
-    #[must_use]
-    pub fn found(&self) -> Option<&SearchMatches> {
-        match self {
-            SearchState::Idle => None,
-            SearchState::Editing { found, .. } | SearchState::Committed { found, .. } => {
-                found.as_ref()
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LineRange {
     start: u32,
@@ -202,11 +219,163 @@ impl LineRange {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExcerptError {
+    Empty,
+    TooLarge { bytes: usize },
+    ContainsNul,
+}
+
+impl fmt::Display for ExcerptError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExcerptError::Empty => f.write_str("excerpt text is empty"),
+            ExcerptError::TooLarge { bytes } => {
+                write!(f, "excerpt text is {bytes} bytes, over {EXCERPT_BYTES_MAX}")
+            }
+            ExcerptError::ContainsNul => f.write_str("excerpt text contains a NUL byte"),
+        }
+    }
+}
+
+impl std::error::Error for ExcerptError {}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExcerptText(String);
+
+impl ExcerptText {
+    pub fn new(text: String) -> Result<ExcerptText, ExcerptError> {
+        if text.is_empty() {
+            return Err(ExcerptError::Empty);
+        }
+        if text.len() > EXCERPT_BYTES_MAX {
+            return Err(ExcerptError::TooLarge { bytes: text.len() });
+        }
+        if text.as_bytes().contains(&0) {
+            return Err(ExcerptError::ContainsNul);
+        }
+        Ok(ExcerptText(text))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl AsRef<str> for ExcerptText {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for ExcerptText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for ExcerptText {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ExcerptText {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExcerptBody {
+    Selected {
+        lines: LineRange,
+        snippet: ExcerptText,
+        enclosing_hunks: Option<ExcerptText>,
+    },
+    Expanded(ExcerptText),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionExcerpt {
-    pub path: FilePath,
-    pub lines: Option<LineRange>,
-    pub snippet: String,
+    path: FilePath,
+    body: ExcerptBody,
+}
+
+impl SelectionExcerpt {
+    #[must_use]
+    pub fn selected(
+        path: FilePath,
+        lines: LineRange,
+        snippet: ExcerptText,
+        enclosing_hunks: Option<ExcerptText>,
+    ) -> SelectionExcerpt {
+        let enclosing_hunks = enclosing_hunks.filter(|enclosing| enclosing != &snippet);
+        SelectionExcerpt {
+            path,
+            body: ExcerptBody::Selected {
+                lines,
+                snippet,
+                enclosing_hunks,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn expanded(path: FilePath, text: ExcerptText) -> SelectionExcerpt {
+        SelectionExcerpt {
+            path,
+            body: ExcerptBody::Expanded(text),
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &FilePath {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn body(&self) -> &ExcerptBody {
+        &self.body
+    }
+
+    #[must_use]
+    pub const fn lines(&self) -> Option<LineRange> {
+        match &self.body {
+            ExcerptBody::Selected { lines, .. } => Some(*lines),
+            ExcerptBody::Expanded(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn snippet(&self) -> &str {
+        match &self.body {
+            ExcerptBody::Selected { snippet, .. } | ExcerptBody::Expanded(snippet) => {
+                snippet.as_str()
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn enclosing_hunks(&self) -> Option<&str> {
+        match &self.body {
+            ExcerptBody::Selected {
+                enclosing_hunks, ..
+            } => enclosing_hunks.as_ref().map(ExcerptText::as_str),
+            ExcerptBody::Expanded(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -219,12 +388,12 @@ pub struct Viewer {
     head: String,
     mode: LayoutMode,
     active_layout: ActiveLayout,
-    sidebar: Sidebar,
+    sidebar_open: bool,
+    focus: ViewerFocus,
     scroll: usize,
     cursor: usize,
     tree_cursor: usize,
-    selection_anchor: Option<usize>,
-    search: SearchState,
+    committed_search: Option<CommittedSearch>,
     viewed: BTreeSet<String>,
     folded: BTreeSet<String>,
 }
@@ -264,11 +433,7 @@ impl Viewer {
         );
         let folded = BTreeSet::new();
         let tree = FileTree::build(&patch, &folded);
-        let sidebar = if patch.files.len() > 1 {
-            Sidebar::Open { focused: false }
-        } else {
-            Sidebar::Closed
-        };
+        let sidebar_open = patch.files.len() > 1;
         Viewer {
             patch,
             split,
@@ -278,12 +443,14 @@ impl Viewer {
             head,
             mode: LayoutMode::Auto,
             active_layout: ActiveLayout::Split,
-            sidebar,
+            sidebar_open,
+            focus: ViewerFocus::Diff {
+                selection_anchor: None,
+            },
             scroll: 0,
             cursor: 0,
             tree_cursor: 0,
-            selection_anchor: None,
-            search: SearchState::Idle,
+            committed_search: None,
             viewed: BTreeSet::new(),
             folded,
         }
@@ -335,8 +502,18 @@ impl Viewer {
     }
 
     #[must_use]
-    pub const fn sidebar(&self) -> Sidebar {
-        self.sidebar
+    pub const fn is_sidebar_open(&self) -> bool {
+        self.sidebar_open
+    }
+
+    #[must_use]
+    pub const fn is_tree_focused(&self) -> bool {
+        self.focus.is_tree()
+    }
+
+    #[must_use]
+    pub const fn focus(&self) -> &ViewerFocus {
+        &self.focus
     }
 
     #[must_use]
@@ -356,12 +533,35 @@ impl Viewer {
 
     #[must_use]
     pub const fn is_selecting(&self) -> bool {
-        self.selection_anchor.is_some()
+        self.focus.selection_anchor().is_some()
     }
 
     #[must_use]
-    pub fn search(&self) -> &SearchState {
-        &self.search
+    pub fn committed_search(&self) -> Option<&CommittedSearch> {
+        self.committed_search.as_ref()
+    }
+
+    #[must_use]
+    pub fn active_search_query(&self) -> Option<&str> {
+        match &self.focus {
+            ViewerFocus::SearchEditing { query, .. } => {
+                (!query.is_empty()).then_some(query.as_str())
+            }
+            ViewerFocus::Diff { .. } | ViewerFocus::Tree => {
+                self.committed_search.as_ref().map(CommittedSearch::query)
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn active_search_matches(&self) -> Option<&SearchMatches> {
+        match &self.focus {
+            ViewerFocus::SearchEditing { found, .. } => found.as_ref(),
+            ViewerFocus::Diff { .. } | ViewerFocus::Tree => self
+                .committed_search
+                .as_ref()
+                .and_then(CommittedSearch::found),
+        }
     }
 
     #[must_use]
@@ -397,7 +597,7 @@ impl Viewer {
             .map(|file| file.path().as_str())
             .collect();
         self.viewed.retain(|path| present.contains(path.as_str()));
-        self.selection_anchor = None;
+        self.clear_select();
         if let Some((path, line)) = anchor {
             self.restore_cursor(&path, line);
         } else {
@@ -425,7 +625,7 @@ impl Viewer {
     fn switch_layout(&mut self, next: ActiveLayout) {
         let anchor = self.cursor_location();
         self.active_layout = next;
-        self.selection_anchor = None;
+        self.clear_select();
         if let Some((path, line)) = anchor {
             self.restore_cursor(&path, line);
         } else {
@@ -455,10 +655,12 @@ impl Viewer {
     }
 
     pub fn toggle_sidebar(&mut self) {
-        self.sidebar = match self.sidebar {
-            Sidebar::Closed => Sidebar::Open { focused: false },
-            Sidebar::Open { .. } => Sidebar::Closed,
-        };
+        if self.sidebar_open {
+            self.sidebar_open = false;
+            self.unfocus_sidebar();
+        } else {
+            self.sidebar_open = true;
+        }
     }
 
     pub fn toggle_focus(&mut self, can_show_tree: bool) {
@@ -466,15 +668,21 @@ impl Viewer {
             self.unfocus_sidebar();
             return;
         }
-        self.sidebar = match self.sidebar {
-            Sidebar::Closed | Sidebar::Open { focused: false } => Sidebar::Open { focused: true },
-            Sidebar::Open { focused: true } => Sidebar::Open { focused: false },
-        };
+        if self.focus.is_tree() {
+            self.focus = ViewerFocus::Diff {
+                selection_anchor: None,
+            };
+        } else {
+            self.sidebar_open = true;
+            self.focus = ViewerFocus::Tree;
+        }
     }
 
     pub fn unfocus_sidebar(&mut self) {
-        if let Sidebar::Open { focused } = &mut self.sidebar {
-            *focused = false;
+        if self.focus.is_tree() {
+            self.focus = ViewerFocus::Diff {
+                selection_anchor: None,
+            };
         }
     }
 
@@ -508,35 +716,28 @@ impl Viewer {
     #[must_use]
     fn diff_file_at(&self, row: usize) -> Option<usize> {
         match self.active_layout {
-            ActiveLayout::Split => self
-                .split
-                .rows
-                .get(row)
-                .and_then(SplitLine::file_index)
-                .or_else(|| {
-                    self.split
-                        .files
-                        .iter()
-                        .find(|span| row >= span.start_row && row < span.end_row)
-                        .map(|span| span.file)
-                }),
+            ActiveLayout::Split => self.split.rows.get(row).map(SplitLine::file_index),
             ActiveLayout::Unified => self.unified.rows.get(row).map(UnifiedRow::file_index),
         }
     }
 
     #[must_use]
     pub fn current_file(&self) -> Option<usize> {
-        if self.sidebar.is_focused()
-            && let Some(entry) = self.tree.entries.get(self.tree_cursor)
-            && let TreeNode::File { file, .. } = entry.node
-        {
-            return Some(file);
+        if self.focus.is_tree() {
+            return self
+                .tree
+                .entries
+                .get(self.tree_cursor)
+                .and_then(|entry| match entry.node {
+                    TreeNode::File { file, .. } => Some(file),
+                    TreeNode::Dir { .. } => None,
+                });
         }
         self.diff_file_at(self.cursor)
     }
 
     pub fn move_down(&mut self, step: usize, viewport: usize) {
-        if self.sidebar.is_focused() {
+        if self.focus.is_tree() {
             let max = self.tree.entries.len().saturating_sub(1);
             self.tree_cursor = self.tree_cursor.saturating_add(step).min(max);
             return;
@@ -548,7 +749,7 @@ impl Viewer {
     }
 
     pub fn move_up(&mut self, step: usize, viewport: usize) {
-        if self.sidebar.is_focused() {
+        if self.focus.is_tree() {
             self.tree_cursor = self.tree_cursor.saturating_sub(step);
             return;
         }
@@ -593,7 +794,7 @@ impl Viewer {
     }
 
     pub fn top(&mut self, viewport: usize) {
-        if self.sidebar.is_focused() {
+        if self.focus.is_tree() {
             self.tree_cursor = 0;
             return;
         }
@@ -604,7 +805,7 @@ impl Viewer {
     }
 
     pub fn bottom(&mut self, viewport: usize) {
-        if self.sidebar.is_focused() {
+        if self.focus.is_tree() {
             self.tree_cursor = self.tree.entries.len().saturating_sub(1);
             return;
         }
@@ -614,6 +815,9 @@ impl Viewer {
     }
 
     pub fn next_hunk(&mut self, viewport: usize) {
+        if self.focus.is_tree() {
+            return;
+        }
         let hunks = match self.active_layout {
             ActiveLayout::Split => &self.split.hunks,
             ActiveLayout::Unified => &self.unified.hunks,
@@ -627,6 +831,9 @@ impl Viewer {
     }
 
     pub fn prev_hunk(&mut self, viewport: usize) {
+        if self.focus.is_tree() {
+            return;
+        }
         let hunks = match self.active_layout {
             ActiveLayout::Split => &self.split.hunks,
             ActiveLayout::Unified => &self.unified.hunks,
@@ -640,6 +847,9 @@ impl Viewer {
     }
 
     pub fn next_file(&mut self, viewport: usize) {
+        if self.focus.is_tree() {
+            return;
+        }
         let files = match self.active_layout {
             ActiveLayout::Split => &self.split.files,
             ActiveLayout::Unified => &self.unified.files,
@@ -650,6 +860,9 @@ impl Viewer {
     }
 
     pub fn prev_file(&mut self, viewport: usize) {
+        if self.focus.is_tree() {
+            return;
+        }
         let files = match self.active_layout {
             ActiveLayout::Split => &self.split.files,
             ActiveLayout::Unified => &self.unified.files,
@@ -660,12 +873,17 @@ impl Viewer {
     }
 
     pub fn activate_tree_index(&mut self, index: usize, viewport: usize) {
-        if index >= self.tree.entries.len() {
-            return;
+        assert!(viewport > 0, "review viewport has at least one row");
+        if index < self.tree.entries.len() {
+            self.tree_cursor = index;
+            self.activate_tree_entry(viewport);
+            if !self.tree.entries.is_empty() {
+                assert!(
+                    self.tree_cursor < self.tree.entries.len(),
+                    "tree cursor stays within tree entries"
+                );
+            }
         }
-        self.sidebar = Sidebar::Open { focused: true };
-        self.tree_cursor = index;
-        self.activate_tree_entry(viewport);
     }
 
     pub fn activate_tree_entry(&mut self, viewport: usize) {
@@ -712,25 +930,29 @@ impl Viewer {
     fn jump_row(&mut self, row: usize, viewport: usize) {
         self.cursor = row;
         self.scroll = row;
-        self.selection_anchor = None;
+        self.clear_select();
         self.keep_visible(viewport);
         self.sync_tree_cursor();
     }
 
     pub fn toggle_select(&mut self) {
-        self.selection_anchor = match self.selection_anchor {
-            Some(_) => None,
-            None => Some(self.cursor),
-        };
+        if let ViewerFocus::Diff { selection_anchor } = &mut self.focus {
+            *selection_anchor = match *selection_anchor {
+                Some(_) => None,
+                None => Some(self.cursor),
+            };
+        }
     }
 
     pub fn clear_select(&mut self) {
-        self.selection_anchor = None;
+        if let ViewerFocus::Diff { selection_anchor } = &mut self.focus {
+            *selection_anchor = None;
+        }
     }
 
     #[must_use]
     pub fn selection_range(&self) -> Option<RangeInclusive<usize>> {
-        let anchor = self.selection_anchor?;
+        let anchor = self.focus.selection_anchor()?;
         let range = if anchor <= self.cursor {
             anchor..=self.cursor
         } else {
@@ -742,6 +964,10 @@ impl Viewer {
 
     #[must_use]
     pub fn selected_excerpt(&self) -> Option<SelectionExcerpt> {
+        enum CodeLine {
+            Old(u32),
+            New(u32),
+        }
         let count = self.row_count();
         if count == 0 {
             return None;
@@ -755,119 +981,213 @@ impl Viewer {
             file_index < self.patch.files.len(),
             "excerpt file index in bounds"
         );
-        let path = self.patch.files[file_index].path().clone();
-        let mut lines: Option<LineRange> = None;
-        let mut snippet = String::new();
-        let mut emitted_lines = 0usize;
-        let mut truncated = false;
-        let byte_budget = EXCERPT_BYTES_MAX - EXCERPT_TRUNCATED_MARKER.len() - 1;
+        let file = &self.patch.files[file_index];
+        let path = file.path().clone();
+        let mut new_lines: Option<LineRange> = None;
+        let mut old_lines: Option<LineRange> = None;
+        let mut selected = ExcerptBuffer::new();
+        let mut touched_hunks = BTreeSet::new();
+        let mut seen_context: BTreeSet<ContextRef> = BTreeSet::new();
+        let mut seen_hunk_headers: BTreeSet<usize> = BTreeSet::new();
+        let extend_lines = |lines: &mut Option<LineRange>, line: u32| match lines {
+            Some(span) => span.extend(line),
+            None => *lines = Some(LineRange::single(line)),
+        };
 
         for row_index in start_row..=end_row {
             if self.diff_file_at(row_index) != Some(file_index) {
                 break;
             }
-            if emitted_lines >= EXCERPT_LINES_MAX {
-                truncated = true;
+            if selected.at_line_limit() {
+                selected.mark_truncated();
                 break;
             }
             match self.active_layout {
                 ActiveLayout::Split => {
                     let row = &self.split.rows[row_index];
-                    if let Some(number) = row.primary_line() {
-                        match &mut lines {
-                            Some(span) => span.extend(number),
-                            None => lines = Some(LineRange::single(number)),
-                        }
-                    }
-                    let SplitLine::Pair { left, right } = row else {
+                    let SplitLine::Pair(pair) = row else {
                         continue;
                     };
-                    let left_entry = match left {
-                        LeftRow::Deleted { .. } => Some((Some('-'), left.text(&self.patch))),
-                        LeftRow::Context { .. } if matches!(right, RightRow::Spacer) => {
-                            Some((Some(' '), left.text(&self.patch)))
-                        }
-                        LeftRow::HunkHeader { text, .. } if matches!(right, RightRow::Spacer) => {
-                            Some((None, text.as_str()))
-                        }
-                        LeftRow::Context { .. } | LeftRow::HunkHeader { .. } | LeftRow::Spacer => {
-                            None
-                        }
-                    };
-                    if let Some((prefix, text)) = left_entry {
-                        if !push_excerpt_line(&mut snippet, prefix, text, byte_budget) {
-                            truncated = true;
-                            break;
-                        }
-                        emitted_lines += 1;
+                    if let Some(left) = pair.left() {
+                        assert_eq!(
+                            left.file_index(),
+                            file_index,
+                            "split pair left side belongs to selected file"
+                        );
+                        let hunk_index = left.hunk_index();
+                        assert!(
+                            hunk_index < file.hunks().len(),
+                            "split left hunk index in bounds"
+                        );
+                        touched_hunks.insert(hunk_index);
                     }
-                    let right_entry = match right {
-                        RightRow::Added { .. } => Some((Some('+'), right.text(&self.patch))),
-                        RightRow::Context { .. } => Some((Some(' '), right.text(&self.patch))),
-                        RightRow::HunkHeader { text, .. } => Some((None, text.as_str())),
-                        RightRow::Spacer => None,
-                    };
-                    if let Some((prefix, text)) = right_entry {
-                        if emitted_lines >= EXCERPT_LINES_MAX
-                            || !push_excerpt_line(&mut snippet, prefix, text, byte_budget)
-                        {
-                            truncated = true;
-                            break;
+                    if let Some(right) = pair.right() {
+                        assert_eq!(
+                            right.file_index(),
+                            file_index,
+                            "split pair right side belongs to selected file"
+                        );
+                        let hunk_index = right.hunk_index();
+                        assert!(
+                            hunk_index < file.hunks().len(),
+                            "split right hunk index in bounds"
+                        );
+                        touched_hunks.insert(hunk_index);
+                    }
+                    let same_context = matches!(
+                        (pair.left(), pair.right()),
+                        (
+                            Some(LeftRow::Context { at: left_at, .. }),
+                            Some(RightRow::Context { at: right_at, .. })
+                        ) if left_at == right_at
+                    );
+                    let same_hunk_header = matches!(
+                        (pair.left(), pair.right()),
+                        (
+                            Some(LeftRow::HunkHeader { hunk: left_hunk, .. }),
+                            Some(RightRow::HunkHeader { hunk: right_hunk, .. })
+                        ) if left_hunk == right_hunk
+                    );
+                    if let Some(left) = pair.left() {
+                        let left_entry = match left {
+                            LeftRow::Deleted { line, .. } => Some((
+                                Some('-'),
+                                left.text(&self.patch),
+                                Some(CodeLine::Old(*line)),
+                            )),
+                            LeftRow::Context { at, .. }
+                                if !same_context && seen_context.insert(*at) =>
+                            {
+                                let context = at.get(&self.patch);
+                                Some((
+                                    Some(' '),
+                                    context.text.as_str(),
+                                    Some(CodeLine::New(context.new_line)),
+                                ))
+                            }
+                            LeftRow::HunkHeader { hunk, text, .. }
+                                if !same_hunk_header && seen_hunk_headers.insert(*hunk) =>
+                            {
+                                Some((None, text.as_str(), None))
+                            }
+                            LeftRow::Context { .. } | LeftRow::HunkHeader { .. } => None,
+                        };
+                        if let Some((prefix, text, code_line)) = left_entry {
+                            if !selected.try_push_line(prefix, text) {
+                                break;
+                            }
+                            match code_line {
+                                Some(CodeLine::New(line)) => extend_lines(&mut new_lines, line),
+                                Some(CodeLine::Old(line)) => extend_lines(&mut old_lines, line),
+                                None => {}
+                            }
                         }
-                        emitted_lines += 1;
+                    }
+                    if let Some(right) = pair.right() {
+                        let right_entry = match right {
+                            RightRow::Added { line, .. } => Some((
+                                Some('+'),
+                                right.text(&self.patch),
+                                Some(CodeLine::New(*line)),
+                            )),
+                            RightRow::Context { at, line } if seen_context.insert(*at) => Some((
+                                Some(' '),
+                                right.text(&self.patch),
+                                Some(CodeLine::New(*line)),
+                            )),
+                            RightRow::HunkHeader { hunk, text, .. }
+                                if seen_hunk_headers.insert(*hunk) =>
+                            {
+                                Some((None, text.as_str(), None))
+                            }
+                            RightRow::Context { .. } | RightRow::HunkHeader { .. } => None,
+                        };
+                        if let Some((prefix, text, code_line)) = right_entry {
+                            if !selected.try_push_line(prefix, text) {
+                                break;
+                            }
+                            match code_line {
+                                Some(CodeLine::New(line)) => extend_lines(&mut new_lines, line),
+                                Some(CodeLine::Old(line)) => extend_lines(&mut old_lines, line),
+                                None => {}
+                            }
+                        }
                     }
                 }
                 ActiveLayout::Unified => {
                     let row = &self.unified.rows[row_index];
-                    if let Some(number) = row.primary_line() {
-                        match &mut lines {
-                            Some(span) => span.extend(number),
-                            None => lines = Some(LineRange::single(number)),
-                        }
+                    if let Some(hunk_index) = row.hunk_index() {
+                        assert!(
+                            hunk_index < file.hunks().len(),
+                            "unified hunk index in bounds"
+                        );
+                        touched_hunks.insert(hunk_index);
                     }
                     let entry = match row {
-                        UnifiedRow::Added { .. } => Some((Some('+'), row.text(&self.patch))),
-                        UnifiedRow::Deleted { .. } => Some((Some('-'), row.text(&self.patch))),
-                        UnifiedRow::Context { .. } => Some((Some(' '), row.text(&self.patch))),
-                        UnifiedRow::HunkHeader { text, .. } => Some((None, text.as_str())),
+                        UnifiedRow::Added { new_line, .. } => Some((
+                            Some('+'),
+                            row.text(&self.patch),
+                            Some(CodeLine::New(*new_line)),
+                        )),
+                        UnifiedRow::Deleted { old_line, .. } => Some((
+                            Some('-'),
+                            row.text(&self.patch),
+                            Some(CodeLine::Old(*old_line)),
+                        )),
+                        UnifiedRow::Context { new_line, .. } => Some((
+                            Some(' '),
+                            row.text(&self.patch),
+                            Some(CodeLine::New(*new_line)),
+                        )),
+                        UnifiedRow::HunkHeader { text, .. } => Some((None, text.as_str(), None)),
                         UnifiedRow::FileHeader { .. } | UnifiedRow::BinaryNotice { .. } => None,
                     };
-                    if let Some((prefix, text)) = entry {
-                        if !push_excerpt_line(&mut snippet, prefix, text, byte_budget) {
-                            truncated = true;
+                    if let Some((prefix, text, code_line)) = entry {
+                        if !selected.try_push_line(prefix, text) {
                             break;
                         }
-                        emitted_lines += 1;
+                        match code_line {
+                            Some(CodeLine::New(line)) => extend_lines(&mut new_lines, line),
+                            Some(CodeLine::Old(line)) => extend_lines(&mut old_lines, line),
+                            None => {}
+                        }
                     }
                 }
             }
         }
-        if truncated {
-            if !snippet.is_empty() {
-                snippet.push('\n');
-            }
-            snippet.push_str(EXCERPT_TRUNCATED_MARKER);
+
+        if let Some(lines) = new_lines.or(old_lines) {
+            assert!(
+                !touched_hunks.is_empty(),
+                "code line selection touches at least one hunk"
+            );
+            let selected_snippet = selected.finish()?;
+            let enclosing = format_hunks_excerpt(file.hunks(), touched_hunks.iter().copied())?;
+            Some(SelectionExcerpt::selected(
+                path,
+                lines,
+                selected_snippet,
+                Some(enclosing),
+            ))
+        } else if !touched_hunks.is_empty() {
+            let expanded = format_hunks_excerpt(file.hunks(), touched_hunks.iter().copied())?;
+            Some(SelectionExcerpt::expanded(path, expanded))
+        } else {
+            let expanded = format_file_excerpt(file)?;
+            Some(SelectionExcerpt::expanded(path, expanded))
         }
-        assert!(
-            snippet.len() <= EXCERPT_BYTES_MAX,
-            "selection excerpt stays within EXCERPT_BYTES_MAX"
-        );
-        Some(SelectionExcerpt {
-            path,
-            lines,
-            snippet,
-        })
     }
 
     pub fn start_search(&mut self) {
-        self.search = SearchState::Editing {
+        self.committed_search = None;
+        self.focus = ViewerFocus::SearchEditing {
             query: String::new(),
             found: None,
         };
     }
 
     pub fn search_push(&mut self, ch: char, viewport: usize) {
-        let SearchState::Editing { query, .. } = &mut self.search else {
+        let ViewerFocus::SearchEditing { query, .. } = &mut self.focus else {
             return;
         };
         if query.len().saturating_add(ch.len_utf8()) > SEARCH_QUERY_BYTES_MAX {
@@ -879,46 +1199,64 @@ impl Viewer {
             "search query stays within SEARCH_QUERY_BYTES_MAX"
         );
         self.recompute_search();
-        if let Some(target) = self.search.found().map(SearchMatches::current) {
+        if let Some(target) = self.active_search_matches().map(SearchMatches::current) {
             self.jump_to_match(target, viewport);
         }
     }
 
     pub fn search_pop(&mut self, viewport: usize) {
-        let SearchState::Editing { query, .. } = &mut self.search else {
+        let ViewerFocus::SearchEditing { query, .. } = &mut self.focus else {
             return;
         };
         query.pop();
         self.recompute_search();
-        if let Some(target) = self.search.found().map(SearchMatches::current) {
+        if let Some(target) = self.active_search_matches().map(SearchMatches::current) {
             self.jump_to_match(target, viewport);
         }
     }
 
     pub fn search_commit(&mut self) {
-        if let SearchState::Editing { query, found } =
-            std::mem::replace(&mut self.search, SearchState::Idle)
-            && !query.is_empty()
-        {
-            self.search = SearchState::Committed { query, found };
+        let previous = std::mem::replace(
+            &mut self.focus,
+            ViewerFocus::Diff {
+                selection_anchor: None,
+            },
+        );
+        match previous {
+            ViewerFocus::SearchEditing { query, found } => {
+                self.committed_search =
+                    SearchQuery::new(query).map(|query| CommittedSearch { query, found });
+            }
+            other => {
+                self.focus = other;
+            }
         }
     }
 
     pub fn search_cancel(&mut self) {
-        self.search = SearchState::Idle;
+        if self.focus.is_search_editing() {
+            self.focus = ViewerFocus::Diff {
+                selection_anchor: None,
+            };
+        }
+        self.committed_search = None;
     }
 
     pub fn search_next(&mut self, viewport: usize) {
-        let target = match &mut self.search {
-            SearchState::Editing {
-                found: Some(matches),
-                ..
-            }
-            | SearchState::Committed {
+        if self.focus.is_tree() {
+            return;
+        }
+        let target = match &mut self.focus {
+            ViewerFocus::SearchEditing {
                 found: Some(matches),
                 ..
             } => Some(matches.step_next()),
-            _ => None,
+            ViewerFocus::Diff { .. } => self
+                .committed_search
+                .as_mut()
+                .and_then(|committed| committed.found.as_mut())
+                .map(SearchMatches::step_next),
+            ViewerFocus::SearchEditing { found: None, .. } | ViewerFocus::Tree => None,
         };
         if let Some(target) = target {
             self.jump_to_match(target, viewport);
@@ -926,35 +1264,30 @@ impl Viewer {
     }
 
     pub fn search_prev(&mut self, viewport: usize) {
-        let target = match &mut self.search {
-            SearchState::Editing {
-                found: Some(matches),
-                ..
-            }
-            | SearchState::Committed {
+        if self.focus.is_tree() {
+            return;
+        }
+        let target = match &mut self.focus {
+            ViewerFocus::SearchEditing {
                 found: Some(matches),
                 ..
             } => Some(matches.step_prev()),
-            _ => None,
+            ViewerFocus::Diff { .. } => self
+                .committed_search
+                .as_mut()
+                .and_then(|committed| committed.found.as_mut())
+                .map(SearchMatches::step_prev),
+            ViewerFocus::SearchEditing { found: None, .. } | ViewerFocus::Tree => None,
         };
         if let Some(target) = target {
             self.jump_to_match(target, viewport);
         }
     }
 
-    fn recompute_search(&mut self) {
-        let needle = match &self.search {
-            SearchState::Idle => return,
-            SearchState::Editing { query, .. } | SearchState::Committed { query, .. } => {
-                if query.is_empty() {
-                    if let SearchState::Editing { found, .. } = &mut self.search {
-                        *found = None;
-                    }
-                    return;
-                }
-                query.clone()
-            }
-        };
+    fn compute_matches(&self, needle: &str) -> Option<SearchMatches> {
+        if needle.is_empty() {
+            return None;
+        }
         let mut found_matches = Vec::new();
         let count = self.row_count();
         for row_index in 0..count {
@@ -963,23 +1296,27 @@ impl Viewer {
             }
             let column = match self.active_layout {
                 ActiveLayout::Split => match &self.split.rows[row_index] {
-                    SplitLine::FileHeader { file } => find_case_insensitive_range(
-                        self.patch.files[*file].path().as_str(),
-                        &needle,
-                    ),
+                    SplitLine::FileHeader { file } => {
+                        find_case_insensitive_range(self.patch.files[*file].path().as_str(), needle)
+                    }
                     SplitLine::BinaryNotice { .. } => {
-                        find_case_insensitive_range("Binary file changed", &needle)
+                        find_case_insensitive_range("Binary file changed", needle)
                     }
-                    SplitLine::Pair { left, right } => {
-                        find_case_insensitive_range(right.text(&self.patch), &needle).or_else(
-                            || find_case_insensitive_range(left.text(&self.patch), &needle),
-                        )
-                    }
+                    SplitLine::Pair(pair) => pair
+                        .right()
+                        .and_then(|right| {
+                            find_case_insensitive_range(right.text(&self.patch), needle)
+                        })
+                        .or_else(|| {
+                            pair.left().and_then(|left| {
+                                find_case_insensitive_range(left.text(&self.patch), needle)
+                            })
+                        }),
                 }
                 .map(|range| range.start),
                 ActiveLayout::Unified => find_case_insensitive_range(
                     self.unified.rows[row_index].text(&self.patch),
-                    &needle,
+                    needle,
                 )
                 .map(|range| range.start),
             };
@@ -994,11 +1331,25 @@ impl Viewer {
             found_matches.len() <= SEARCH_MATCHES_MAX,
             "search matches stay within SEARCH_MATCHES_MAX"
         );
-        let built = SearchMatches::new(found_matches, self.cursor);
-        match &mut self.search {
-            SearchState::Idle => {}
-            SearchState::Editing { found, .. } | SearchState::Committed { found, .. } => {
+        SearchMatches::new(found_matches, self.cursor)
+    }
+
+    fn recompute_search(&mut self) {
+        if let ViewerFocus::SearchEditing { query, .. } = &self.focus {
+            let needle = query.clone();
+            let built = self.compute_matches(&needle);
+            if let ViewerFocus::SearchEditing { found, .. } = &mut self.focus {
                 *found = built;
+            }
+        }
+        if let Some(needle) = self
+            .committed_search
+            .as_ref()
+            .map(|committed| committed.query.as_str().to_owned())
+        {
+            let built = self.compute_matches(&needle);
+            if let Some(committed) = &mut self.committed_search {
+                committed.found = built;
             }
         }
     }
@@ -1037,7 +1388,7 @@ impl Viewer {
     }
 
     fn sync_tree_cursor(&mut self) {
-        if let Some(file) = self.current_file()
+        if let Some(file) = self.diff_file_at(self.cursor)
             && let Some(index) = self.tree.index_of_file(file)
         {
             self.tree_cursor = index;
@@ -1045,7 +1396,7 @@ impl Viewer {
     }
 
     fn cursor_location(&self) -> Option<(String, Option<u32>)> {
-        let file_index = self.current_file()?;
+        let file_index = self.diff_file_at(self.cursor)?;
         assert!(
             file_index < self.patch.files.len(),
             "cursor file index in bounds"
@@ -1100,6 +1451,135 @@ impl Viewer {
         self.cursor = span.start_row;
         self.scroll = span.start_row;
     }
+}
+
+struct ExcerptBuffer {
+    text: String,
+    lines_count: usize,
+    truncated: bool,
+}
+
+impl ExcerptBuffer {
+    fn new() -> ExcerptBuffer {
+        ExcerptBuffer {
+            text: String::new(),
+            lines_count: 0,
+            truncated: false,
+        }
+    }
+
+    const fn at_line_limit(&self) -> bool {
+        self.lines_count >= EXCERPT_LINES_MAX
+    }
+
+    fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+
+    fn try_push_line(&mut self, prefix: Option<char>, line: &str) -> bool {
+        if self.lines_count < EXCERPT_LINES_MAX {
+            let pushed = push_excerpt_line(&mut self.text, prefix, line, EXCERPT_CONTENT_BYTES_MAX);
+            if pushed {
+                self.lines_count += 1;
+                assert!(
+                    self.lines_count <= EXCERPT_LINES_MAX,
+                    "excerpt line count stays within EXCERPT_LINES_MAX"
+                );
+                return true;
+            }
+        }
+        self.truncated = true;
+        false
+    }
+
+    fn finish(mut self) -> Option<ExcerptText> {
+        assert!(
+            self.lines_count <= EXCERPT_LINES_MAX,
+            "excerpt line count stays within EXCERPT_LINES_MAX"
+        );
+        if self.truncated {
+            if !self.text.is_empty() {
+                self.text.push('\n');
+            }
+            self.text.push_str(EXCERPT_TRUNCATED_MARKER);
+        }
+        assert!(
+            self.text.len() <= EXCERPT_BYTES_MAX,
+            "formatted excerpt stays within EXCERPT_BYTES_MAX"
+        );
+        ExcerptText::new(self.text).ok()
+    }
+}
+
+fn format_file_excerpt(file: &FilePatch) -> Option<ExcerptText> {
+    match &file.body {
+        FileBody::Binary => {
+            let text = match &file.change {
+                FileChange::Added(_) => "Binary file added".to_owned(),
+                FileChange::Deleted(_) => "Binary file deleted".to_owned(),
+                FileChange::Modified(_) => "Binary file changed".to_owned(),
+                FileChange::Renamed { old, .. } => format!("Binary file renamed from {old}"),
+            };
+            ExcerptText::new(text).ok()
+        }
+        FileBody::Text(hunks) if hunks.is_empty() => {
+            let text = match &file.change {
+                FileChange::Added(_) => "New empty file (no diff hunks)".to_owned(),
+                FileChange::Deleted(_) => "Deleted empty file (no diff hunks)".to_owned(),
+                FileChange::Renamed { old, .. } => {
+                    format!("Renamed from {old} with no content changes")
+                }
+                FileChange::Modified(_) => "File changed with no text diff hunks".to_owned(),
+            };
+            ExcerptText::new(text).ok()
+        }
+        FileBody::Text(hunks) => format_hunks_excerpt(hunks, 0..hunks.len()),
+    }
+}
+
+fn format_hunks_excerpt<I>(hunks: &[Hunk], indices: I) -> Option<ExcerptText>
+where
+    I: IntoIterator<Item = usize>,
+{
+    let mut excerpt = ExcerptBuffer::new();
+
+    'hunks: for hunk_index in indices {
+        assert!(
+            hunk_index < hunks.len(),
+            "hunk index stays within file hunks"
+        );
+        let hunk = &hunks[hunk_index];
+        let header = hunk.header_text();
+        if !excerpt.try_push_line(None, &header) {
+            break 'hunks;
+        }
+
+        for block in &hunk.blocks {
+            match block {
+                Block::Context(lines) => {
+                    for context_line in lines.iter() {
+                        if !excerpt.try_push_line(Some(' '), &context_line.text) {
+                            break 'hunks;
+                        }
+                    }
+                }
+                Block::Changed(changed) => {
+                    for deleted_line in changed.deleted() {
+                        if !excerpt.try_push_line(Some('-'), &deleted_line.text) {
+                            break 'hunks;
+                        }
+                    }
+                    for added_line in changed.added() {
+                        if !excerpt.try_push_line(Some('+'), &added_line.text) {
+                            break 'hunks;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    excerpt.finish()
 }
 
 fn push_excerpt_line(
@@ -1221,7 +1701,7 @@ diff --git a/src/b.rs b/src/b.rs
     fn navigation_search_selection_and_reload_preserve_state() {
         let patch = Patch::parse(SAMPLE.as_bytes());
         let mut viewer = Viewer::new(patch, "main".to_owned(), "feat".to_owned());
-        assert!(viewer.sidebar().is_open());
+        assert!(viewer.is_sidebar_open());
         viewer.sync_layout(120);
         assert!(viewer.is_split());
         viewer.sync_layout(60);
@@ -1239,14 +1719,17 @@ diff --git a/src/b.rs b/src/b.rs
             viewer.search_push(ch, 20);
         }
         viewer.search_commit();
-        assert_eq!(viewer.search().found().map(|m| m.count().get()), Some(1));
+        assert_eq!(
+            viewer.active_search_matches().map(|m| m.count().get()),
+            Some(1)
+        );
         assert_eq!(viewer.current_file(), Some(0));
 
         viewer.toggle_select();
         let excerpt = viewer.selected_excerpt().unwrap();
-        assert_eq!(excerpt.path, "src/a.rs");
-        assert!(excerpt.snippet.contains("new_call"));
-        assert!(excerpt.lines.is_some_and(|l| l.start() <= l.end()));
+        assert_eq!(excerpt.path(), "src/a.rs");
+        assert!(excerpt.snippet().contains("new_call"));
+        assert!(excerpt.lines().is_some_and(|l| l.start() <= l.end()));
 
         let reloaded = Patch::parse(SAMPLE.as_bytes());
         viewer.reload(reloaded, "main".to_owned(), "feat".to_owned());
@@ -1266,7 +1749,7 @@ diff --git a/src/b.rs b/src/b.rs
             viewer.search_push(ch, 20);
         }
         viewer.search_commit();
-        let split_match_row = viewer.search().found().unwrap().current().row;
+        let split_match_row = viewer.active_search_matches().unwrap().current().row;
         viewer.toggle_select();
         assert!(viewer.is_selecting());
 
@@ -1276,7 +1759,7 @@ diff --git a/src/b.rs b/src/b.rs
             !viewer.is_selecting(),
             "layout switch clears stale selection"
         );
-        let unified_match_row = viewer.search().found().unwrap().current().row;
+        let unified_match_row = viewer.active_search_matches().unwrap().current().row;
         assert_ne!(unified_match_row, split_match_row);
         assert_eq!(viewer.current_file(), Some(1));
         assert!(
@@ -1299,18 +1782,43 @@ diff --git a/src/b.rs b/src/b.rs
         let patch = Patch::parse(SAMPLE.as_bytes());
         let mut viewer = Viewer::new(patch, "main".to_owned(), "feat".to_owned());
         viewer.toggle_focus(false);
-        assert!(!viewer.sidebar().is_focused());
+        assert!(!viewer.is_tree_focused());
 
+        viewer.toggle_select();
+        assert!(viewer.is_selecting());
         viewer.toggle_focus(true);
-        assert!(viewer.sidebar().is_focused());
+        assert!(viewer.is_tree_focused());
+        assert!(!viewer.is_selecting());
+        viewer.toggle_select();
+        assert!(!viewer.is_selecting());
+
+        viewer.top(20);
+        assert_eq!(
+            viewer.current_file(),
+            None,
+            "directory entry in focused tree names no file"
+        );
+        viewer.toggle_viewed();
+        assert_eq!(
+            viewer.viewed_count(),
+            0,
+            "toggling viewed on a directory does not mark an unrelated diff file"
+        );
+
         viewer.sync_tree_availability(false);
-        assert!(viewer.sidebar().is_open());
-        assert!(!viewer.sidebar().is_focused());
+        assert!(viewer.is_sidebar_open());
+        assert!(!viewer.is_tree_focused());
 
         viewer.start_search();
-        assert!(viewer.search().is_editing());
+        assert!(viewer.focus().is_search_editing());
         viewer.search_commit();
-        assert_eq!(*viewer.search(), SearchState::Idle);
+        assert_eq!(viewer.committed_search(), None);
+        assert_eq!(
+            *viewer.focus(),
+            ViewerFocus::Diff {
+                selection_anchor: None
+            }
+        );
     }
 
     #[test]
@@ -1324,18 +1832,38 @@ diff --git a/src/b.rs b/src/b.rs
         let mut patch = Patch::parse(b"");
         patch.push_untracked(FilePath::parse("src/huge.rs").unwrap(), &huge);
         let mut viewer = Viewer::new(patch, "main".to_owned(), "feat".to_owned());
+        let file_header_excerpt = viewer.selected_excerpt().unwrap();
+        assert!(file_header_excerpt.snippet().len() <= EXCERPT_BYTES_MAX);
+        assert!(
+            file_header_excerpt
+                .snippet()
+                .ends_with(EXCERPT_TRUNCATED_MARKER)
+        );
+        assert_eq!(file_header_excerpt.enclosing_hunks(), None);
+
+        viewer.next_hunk(20);
+        let hunk_header_excerpt = viewer.selected_excerpt().unwrap();
+        assert!(hunk_header_excerpt.snippet().len() <= EXCERPT_BYTES_MAX);
+        assert!(
+            hunk_header_excerpt
+                .snippet()
+                .ends_with(EXCERPT_TRUNCATED_MARKER)
+        );
+        assert_eq!(hunk_header_excerpt.enclosing_hunks(), None);
+
+        viewer.top(20);
         viewer.toggle_select();
         viewer.bottom(20);
         let excerpt = viewer.selected_excerpt().unwrap();
-        assert!(excerpt.snippet.len() <= EXCERPT_BYTES_MAX);
-        assert!(excerpt.snippet.ends_with(EXCERPT_TRUNCATED_MARKER));
+        assert!(excerpt.snippet().len() <= EXCERPT_BYTES_MAX);
+        assert!(excerpt.snippet().ends_with(EXCERPT_TRUNCATED_MARKER));
 
         viewer.start_search();
         for _ in 0..SEARCH_QUERY_BYTES_MAX + 50 {
             viewer.search_push('a', 20);
         }
         assert_eq!(
-            viewer.search().query().map(str::len),
+            viewer.active_search_query().map(str::len),
             Some(SEARCH_QUERY_BYTES_MAX)
         );
     }
@@ -1356,7 +1884,7 @@ diff --git a/src/b.rs b/src/b.rs
     }
 
     #[test]
-    fn excerpt_uses_diff_cursor_file_stays_within_one_file_and_orders_split_lines() {
+    fn excerpt_uses_diff_cursor_file_stays_within_one_file_and_deduplicates_drifted_split_lines() {
         let patch = Patch::parse(SAMPLE.as_bytes());
         let mut viewer = Viewer::new(patch, "main".to_owned(), "feat".to_owned());
         viewer.sync_layout(120);
@@ -1365,15 +1893,27 @@ diff --git a/src/b.rs b/src/b.rs
         viewer.bottom(20);
         assert_eq!(viewer.current_file(), Some(1));
         let excerpt = viewer.selected_excerpt().unwrap();
-        assert_eq!(excerpt.path, "src/a.rs");
-        assert_eq!(excerpt.snippet, "-    old_call();\n+    new_call();");
+        assert_eq!(excerpt.path(), "src/a.rs");
+        assert_eq!(excerpt.snippet(), "-    old_call();\n+    new_call();");
+        assert_eq!(
+            excerpt.enclosing_hunks(),
+            Some("@@ -1,3 +1,3 @@\n fn alpha() {\n-    old_call();\n+    new_call();\n }")
+        );
+
+        viewer.toggle_layout(120);
+        assert_eq!(
+            viewer.diff_file_at(viewer.cursor()),
+            Some(0),
+            "layout switch while tree is focused keeps diff cursor on its own file"
+        );
+        viewer.toggle_layout(120);
 
         viewer.unfocus_sidebar();
         viewer.toggle_select();
         viewer.bottom(20);
         let across = viewer.selected_excerpt().unwrap();
-        assert_eq!(across.path, "src/a.rs");
-        assert!(!across.snippet.contains("added_line"));
+        assert_eq!(across.path(), "src/a.rs");
+        assert!(!across.snippet().contains("added_line"));
 
         let drifted = "\
 diff --git a/src/a.rs b/src/a.rs
@@ -1394,6 +1934,260 @@ diff --git a/src/a.rs b/src/a.rs
         split_viewer.sync_layout(120);
         split_viewer.bottom(20);
         let tail = split_viewer.selected_excerpt().unwrap();
-        assert!(tail.snippet.contains(" tail_ctx"), "{:?}", tail.snippet);
+        assert!(tail.snippet().contains(" tail_ctx"), "{:?}", tail.snippet());
+
+        split_viewer.click_diff_row(2, 20);
+        split_viewer.toggle_select();
+        split_viewer.bottom(20);
+        let all_drifted = split_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            all_drifted.snippet().matches(" tail_ctx").count(),
+            1,
+            "drifted context line is emitted once: {:?}",
+            all_drifted.snippet()
+        );
+
+        let two_hunk_drift = "\
+diff --git a/src/a.rs b/src/a.rs
+--- a/src/a.rs
++++ a/src/a.rs
+@@ -1,3 +1,2 @@
+-old_one
+-old_two
++new_one
+ tail_first
+@@ -20,2 +19,2 @@
+-old_second
++new_second
+ tail_second
+";
+        let mut drift_viewer = Viewer::new(
+            Patch::parse(two_hunk_drift.as_bytes()),
+            "main".to_owned(),
+            "feat".to_owned(),
+        );
+        drift_viewer.sync_layout(120);
+        drift_viewer.click_diff_row(4, 20);
+        let mixed = drift_viewer.selected_excerpt().unwrap();
+        assert!(
+            mixed.snippet().contains(" tail_first"),
+            "drifted left context paired with next hunk header is preserved: {:?}",
+            mixed.snippet()
+        );
+    }
+
+    #[test]
+    fn excerpt_expands_headers_binary_empty_and_dir_click_preserves_focus() {
+        let patch = Patch::parse(SAMPLE.as_bytes());
+        let mut viewer = Viewer::new(patch, "main".to_owned(), "feat".to_owned());
+        viewer.sync_layout(120);
+
+        for width in [120, 60] {
+            viewer.sync_layout(width);
+            viewer.top(20);
+            let on_file_header = viewer.selected_excerpt().unwrap();
+            assert_eq!(on_file_header.path(), "src/a.rs");
+            assert_eq!(on_file_header.lines(), None);
+            assert_eq!(on_file_header.enclosing_hunks(), None);
+            assert!(
+                on_file_header.snippet().contains("-    old_call();"),
+                "{on_file_header:?}"
+            );
+            assert!(
+                on_file_header.snippet().contains("+    new_call();"),
+                "{on_file_header:?}"
+            );
+
+            viewer.next_hunk(20);
+            let on_hunk_header = viewer.selected_excerpt().unwrap();
+            assert_eq!(on_hunk_header.path(), "src/a.rs");
+            assert_eq!(on_hunk_header.enclosing_hunks(), None);
+            assert!(
+                on_hunk_header.snippet().contains("@@ -1,3 +1,3 @@"),
+                "{on_hunk_header:?}"
+            );
+            assert!(
+                on_hunk_header.snippet().contains("-    old_call();"),
+                "{on_hunk_header:?}"
+            );
+            assert!(
+                on_hunk_header.snippet().contains("+    new_call();"),
+                "{on_hunk_header:?}"
+            );
+        }
+
+        viewer.sync_layout(60);
+        viewer.top(20);
+        viewer.next_hunk(20);
+        viewer.toggle_select();
+        viewer.move_down(4, 20);
+        let full_hunk = viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            full_hunk.enclosing_hunks(),
+            None,
+            "identical enclosing hunk is not duplicated"
+        );
+        viewer.clear_select();
+
+        let special = "\
+diff --git a/img.png b/img.png
+Binary files a/img.png and b/img.png differ
+diff --git a/old.png b/new.png
+rename from old.png
+rename to new.png
+Binary files a/old.png and b/new.png differ
+diff --git a/empty.txt b/empty.txt
+new file mode 100644
+diff --git a/gone.txt b/gone.txt
+deleted file mode 100644
+diff --git a/old.txt b/new.txt
+similarity index 100%
+rename from old.txt
+rename to new.txt
+";
+        let mut special_viewer = Viewer::new(
+            Patch::parse(special.as_bytes()),
+            "main".to_owned(),
+            "feat".to_owned(),
+        );
+        for width in [120, 60] {
+            special_viewer.sync_layout(width);
+            for row in 0..special_viewer.row_count() {
+                special_viewer.click_diff_row(row, 20);
+                let excerpt = special_viewer.selected_excerpt().unwrap();
+                assert!(
+                    !excerpt.snippet().is_empty(),
+                    "width {width} row {row}: {excerpt:?}"
+                );
+            }
+        }
+
+        let multi_hunk = "\
+diff --git a/src/multi.rs b/src/multi.rs
+--- a/src/multi.rs
++++ a/src/multi.rs
+@@ -1,3 +1,3 @@
+ fn first() {
+-    one();
++    two();
+ }
+@@ -20,3 +20,3 @@
+ fn second() {
+-    three();
++    four();
+ }
+";
+        let mut multi_viewer = Viewer::new(
+            Patch::parse(multi_hunk.as_bytes()),
+            "main".to_owned(),
+            "feat".to_owned(),
+        );
+        for width in [120, 60] {
+            multi_viewer.sync_layout(width);
+            multi_viewer.top(20);
+            multi_viewer.move_down(3, 20);
+            multi_viewer.toggle_select();
+            multi_viewer.move_down(5, 20);
+            let across_hunks = multi_viewer.selected_excerpt().unwrap();
+            let enclosing = across_hunks
+                .enclosing_hunks()
+                .expect("partial multi-hunk selection includes both enclosing hunks");
+            assert!(enclosing.contains("@@ -1,3 +1,3 @@"), "{enclosing}");
+            assert!(enclosing.contains(" fn first() {"), "{enclosing}");
+            assert!(enclosing.contains("@@ -20,3 +20,3 @@"), "{enclosing}");
+            assert!(enclosing.contains(" fn second() {"), "{enclosing}");
+            multi_viewer.clear_select();
+        }
+
+        let sample_path = FilePath::parse("src/a.rs").unwrap();
+        assert_eq!(ExcerptText::new(String::new()), Err(ExcerptError::Empty));
+        assert_eq!(
+            ExcerptText::new("\0".to_owned()),
+            Err(ExcerptError::ContainsNul)
+        );
+        assert_eq!(
+            ExcerptText::new("x".repeat(EXCERPT_BYTES_MAX + 1)),
+            Err(ExcerptError::TooLarge {
+                bytes: EXCERPT_BYTES_MAX + 1
+            })
+        );
+        let ok = ExcerptText::new("+ok".to_owned()).unwrap();
+        let deduped =
+            SelectionExcerpt::selected(sample_path, LineRange::single(1), ok.clone(), Some(ok));
+        assert_eq!(deduped.snippet(), "+ok");
+        assert_eq!(deduped.enclosing_hunks(), None);
+
+        assert!(viewer.is_sidebar_open());
+        assert!(!viewer.is_tree_focused());
+        let dir_index = viewer
+            .tree()
+            .entries
+            .iter()
+            .position(|entry| matches!(entry.node, TreeNode::Dir { .. }))
+            .expect("SAMPLE has a src directory node");
+        viewer.activate_tree_index(dir_index, 20);
+        assert!(
+            !viewer.is_tree_focused(),
+            "clicking a directory folds it without trapping focus in the file tree"
+        );
+
+        let shifted = "\
+diff --git a/src/shifted.rs b/src/shifted.rs
+--- a/src/shifted.rs
++++ b/src/shifted.rs
+@@ -10,4 +60,3 @@
+ fn moved() {
+-    old_a();
+-    old_b();
++    new_a();
+ }
+";
+        let mut shifted_viewer = Viewer::new(
+            Patch::parse(shifted.as_bytes()),
+            "main".to_owned(),
+            "feat".to_owned(),
+        );
+        shifted_viewer.sync_layout(120);
+        shifted_viewer.click_diff_row(3, 20);
+        let modified_row = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            modified_row.lines(),
+            Some(LineRange::single(61)),
+            "single modified split row uses new-file line instead of old..=new range"
+        );
+        shifted_viewer.click_diff_row(5, 20);
+        let drifted_ctx = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            drifted_ctx.lines(),
+            Some(LineRange::single(62)),
+            "drifted left-only context line uses its new-file line"
+        );
+        shifted_viewer.sync_layout(60);
+        shifted_viewer.click_diff_row(3, 20);
+        let pure_delete = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            pure_delete.lines(),
+            Some(LineRange::single(11)),
+            "pure deletion uses old-file line"
+        );
+        shifted_viewer.toggle_select();
+        shifted_viewer.move_down(2, 20);
+        let unified_pair = shifted_viewer.selected_excerpt().unwrap();
+        assert_eq!(
+            unified_pair.lines(),
+            Some(LineRange::single(61)),
+            "unified selection with deletions and additions prefers new-file lines"
+        );
+
+        shifted_viewer.start_search();
+        shifted_viewer.search_push('m', 20);
+        shifted_viewer.search_commit();
+        assert!(shifted_viewer.committed_search().is_some());
+        shifted_viewer.start_search();
+        assert_eq!(
+            shifted_viewer.committed_search(),
+            None,
+            "starting a new search clears stale committed search"
+        );
     }
 }
