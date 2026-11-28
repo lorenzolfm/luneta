@@ -872,8 +872,6 @@ fn end_group(child: &mut Child, group: Pid) -> Result<ExitStatus, String> {
         .map_err(|error| format!("failed to wait on child: {error}"))
 }
 
-// `session_out` is a plain text handoff file written only by `lune _step` and
-// read by `luned::flows::store::read_session_out`, which parses `SessionId`.
 fn write_session_id(path: &Path, id: &SessionId) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
