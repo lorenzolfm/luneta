@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::symlink;
+use std::io::{BufRead, BufReader, Write as _};
+use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Output, Stdio};
 use std::sync::LazyLock;
@@ -121,9 +121,36 @@ pub fn install(from: &Path, to: &Path) {
 }
 
 pub fn script(path: &Path, text: &str) {
-    let draft = path.with_extension("draft");
-    fs::write(&draft, format!("#!/bin/sh\n{text}")).unwrap();
-    install(&draft, path);
+    assert!(
+        path.file_name().is_some(),
+        "script path has a file name: {}",
+        path.display()
+    );
+    assert!(
+        !text.starts_with("#!"),
+        "script text omits the shebang line: {}",
+        path.display()
+    );
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut staged = tempfile::Builder::new()
+        .prefix(".script-")
+        .tempfile_in(parent)
+        .unwrap();
+    assert_ne!(
+        staged.path(),
+        path,
+        "staged script path is distinct from target"
+    );
+    write!(staged, "#!/bin/sh\n{text}").unwrap();
+    staged
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o755))
+        .unwrap();
+    staged.into_temp_path().persist(path).unwrap();
+    assert!(path.is_file(), "script is installed at {}", path.display());
 }
 
 pub fn shared_script(path: &Path, text: &str) {
@@ -894,19 +921,29 @@ struct QuickProfile {
     overrides: Vec<NextestOverride>,
 }
 
+struct DisabledRetries;
+
+impl<'de> serde::Deserialize<'de> for DisabledRetries {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = u32::deserialize(deserializer)?;
+        if value != 0 {
+            return Err(serde::de::Error::custom(format!(
+                "retries must be 0 so flaky races are not masked, got {value}"
+            )));
+        }
+        Ok(Self)
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CiProfile {
-    #[serde(default, rename = "retries")]
-    _retries: Option<u32>,
+    #[serde(rename = "retries")]
+    _retries: DisabledRetries,
     #[serde(default, rename = "slow-timeout")]
     _slow_timeout: Option<toml::Value>,
     #[serde(default, rename = "failure-output")]
     _failure_output: Option<String>,
-    #[serde(default, rename = "final-status-level")]
-    _final_status_level: Option<String>,
-    #[serde(default, rename = "junit")]
-    _junit: Option<toml::Value>,
     #[serde(default)]
     overrides: Vec<NextestOverride>,
 }
@@ -917,8 +954,6 @@ struct NextestOverride {
     filter: ExactUnionFilter,
     #[serde(default)]
     priority: Option<NextestPriority>,
-    #[serde(default, rename = "retries")]
-    _retries: Option<u32>,
     #[serde(default, rename = "slow-timeout")]
     _slow_timeout: Option<toml::Value>,
 }
@@ -1180,6 +1215,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1189,6 +1225,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1198,6 +1235,7 @@ priority = 101
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1207,6 +1245,7 @@ priority = 100
 [profile.quick]
 default-filter = "test(=a::one)"
 [profile.ci]
+retries = 0
 "#,
         r#"
 [profile.default]
@@ -1215,6 +1254,38 @@ filter = "test(=a::one)"
 priority = 100
 [profile.quick]
 default-filter = "not test(=a::one) or not test(=b::two)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+test-threads = 4
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+final-status-level = "flaky"
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
 [profile.ci]
 "#,
         r#"
@@ -1225,7 +1296,62 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
-test-threads = 4
+retries = 1
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = { backoff = "fixed", count = 0 }
+"#,
+        r#"
+[profile.default]
+retries = 1
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+retries = 1
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+retries = 0
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+"#,
+        r#"
+[profile.default]
+[[profile.default.overrides]]
+filter = "test(=a::one)"
+priority = 100
+[profile.quick]
+default-filter = "not test(=a::one)"
+[profile.ci]
+retries = 0
+[profile.ci.junit]
+path = "junit.xml"
 "#,
     ];
     for raw in invalid_configs {
@@ -1244,6 +1370,7 @@ priority = 100
 [profile.quick]
 default-filter = "not test(=a::one)"
 [profile.ci]
+retries = 0
 [[profile.ci.overrides]]
 filter = "test(=a::one)"
 priority = 0
