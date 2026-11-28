@@ -18,7 +18,7 @@ use lune_protocol::program_resume::{ARGV_BYTES_MAX, ProcessArgv};
 
 use super::{
     Found, Id, Mine, OPEN_FILES_MAX, ProcessMeta, SPURIOUS_WAKES_MAX, Start, Unended, Unread,
-    Unreadable, program_named, readable_fd,
+    Unreadable, open_files_over, program_named, readable_fd,
 };
 
 const META_ARGV_BYTES_MAX: usize = ARGV_BYTES_MAX;
@@ -158,11 +158,12 @@ pub fn cwd(pid: u32) -> Result<PathBuf, Unread> {
     fs::read_link(proc(pid, "cwd")).map_err(|error| unread(pid, &error))
 }
 
-pub fn open_files(pid: u32) -> Result<Vec<PathBuf>, Unread> {
+pub fn open_files(pid: u32, limit: usize) -> Result<Vec<PathBuf>, Unread> {
+    assert!(limit <= OPEN_FILES_MAX);
     let folder = proc(pid, "fd");
-    let listed = fs::read_dir(&folder).map_err(|error| unread(pid, &error))?;
+    let mut listed = fs::read_dir(&folder).map_err(|error| unread(pid, &error))?;
     let mut files = Vec::new();
-    for entry in listed.take(OPEN_FILES_MAX) {
+    for entry in listed.by_ref().take(limit) {
         let entry = entry.map_err(|error| unread(pid, &error))?;
         match fs::read_link(entry.path()) {
             Ok(path) if path.is_absolute() => files.push(path),
@@ -171,7 +172,10 @@ pub fn open_files(pid: u32) -> Result<Vec<PathBuf>, Unread> {
             Err(error) => return Err(unread(pid, &error)),
         }
     }
-    assert!(files.len() <= OPEN_FILES_MAX);
+    if listed.next().is_some() {
+        return Err(open_files_over(limit));
+    }
+    assert!(files.len() <= limit);
     Ok(files)
 }
 

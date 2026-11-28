@@ -35,6 +35,10 @@ pub const OPEN_FILES_MAX: usize = 4096;
 
 const _: () = assert!(OPEN_FILES_MAX > 0);
 
+fn open_files_over(limit: usize) -> Unread {
+    Unread::Failed(format!("there are more than {limit}"))
+}
+
 pub const ANCESTOR_DEPTH_MAX: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -540,18 +544,26 @@ mod tests {
         let dir = dir.path().canonicalize().unwrap();
         let held = dir.join("held.lock");
         let file = std::fs::File::create(&held).unwrap();
-        let mine = super::open_files(std::process::id()).unwrap();
+        let most = super::OPEN_FILES_MAX;
+        let mine = super::open_files(std::process::id(), most).unwrap();
         assert!(mine.contains(&held), "{mine:?} lists {held:?}");
-        assert!(mine.len() <= super::OPEN_FILES_MAX);
+        assert!(mine.len() <= most);
+        let other = std::fs::File::open(&dir).unwrap();
+        assert_eq!(
+            super::open_files(std::process::id(), 1),
+            Err(super::Unread::Failed("there are more than 1".to_owned())),
+            "a list cut at its limit would leave out a file without saying so"
+        );
+        drop(other);
         drop(file);
-        let after = super::open_files(std::process::id()).unwrap();
+        let after = super::open_files(std::process::id(), most).unwrap();
         assert!(!after.contains(&held), "{after:?} still lists {held:?}");
 
         let mut child = Command::new("sleep").arg("60").spawn().unwrap();
         let pid = child.id();
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(super::open_files(pid), Err(super::Unread::Gone));
+        assert_eq!(super::open_files(pid, most), Err(super::Unread::Gone));
     }
 
     #[test]

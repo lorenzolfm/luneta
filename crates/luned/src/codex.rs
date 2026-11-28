@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, ErrorKind, Read as _, Seek as _, SeekFrom};
@@ -55,14 +55,17 @@ pub struct Thread {
 pub type Held = HashMap<AgentId, Thread>;
 
 fn thread_in(locks: &Path, files: &[PathBuf]) -> Option<SessionId> {
-    let held: BTreeSet<&str> = files
+    assert!(
+        locks.is_absolute(),
+        "open files are named from the root, and so is the folder they are sought in"
+    );
+    let held = files
         .iter()
         .filter(|file| file.parent() == Some(locks))
         .filter(|file| file.extension().is_some_and(|extension| extension == LOCK))
         .filter_map(|file| file.file_stem()?.to_str())
-        .filter(|stem| SessionId::parse(stem).is_some())
-        .collect();
-    held.first().and_then(|oldest| SessionId::parse(oldest))
+        .filter(|stem| trust::is_uuid(stem));
+    SessionId::parse(held.min()?)
 }
 
 fn resumed_in(argv: &[String]) -> Option<SessionId> {
@@ -84,8 +87,9 @@ struct Indexed {
 
 fn names_in(index: &[u8]) -> HashMap<String, Said> {
     let mut names = HashMap::new();
-    let lines = index.split(|byte| *byte == b'\n');
-    for line in lines.take(NAME_LINES_MAX) {
+    let newest_first = index.rsplit(|byte| *byte == b'\n');
+    let newest: Vec<&[u8]> = newest_first.take(NAME_LINES_MAX).collect();
+    for line in newest.into_iter().rev() {
         let Ok(Indexed { id, thread_name }) = serde_json::from_slice::<Indexed>(line) else {
             continue;
         };
@@ -117,7 +121,16 @@ fn index_end(codex: &Path) -> io::Result<Vec<u8>> {
     Ok(end)
 }
 
+fn locks_in(codex: &Path) -> io::Result<Option<PathBuf>> {
+    match codex.join(LOCKS).canonicalize() {
+        Ok(locks) => Ok(Some(locks)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn wraps(wrapper: AgentPid, pid: u32) -> bool {
+    assert_ne!(pid, wrapper.get(), "a wrapper is not the Codex it wraps");
     let mut at = pid;
     for _ in 0..WRAPPERS_MAX {
         let Some(parent) = process::parent(at) else {
@@ -152,13 +165,21 @@ impl Threads {
 
     fn locks(&mut self) -> Option<PathBuf> {
         if self.locks.is_none() {
-            self.locks = self.codex.as_ref()?.join(LOCKS).canonicalize().ok();
+            let codex = self.codex.as_deref()?;
+            match locks_in(codex) {
+                Ok(locks) => self.locks = locks,
+                Err(error) => {
+                    let locks = codex.join(LOCKS);
+                    self.troubles
+                        .say(format!("{} is unread: {error}", locks.display()));
+                }
+            }
         }
         self.locks.clone()
     }
 
     fn files(&mut self, pid: u32) -> Vec<PathBuf> {
-        match process::open_files(pid) {
+        match process::open_files(pid, process::OPEN_FILES_MAX) {
             Ok(files) => files,
             Err(process::Unread::Gone) => Vec::new(),
             Err(process::Unread::Failed(why)) => {
@@ -172,11 +193,13 @@ impl Threads {
 
     fn wrapped(&mut self, locks: &Path, agent: AgentPid) -> Option<SessionId> {
         let program = Harness::Codex.program();
-        let mut inside: Vec<u32> = process::mine(&[((), program)])
-            .found
-            .into_iter()
-            .map(|found| found.id.pid)
-            .filter(|pid| *pid != agent.get() && wraps(agent, *pid))
+        let process::Mine { found, unreadable } = process::mine(&[((), program)]);
+        let found = found.iter().map(|found| found.id.pid);
+        let unreadable = unreadable.iter().map(|unreadable| unreadable.id.pid);
+        let mut inside: Vec<u32> = found
+            .chain(unreadable)
+            .filter(|pid| *pid != agent.get())
+            .filter(|pid| wraps(agent, *pid))
             .collect();
         inside.sort_unstable();
         inside.truncate(SOURCE_AGENTS_MAX);
@@ -186,20 +209,23 @@ impl Threads {
     }
 
     pub fn held_by(&mut self, agents: &[Agent]) -> Held {
-        let mut held = Held::new();
         let codex: Vec<&Agent> = agents
             .iter()
             .filter(|agent| agent.harness == Harness::Codex)
             .take(SOURCE_AGENTS_MAX)
             .collect();
-        if codex.is_empty() {
-            self.troubles.done();
-            return held;
-        }
-        let Some(locks) = self.locks() else {
-            self.troubles.done();
-            return held;
+        let locks = if codex.is_empty() { None } else { self.locks() };
+        let held = match locks {
+            Some(locks) => self.held_in(&locks, &codex),
+            None => Held::new(),
         };
+        self.troubles.done();
+        assert!(held.len() <= codex.len());
+        assert!(held.len() <= SOURCE_AGENTS_MAX);
+        held
+    }
+
+    fn held_in(&mut self, locks: &Path, codex: &[&Agent]) -> Held {
         let mut sessions = Vec::with_capacity(codex.len());
         for agent in codex {
             let pid = agent.pid.get();
@@ -210,9 +236,9 @@ impl Threads {
                 continue;
             };
             let wrapper = runs.name != Harness::Codex.program();
-            let direct = thread_in(&locks, &self.files(pid));
+            let direct = thread_in(locks, &self.files(pid));
             let written = match direct {
-                None if wrapper => self.wrapped(&locks, agent.pid),
+                None if wrapper => self.wrapped(locks, agent.pid),
                 direct => direct,
             };
             let argv = runs.argv.as_ref().map(ProcessArgv::words);
@@ -226,18 +252,16 @@ impl Threads {
         } else {
             self.names()
         };
+        let mut held = Held::new();
         for (agent, session) in sessions {
             let name = names.get(session.as_str()).map(|text| Name {
                 text: text.clone(),
                 source: Some(Source::Auto),
             });
-            let Some(session) = Said::new(session.as_str().to_owned()) else {
-                continue;
-            };
+            let session =
+                Said::new(session.as_str().to_owned()).expect("a session id is never empty");
             held.insert(agent, Thread { session, name });
         }
-        self.troubles.done();
-        assert!(held.len() <= SOURCE_AGENTS_MAX);
         held
     }
 
@@ -262,6 +286,10 @@ pub fn follow(
     codex: Option<PathBuf>,
     sweep: Duration,
 ) -> io::Result<()> {
+    assert!(
+        !sweep.is_zero(),
+        "a sweep that takes no time asks the core without a rest"
+    );
     thread::Builder::new()
         .name("codex".to_owned())
         .spawn(move || {
@@ -321,6 +349,11 @@ mod tests {
         assert_eq!(held(&[locks.join(".coordination.lock")]), None);
         assert_eq!(held(&[locks.join(format!("{OLDER}.jsonl"))]), None);
         assert_eq!(held(&[locks.join("not a thread.lock")]), None);
+        for no_uuid in ["abc", "DEAD-BEEF", "01a222f4cde975d39267061cca269c80"] {
+            assert!(SessionId::parse(no_uuid).is_some(), "{no_uuid}");
+            let named = locks.join(format!("{no_uuid}.lock"));
+            assert_eq!(held(&[named]), None, "{no_uuid} orders no threads by age");
+        }
         assert_eq!(
             held(&[PathBuf::from("/dev/pts/8"), lock(locks, NEWER)]),
             Some(NEWER.to_owned())
@@ -374,6 +407,37 @@ mod tests {
         assert_eq!(names.get(OLDER).map(Said::as_str), Some("lighthouse"));
         assert_eq!(names.get(NEWER), None, "a blank name unnames the thread");
         assert_eq!(names_in(b""), HashMap::new());
+    }
+
+    #[test]
+    fn an_index_of_more_lines_than_are_read_is_read_from_its_newest() {
+        let line = |thread: &str, name: &str| {
+            format!("{{\"id\":\"{thread}\",\"thread_name\":\"{name}\"}}\n")
+        };
+        let index = [
+            line(NEWER, "only in the lines left unread"),
+            line(OLDER, "an older name"),
+            "\n".repeat(NAME_LINES_MAX),
+            line(OLDER, "lighthouse"),
+        ]
+        .concat();
+        let names = names_in(index.as_bytes());
+        assert_eq!(names.get(OLDER).map(Said::as_str), Some("lighthouse"));
+        assert_eq!(names.get(NEWER), None);
+    }
+
+    #[test]
+    fn a_lock_folder_codex_has_not_made_is_none_and_one_that_does_not_read_says_why() {
+        let home = tempfile::tempdir().unwrap();
+        let codex = home.path().canonicalize().unwrap();
+        assert_eq!(locks_in(&codex).unwrap(), None);
+        fs::create_dir(codex.join(LOCKS)).unwrap();
+        assert_eq!(locks_in(&codex).unwrap(), Some(codex.join(LOCKS)));
+
+        let file = codex.join("a file, not Codex's folder");
+        fs::write(&file, "").unwrap();
+        let unread = locks_in(&file).unwrap_err();
+        assert_ne!(unread.kind(), ErrorKind::NotFound, "{unread}");
     }
 
     #[test]
