@@ -429,7 +429,7 @@ impl Argv {
                 }
                 command.push("--".to_owned());
             }
-            Harness::Pi => command.push("--".to_owned()),
+            Harness::Pi | Harness::Codex => command.push("--".to_owned()),
             Harness::Antigravity => command.push("-i".to_owned()),
         }
         command.push(words);
@@ -1174,7 +1174,14 @@ mod tests {
                 Argv::on_words(Harness::Antigravity, prompt.clone(), &[file])
                     .unwrap()
                     .words(),
-                ["agy".to_owned(), "-i".to_owned(), prompt],
+                ["agy".to_owned(), "-i".to_owned(), prompt.clone()],
+                "{file}"
+            );
+            assert_eq!(
+                Argv::on_words(Harness::Codex, prompt.clone(), &[file])
+                    .unwrap()
+                    .words(),
+                ["codex".to_owned(), "--".to_owned(), prompt],
                 "{file}"
             );
         }
@@ -1207,6 +1214,7 @@ mod tests {
             (api::Harness::ClaudeCode, Harness::ClaudeCode, "--"),
             (api::Harness::Pi, Harness::Pi, "--"),
             (api::Harness::Antigravity, Harness::Antigravity, "-i"),
+            (api::Harness::Codex, Harness::Codex, "--"),
         ] {
             let asked = asked(said, "Tackle #444");
             let opens = Opens::of_api(Some(asked.clone())).unwrap();

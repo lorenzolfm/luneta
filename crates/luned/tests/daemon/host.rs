@@ -65,6 +65,7 @@ impl<'a> Vars<'a> {
             "HOME",
             "CLAUDE_CONFIG_DIR",
             "PI_CODING_AGENT_DIR",
+            "CODEX_HOME",
         ];
         let views = [
             "LUNE_MUX_SESSION",

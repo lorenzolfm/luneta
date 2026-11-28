@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
+use lune_domain::agent::FlowHarness;
 use lune_domain::projects::{Argv, Dir, Opens, WorktreeId};
 use luned::Directory;
 use luned::links::{self, Branch, Kind, Link, Of, Pasted, Unready, Work, Worked};
@@ -18,11 +19,24 @@ use crate::state;
 use crate::worktrees::{self, Landed, Landing, Opening, Went};
 
 pub struct ShipOptions {
-    pub flow: Option<String>,
-    pub interactive: bool,
+    flow: Option<String>,
+    interactive: bool,
+    harness: FlowHarness,
 }
 
 impl ShipOptions {
+    pub fn on_the_agent_picked(
+        flow: Option<String>,
+        interactive: bool,
+    ) -> Result<ShipOptions, String> {
+        let harness = flow::picked()?;
+        Ok(ShipOptions {
+            flow,
+            interactive,
+            harness,
+        })
+    }
+
     fn mode(&self) -> lune_domain::flows::FlowMode {
         if self.interactive {
             lune_domain::flows::FlowMode::Interactive
@@ -248,12 +262,11 @@ fn start_ship_flow(
     prompt: Option<String>,
     label: &dyn std::fmt::Display,
 ) -> Left {
-    let harness = Kept::shared(&state::Folder::of_user()).0.harness();
     match flow::start_on(
         path,
         worktree,
         options.mode(),
-        harness,
+        options.harness,
         options.flow.clone(),
         prompt,
     ) {

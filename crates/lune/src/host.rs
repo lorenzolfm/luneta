@@ -22,6 +22,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, SetTitle};
 use crossterm::{execute, queue};
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{self, FlowBadgeKind, FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{self, Arranged, BrowserUrl, Opens, ProjectId, ViewId, WorktreeId};
@@ -3513,7 +3514,7 @@ impl App {
         on: Machine,
         worktree: WorktreeId,
         mode: FlowMode,
-        harness: agents::Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
     ) {
         let (luned, events) = (self.luned.clone(), self.events.clone());

@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::{FlowHarness, Harness};
 use lune_domain::flows::FlowEntry;
 use lune_domain::mux::TerminalKey;
 use lune_domain::projects::{Dir, ProjectId, WorktreeId};
@@ -78,9 +78,9 @@ use crate::sayings::ToSay;
 use crate::statuses::ReportedAgent;
 use crate::transcripts::{self, Reading, SessionId};
 use crate::{
-    agy, changes, checks, claude, claude_status, client, devices, eza, fetches, flows, git, github,
-    keeps, log, owns, pi, printed, program, projects, release, remote, repositories, skills, state,
-    tailnet, topics, watch, work,
+    agy, changes, checks, claude, claude_status, client, codex, devices, eza, fetches, flows, git,
+    github, keeps, log, owns, pi, printed, program, projects, release, remote, repositories,
+    skills, state, tailnet, topics, watch, work,
 };
 
 mod over_tailnet;
@@ -507,7 +507,12 @@ fn follow(
         let core = core.clone();
         move |found| core.send(Command::AgyAgents(found)).is_ok()
     };
-    watch::watch_ending("agy", dir, mode, any, SWEEP, read, pids, tell)
+    watch::watch_ending("agy", dir, mode, any, SWEEP, read, pids, tell)?;
+    let Some(codex_folder) = codex::folder() else {
+        log::say("neither CODEX_HOME nor HOME names a folder, to find Codex's threads in");
+        return Ok(());
+    };
+    codex::follow(core.clone(), codex_folder, SWEEP)
 }
 
 async fn stand(
@@ -1569,6 +1574,7 @@ impl Daemon for Host {
             Ok(api::Harness::ClaudeCode | api::Harness::Unspecified) => Harness::ClaudeCode,
             Ok(api::Harness::Pi) => Harness::Pi,
             Ok(api::Harness::Antigravity) => Harness::Antigravity,
+            Ok(api::Harness::Codex) => Harness::Codex,
             Err(_) => return Err(Status::invalid_argument("harness: unknown harness")),
         };
         let parsed_entry = match &entry {
@@ -1594,6 +1600,7 @@ impl Daemon for Host {
                 })
                 .await;
         }
+        let flow_harness = FlowHarness::of(parsed_harness).map_err(Status::failed_precondition)?;
         let layouts = self.layouts.clone();
         let flows = self.flows.clone();
         let started = task::spawn_blocking(move || {
@@ -1605,7 +1612,7 @@ impl Daemon for Host {
                 dir: dir.as_str().to_owned(),
                 flow_name,
                 mode: parsed_mode,
-                harness: parsed_harness,
+                harness: flow_harness,
                 entry: parsed_entry,
                 answer,
             })
@@ -2151,6 +2158,10 @@ impl Host {
             api::Harness::Antigravity => {
                 let why =
                     format!("terminal {id} runs Antigravity, whose menus luned does not read");
+                return Runs::Unread(why);
+            }
+            api::Harness::Codex => {
+                let why = format!("terminal {id} runs Codex, whose menus luned does not read");
                 return Runs::Unread(why);
             }
             api::Harness::Unspecified => {

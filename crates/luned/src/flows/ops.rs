@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use lune_domain::agent::Harness;
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{
     AgentStage, FixChecksGateFailure, FlowEntry, GitOid, MergeMethod, MergeOutcome, PrSnapshot,
     PrState, RebaseOutcome, SessionId, StageGateFailure,
@@ -58,10 +58,10 @@ pub fn lune_binary() -> String {
 }
 
 #[must_use]
-pub fn spelled_skill(harness: Harness, skill: &str) -> String {
+pub fn spelled_skill(harness: FlowHarness, skill: &str) -> String {
     match harness {
-        Harness::ClaudeCode | Harness::Antigravity => format!("/{skill}"),
-        Harness::Pi => format!("/skill:{skill}"),
+        FlowHarness::ClaudeCode | FlowHarness::Antigravity => format!("/{skill}"),
+        FlowHarness::Pi => format!("/skill:{skill}"),
     }
 }
 
@@ -343,7 +343,7 @@ pub fn pr_scope(dir: &str, pr_url: Option<&str>) -> String {
 #[must_use]
 pub fn stage_prompts(
     dir: &str,
-    harness: Harness,
+    harness: FlowHarness,
     stage: &AgentStage,
     pr_url: Option<&PullPage>,
 ) -> (String, Option<String>) {
@@ -367,14 +367,14 @@ pub fn stage_prompts(
 
 pub fn interactive_stage_argv(
     dir: &str,
-    harness: Harness,
+    harness: FlowHarness,
     stage: &AgentStage,
     pr_url: Option<&PullPage>,
 ) -> Result<Argv, String> {
     match stage {
         AgentStage::Implement { prompt } => {
             assert_ne!(prompt.trim(), "");
-            Argv::on_words(harness, prompt.clone(), &[])
+            Argv::on_words(harness.harness(), prompt.clone(), &[])
         }
         AgentStage::ReviewSkill { skill } => {
             assert_ne!(skill.trim(), "");
@@ -382,8 +382,10 @@ pub fn interactive_stage_argv(
             let scope = pr_scope(dir, pr_url.map(PullPage::url));
             let prompt = format!("{spelled} {scope}");
             let words = match harness {
-                Harness::ClaudeCode | Harness::Pi => vec![harness.program().to_owned(), prompt],
-                Harness::Antigravity => {
+                FlowHarness::ClaudeCode | FlowHarness::Pi => {
+                    vec![harness.program().to_owned(), prompt]
+                }
+                FlowHarness::Antigravity => {
                     vec![harness.program().to_owned(), "-i".to_owned(), prompt]
                 }
             };
@@ -412,7 +414,7 @@ impl StepFiles {
 
 pub fn unattended_step_argv(
     lune_bin: &str,
-    harness: Harness,
+    harness: FlowHarness,
     stage_label: &str,
     files: &StepFiles,
     timeout_secs: u64,
@@ -444,7 +446,7 @@ pub fn unattended_step_argv(
         words.push("--followup-file".to_owned());
         words.push(path(followup)?);
     }
-    if harness == Harness::Pi
+    if harness == FlowHarness::Pi
         && let Some(pi_session) = &files.pi_session
     {
         words.push("--pi-session".to_owned());
@@ -453,11 +455,11 @@ pub fn unattended_step_argv(
     Argv::parse(words)
 }
 
-pub fn takeover_argv(harness: Harness, session_id: Option<&SessionId>) -> Result<Argv, String> {
+pub fn takeover_argv(harness: FlowHarness, session_id: Option<&SessionId>) -> Result<Argv, String> {
     let words = match session_id {
         Some(id) => vec![
             harness.program().to_owned(),
-            harness.resumes().to_owned(),
+            harness.harness().resumes().to_owned(),
             id.as_str().to_owned(),
         ],
         None => vec![harness.program().to_owned()],
@@ -472,20 +474,26 @@ mod tests {
     #[test]
     fn takeover_argv_uses_each_harness_resume_flag() {
         assert_eq!(
-            takeover_argv(Harness::ClaudeCode, Some(&SessionId::parse("s1").unwrap()))
-                .unwrap()
-                .words(),
+            takeover_argv(
+                FlowHarness::ClaudeCode,
+                Some(&SessionId::parse("s1").unwrap())
+            )
+            .unwrap()
+            .words(),
             ["claude", "--resume", "s1"]
         );
         assert_eq!(
-            takeover_argv(Harness::Antigravity, Some(&SessionId::parse("c1").unwrap()))
-                .unwrap()
-                .words(),
+            takeover_argv(
+                FlowHarness::Antigravity,
+                Some(&SessionId::parse("c1").unwrap())
+            )
+            .unwrap()
+            .words(),
             ["agy", "--resume", "c1"]
         );
         assert_eq!(
             takeover_argv(
-                Harness::Pi,
+                FlowHarness::Pi,
                 Some(&SessionId::parse("/tmp/s.jsonl").unwrap())
             )
             .unwrap()

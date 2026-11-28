@@ -9,6 +9,7 @@ pub mod choices;
 mod claude;
 mod claude_status;
 mod client;
+mod codex;
 mod core;
 mod daemon;
 mod devices;
@@ -68,6 +69,7 @@ pub use client::{
     Unasked, Unbridged, Unmatched, Unreached, Unsent, WatchError, WatchedHost, Watching, connect,
     info_of_any_build, kept, listening, reach, stream, through, unanswered,
 };
+pub use codex::folder as codex_folder;
 pub use daemon::{ALONE, ANSWERING_MAX, Claim, LISTENING, SWEEP, WATCH, parked_watch, serve};
 pub use directory::Directory;
 pub use folder::Refusal;

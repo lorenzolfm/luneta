@@ -129,7 +129,12 @@ const STORY: &str = "Write a 400 word story about a lighthouse keeper. Use no to
 
 const COUNT: &str = "Count from 1 to 2000, one number per line. Use no tools.";
 
+const LONG_STORY: &str = "Write a 1500 word story about a lighthouse keeper. Use no tools.";
+
 const TOUCH: &str = "Use your shell tool to run: touch lune-record-status.txt";
+
+const TOUCH_AND_ASK: &str =
+    "Ask me to approve this shell command, then run it: touch lune-record-status.txt";
 
 fn kept_folder(named: &str) -> Result<PathBuf, String> {
     let cache = std::env::var_os("XDG_CACHE_HOME")
@@ -163,7 +168,11 @@ fn seconds(count: u64) -> Duration {
 }
 
 fn started() -> Move {
-    Move::to(vec![], Want::Resting, Some(Step::Start), seconds(2))
+    started_and_settled_in(seconds(2))
+}
+
+fn started_and_settled_in(settle: Duration) -> Move {
+    Move::to(vec![], Want::Resting, Some(Step::Start), settle)
 }
 
 fn prompted() -> Vec<Move> {
@@ -178,10 +187,10 @@ fn prompted() -> Vec<Move> {
     ]
 }
 
-fn asked_and_rejected() -> Vec<Move> {
+fn asked_and_rejected(touch: &'static str) -> Vec<Move> {
     vec![
         Move::to(
-            vec![Input::Line(TOUCH)],
+            vec![Input::Line(touch)],
             Want::Blocked(OscBlockedKind::Permission),
             Some(Step::Permission),
             seconds(2),
@@ -207,9 +216,14 @@ fn asked(question: &'static str) -> Vec<Move> {
     ]
 }
 
-fn interrupted() -> Vec<Move> {
+fn interrupted(long_turn: &'static str) -> Vec<Move> {
     vec![
-        Move::to(vec![Input::Line(COUNT)], Want::Working, None, seconds(3)),
+        Move::to(
+            vec![Input::Line(long_turn)],
+            Want::Working,
+            None,
+            seconds(3),
+        ),
         Move::to(
             vec![Input::Keys(ESC)],
             Want::Resting,
@@ -259,11 +273,11 @@ fn plan(harness: Harness) -> Result<Plan, String> {
             let asks = ["--permission-mode", "default"];
             let mut moves = vec![started()];
             moves.extend(prompted());
-            moves.extend(asked_and_rejected());
+            moves.extend(asked_and_rejected(TOUCH));
             moves.extend(asked(
                 "Use the AskUserQuestion tool to ask me whether I prefer red or blue.",
             ));
-            moves.extend(interrupted());
+            moves.extend(interrupted(COUNT));
             moves.push(exited("/exit", true));
             Plan {
                 folder: Folder::Temporary,
@@ -308,7 +322,7 @@ fn plan(harness: Harness) -> Result<Plan, String> {
         Harness::Pi => {
             let mut moves = vec![started()];
             moves.extend(prompted());
-            moves.extend(interrupted());
+            moves.extend(interrupted(COUNT));
             moves.push(exited("/quit", true));
             let model = &["--model", "anthropic/claude-haiku-4-5"];
             Plan {
@@ -346,11 +360,11 @@ fn plan(harness: Harness) -> Result<Plan, String> {
         Harness::Antigravity => {
             let mut moves = vec![started()];
             moves.extend(prompted());
-            moves.extend(asked_and_rejected());
+            moves.extend(asked_and_rejected(TOUCH));
             moves.extend(asked(
                 "Use your ask_question tool to ask me whether I prefer red or blue.",
             ));
-            moves.extend(interrupted());
+            moves.extend(interrupted(COUNT));
             moves.push(exited("/quit", true));
             let model = &["--model", "gemini-3.8-flash-medium"];
             let asks = ["--mode", "accept-edits"];
@@ -378,6 +392,45 @@ fn plan(harness: Harness) -> Result<Plan, String> {
                         moves,
                     },
                     failed(model, asks.to_vec(), OFFLINE.to_vec(), "/quit"),
+                ],
+            }
+        }
+        Harness::Codex => {
+            let mut moves = vec![started_and_settled_in(seconds(10))];
+            moves.extend(prompted());
+            moves.extend(asked_and_rejected(TOUCH_AND_ASK));
+            moves.extend(interrupted(LONG_STORY));
+            moves.extend(asked(
+                "/plan Use your request_user_input tool to ask me whether I prefer red or blue.",
+            ));
+            moves.push(exited("/quit", true));
+            let model = &[
+                "--model",
+                "gpt-6-luna",
+                "--config",
+                "model_reasoning_effort=\"low\"",
+            ];
+            let asks = ["--sandbox", "read-only", "--ask-for-approval", "on-request"];
+            Plan {
+                folder: Folder::Temporary,
+                args: vec![],
+                dialogs: &[],
+                keeps: &[],
+                files: vec![],
+                runs: vec![
+                    Run {
+                        reaches_model: true,
+                        model,
+                        args: asks.to_vec(),
+                        env: vec![],
+                        moves,
+                    },
+                    failed(
+                        &[],
+                        vec!["--model", "codex-no-such-model-0"],
+                        vec![],
+                        "/quit",
+                    ),
                 ],
             }
         }

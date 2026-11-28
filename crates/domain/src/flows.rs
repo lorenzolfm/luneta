@@ -5,7 +5,7 @@ use lune_protocol::github::PullPage;
 use lune_protocol::v1 as api;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::Harness;
+use crate::agent::FlowHarness;
 use crate::projects::{ViewId, WORKTREES_MAX, WorktreeId};
 
 pub const STAGES_MAX: usize = 16;
@@ -467,7 +467,7 @@ impl FlowMode {
 pub fn start_request(
     worktree: WorktreeId,
     mode: FlowMode,
-    harness: Harness,
+    harness: FlowHarness,
     flow_name: Option<String>,
     prompt: Option<String>,
 ) -> api::StartFlowRequest {
@@ -480,7 +480,7 @@ pub fn start_request(
         worktree: worktree.get(),
         flow_name,
         mode: mode.to_api().into(),
-        harness: harness.to_api().into(),
+        harness: harness.harness().to_api().into(),
         entry: Some(entry),
     }
 }
@@ -711,27 +711,27 @@ pub enum FlowEffect {
     OpenInteractiveStage {
         worktree: WorktreeId,
         view_name: String,
-        harness: Harness,
+        harness: FlowHarness,
         stage: AgentStage,
     },
     OpenUnattendedStage {
         worktree: WorktreeId,
         view_name: String,
-        harness: Harness,
+        harness: FlowHarness,
         stage: AgentStage,
         timeout_secs: u64,
     },
     OpenUnattendedHelper {
         worktree: WorktreeId,
         view_name: String,
-        harness: Harness,
+        harness: FlowHarness,
         prompt: String,
         timeout_secs: u64,
     },
     OpenTakeOver {
         worktree: WorktreeId,
         view_name: String,
-        harness: Harness,
+        harness: FlowHarness,
         session_id: Option<SessionId>,
         fallback_view: Option<ViewId>,
         stopped_view: Option<ViewId>,
@@ -1061,7 +1061,7 @@ pub struct FlowSummary {
     pub worktree: WorktreeId,
     pub flow_name: String,
     pub mode: FlowMode,
-    pub harness: Harness,
+    pub harness: FlowHarness,
     pub step_number: u32,
     pub step_total: u32,
     pub stage_label: String,
@@ -1084,7 +1084,7 @@ pub struct FlowRun {
     pub stage_index: u32,
     pub mode: FlowMode,
     #[serde(with = "harness_serde")]
-    pub harness: Harness,
+    pub harness: FlowHarness,
     pub phase: FlowPhase,
     pub rebase_attempts: u32,
     pub fix_checks_attempts: u32,
@@ -1097,7 +1097,7 @@ struct Entering<'a> {
     worktree: WorktreeId,
     stages: &'a [RunStage],
     mode: FlowMode,
-    harness: Harness,
+    harness: FlowHarness,
     policy: &'a FlowPolicy,
 }
 
@@ -1151,7 +1151,7 @@ impl FlowRun {
         worktree: WorktreeId,
         spec: FlowSpec,
         mode: FlowMode,
-        harness: Harness,
+        harness: FlowHarness,
         entry: FlowEntry,
     ) -> Result<(FlowRun, Vec<FlowEffect>), String> {
         let stages = spec.effective_stages(entry)?;
@@ -2593,7 +2593,7 @@ impl FlowRegistry {
         worktree: WorktreeId,
         spec: FlowSpec,
         mode: FlowMode,
-        harness: Harness,
+        harness: FlowHarness,
         entry: FlowEntry,
     ) -> Result<Vec<FlowEffect>, String> {
         if self.flows.get(&worktree).is_some_and(FlowRun::is_active) {
@@ -2803,26 +2803,21 @@ mod opt_view_id {
 mod harness_serde {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    use crate::agent::Harness;
+    use crate::agent::{FlowHarness, Harness};
 
     #[expect(
         clippy::trivially_copy_pass_by_ref,
         reason = "serde with requires passing the field by reference"
     )]
-    pub fn serialize<S: Serializer>(harness: &Harness, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(harness: &FlowHarness, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(harness.program())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Harness, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<FlowHarness, D::Error> {
         let raw = String::deserialize(d)?;
-        match raw.as_str() {
-            "claude" => Ok(Harness::ClaudeCode),
-            "pi" => Ok(Harness::Pi),
-            "agy" => Ok(Harness::Antigravity),
-            other => Err(serde::de::Error::custom(format!(
-                "unknown harness {other:?}"
-            ))),
-        }
+        let harness = Harness::from_program(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown harness {raw:?}")))?;
+        FlowHarness::of(harness).map_err(serde::de::Error::custom)
     }
 }
 
@@ -2869,6 +2864,7 @@ mod flow_map_serde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::Harness;
 
     fn wt(id: u64) -> WorktreeId {
         WorktreeId::of(id).unwrap()
@@ -2918,7 +2914,7 @@ mod tests {
             wt(1),
             FlowSpec::default_spec(),
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3020,7 +3016,7 @@ mod tests {
             wt(2),
             FlowSpec::default_spec(),
             FlowMode::Unattended,
-            Harness::Antigravity,
+            FlowHarness::Antigravity,
             FlowEntry::Implement {
                 prompt: "Tackle #872".to_owned(),
             },
@@ -3068,7 +3064,7 @@ mod tests {
             vec![FlowEffect::OpenTakeOver {
                 worktree: wt(2),
                 view_name: "implement (takeover)".to_owned(),
-                harness: Harness::Antigravity,
+                harness: FlowHarness::Antigravity,
                 session_id: Some(session("agy-conv-1")),
                 fallback_view: Some(view(20)),
                 stopped_view: None,
@@ -3096,7 +3092,7 @@ mod tests {
             wt(3),
             FlowSpec::default_spec(),
             FlowMode::Interactive,
-            Harness::Pi,
+            FlowHarness::Pi,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3153,7 +3149,7 @@ mod tests {
             wt(4),
             stop_spec,
             FlowMode::Interactive,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3170,7 +3166,7 @@ mod tests {
             wt(4),
             confirm_spec,
             FlowMode::Interactive,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3224,7 +3220,7 @@ mod tests {
             wt(5),
             spec,
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3421,7 +3417,7 @@ mod tests {
             wt(6),
             spec,
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3474,7 +3470,7 @@ mod tests {
             wt(7),
             spec,
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3528,7 +3524,7 @@ mod tests {
                 wt(8),
                 FlowSpec::default_spec(),
                 FlowMode::Unattended,
-                Harness::ClaudeCode,
+                FlowHarness::ClaudeCode,
                 FlowEntry::PullRequest,
             )
             .unwrap();
@@ -3538,7 +3534,7 @@ mod tests {
                     wt(8),
                     FlowSpec::default_spec(),
                     FlowMode::Unattended,
-                    Harness::ClaudeCode,
+                    FlowHarness::ClaudeCode,
                     FlowEntry::PullRequest,
                 )
                 .is_err()
@@ -3574,7 +3570,7 @@ mod tests {
             wt(9),
             spec,
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3640,7 +3636,7 @@ mod tests {
             wt(10),
             spec.clone(),
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3666,7 +3662,7 @@ mod tests {
             wt(11),
             spec.clone(),
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3682,7 +3678,7 @@ mod tests {
             wt(12),
             spec,
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3726,7 +3722,7 @@ mod tests {
             wt(13),
             spec,
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3764,7 +3760,7 @@ mod tests {
                 wt(14),
                 FlowSpec::default_spec(),
                 FlowMode::Unattended,
-                Harness::ClaudeCode,
+                FlowHarness::ClaudeCode,
                 FlowEntry::PullRequest,
             )
             .unwrap();
@@ -3778,6 +3774,18 @@ mod tests {
             );
         };
         rejects(&|run| run["policy"]["step_timeout_secs"] = serde_json::json!(0));
+        rejects(&|run| run["harness"] = serde_json::json!("opencode"));
+        for harness in Harness::ALL {
+            let mut raw = saved.clone();
+            raw["flows"][0]["harness"] = serde_json::json!(harness.program());
+            let loaded = serde_json::from_value::<FlowRegistry>(raw).map_err(|why| why.to_string());
+            let kept = loaded.map(|kept| kept.get(wt(14)).map(|run| run.harness));
+            assert_eq!(
+                kept,
+                FlowHarness::of(harness).map(Some),
+                "a kept flow runs on a harness that starts one, or is no flow"
+            );
+        }
         rejects(&|run| run["phase"] = serde_json::json!({ "Done": "Aborted" }));
         rejects(&|run| {
             run["phase"] = serde_json::json!({
@@ -3904,7 +3912,7 @@ mod tests {
             wt(9),
             spec,
             mode,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -3966,7 +3974,7 @@ mod tests {
                 wt(9),
                 FlowSpec::default_spec(),
                 FlowMode::Unattended,
-                Harness::ClaudeCode,
+                FlowHarness::ClaudeCode,
                 FlowEntry::PullRequest,
             )
             .unwrap();
@@ -4002,7 +4010,7 @@ mod tests {
                 FlowEffect::OpenTakeOver {
                     worktree: wt(9),
                     view_name: "land (takeover)".to_owned(),
-                    harness: Harness::ClaudeCode,
+                    harness: FlowHarness::ClaudeCode,
                     session_id: None,
                     fallback_view: Some(view(90)),
                     stopped_view: Some(view(90)),
@@ -4145,7 +4153,7 @@ mod tests {
             wt(10),
             FlowSpec::default_spec(),
             FlowMode::Interactive,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -4173,7 +4181,7 @@ mod tests {
             wt(11),
             FlowSpec::default_spec(),
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();
@@ -4213,7 +4221,7 @@ mod tests {
             wt(1),
             FlowSpec::default_spec(),
             FlowMode::Unattended,
-            Harness::ClaudeCode,
+            FlowHarness::ClaudeCode,
             FlowEntry::PullRequest,
         )
         .unwrap();

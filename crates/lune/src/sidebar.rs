@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
+use lune_domain::agent::FlowHarness;
 use lune_domain::flows::{FlowBadgeKind, FlowControl, FlowMode};
 use lune_domain::mux::TerminalKey;
 use lune_domain::names::SessionName;
@@ -63,8 +64,8 @@ use crate::live::Lists;
 use crate::machines::{self, Machine};
 use crate::menu::{
     self, AllKeys, Briefed, Choice, Cwd, Did, Done, Folder, Hint, InteractiveMenu, Label, Menu,
-    MenuId, Origin, ProjectTarget, Pull, Ran, Rename, Target, Top, ViewKind, ViewRow, WaitingMenu,
-    Wants, WorktreeRow,
+    MenuId, Origin, ProjectTarget, Pull, Pulls, Ran, Rename, Target, Top, ViewKind, ViewRow,
+    WaitingMenu, Wants, WorktreeRow,
 };
 use crate::moonlight;
 use crate::news::{Dwell, News};
@@ -1994,14 +1995,14 @@ pub enum Asked {
         on: Machine,
         cwd: Directory,
         name: String,
-        harness: agents::Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
     },
     StartFlow {
         on: Machine,
         worktree: WorktreeId,
         mode: FlowMode,
-        harness: agents::Harness,
+        harness: FlowHarness,
         prompt: Option<String>,
         go: Option<Place>,
     },
@@ -3974,7 +3975,7 @@ impl SidebarState {
     ) -> Option<(&Known, &KnownWorktree)> {
         for known in shelf(&self.shelves, on) {
             if let Some(wt) = known
-                .worktrees
+                .worktrees()
                 .iter()
                 .find(|wt| wt.place.worktree == worktree)
             {
@@ -4100,6 +4101,7 @@ impl SidebarState {
                     agents::Harness::ClaudeCode => 0u8,
                     agents::Harness::Antigravity => 1u8,
                     agents::Harness::Pi => 2u8,
+                    agents::Harness::Codex => 3u8,
                 };
                 (!matches_preferred, rank, std::cmp::Reverse(*pid))
             });
@@ -6153,10 +6155,16 @@ impl SidebarState {
         if self.notice_on_its_way(&work) {
             return Asked::Nothing;
         }
+        let pulls = match Pulls::of(pull, self.agent.harness()) {
+            Ok(pulls) => pulls,
+            Err(why) => {
+                self.say(format!("menu: {work}: {why}"));
+                return Asked::Nothing;
+            }
+        };
         self.end_mode();
         let number = self.next_menu();
-        let (waiting, wants) =
-            WaitingMenu::start_pull(number, target, work, self.agent.harness(), pull);
+        let (waiting, wants) = WaitingMenu::start_pull(number, target, work, pulls);
         if origin == Origin::Views {
             let _ = self.let_go();
         }
@@ -6331,14 +6339,23 @@ impl SidebarState {
                         harness,
                         prompt,
                         go,
-                    } => Asked::StartFlow {
-                        on,
-                        worktree,
-                        mode,
-                        harness: harness.unwrap_or_else(|| self.agent.harness()),
-                        prompt,
-                        go,
-                    },
+                    } => {
+                        let picked = || FlowHarness::of(self.agent.harness());
+                        match harness.map_or_else(picked, Ok) {
+                            Ok(harness) => Asked::StartFlow {
+                                on,
+                                worktree,
+                                mode,
+                                harness,
+                                prompt,
+                                go,
+                            },
+                            Err(why) => {
+                                self.say_of(taken, format!("flow: {why}"));
+                                Asked::Nothing
+                            }
+                        }
+                    }
                     Done::ControlFlow {
                         on,
                         worktree,
@@ -8225,7 +8242,7 @@ fn build_worktree_status(
         .and_then(|status| checkout(status, pulls.get(dir)));
     let branch = co
         .as_ref()
-        .filter(|checkout| checkout.branch.as_str() != worktree.name)
+        .filter(|checkout| checkout.branch != worktree.name)
         .map(|checkout| checkout.branch.as_str().to_owned());
     let git_status = co
         .as_ref()
@@ -8255,7 +8272,7 @@ fn build_worktree_status(
             }
         });
     statusbar::WorktreeInfo {
-        name: worktree.name.clone(),
+        name: worktree.name.as_str().to_owned(),
         branch,
         git_status,
         changed,
@@ -14986,6 +15003,59 @@ mod tests {
         assert_eq!(pull(&mut picked), keyed);
         assert_eq!(pull(&mut picked), Asked::Nothing);
         assert_eq!(picked.notice.as_deref(), Some("#5 is on its way"));
+    }
+
+    #[test]
+    fn a_ship_picked_with_an_agent_that_runs_no_flow_says_why_and_pulls_nothing() {
+        let page = "https://github.com/lorenzolfm/lune/pull/5";
+        let mut sidebar = own_two_sessions();
+        sidebar
+            .edit(|state| state.agent.keep(agents::Harness::Codex))
+            .unwrap();
+        sidebar.focus(Keys::Sidebar, test_wall());
+        let target = sidebar.target().expect("a row is highlighted");
+        let work = Work::parse(page, None).expect("a pull request's link");
+        let shipped =
+            sidebar.pull_in_menu(target.clone(), work.clone(), Pull::Ship, Origin::Sidebar);
+        assert_eq!(shipped, Asked::Nothing);
+        let unrun = FlowHarness::of(agents::Harness::Codex).unwrap_err();
+        assert_eq!(sidebar.notice, Some(format!("menu: {work}: {unrun}")));
+        assert!(sidebar.open().is_none(), "no menu waits on a pull not made");
+        let pulled = sidebar.pull_in_menu(target, work, Pull::Worktree, Origin::Sidebar);
+        assert!(matches!(pulled, Asked::Pull { .. }), "{pulled:?}");
+    }
+
+    #[test]
+    fn a_flow_started_in_the_menu_runs_on_the_agent_picked_or_says_why_it_runs_none() {
+        let started = |picked: agents::Harness, keys: &str, last: KeyEvent| {
+            let mut sidebar = own_two_sessions();
+            sidebar.edit(|state| state.agent.keep(picked)).unwrap();
+            sidebar.focus(Keys::Sidebar, test_wall());
+            sidebar.light(Spot::Local(own_view_of("young", 2, 1)));
+            type_in(&mut sidebar, keys);
+            let asked = sidebar.key(&last, moment(160_000));
+            (asked, sidebar.notice.clone())
+        };
+        let enter = KeyEvent::from(KeyCode::Enter);
+        for (keys, last, prompt) in [("f", char('a'), None), ("fpdo it", enter, Some("do it"))] {
+            let (asked, notice) = started(agents::Harness::Pi, keys, last);
+            let Asked::StartFlow {
+                harness,
+                prompt: asks,
+                ..
+            } = asked
+            else {
+                panic!("{keys} starts a flow: {asked:?}");
+            };
+            assert_eq!(harness, FlowHarness::Pi, "{keys}");
+            assert_eq!(asks.as_deref(), prompt, "{keys}");
+            assert_eq!(notice, None, "{keys}");
+
+            let (asked, notice) = started(agents::Harness::Codex, keys, last);
+            assert_eq!(asked, Asked::Nothing, "{keys}");
+            let unrun = FlowHarness::of(agents::Harness::Codex).unwrap_err();
+            assert_eq!(notice, Some(format!("flow: {unrun}")), "{keys}");
+        }
     }
 
     #[test]

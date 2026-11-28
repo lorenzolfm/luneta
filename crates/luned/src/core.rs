@@ -14,7 +14,7 @@ use lune_domain::projects::{
 use lune_protocol::HOST_SUBAGENTS_BYTES_MAX;
 use lune_protocol::git::{GitStatus, Head};
 use lune_protocol::github::PullRequest;
-use lune_protocol::program_status::bound_fair;
+use lune_protocol::program_status::{ChildProgramStatus, ProgramPhase, ProgramStatus, bound_fair};
 use lune_protocol::said::Said;
 use lune_protocol::shell::Doing;
 use lune_protocol::telemetry::AgentTelemetry;
@@ -39,7 +39,7 @@ use crate::titles::{self, Titled};
 use crate::topics::TopicKey;
 use crate::transcripts::{SessionId, TranscriptHarness};
 use crate::watch::Troubles;
-use crate::{agy, osc_7501, pi};
+use crate::{agy, codex, osc_7501, pi};
 
 pub use known_remotes::Remotes;
 
@@ -120,16 +120,29 @@ impl MuxTerminal {
         else {
             return None;
         };
-        let root_record = terminal.statuses.root.as_ref()?;
-        let root_app = root_record.app.as_ref()?;
-        let reads = Harness::from_osc_7501_app(root_app.as_str())?;
-        let subagents: Vec<Subagent> = terminal
-            .statuses
-            .children
+        let children = &terminal.statuses.children;
+        let reads_of = |status: &ProgramStatus| {
+            let app = status.app.as_ref()?;
+            Some((Harness::from_osc_7501_app(app.as_str())?, app.clone()))
+        };
+        let (reads, app) = match &terminal.statuses.root {
+            Some(root) => reads_of(root)?,
+            None => children.iter().find_map(|child| {
+                let (reads, app) = reads_of(&child.status)?;
+                let its_own = reads.dialogs().holds(child.id.as_str());
+                its_own.then_some((reads, app))
+            })?,
+        };
+        let (dialogs, others): (Vec<&ChildProgramStatus>, Vec<&ChildProgramStatus>) = children
             .iter()
-            .filter(|child| child.status.app.as_ref() == Some(root_app))
-            .map(osc_7501::subagent)
-            .collect();
+            .filter(|child| child.status.app.as_ref() == Some(&app))
+            .partition(|child| reads.dialogs().holds(child.id.as_str()));
+        let asked = dialogs
+            .iter()
+            .map(|dialog| &dialog.status)
+            .find(|dialog| matches!(dialog.phase, ProgramPhase::Blocked { .. }));
+        let told = asked.or(terminal.statuses.root.as_ref())?;
+        let subagents: Vec<Subagent> = others.into_iter().map(osc_7501::subagent).collect();
         assert!(subagents.len() <= lune_protocol::PROGRAM_STATUS_RECORDS_MAX);
         let shell_idle = matches!(
             doing,
@@ -141,8 +154,8 @@ impl MuxTerminal {
             front: front.clone(),
             shell_idle,
             reads,
-            status: osc_7501::phase(&root_record.phase),
-            at: root_record.at,
+            status: osc_7501::phase(&told.phase),
+            at: told.at,
             subagents,
         })
     }
@@ -219,6 +232,7 @@ pub enum Command {
     Agents(Scan),
     PiAgents(Vec<ReportedAgent>),
     AgyAgents(Vec<ReportedAgent>),
+    CodexThreads(codex::Held),
     ClaudeTelemetry(Vec<ClaudeTelemetry>),
     MuxTerminals(BTreeMap<TerminalKey, MuxTerminal>),
     Terminals(BTreeMap<ViewId, Located>),
@@ -703,6 +717,7 @@ struct Known {
     found: Scan,
     pi: Vec<ReportedAgent>,
     agy: Vec<ReportedAgent>,
+    codex: codex::Held,
     claude_telemetry: Vec<ClaudeTelemetry>,
     contested: HashMap<AgentId, Contest>,
     mux_terminals: BTreeMap<TerminalKey, MuxTerminal>,
@@ -749,6 +764,7 @@ impl Known {
             },
             pi: Vec::new(),
             agy: Vec::new(),
+            codex: codex::Held::new(),
             claude_telemetry: Vec::new(),
             contested: HashMap::new(),
             mux_terminals: BTreeMap::new(),
@@ -813,6 +829,12 @@ fn run(commands: &Receiver<Command>, wakes: &Wakes) {
                 assert!(now.iter().all(|agent| agent.report().reads() == agy::READS));
                 known.agy = now;
                 known.settle_readers();
+            }
+            Command::CodexThreads(now) if now == known.codex => continue,
+            Command::CodexThreads(now) => {
+                assert!(now.len() <= crate::statuses::SOURCE_AGENTS_MAX);
+                known.codex = now;
+                known.reconcile_osc_statuses();
             }
             Command::ClaudeTelemetry(now) if now == known.claude_telemetry => continue,
             Command::ClaudeTelemetry(now) => {
@@ -1193,13 +1215,17 @@ impl Known {
                 .to_api()
                 .prompt_word()
                 .and_then(|word| Said::new(word.to_owned()));
+            let thread = match terminal.reads.harness() {
+                Harness::Codex => self.codex.get(&id),
+                Harness::ClaudeCode | Harness::Pi | Harness::Antigravity => None,
+            };
             osc_agents.push(SeenAgent {
                 id: id.clone(),
                 harness: terminal.reads.harness(),
-                session_id: None,
+                session_id: thread.map(|thread| thread.session.clone()),
                 cwd,
                 started_at,
-                name: None,
+                name: thread.and_then(|thread| thread.name.clone()),
                 entrypoint,
                 terminal: Some(key),
                 telemetry: None,
@@ -1913,6 +1939,7 @@ fn arg_matches_harness(arg: &str, harness: Harness) -> bool {
         Harness::ClaudeCode => &["claude", "claude-code"],
         Harness::Pi => &["pi", "pi-coding-agent"],
         Harness::Antigravity => &["agy", "antigravity", "antigravity-cli"],
+        Harness::Codex => &["codex"],
     };
     arg.split('/').any(|segment| {
         let segment = segment.trim_start_matches('-').trim_start_matches('.');
@@ -2005,6 +2032,89 @@ mod tests {
 
     fn dir(path: &str) -> Directory {
         Directory::parse(path.to_owned()).unwrap()
+    }
+
+    fn heard(written: &str) -> server::Terminal {
+        let cells = std::num::NonZeroU16::new(80).unwrap();
+        let square = lune_mux::screen::Size {
+            columns: cells,
+            rows: cells,
+        };
+        let mut screen = lune_mux::screen::Screen::new(square, 0).unwrap();
+        screen.write(written.as_bytes()).unwrap();
+        server::Terminal {
+            tag: Vec::new(),
+            size: None,
+            cwd: Some(dir("/w")),
+            title: String::new(),
+            tty: None,
+            is: Is::Running {
+                root: AgentPid::new(100).unwrap(),
+                front: None,
+                doing: None,
+                resumes: None,
+            },
+            statuses: screen.program_statuses(),
+        }
+    }
+
+    #[test]
+    fn a_harness_s_own_dialog_blocks_the_agent_itself_and_is_no_subagent() {
+        let told = |written: &str| {
+            let terminal = MuxTerminal::of(&heard(written))?;
+            let subagents: Vec<String> = terminal
+                .subagents
+                .iter()
+                .map(|subagent| subagent.id.as_str().to_owned())
+                .collect();
+            Some((terminal.reads.harness(), terminal.status, subagents))
+        };
+        let blocked = |reason| ActiveStatus::Blocked {
+            reason,
+            message: None,
+        };
+        let trust = "\x1b]7501;state=blocked:app=codex:kind=permission:id=startup/trust\x1b\\";
+        let update = "\x1b]7501;state=blocked:app=codex:kind=question:id=startup/update\x1b\\";
+        let answered = "\x1b]7501;state=clear:id=startup/trust\x1b\\";
+        let idle = "\x1b]7501;state=idle:app=codex\x1b\\";
+        let subagent = "\x1b]7501;state=working:id=sub-1\x1b\\";
+
+        assert_eq!(
+            told(trust),
+            Some((Harness::Codex, blocked(BlockedReason::Permission), vec![])),
+            "Codex asks for trust before it reports a root record"
+        );
+        assert_eq!(told(&format!("{trust}{answered}")), None);
+        assert_eq!(
+            told(&format!("{trust}{answered}{idle}")),
+            Some((Harness::Codex, ActiveStatus::Stopped, vec![]))
+        );
+        assert_eq!(
+            told(&format!("{idle}{update}{subagent}")),
+            Some((
+                Harness::Codex,
+                blocked(BlockedReason::Question),
+                vec!["sub-1".to_owned()]
+            )),
+            "a dialog over the chat blocks the agent, and a child that is no dialog stays a subagent"
+        );
+
+        let claude = "\x1b]7501;state=working:app=claude-code\x1b\\";
+        let claude_child = "\x1b]7501;state=blocked:kind=permission:id=startup/trust\x1b\\";
+        assert_eq!(
+            told(&format!("{claude}{claude_child}")),
+            Some((
+                Harness::ClaudeCode,
+                ActiveStatus::Working,
+                vec!["startup/trust".to_owned()]
+            )),
+            "a harness that declares no dialogs keeps every child as a subagent"
+        );
+        let rootless =
+            "\x1b]7501;state=blocked:app=claude-code:kind=permission:id=startup/trust\x1b\\";
+        assert_eq!(told(rootless), None);
+        let no_dialog = "\x1b]7501;state=working:app=codex:id=sub-1\x1b\\";
+        assert_eq!(told(no_dialog), None, "a subagent alone names no agent");
     }
 
     #[test]
@@ -2492,6 +2602,7 @@ mod tests {
                 Harness::ClaudeCode => claude::READS,
                 Harness::Pi => pi::READS,
                 Harness::Antigravity => agy::READS,
+                Harness::Codex => OscReads::of(Harness::Codex).declared(),
             };
             let sighting = Sighting {
                 session_id: Said::new(format!("s-{}", id.pid())),

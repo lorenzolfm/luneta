@@ -97,7 +97,7 @@ one shared tokio runtime (`luned/src/tasks.rs`).
 | **owns** | `luned/src/owns.rs` | lune-mux's `Watch` stream: the terminals and their program statuses | lune-mux |
 | **folders** | `luned/src/projects.rs` | Which project folders are missing, and each clone's worktrees | the file system |
 | **git**, **gh**, **fetches**, **topics** | `git.rs`, `github.rs`, `fetches.rs`, `topics.rs` | Their own polling: git status, pull requests and checks, fetches, what each agent's session is about | core, which they ask what to poll |
-| agent watchers | `watch.rs`, `claude.rs`, `pi.rs`, `agy.rs` | The agents' session files on disk | the file system |
+| agent watchers | `watch.rs`, `claude.rs`, `pi.rs`, `agy.rs`, `codex.rs` | The agents' session files on disk, and the thread each Codex holds a writer lock on | the file system; `codex.rs` asks core which agents are Codex's |
 | **remote** | `luned/src/remote.rs` | The `hosts` file, and one ssh bridge per machine in it | the other machines' luned |
 | **tailnet** | `luned/src/tailnet.rs` | The tailnet listener, and which devices it admits | tailscaled |
 

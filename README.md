@@ -10,7 +10,7 @@ and on the others you watch, and what the agent in each terminal is doing.
   worktrees, or a plain folder, whose one worktree is the folder itself.
 - A **worktree** has a row in the sidebar once you open it. Its **views** are
   terminals of `lune-mux`, lune's own multiplexer, each running a shell or an
-  agent (Claude Code, pi or Antigravity).
+  agent (Claude Code, pi, Antigravity or Codex).
 - **luned**, lune's daemon, keeps the projects, their worktrees and their views,
   and watches the agents in them. It outlives `lune`, so the shells and agents
   keep running when you close it.
@@ -39,7 +39,7 @@ lune calls these programs when it finds them on the `PATH`:
 | `gh`, logged in | pull requests, issues and their checks |
 | `zoxide` | the folders you work in, to open as projects |
 | `eza` | listing a folder's contents |
-| `claude`, `pi`, `agy` | the agents a view runs; the one picked last in lune's menu also answers its ask box, writes its briefs and the issues it files (with `agy` picked, the ask box that runs lune's commands is `claude`'s, as nothing holds `agy` to them) |
+| `claude`, `pi`, `agy`, `codex` | the agents a view runs; the one picked last in lune's menu also answers its ask box, writes its briefs and the issues it files (with `agy` or `codex` picked, the ask box that runs lune's commands is `claude`'s, as nothing holds either to them; `codex` answers and writes without your `config.toml`, on its default model; no flow runs on `codex` yet) |
 | `ssh` | watching another machine, which needs lune installed there too |
 
 lune makes worktrees with [wt](https://github.com/lorenzolfm/wt)'s code, built

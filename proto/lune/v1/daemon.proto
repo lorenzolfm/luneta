@@ -593,6 +593,7 @@ enum Harness {
   HARNESS_CLAUDE_CODE = 1;
   HARNESS_PI = 2;
   HARNESS_ANTIGRAVITY = 3;
+  HARNESS_CODEX = 4;
 }
 
 enum Status {

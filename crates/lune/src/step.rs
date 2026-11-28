@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use clap::{ArgGroup, Args, ValueEnum};
-use lune_domain::agent::Harness;
+use lune_domain::agent::{FlowHarness, Harness};
 use lune_domain::flows::SESSION_ID_BYTES_MAX;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
@@ -101,12 +101,17 @@ pub enum StepHarness {
 
 impl StepHarness {
     #[must_use]
-    pub const fn into_harness(self) -> Harness {
+    pub const fn flow(self) -> FlowHarness {
         match self {
-            StepHarness::Claude => Harness::ClaudeCode,
-            StepHarness::Pi => Harness::Pi,
-            StepHarness::Agy => Harness::Antigravity,
+            StepHarness::Claude => FlowHarness::ClaudeCode,
+            StepHarness::Pi => FlowHarness::Pi,
+            StepHarness::Agy => FlowHarness::Antigravity,
         }
+    }
+
+    #[must_use]
+    pub const fn into_harness(self) -> Harness {
+        self.flow().harness()
     }
 }
 
@@ -207,7 +212,6 @@ impl Stopping {
 
 #[must_use]
 pub fn run(args: &StepArgs) -> ExitCode {
-    let harness = args.harness.into_harness();
     let stage = args.stage.trim();
     if stage.is_empty() {
         eprintln!("lune _step: stage name must not be empty");
@@ -251,7 +255,7 @@ pub fn run(args: &StepArgs) -> ExitCode {
     };
     let mut renderer = Renderer::new(io::stdout().lock());
     let step = StepPlan {
-        harness,
+        harness: args.harness,
         stage,
         prompt: &prompt,
         followup: followup.as_deref(),
@@ -264,7 +268,7 @@ pub fn run(args: &StepArgs) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             renderer.note(&format!("\nerror: {why}"));
-            renderer.raw(&osc_7501_error(harness, stage, &why));
+            renderer.raw(&osc_7501_error(args.harness.into_harness(), stage, &why));
             ExitCode::FAILURE
         }
     }
@@ -307,7 +311,7 @@ fn read_file_bounded(path: &Path, limit: usize) -> Result<String, String> {
 }
 
 struct StepPlan<'a> {
-    harness: Harness,
+    harness: StepHarness,
     stage: &'a str,
     prompt: &'a str,
     followup: Option<&'a str>,
@@ -321,7 +325,7 @@ fn execute(
     stopping: &Stopping,
     renderer: &mut Renderer<impl Write>,
 ) -> Result<(), String> {
-    let harness = step.harness;
+    let harness = step.harness.into_harness();
     assert!(!step.stage.is_empty(), "stage label is non-empty");
     assert!(!step.prompt.trim().is_empty(), "prompt is non-empty");
     let pi_session = match (harness, step.pi_session) {
@@ -336,7 +340,7 @@ fn execute(
         write_session_id(out_path, session_path)?;
     }
     let turns = TurnPlan {
-        harness,
+        harness: step.harness,
         session_out: step.session_out,
         record_stream_session: pi_session.is_none(),
         deadline: step.deadline,
@@ -374,10 +378,10 @@ fn execute(
 }
 
 #[must_use]
-pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>) -> Command {
-    let mut command = Command::new(harness.program());
+pub fn build_command(harness: StepHarness, prompt: &str, resume_handle: Option<&str>) -> Command {
+    let mut command = Command::new(harness.into_harness().program());
     match harness {
-        Harness::ClaudeCode => {
+        StepHarness::Claude => {
             command.args([
                 "-p",
                 "--output-format",
@@ -390,7 +394,7 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
             }
             command.args(["--", prompt]);
         }
-        Harness::Antigravity => {
+        StepHarness::Agy => {
             command.args([
                 "-p",
                 "--output-format",
@@ -402,7 +406,7 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
             }
             command.args(["--", prompt]);
         }
-        Harness::Pi => {
+        StepHarness::Pi => {
             command.args(["--mode", "json"]);
             if let Some(session) = resume_handle {
                 command.args(["--session", session]);
@@ -423,7 +427,7 @@ pub fn build_command(harness: Harness, prompt: &str, resume_handle: Option<&str>
 }
 
 struct TurnPlan<'a> {
-    harness: Harness,
+    harness: StepHarness,
     session_out: Option<&'a Path>,
     record_stream_session: bool,
     deadline: Instant,
@@ -442,8 +446,8 @@ fn run_turn(
     stopping: &Stopping,
     renderer: &mut Renderer<impl Write>,
 ) -> Result<Turn, String> {
-    let harness = plan.harness;
-    let mut command = build_command(harness, prompt, resume_handle);
+    let harness = plan.harness.into_harness();
+    let mut command = build_command(plan.harness, prompt, resume_handle);
     let mut child = command
         .spawn()
         .map_err(|error| format!("{} could not be started: {error}", harness.program()))?;
@@ -592,7 +596,7 @@ fn heard_line(
                     if !usable_session_id(&id) {
                         return Err(format!(
                             "{} reported an unusable session id",
-                            plan.harness.program()
+                            plan.harness.into_harness().program()
                         ));
                     }
                     if plan.record_stream_session
@@ -898,14 +902,14 @@ fn finished(ok: bool, summary: Option<String>, fallback: &str) -> StreamEvent {
 }
 
 #[must_use]
-pub fn parse_line(harness: Harness, line: &str) -> Vec<StreamEvent> {
+pub fn parse_line(harness: StepHarness, line: &str) -> Vec<StreamEvent> {
     let Ok(record) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
     match harness {
-        Harness::ClaudeCode => parse_claude(&record),
-        Harness::Antigravity => parse_agy(&record),
-        Harness::Pi => parse_pi(&record),
+        StepHarness::Claude => parse_claude(&record),
+        StepHarness::Agy => parse_agy(&record),
+        StepHarness::Pi => parse_pi(&record),
     }
 }
 
@@ -1243,8 +1247,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_word_luned_starts_a_step_with_names_the_harness_the_flow_runs_on() {
+        for flow in FlowHarness::ALL {
+            let word = flow.program();
+            let told = StepHarness::from_str(word, false);
+            assert_eq!(told.map(StepHarness::flow), Ok(flow), "--harness {word}");
+        }
+        assert!(StepHarness::from_str(Harness::Codex.program(), false).is_err());
+    }
+
+    #[test]
     fn build_command_matches_each_harness_cli_contract() {
-        let claude1 = build_command(Harness::ClaudeCode, "/tigerstyle PR #1", None);
+        let claude1 = build_command(StepHarness::Claude, "/tigerstyle PR #1", None);
         let args: Vec<&OsStr> = claude1.get_args().collect();
         assert_eq!(claude1.get_program(), OsStr::new("claude"));
         assert_eq!(
@@ -1261,7 +1275,7 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let claude2 = build_command(Harness::ClaudeCode, "act now", Some("sess-123"));
+        let claude2 = build_command(StepHarness::Claude, "act now", Some("sess-123"));
         let args: Vec<&OsStr> = claude2.get_args().collect();
         assert_eq!(
             args,
@@ -1279,7 +1293,7 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let agy1 = build_command(Harness::Antigravity, "/tigerstyle", None);
+        let agy1 = build_command(StepHarness::Agy, "/tigerstyle", None);
         let args: Vec<&OsStr> = agy1.get_args().collect();
         assert_eq!(agy1.get_program(), OsStr::new("agy"));
         assert!(!args.contains(&OsStr::new("--verbose")));
@@ -1296,7 +1310,7 @@ mod tests {
             .map(OsStr::new)
         );
 
-        let agy2 = build_command(Harness::Antigravity, "fix", Some("conv-9"));
+        let agy2 = build_command(StepHarness::Agy, "fix", Some("conv-9"));
         let args: Vec<&OsStr> = agy2.get_args().collect();
         assert_eq!(
             args,
@@ -1314,7 +1328,7 @@ mod tests {
         );
 
         let pi = build_command(
-            Harness::Pi,
+            StepHarness::Pi,
             "/skill:tigerstyle",
             Some("/tmp/pi-session.jsonl"),
         );
@@ -1339,13 +1353,13 @@ mod tests {
     fn parses_claude_stream_json_events() {
         let init = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
         assert_eq!(
-            parse_line(Harness::ClaudeCode, init),
+            parse_line(StepHarness::Claude, init),
             vec![StreamEvent::SessionId("abc-123".to_owned())]
         );
 
         let assistant = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"Auditing PR."},{"type":"tool_use","name":"Bash","input":{"command":"cargo test"}}]}}"#;
         assert_eq!(
-            parse_line(Harness::ClaudeCode, assistant),
+            parse_line(StepHarness::Claude, assistant),
             vec![
                 StreamEvent::TextBlock("Auditing PR.".to_owned()),
                 StreamEvent::ToolUse {
@@ -1358,7 +1372,7 @@ mod tests {
         let result_ok =
             r#"{"type":"result","subtype":"success","is_error":false,"result":"All clean"}"#;
         assert_eq!(
-            parse_line(Harness::ClaudeCode, result_ok),
+            parse_line(StepHarness::Claude, result_ok),
             vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
                 "All clean".to_owned()
             )))]
@@ -1366,7 +1380,7 @@ mod tests {
 
         let result_err = r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"boom"}"#;
         assert_eq!(
-            parse_line(Harness::ClaudeCode, result_err),
+            parse_line(StepHarness::Claude, result_err),
             vec![StreamEvent::TurnFinished(Verdict::Failed(
                 "boom".to_owned()
             ))]
@@ -1377,20 +1391,20 @@ mod tests {
     fn parses_agy_stream_json_events() {
         let init = r#"{"type":"init","conversation_id":"conv-42"}"#;
         assert_eq!(
-            parse_line(Harness::Antigravity, init),
+            parse_line(StepHarness::Agy, init),
             vec![StreamEvent::SessionId("conv-42".to_owned())]
         );
 
         let update_text =
             r#"{"type":"step_update","step_type":"planner_response","delta":"Finding 1"}"#;
         assert_eq!(
-            parse_line(Harness::Antigravity, update_text),
+            parse_line(StepHarness::Agy, update_text),
             vec![StreamEvent::TextDelta("Finding 1".to_owned())]
         );
 
         let update_tool = r#"{"type":"step_update","step_type":"run_command","tool_name":"run_command","tool_info":{"command_line":"cargo clippy"}}"#;
         assert_eq!(
-            parse_line(Harness::Antigravity, update_tool),
+            parse_line(StepHarness::Agy, update_tool),
             vec![StreamEvent::ToolUse {
                 name: "run_command".to_owned(),
                 detail: Some("cargo clippy".to_owned()),
@@ -1399,7 +1413,7 @@ mod tests {
 
         let result_ok = r#"{"type":"result","status":"SUCCESS","response":"Done"}"#;
         assert_eq!(
-            parse_line(Harness::Antigravity, result_ok),
+            parse_line(StepHarness::Agy, result_ok),
             vec![StreamEvent::TurnFinished(Verdict::Succeeded(Some(
                 "Done".to_owned()
             )))]
@@ -1407,7 +1421,7 @@ mod tests {
 
         let result_timeout = r#"{"type":"result","status":"ERROR","finished_reason":"print_timeout","error":"timed out"}"#;
         assert_eq!(
-            parse_line(Harness::Antigravity, result_timeout),
+            parse_line(StepHarness::Agy, result_timeout),
             vec![StreamEvent::TurnFinished(Verdict::Failed(
                 "timed out".to_owned()
             ))]
@@ -1418,19 +1432,19 @@ mod tests {
     fn parses_pi_json_mode_events() {
         let session = r#"{"type":"session","version":3,"id":"pi-uuid-7","cwd":"/w"}"#;
         assert_eq!(
-            parse_line(Harness::Pi, session),
+            parse_line(StepHarness::Pi, session),
             vec![StreamEvent::SessionId("pi-uuid-7".to_owned())]
         );
 
         let delta = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Reviewing "}}"#;
         assert_eq!(
-            parse_line(Harness::Pi, delta),
+            parse_line(StepHarness::Pi, delta),
             vec![StreamEvent::TextDelta("Reviewing ".to_owned())]
         );
 
         let tool = r#"{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"dev test"}}"#;
         assert_eq!(
-            parse_line(Harness::Pi, tool),
+            parse_line(StepHarness::Pi, tool),
             vec![StreamEvent::ToolUse {
                 name: "bash".to_owned(),
                 detail: Some("dev test".to_owned()),
@@ -1439,13 +1453,13 @@ mod tests {
 
         let settled = r#"{"type":"agent_settled","aborted":false}"#;
         assert_eq!(
-            parse_line(Harness::Pi, settled),
+            parse_line(StepHarness::Pi, settled),
             vec![StreamEvent::TurnFinished(Verdict::Succeeded(None))]
         );
 
         let aborted = r#"{"type":"agent_settled","aborted":true}"#;
         assert_eq!(
-            parse_line(Harness::Pi, aborted),
+            parse_line(StepHarness::Pi, aborted),
             vec![StreamEvent::TurnFinished(Verdict::Failed(
                 "pi aborted the turn".to_owned()
             ))]
@@ -1480,7 +1494,7 @@ mod tests {
             "message": { "content": blocks }
         })
         .to_string();
-        let events = parse_line(Harness::ClaudeCode, &line);
+        let events = parse_line(StepHarness::Claude, &line);
         assert_eq!(events.len(), CONTENT_BLOCKS_MAX);
         assert_eq!(truncate_utf8("héllo", 2), "h");
         assert_eq!(truncate_utf8("héllo", 3), "hé");
