@@ -4025,22 +4025,22 @@ fn revive_view_reopens_closed_views_in_lifo_order_preserving_kind_name_and_cwd()
         laid.views.len() == 1 && laid.views[0].id == keep_open
     });
 
-    let (made_term, revived_term) = revive_view(&owned.host).unwrap();
-    assert_eq!(made_term, Made::Found(worktree));
-    assert_ne!(revived_term, terminal_id);
+    let (made_terminal, revived_terminal) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_terminal, Made::Found(worktree));
+    assert_ne!(revived_terminal, terminal_id);
     let laid = shown.until("revived terminal is focused with a live key", |laid| {
-        focused_of(laid) == Some(revived_term)
+        focused_of(laid) == Some(revived_terminal)
             && laid
                 .views
                 .iter()
-                .find(|v| v.id == revived_term)
+                .find(|v| v.id == revived_terminal)
                 .and_then(key)
                 .is_some()
     });
-    assert!(laid.views.iter().any(|v| v.id == revived_term));
+    assert!(laid.views.iter().any(|v| v.id == revived_terminal));
     eventually("revived terminal keeps its name and nested cwd", || {
         let watched_list = watched(&owned, worktree);
-        let entry = watched_list.iter().find(|t| t.id == revived_term)?;
+        let entry = watched_list.iter().find(|t| t.id == revived_terminal)?;
         (entry.name.as_deref() == Some("build logs") && entry.folder == sub.to_str().unwrap())
             .then_some(())
     });
@@ -4090,37 +4090,39 @@ fn revive_view_reopens_closed_views_in_lifo_order_preserving_kind_name_and_cwd()
 #[test]
 fn revive_view_reopens_closed_clone_worktree_and_skips_deleted_worktree() {
     let owned = Owned::new();
-    let (_, main_wt, two_wt) = two_in_a_clone(&owned, "revive-clone");
+    let (_, main_worktree, two_worktree) = two_in_a_clone(&owned, "revive-clone");
     let home = fs::canonicalize(owned.host.home.path()).unwrap();
     let two_dir = home.join("revive-clone").join("two");
 
     asked(
         &owned.host,
         Change::RenameWorktree(RenameWorktree {
-            worktree: two_wt,
+            worktree: two_worktree,
             to: Some("task two".to_owned()),
         }),
     )
     .unwrap();
-    let mut shown_two = Shown::new(&owned, two_wt, 100, 30);
+    let mut shown_two = Shown::new(&owned, two_worktree, 100, 30);
     shown_two.arrange(Arrangement::Panes);
     let only_view = shown_two.terminals()[0];
     shown_two.ask(Event::Close(only_view));
     assert_eq!(
         shown_two.until_left(),
-        two_wt,
+        two_worktree,
         "closing the last view removes a clone worktree"
     );
     eventually("closed clone worktree is gone from host", || {
-        watched_worktree(&owned, two_wt).is_none().then_some(())
+        watched_worktree(&owned, two_worktree)
+            .is_none()
+            .then_some(())
     });
 
     let (made, revived_first) = revive_view(&owned.host).unwrap();
-    let Made::Worktree(reopened_wt) = made else {
+    let Made::Worktree(reopened_worktree) = made else {
         panic!("expected Made::Worktree, got {made:?}");
     };
-    assert_ne!(reopened_wt, two_wt);
-    let mut shown_reopened = Shown::new(&owned, reopened_wt, 100, 30);
+    assert_ne!(reopened_worktree, two_worktree);
+    let mut shown_reopened = Shown::new(&owned, reopened_worktree, 100, 30);
     shown_reopened.until(
         "reopened clone worktree holds revived view in panes",
         |laid| {
@@ -4135,20 +4137,20 @@ fn revive_view_reopens_closed_clone_worktree_and_skips_deleted_worktree() {
         },
     );
     eventually("reopened clone worktree keeps its rename", || {
-        let wt = watched_worktree(&owned, reopened_wt)?;
-        (wt.name == "task two" && wt.renamed).then_some(())
+        let worktree = watched_worktree(&owned, reopened_worktree)?;
+        (worktree.name == "task two" && worktree.renamed).then_some(())
     });
 
     let second_view = shown_reopened.open();
     asked(
         &owned.host,
         Change::CloseWorktree(CloseWorktree {
-            worktree: reopened_wt,
+            worktree: reopened_worktree,
             seen: vec![revived_first, second_view],
         }),
     )
     .unwrap();
-    assert_eq!(shown_reopened.until_left(), reopened_wt);
+    assert_eq!(shown_reopened.until_left(), reopened_worktree);
 
     let (made_a, view_a) = revive_view(&owned.host).unwrap();
     let Made::Worktree(reopened_again) = made_a else {
@@ -4162,7 +4164,7 @@ fn revive_view_reopens_closed_clone_worktree_and_skips_deleted_worktree() {
     );
     assert_ne!(view_a, view_b);
 
-    let mut shown_main = Shown::new(&owned, main_wt, 100, 30);
+    let mut shown_main = Shown::new(&owned, main_worktree, 100, 30);
     shown_main.ask(Event::Welcome(()));
     let main_welcome = shown_main
         .until("welcome opened in main", |laid| {
@@ -4197,11 +4199,72 @@ fn revive_view_reopens_closed_clone_worktree_and_skips_deleted_worktree() {
     let (skipped_to, revived_welcome) = revive_view(&owned.host).unwrap();
     assert_eq!(
         skipped_to,
-        Made::Found(main_wt),
+        Made::Found(main_worktree),
         "deleted clone worktree entries are skipped to revive the previous valid view"
     );
     shown_main.until(
         "main welcome view revived after skipping deleted worktree",
+        |laid| {
+            focused_of(laid) == Some(revived_welcome)
+                && laid
+                    .views
+                    .iter()
+                    .any(|v| v.id == revived_welcome && matches!(v.found, Some(Found::Welcome(()))))
+        },
+    );
+}
+
+#[test]
+fn revive_view_skips_deleted_plain_folder_terminal_to_revive_earlier_view() {
+    let owned = Owned::new();
+    let kept_folder = owned.host.home.path().join("kept-plain");
+    let doomed_folder = owned.host.home.path().join("doomed-plain");
+    fs::create_dir(&kept_folder).unwrap();
+    fs::create_dir(&doomed_folder).unwrap();
+    let kept_worktree = worktree(
+        &owned.host,
+        project(&owned.host, &kept_folder, None),
+        &kept_folder,
+    );
+    let doomed_worktree = worktree(
+        &owned.host,
+        project(&owned.host, &doomed_folder, None),
+        &doomed_folder,
+    );
+
+    let mut shown_kept = Shown::new(&owned, kept_worktree, 80, 24);
+    shown_kept.ask(Event::Welcome(()));
+    let kept_welcome = shown_kept
+        .until("welcome opened in kept plain project", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Welcome(()))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Welcome(()))).then_some(v.id))
+        .unwrap();
+    shown_kept.ask(Event::Close(kept_welcome));
+    shown_kept.until("welcome closed in kept plain project", |laid| {
+        !laid.views.iter().any(|v| v.id == kept_welcome)
+    });
+
+    let mut shown_doomed = Shown::new(&owned, doomed_worktree, 80, 24);
+    let doomed_terminal = shown_doomed.open();
+    shown_doomed.ask(Event::Close(doomed_terminal));
+    shown_doomed.until("terminal closed in doomed plain project", |laid| {
+        laid.views.is_empty()
+    });
+    fs::remove_dir_all(&doomed_folder).unwrap();
+
+    let (made, revived_welcome) = revive_view(&owned.host).unwrap();
+    assert_eq!(
+        made,
+        Made::Found(kept_worktree),
+        "deleted plain folder terminal is skipped instead of jamming revive history"
+    );
+    shown_kept.until(
+        "earlier welcome view revives after skipping deleted plain folder terminal",
         |laid| {
             focused_of(laid) == Some(revived_welcome)
                 && laid

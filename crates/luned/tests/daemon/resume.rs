@@ -1227,8 +1227,8 @@ fn revive_view_resumes_a_closed_trusted_agent_session() {
     fs::write(&fake_claude, claude_js).unwrap();
     fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let wt = open_worktree(&owned, &work);
-    let mut shown = Shown::new(&owned, wt);
+    let worktree = open_worktree(&owned, &work);
+    let mut shown = Shown::new(&owned, worktree);
     let key = shown.open_shell();
 
     run_in_shell(&owned, key, "claude --model opus");
@@ -1246,10 +1246,10 @@ fn revive_view_resumes_a_closed_trusted_agent_session() {
 
     eventually("luned synthesizes and saves claude resume record", || {
         let listed = list_resume(&owned, Some(key.id));
-        let rec = listed.terminals.first()?.records.first()?;
-        (rec.source() == ResumeRecordSource::Synthesized
-            && trusted_rule(rec) == Some("claude")
-            && is_saved(rec))
+        let record = listed.terminals.first()?.records.first()?;
+        (record.source() == ResumeRecordSource::Synthesized
+            && trusted_rule(record) == Some("claude")
+            && is_saved(record))
         .then_some(())
     });
 
@@ -1268,7 +1268,7 @@ fn revive_view_resumes_a_closed_trusted_agent_session() {
         crate::projects::answered_on(&owned.host, None, Change::ReviveView(ReviveView {})).unwrap();
     assert_eq!(
         answered.made,
-        Some(luned::api::change_projects_response::Made::Found(wt))
+        Some(luned::api::change_projects_response::Made::Found(worktree))
     );
     let got = eventually("revived view resumes the closed claude session", || {
         fs::read(&resumed_args).ok()

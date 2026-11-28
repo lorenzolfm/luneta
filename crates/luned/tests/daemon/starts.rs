@@ -768,8 +768,8 @@ fn super_shift_t_in_lune_revives_a_closed_view() {
     let dir = work_in(&owned, "revive");
     let mut window = Window::open(&owned.host, &dir, &[]);
     let first = eventually("lune opens the worktree's first view", || {
-        let wt = shown(&owned, &dir.path)?;
-        wt.terminals.first().map(|t| (wt.id, t.id))
+        let worktree = shown(&owned, &dir.path)?;
+        worktree.terminals.first().map(|t| (worktree.id, t.id))
     });
     eventually("lune shows no empty prompt", || {
         (!window.shows(UNSHOWN)).then_some(())
@@ -786,9 +786,9 @@ fn super_shift_t_in_lune_revives_a_closed_view() {
 
     window.send(REVIVE);
     let revived = eventually("Super+Shift+T revives the closed view", || {
-        let wt = shown(&owned, &dir.path)?;
-        let term = wt.terminals.first()?;
-        (!window.shows(UNSHOWN)).then_some((wt.id, term.id))
+        let worktree = shown(&owned, &dir.path)?;
+        let terminal = worktree.terminals.first()?;
+        (!window.shows(UNSHOWN)).then_some((worktree.id, terminal.id))
     });
     assert_ne!(revived.1, first.1, "revived view gets a fresh view id");
 }

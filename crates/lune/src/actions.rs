@@ -36,8 +36,11 @@ pub const REVIVE: Chord = (KeyCode::Char('T'), KeyModifiers::SUPER);
 #[must_use]
 pub fn revives((code, modifiers): Chord) -> bool {
     let super_shift = KeyModifiers::SUPER | KeyModifiers::SHIFT;
-    (matches!(code, KeyCode::Char('t' | 'T')) && modifiers == super_shift)
-        || (code == KeyCode::Char('T') && modifiers == KeyModifiers::SUPER)
+    match (code, modifiers) {
+        (KeyCode::Char('t' | 'T'), held) if held == super_shift => true,
+        (KeyCode::Char('T'), KeyModifiers::SUPER) => true,
+        _ => false,
+    }
 }
 
 pub const REVIEW: &str = "thermo-nuclear-review";

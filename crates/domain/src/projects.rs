@@ -494,6 +494,10 @@ impl Project {
         let Holds::Clone(rows) = &self.holds else {
             return None;
         };
+        assert!(
+            rows.len() <= WORKTREES_MAX,
+            "clone worktrees stay within WORKTREES_MAX"
+        );
         rows.iter()
             .find(|(_, it)| it.id == worktree)
             .map(|(subfolder, _)| subfolder)
@@ -504,6 +508,10 @@ impl Project {
         let Holds::Clone(rows) = &self.holds else {
             return None;
         };
+        assert!(
+            rows.len() <= WORKTREES_MAX,
+            "clone worktrees stay within WORKTREES_MAX"
+        );
         rows.iter()
             .find(|(it, _)| it == subfolder)
             .map(|(_, it)| it.id)
@@ -798,7 +806,7 @@ pub enum Change {
         project: ProjectId,
         subfolder: Subfolder,
         name: Option<Name>,
-        arranged: Option<Arranged>,
+        arranged: Arranged,
         view: View,
     },
 }
@@ -1649,6 +1657,13 @@ impl Projects {
                     let many = format!("there are {VIEWS_MAX} views");
                     return Err(format!("{many}, as many as are kept"));
                 }
+                let folder = changed.project(project)?.dir.at(&subfolder);
+                if folder.0.len() > PATH_BYTES_MAX {
+                    return Err(format!(
+                        "{}: a path is longer than {PATH_BYTES_MAX} bytes",
+                        folder.0
+                    ));
+                }
                 if changed
                     .rows(project)?
                     .iter()
@@ -1659,19 +1674,28 @@ impl Projects {
                         subfolder.as_str()
                     ));
                 }
-                let made = changed.drawn(&mut draw)?;
+                let made = changed.drawn_excluding(id.0, &mut draw)?;
+                assert_ne!(made.0, id.0, "revived worktree and view have distinct ids");
                 let mut layout = Layout::first(view);
-                if let Some(arranged) = arranged {
-                    layout.arranged_as(arranged)?;
-                }
+                layout.arranged_as(arranged)?;
                 layout.focused(id);
                 let mut worktree = Worktree::new(made, name);
                 worktree.layout = layout;
                 changed.rows(project)?.push((subfolder, worktree));
-                let count = changed.worktree_count();
+                let worktrees_count = changed.worktree_count();
+                assert_eq!(
+                    worktrees_count,
+                    self.worktree_count() + 1,
+                    "reviving a worktree adds one worktree"
+                );
+                assert_eq!(
+                    changed.view_count(),
+                    self.view_count() + 1,
+                    "reviving a worktree adds one view"
+                );
                 assert!(
-                    count <= WORKTREES_MAX,
-                    "{count} worktrees are kept, over {WORKTREES_MAX}"
+                    worktrees_count <= WORKTREES_MAX,
+                    "{worktrees_count} worktrees are kept, over {WORKTREES_MAX}"
                 );
                 Some(Made::Worktree(made))
             }
@@ -1947,6 +1971,24 @@ impl Projects {
             return Err(format!("{many}, as many as are kept"));
         }
         self.fresh(draw).map(WorktreeId)
+    }
+
+    fn drawn_excluding(
+        &self,
+        excluded: Id,
+        draw: &mut impl FnMut() -> io::Result<Id>,
+    ) -> Result<WorktreeId, String> {
+        if self.worktree_count() >= WORKTREES_MAX {
+            let many = format!("there are {WORKTREES_MAX} worktrees");
+            return Err(format!("{many}, as many as are kept"));
+        }
+        for _ in 0..FRESH_TRIES {
+            let candidate = draw().map_err(|error| format!("no id is drawn: {error}"))?;
+            if candidate != excluded && !self.holds(candidate) {
+                return Ok(WorktreeId(candidate));
+            }
+        }
+        Err(format!("{FRESH_TRIES} ids drawn were all taken"))
     }
 
     fn rows(&mut self, project: ProjectId) -> Result<&mut Vec<(Subfolder, Worktree)>, String> {
@@ -4569,19 +4611,19 @@ mod tests {
                 project: lune,
                 subfolder: tree("feat"),
                 name: Some(name("feature work")),
-                arranged: Some(Arranged::Panes),
+                arranged: Arranged::Panes,
                 view: browser,
             },
         ) else {
             panic!("reviving a closed clone worktree makes a worktree");
         };
-        let (proj, wt) = projects.find(reopened).unwrap();
-        assert_eq!(proj.id(), lune);
-        assert_eq!(proj.subfolder(reopened), Some(&tree("feat")));
-        assert_eq!(proj.worktree_at(&tree("feat")), Some(reopened));
-        assert_eq!(wt.renamed(), Some(&name("feature work")));
-        assert_eq!(wt.layout().arranged(), Some(Arranged::Panes));
-        assert_eq!(wt.layout().last_focus(), Some(revived_view));
+        let (revived_project, revived_worktree) = projects.find(reopened).unwrap();
+        assert_eq!(revived_project.id(), lune);
+        assert_eq!(revived_project.subfolder(reopened), Some(&tree("feat")));
+        assert_eq!(revived_project.worktree_at(&tree("feat")), Some(reopened));
+        assert_eq!(revived_worktree.renamed(), Some(&name("feature work")));
+        assert_eq!(revived_worktree.layout().arranged(), Some(Arranged::Panes));
+        assert_eq!(revived_worktree.layout().last_focus(), Some(revived_view));
 
         let duplicate = change(
             &projects,
@@ -4589,7 +4631,7 @@ mod tests {
                 project: lune,
                 subfolder: tree("feat"),
                 name: None,
-                arranged: None,
+                arranged: Arranged::Tabs,
                 view: View::Review(ViewId::of(100).unwrap()),
             },
         );
@@ -4601,7 +4643,7 @@ mod tests {
                 project: lune,
                 subfolder: tree("other"),
                 name: None,
-                arranged: None,
+                arranged: Arranged::Tabs,
                 view: View::Review(revived_view),
             },
         );
@@ -4614,10 +4656,63 @@ mod tests {
                 project: plain,
                 subfolder: tree("sub"),
                 name: None,
-                arranged: None,
+                arranged: Arranged::Tabs,
                 view: View::Welcome(ViewId::of(101).unwrap()),
             },
         );
         assert!(in_plain.unwrap_err().contains("holds no worktree"));
+
+        let colliding_view = ViewId::of(102).unwrap();
+        let mut draws = [colliding_view.0, Id::of(103).unwrap()].into_iter();
+        let (reopened_projects, made) = projects
+            .changed(
+                Change::ReviveWorktree {
+                    project: lune,
+                    subfolder: tree("collide"),
+                    name: None,
+                    arranged: Arranged::Tabs,
+                    view: View::Welcome(colliding_view),
+                },
+                None,
+                || Ok(draws.next().unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            made,
+            Some(Made::Worktree(WorktreeId::of(103).unwrap())),
+            "revived worktree skips drawing the view's own id"
+        );
+        assert!(reopened_projects.holding_view(colliding_view).is_some());
+
+        let always_collides = projects.changed(
+            Change::ReviveWorktree {
+                project: lune,
+                subfolder: tree("collide-all"),
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Welcome(colliding_view),
+            },
+            None,
+            || Ok(colliding_view.0),
+        );
+        assert!(
+            always_collides
+                .unwrap_err()
+                .to_string()
+                .contains("were all taken")
+        );
+
+        let long_subfolder = Subfolder::parse(&"a".repeat(PATH_BYTES_MAX - 2)).unwrap();
+        let too_long = change(
+            &projects,
+            Change::ReviveWorktree {
+                project: lune,
+                subfolder: long_subfolder,
+                name: None,
+                arranged: Arranged::Tabs,
+                view: View::Welcome(ViewId::of(104).unwrap()),
+            },
+        );
+        assert!(too_long.unwrap_err().contains("longer than"));
     }
 }

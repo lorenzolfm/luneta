@@ -112,6 +112,12 @@ enum Naming {
     Busy,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reviving {
+    Idle,
+    Busy,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Opener {
     Holds,
@@ -128,6 +134,8 @@ impl Opener {
 }
 
 const NAMING: &str = "lune names a session already: try again once it has made it";
+
+const REVIVING: &str = "lune revives a view already: try again once it has answered";
 
 const MAKE_PANICKED: &str = "lune could not ask luned for the worktree: asking panicked";
 
@@ -764,6 +772,7 @@ pub struct App {
     gave_up: Option<String>,
     changes: Vec<JoinHandle<()>>,
     naming: Naming,
+    reviving: Reviving,
     alerts: Alerts,
     desktop: Desktop,
     quit_asked: bool,
@@ -1203,6 +1212,7 @@ impl App {
             gave_up: None,
             changes: Vec::new(),
             naming: Naming::Idle,
+            reviving: Reviving::Idle,
             alerts: Alerts::new(focused),
             desktop,
             quit_asked: false,
@@ -2070,10 +2080,10 @@ impl App {
             };
         }
         let chord = (key.code, key.modifiers);
-        if key.kind == KeyEventKind::Release
-            || (key.kind == KeyEventKind::Repeat
-                && (chord == dictation::KEY || chord == aloud::KEY || revives(chord)))
-        {
+        if key.kind == KeyEventKind::Release {
+            return false;
+        }
+        if key.kind == KeyEventKind::Repeat && ignores_repeat(chord) {
             return false;
         }
         if chord == dictation::KEY && self.dictate(now.steady) {
@@ -2454,6 +2464,7 @@ impl App {
     }
 
     fn notify_or_float(&mut self, note: String) {
+        assert!(!note.is_empty(), "notifications carry text");
         match (self.holder(), self.focus.side) {
             (Holder::Terminal, Side::Collapsed) => {
                 log::say(&note);
@@ -2465,19 +2476,43 @@ impl App {
     }
 
     fn revive_machine(&self) -> Machine {
-        if self.focus.side == Side::Sidebar
-            && let Some(on) = self.sidebar.lit_machine()
-        {
-            return on;
+        if self.right.is_none() {
+            assert_eq!(
+                self.focus.side,
+                Side::Sidebar,
+                "with no worktree shown, focus stays on the sidebar"
+            );
         }
-        match &self.right {
-            Some(Right::Worktree(right)) => right.machine().clone(),
-            Some(Right::Home(shown)) => shown.on.clone(),
-            None => self.sidebar.lit_machine().unwrap_or(Machine::Local),
+        match (self.focus.side, &self.right) {
+            (Side::Sidebar, _) => self
+                .sidebar
+                .lit_machine()
+                .unwrap_or_else(|| match &self.right {
+                    Some(Right::Worktree(right)) => right.machine().clone(),
+                    Some(Right::Home(shown)) => shown.on.clone(),
+                    None => Machine::Local,
+                }),
+            (Side::Session | Side::Collapsed, Some(Right::Worktree(right))) => {
+                right.machine().clone()
+            }
+            (Side::Session | Side::Collapsed, Some(Right::Home(shown))) => shown.on.clone(),
+            (Side::Session | Side::Collapsed, None) => {
+                unreachable!("focus stays on the sidebar when nothing is shown")
+            }
         }
     }
 
     fn revive_view(&mut self) {
+        if self.reviving == Reviving::Busy {
+            self.notify_or_float(REVIVING.to_owned());
+            return;
+        }
+        assert_eq!(
+            self.reviving,
+            Reviving::Idle,
+            "lune revives one view at a time"
+        );
+        self.reviving = Reviving::Busy;
         let on = self.revive_machine();
         let (luned, events) = (self.luned.clone(), self.events.clone());
         self.keep_change(thread::spawn(move || {
@@ -2487,6 +2522,12 @@ impl App {
     }
 
     fn revived(&mut self, on: &Machine, revived: Result<worktrees::Revived, Unchanged>) {
+        assert_eq!(
+            self.reviving,
+            Reviving::Busy,
+            "a view was revived only while revive_view was in flight"
+        );
+        self.reviving = Reviving::Idle;
         let revived = match revived {
             Ok(revived) => revived,
             Err(unchanged) => {
@@ -2497,6 +2538,11 @@ impl App {
         };
         let _ = self.sidebar.clear_notice();
         self.go_worktree(on, revived.worktree, Some(revived.view));
+        assert_eq!(
+            self.viewed().map(Viewed::worktree),
+            Some(revived.worktree),
+            "lune shows the revived worktree"
+        );
         self.give_opened(Opener::LetGo);
     }
 
@@ -4459,6 +4505,10 @@ fn draw_unshown(buffer: &mut Buffer, area: Rect) {
     }
 }
 
+fn ignores_repeat(chord: Chord) -> bool {
+    chord == dictation::KEY || chord == aloud::KEY || revives(chord)
+}
+
 fn cursor_style((shape, blinking): (CursorShape, bool)) -> SetCursorStyle {
     match (shape, blinking) {
         (CursorShape::HollowBlock, _) => SetCursorStyle::DefaultUserShape,
@@ -5305,11 +5355,27 @@ mod tests {
             !app.key(&repeat, now),
             "holding Super+Shift+T does not repeatedly revive views"
         );
+        assert_eq!(app.reviving, Reviving::Idle);
 
         let worktree = WorktreeId::of(100).unwrap();
         let view = ViewId::of(200).unwrap();
         assert!(app.right.is_none());
         assert_eq!(app.focus.side, Side::Sidebar);
+
+        app.reviving = Reviving::Busy;
+        let press = KeyEvent::new_with_kind(
+            KeyCode::Char('t'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            KeyEventKind::Press,
+        );
+        let before_threads = app.changes.len();
+        assert!(app.key(&press, now));
+        assert_eq!(
+            app.changes.len(),
+            before_threads,
+            "pressing Super+Shift+T while reviving spawns no second thread"
+        );
+        assert_eq!(app.reviving, Reviving::Busy);
 
         app.handle_at(
             Event::Revived {
@@ -5320,8 +5386,10 @@ mod tests {
             now,
         )
         .unwrap();
+        assert_eq!(app.reviving, Reviving::Idle);
         assert!(app.right.is_none());
 
+        app.reviving = Reviving::Busy;
         app.handle_at(
             Event::Revived {
                 on: Machine::Local,
@@ -5331,10 +5399,12 @@ mod tests {
             now,
         )
         .unwrap();
+        assert_eq!(app.reviving, Reviving::Idle);
         assert_eq!(app.viewed().map(Viewed::worktree), Some(worktree));
         assert_eq!(app.focus.side, Side::Session);
 
         app.give(Focus::on(Side::Collapsed));
+        app.reviving = Reviving::Busy;
         app.handle_at(
             Event::Revived {
                 on: Machine::Local,
@@ -5344,6 +5414,7 @@ mod tests {
             now,
         )
         .unwrap();
+        assert_eq!(app.reviving, Reviving::Idle);
         assert!(
             matches!(
                 app.sidebar.floating(),
