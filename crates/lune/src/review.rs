@@ -14,8 +14,8 @@ use lune_diff::ribbon::{
 };
 use lune_diff::tree::TreeNode;
 use lune_diff::viewer::{
-    ActiveLayout, LINE_NUMBER_COLS, SPLIT_HARD_MIN_WIDTH, SearchState, SelectionExcerpt, Viewer,
-    find_case_insensitive_range,
+    ActiveLayout, LINE_NUMBER_COLS, SPLIT_HARD_MIN_WIDTH, SearchMatches, SelectionExcerpt, Viewer,
+    ViewerFocus, find_case_insensitive_range,
 };
 use lune_diff::words::ByteSpan;
 use lune_protocol::diff::ReadDiff;
@@ -263,7 +263,7 @@ impl ReviewPane {
     pub fn is_searching(&self) -> bool {
         matches!(
             &self.state,
-            PaneState::Loaded { viewer, .. } if viewer.search().is_editing()
+            PaneState::Loaded { viewer, .. } if viewer.focus().is_search_editing()
         )
     }
 
@@ -292,57 +292,80 @@ impl ReviewPane {
             return ReviewAction::None;
         };
         let mut geometry_changed = false;
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down if bare => viewer.move_down(1, viewport),
-            KeyCode::Char('k') | KeyCode::Up if bare => viewer.move_up(1, viewport),
-            KeyCode::Char('d') if ctrl => viewer.move_down(half_page, viewport),
-            KeyCode::Char('u') if ctrl => viewer.move_up(half_page, viewport),
-            KeyCode::PageDown if bare => viewer.move_down(viewport, viewport),
-            KeyCode::PageUp if bare => viewer.move_up(viewport, viewport),
-            KeyCode::Char('g') | KeyCode::Home if bare => viewer.top(viewport),
-            KeyCode::Char('G') if shift || bare => viewer.bottom(viewport),
-            KeyCode::End if bare => viewer.bottom(viewport),
-            KeyCode::Char(']') if bare => viewer.next_hunk(viewport),
-            KeyCode::Char('[') if bare => viewer.prev_hunk(viewport),
-            KeyCode::Char('}') if shift || bare => viewer.next_file(viewport),
-            KeyCode::Char('{') if shift || bare => viewer.prev_file(viewport),
-            KeyCode::Char('s') if bare => viewer.toggle_layout(body.width),
-            KeyCode::Char('f') if bare => {
-                viewer.toggle_sidebar();
-                geometry_changed = true;
-            }
-            KeyCode::Tab if bare => {
-                viewer.toggle_focus(can_show_tree);
-                geometry_changed = true;
-            }
-            KeyCode::Char('m') if bare => viewer.toggle_viewed(),
-            KeyCode::Char('v') if bare => viewer.toggle_select(),
-            KeyCode::Char('/') if bare => viewer.start_search(),
-            KeyCode::Char('n') if bare => viewer.search_next(viewport),
-            KeyCode::Char('N') if shift || bare => viewer.search_prev(viewport),
-            KeyCode::Enter if bare && viewer.sidebar().is_focused() => {
-                viewer.activate_tree_entry(viewport);
-            }
-            KeyCode::Esc if bare => {
-                if viewer.is_selecting() {
-                    viewer.clear_select();
-                } else if viewer.search().is_visible() {
-                    viewer.search_cancel();
-                } else if viewer.sidebar().is_focused() {
-                    viewer.unfocus_sidebar();
+        match viewer.focus() {
+            ViewerFocus::Tree => match key.code {
+                KeyCode::Char('j') | KeyCode::Down if bare => viewer.move_down(1, viewport),
+                KeyCode::Char('k') | KeyCode::Up if bare => viewer.move_up(1, viewport),
+                KeyCode::Char('d') if ctrl => viewer.move_down(half_page, viewport),
+                KeyCode::Char('u') if ctrl => viewer.move_up(half_page, viewport),
+                KeyCode::PageDown if bare => viewer.move_down(viewport, viewport),
+                KeyCode::PageUp if bare => viewer.move_up(viewport, viewport),
+                KeyCode::Char('g') | KeyCode::Home if bare => viewer.top(viewport),
+                KeyCode::Char('G') if shift || bare => viewer.bottom(viewport),
+                KeyCode::End if bare => viewer.bottom(viewport),
+                KeyCode::Char('f') if bare => {
+                    viewer.toggle_sidebar();
+                    geometry_changed = true;
                 }
-            }
-            KeyCode::Char('e') if bare && !viewer.sidebar().is_focused() => {
-                if let Some(excerpt) = viewer.selected_excerpt() {
-                    return ReviewAction::Explain(excerpt);
+                KeyCode::Tab if bare => {
+                    viewer.toggle_focus(can_show_tree);
+                    geometry_changed = true;
                 }
-            }
-            KeyCode::Char('?') if (shift || bare) && !viewer.sidebar().is_focused() => {
-                if let Some(excerpt) = viewer.selected_excerpt() {
-                    return ReviewAction::Ask(excerpt);
+                KeyCode::Char('m') if bare => viewer.toggle_viewed(),
+                KeyCode::Enter if bare => viewer.activate_tree_entry(viewport),
+                KeyCode::Esc if bare => viewer.unfocus_sidebar(),
+                _ => {}
+            },
+            ViewerFocus::Diff { .. } => match key.code {
+                KeyCode::Char('j') | KeyCode::Down if bare => viewer.move_down(1, viewport),
+                KeyCode::Char('k') | KeyCode::Up if bare => viewer.move_up(1, viewport),
+                KeyCode::Char('d') if ctrl => viewer.move_down(half_page, viewport),
+                KeyCode::Char('u') if ctrl => viewer.move_up(half_page, viewport),
+                KeyCode::PageDown if bare => viewer.move_down(viewport, viewport),
+                KeyCode::PageUp if bare => viewer.move_up(viewport, viewport),
+                KeyCode::Char('g') | KeyCode::Home if bare => viewer.top(viewport),
+                KeyCode::Char('G') if shift || bare => viewer.bottom(viewport),
+                KeyCode::End if bare => viewer.bottom(viewport),
+                KeyCode::Char(']') if bare => viewer.next_hunk(viewport),
+                KeyCode::Char('[') if bare => viewer.prev_hunk(viewport),
+                KeyCode::Char('}') if shift || bare => viewer.next_file(viewport),
+                KeyCode::Char('{') if shift || bare => viewer.prev_file(viewport),
+                KeyCode::Char('s') if bare => viewer.toggle_layout(body.width),
+                KeyCode::Char('f') if bare => {
+                    viewer.toggle_sidebar();
+                    geometry_changed = true;
                 }
+                KeyCode::Tab if bare => {
+                    viewer.toggle_focus(can_show_tree);
+                    geometry_changed = true;
+                }
+                KeyCode::Char('m') if bare => viewer.toggle_viewed(),
+                KeyCode::Char('v') if bare => viewer.toggle_select(),
+                KeyCode::Char('/') if bare => viewer.start_search(),
+                KeyCode::Char('n') if bare => viewer.search_next(viewport),
+                KeyCode::Char('N') if shift || bare => viewer.search_prev(viewport),
+                KeyCode::Esc if bare => {
+                    if viewer.is_selecting() {
+                        viewer.clear_select();
+                    } else if viewer.committed_search().is_some() {
+                        viewer.search_cancel();
+                    }
+                }
+                KeyCode::Char('e') if bare => {
+                    if let Some(excerpt) = viewer.selected_excerpt() {
+                        return ReviewAction::Explain(excerpt);
+                    }
+                }
+                KeyCode::Char('?') if shift || bare => {
+                    if let Some(excerpt) = viewer.selected_excerpt() {
+                        return ReviewAction::Ask(excerpt);
+                    }
+                }
+                _ => {}
+            },
+            ViewerFocus::SearchEditing { .. } => {
+                unreachable!("search editing is handled before mode dispatch")
             }
-            _ => {}
         }
         if geometry_changed && !last_area.is_empty() {
             let _ = self.sync_geometry(last_area);
@@ -426,7 +449,7 @@ impl ReviewPane {
         };
         let (tree_area, diff_area, _) = self.sync_geometry(area);
 
-        match &mut self.state {
+        let overlay = match &mut self.state {
             PaneState::Loading => {
                 draw_banner(
                     buffer,
@@ -443,9 +466,6 @@ impl ReviewPane {
                         usize::from(diff_area.width),
                         Style::new().fg(moonlight::MUTE),
                     );
-                }
-                if has_footer {
-                    draw_hints(buffer, footer, None);
                 }
                 None
             }
@@ -465,9 +485,6 @@ impl ReviewPane {
                         usize::from(diff_area.width),
                         Style::new().fg(moonlight::RED),
                     );
-                }
-                if has_footer {
-                    draw_hints(buffer, footer, None);
                 }
                 None
             }
@@ -495,7 +512,7 @@ impl ReviewPane {
                         }
                     }
                 }
-                let overlay = if viewer.patch().files.is_empty() {
+                if viewer.patch().files.is_empty() {
                     if !diff_area.is_empty() {
                         let message = format!(
                             " No changes between {} and {}.",
@@ -527,13 +544,13 @@ impl ReviewPane {
                             None
                         }
                     }
-                };
-                if has_footer {
-                    draw_hints(buffer, footer, Some(viewer));
                 }
-                overlay
             }
+        };
+        if has_footer {
+            draw_hints(buffer, footer, HintMode::of(&self.state));
         }
+        overlay
     }
 
     fn sync_geometry(&mut self, area: Rect) -> (Rect, Rect, bool) {
@@ -560,7 +577,7 @@ impl ReviewPane {
         let show_tree = matches!(
             &self.state,
             PaneState::Loaded { viewer, .. }
-                if viewer.sidebar().is_open() && !viewer.tree().entries.is_empty()
+                if viewer.is_sidebar_open() && !viewer.tree().entries.is_empty()
         ) && area.width >= SIDEBAR_PANE_COLS_MIN;
         let (tree, diff) = if show_tree {
             let tree_width = SIDEBAR_WIDTH_COLS.min(area.width / 3);
@@ -641,59 +658,77 @@ fn draw_header(buffer: &mut Buffer, area: Rect, viewer: &Viewer, stale: Option<&
     buffer.set_line(area.x, area.y, &line, area.width);
 }
 
-fn draw_hints(buffer: &mut Buffer, area: Rect, viewer: Option<&Viewer>) {
+#[derive(Clone, Copy)]
+enum HintMode<'a> {
+    Loading,
+    Failed,
+    SearchEditing {
+        query: &'a str,
+        found: Option<&'a SearchMatches>,
+    },
+    Tree,
+    Visual,
+    SearchCommitted {
+        query: &'a str,
+        found: Option<&'a SearchMatches>,
+    },
+    Normal,
+}
+
+impl<'a> HintMode<'a> {
+    fn of(state: &'a PaneState) -> HintMode<'a> {
+        match state {
+            PaneState::Loading => HintMode::Loading,
+            PaneState::Failed { .. } => HintMode::Failed,
+            PaneState::Loaded { viewer, .. } => match viewer.focus() {
+                ViewerFocus::SearchEditing { query, found } => HintMode::SearchEditing {
+                    query: query.as_str(),
+                    found: found.as_ref(),
+                },
+                ViewerFocus::Tree => HintMode::Tree,
+                ViewerFocus::Diff {
+                    selection_anchor: Some(_),
+                } => HintMode::Visual,
+                ViewerFocus::Diff {
+                    selection_anchor: None,
+                } => match viewer.committed_search() {
+                    Some(committed) => HintMode::SearchCommitted {
+                        query: committed.query(),
+                        found: committed.found(),
+                    },
+                    None => HintMode::Normal,
+                },
+            },
+        }
+    }
+}
+
+fn draw_hints(buffer: &mut Buffer, area: Rect, mode: HintMode<'_>) {
     assert_eq!(area.height, 1, "review hints bar occupies one row");
     let bg = moonlight::SURFACE;
     fill_row(buffer, area, Style::new().bg(bg));
-    if let Some(viewer) = viewer {
-        let search_parts = match viewer.search() {
-            SearchState::Idle => None,
-            SearchState::Editing { query, found } => Some((query.as_str(), "_", found.as_ref())),
-            SearchState::Committed { query, found } => Some((query.as_str(), "", found.as_ref())),
-        };
-        if let Some((query, cursor, found)) = search_parts {
-            let count = match found {
-                None => "0 matches".to_owned(),
-                Some(matches) => format!("{}/{}", matches.current_index() + 1, matches.count()),
-            };
-            let line = Line::from(vec![
-                Span::styled(
-                    " /",
-                    Style::new()
-                        .fg(moonlight::YELLOW)
-                        .bg(bg)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{query}{cursor}"),
-                    Style::new().fg(moonlight::TEXT).bg(bg),
-                ),
-                Span::styled(
-                    format!("  ({count})"),
-                    Style::new().fg(moonlight::MUTE).bg(bg),
-                ),
-            ]);
-            buffer.set_line(area.x, area.y, &line, area.width);
+    let (text, fg) = match mode {
+        HintMode::SearchEditing { query, found } => {
+            draw_search_hint(buffer, area, bg, query, "_", found);
             return;
         }
-    }
-    let tree_focused = viewer.is_some_and(|viewer| viewer.sidebar().is_focused());
-    let selecting = viewer.is_some_and(Viewer::is_selecting);
-    let (text, fg) = if tree_focused {
-        (
+        HintMode::SearchCommitted { query, found } => {
+            draw_search_hint(buffer, area, bg, query, "", found);
+            return;
+        }
+        HintMode::Loading | HintMode::Failed => (" r reload · dd close", moonlight::MUTE),
+        HintMode::Tree => (
             " FILES · j/k move · Enter open/fold · m viewed · Tab diff · Esc back",
             ACCENT,
-        )
-    } else if selecting {
-        (
+        ),
+        HintMode::Visual => (
             " VISUAL · j/k extend · e explain · ? ask · Esc clear",
             moonlight::MAUVE,
-        )
-    } else {
-        (
+        ),
+        HintMode::Normal => (
             " j/k move · ]/[ hunk · }/{ file · v select · e explain · ? ask · s split · f files · m viewed · / search · dd close",
             moonlight::MUTE,
-        )
+        ),
     };
     assert!(!text.is_empty(), "review hints text is non-empty");
     buffer.set_stringn(
@@ -705,9 +740,41 @@ fn draw_hints(buffer: &mut Buffer, area: Rect, viewer: Option<&Viewer>) {
     );
 }
 
+fn draw_search_hint(
+    buffer: &mut Buffer,
+    area: Rect,
+    bg: Color,
+    query: &str,
+    cursor: &str,
+    found: Option<&SearchMatches>,
+) {
+    let count = match found {
+        None => "0 matches".to_owned(),
+        Some(matches) => format!("{}/{}", matches.current_index() + 1, matches.count()),
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            " /",
+            Style::new()
+                .fg(moonlight::YELLOW)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{query}{cursor}"),
+            Style::new().fg(moonlight::TEXT).bg(bg),
+        ),
+        Span::styled(
+            format!("  ({count})"),
+            Style::new().fg(moonlight::MUTE).bg(bg),
+        ),
+    ]);
+    buffer.set_line(area.x, area.y, &line, area.width);
+}
+
 fn draw_tree(buffer: &mut Buffer, area: Rect, viewer: &Viewer, scroll: usize, focused: bool) {
     let width = usize::from(area.width);
-    let tree_focused = focused && viewer.sidebar().is_focused();
+    let tree_focused = focused && viewer.is_tree_focused();
     for (offset, y) in (area.top()..area.bottom()).enumerate() {
         let index = scroll.saturating_add(offset);
         let Some(entry) = viewer.tree().entries.get(index) else {
@@ -842,7 +909,7 @@ fn draw_split(
 
     let visible_rows = usize::from(area.height);
     let selection = viewer.selection_range();
-    let search_query = viewer.search().query();
+    let search_query = viewer.active_search_query();
     let fallback_cells = if kitty.is_some() {
         None
     } else {
@@ -862,7 +929,7 @@ fn draw_split(
         };
         let y_offset = u16::try_from(offset).expect("visible row offset fits u16");
         let y = area.y + y_offset;
-        let is_cursor = focused && !viewer.sidebar().is_focused() && row_index == viewer.cursor();
+        let is_cursor = focused && !viewer.is_tree_focused() && row_index == viewer.cursor();
         let is_selected = selection
             .as_ref()
             .is_some_and(|range| range.contains(&row_index));
@@ -893,27 +960,31 @@ fn draw_split(
                     Style::new().fg(moonlight::YELLOW),
                 );
             }
-            SplitLine::Pair { left, right } => {
-                draw_left_row(
-                    buffer,
-                    Rect::new(left_x, y, left_width, 1),
-                    old_number_x,
-                    left,
-                    viewer,
-                    is_cursor,
-                    is_selected,
-                    search_query,
-                );
-                draw_right_row(
-                    buffer,
-                    Rect::new(right_x, y, right_width, 1),
-                    new_number_x,
-                    right,
-                    viewer,
-                    is_cursor,
-                    is_selected,
-                    search_query,
-                );
+            SplitLine::Pair(pair) => {
+                if let Some(left) = pair.left() {
+                    draw_left_row(
+                        buffer,
+                        Rect::new(left_x, y, left_width, 1),
+                        old_number_x,
+                        left,
+                        viewer,
+                        is_cursor,
+                        is_selected,
+                        search_query,
+                    );
+                }
+                if let Some(right) = pair.right() {
+                    draw_right_row(
+                        buffer,
+                        Rect::new(right_x, y, right_width, 1),
+                        new_number_x,
+                        right,
+                        viewer,
+                        is_cursor,
+                        is_selected,
+                        search_query,
+                    );
+                }
                 if let Some(grid) = &fallback_cells {
                     for (column, cell) in grid[offset].iter().enumerate() {
                         let col_offset =
@@ -1092,7 +1163,6 @@ fn draw_left_row(
                 Style::new().fg(moonlight::CYAN).bg(base_bg),
             );
         }
-        LeftRow::Spacer => {}
     }
 }
 
@@ -1173,14 +1243,13 @@ fn draw_right_row(
                 Style::new().fg(moonlight::CYAN).bg(base_bg),
             );
         }
-        RightRow::Spacer => {}
     }
 }
 
 fn draw_unified(buffer: &mut Buffer, area: Rect, viewer: &Viewer, focused: bool) {
     let visible_rows = usize::from(area.height);
     let selection = viewer.selection_range();
-    let search_query = viewer.search().query();
+    let search_query = viewer.active_search_query();
     let prefix_width = LINE_NUMBER_COLS + 1 + LINE_NUMBER_COLS + 3;
 
     for offset in 0..visible_rows {
@@ -1190,7 +1259,7 @@ fn draw_unified(buffer: &mut Buffer, area: Rect, viewer: &Viewer, focused: bool)
         };
         let y_offset = u16::try_from(offset).expect("visible row offset fits u16");
         let y = area.y + y_offset;
-        let is_cursor = focused && !viewer.sidebar().is_focused() && row_index == viewer.cursor();
+        let is_cursor = focused && !viewer.is_tree_focused() && row_index == viewer.cursor();
         let is_selected = selection
             .as_ref()
             .is_some_and(|range| range.contains(&row_index));
@@ -1714,5 +1783,38 @@ diff --git a/crates/a/two.rs b/crates/a/two.rs
         assert!(del_row.contains("10000"), "{del_row}");
         assert!(del_row.contains(" - old_big();"), "{del_row}");
         assert_eq!(format_line_number(123_456), "…3456");
+
+        let mut loading_pane = ReviewPane::loading();
+        let mut loading_buf = Buffer::empty(area);
+        loading_pane.draw(&mut loading_buf, area, true, None);
+        let loading_hints: String = (0..area.width)
+            .map(|x| loading_buf[(x, area.height - 1)].symbol())
+            .collect();
+        assert!(loading_hints.contains("r reload"), "{loading_hints}");
+        assert!(!loading_hints.contains("e explain"), "{loading_hints}");
+
+        pane.key(&KeyEvent::from(KeyCode::Char('/')));
+        pane.key(&KeyEvent::from(KeyCode::Char('k')));
+        pane.key(&KeyEvent::from(KeyCode::Enter));
+        pane.key(&KeyEvent::from(KeyCode::Char('v')));
+        pane.key(&KeyEvent::from(KeyCode::Tab));
+        let mut tree_over_search_buf = Buffer::empty(area);
+        pane.draw(&mut tree_over_search_buf, area, true, None);
+        let tree_over_search: String = (0..area.width)
+            .map(|x| tree_over_search_buf[(x, area.height - 1)].symbol())
+            .collect();
+        assert!(tree_over_search.contains("FILES"), "{tree_over_search}");
+        pane.key(&KeyEvent::from(KeyCode::Char('v')));
+        pane.key(&KeyEvent::from(KeyCode::Char('/')));
+        pane.key(&KeyEvent::from(KeyCode::Esc));
+        let mut after_esc_buf = Buffer::empty(area);
+        pane.draw(&mut after_esc_buf, area, true, None);
+        let after_esc: String = (0..area.width)
+            .map(|x| after_esc_buf[(x, area.height - 1)].symbol())
+            .collect();
+        assert!(
+            !after_esc.contains("FILES"),
+            "Esc leaves FILES even after v and / in tree focus: {after_esc}"
+        );
     }
 }

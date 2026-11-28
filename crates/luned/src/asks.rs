@@ -1,7 +1,9 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
+use std::fmt;
+use std::fs::{self, File};
+use std::io::{self, BufRead as _, BufReader, ErrorKind, Read as _, Write as _};
 use std::mem;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -10,12 +12,14 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lune_protocol::said::Said;
 use serde_json::Value;
 
 use crate::api::ask_response::{self, Ran};
-use crate::api::{AskRequest, AskResponse, On};
+use crate::api::{AskRequest, AskResponse, AskReviewRequest, On, ask_review_request};
 use crate::mux;
 use crate::program::{self, Wanted};
+use crate::state;
 use crate::transcripts::SessionId;
 use crate::work::{self, Item};
 use crate::{git, log};
@@ -23,6 +27,14 @@ use crate::{git, log};
 pub const MODEL: &str = "sonnet";
 
 pub const TURN: Duration = Duration::from_mins(10);
+
+pub const HIGHLIGHTED_BYTES_MAX: usize = 4096;
+
+pub const SESSIONS_FILE: &str = "ask_sessions";
+
+const SESSIONS_MAX: usize = 4096;
+
+const SESSIONS_BYTES_MAX: usize = 512 * 1024;
 
 const LINES_QUEUED_MAX: usize = 64;
 
@@ -33,12 +45,34 @@ const LINES_PER_TURN_MAX: usize = 65_536;
 const SPURIOUS_WAKES_MAX: usize = 1024;
 
 const _: () = assert!(TURN.as_secs().is_multiple_of(60));
+const _: () = assert!(HIGHLIGHTED_BYTES_MAX > 0);
+const _: () = assert!(
+    SYSTEM.len() + SKILL.len() + HIGHLIGHTED_BYTES_MAX + 4 < 64 * 1024,
+    "general system prompt fits within OS argv limits"
+);
+const _: () = assert!(SESSIONS_MAX > 0);
+const _: () = assert!(SESSIONS_BYTES_MAX >= SESSIONS_MAX * 64);
 const _: () = assert!(LINES_QUEUED_MAX > 0);
 const _: () = assert!(LINES_PER_TURN_MAX > 0);
 const _: () = assert!(LINE_BYTES_MAX as u64 <= program::SAID_MAX);
+const fn has_nul(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0 {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 const _: () = assert!(
     !REVIEW_SYSTEM.is_empty(),
     "review system prompt is non-empty"
+);
+const _: () = assert!(
+    !has_nul(REVIEW_SYSTEM.as_bytes()),
+    "review system prompt contains no NUL bytes"
 );
 
 pub use lune_protocol::turn::{BEFORE_VAR, TURN_VAR, Turn};
@@ -116,14 +150,290 @@ impl Step {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptText(String);
+
+impl PromptText {
+    pub fn parse(text: String) -> Result<Option<PromptText>, String> {
+        if text.is_empty() {
+            return Ok(None);
+        }
+        if text.len() > HIGHLIGHTED_BYTES_MAX {
+            return Err(format!(
+                "highlighted: {} bytes exceeds {HIGHLIGHTED_BYTES_MAX}",
+                text.len()
+            ));
+        }
+        if text.as_bytes().contains(&0) {
+            return Err("highlighted: contains a NUL byte".to_owned());
+        }
+        Ok(Some(PromptText(text)))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AskMode {
+    General,
+    Review,
+}
+
+impl AskMode {
+    const fn label(self) -> &'static str {
+        match self {
+            AskMode::General => "general",
+            AskMode::Review => "review",
+        }
+    }
+
+    fn parse(label: &str) -> Option<AskMode> {
+        match label {
+            "general" => Some(AskMode::General),
+            "review" => Some(AskMode::Review),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for AskMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+struct SessionLedger {
+    file: Option<PathBuf>,
+    entries: HashMap<SessionId, AskMode>,
+    order: VecDeque<SessionId>,
+}
+
+pub struct SessionModes {
+    ledger: Mutex<SessionLedger>,
+}
+
+impl SessionModes {
+    #[must_use]
+    pub fn open(projects_kept: bool) -> SessionModes {
+        if !projects_kept {
+            return SessionModes::in_memory();
+        }
+        match state::path(SESSIONS_FILE) {
+            Ok(path) => SessionModes::at(path),
+            Err(_) => SessionModes::in_memory(),
+        }
+    }
+
+    #[must_use]
+    pub fn in_memory() -> SessionModes {
+        SessionModes {
+            ledger: Mutex::new(SessionLedger {
+                file: None,
+                entries: HashMap::new(),
+                order: VecDeque::new(),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn at(path: PathBuf) -> SessionModes {
+        let (entries, order) = load_sessions(&path);
+        SessionModes {
+            ledger: Mutex::new(SessionLedger {
+                file: Some(path),
+                entries,
+                order,
+            }),
+        }
+    }
+
+    pub fn check_resume(&self, session: &SessionId, mode: AskMode) -> Result<(), String> {
+        let ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(&recorded) = ledger.entries.get(session)
+            && recorded != mode
+        {
+            let why = format!(
+                "session {} was started in {recorded} mode and cannot be resumed in {mode} mode",
+                session.as_str()
+            );
+            log::say(&format!("ask: rejected cross-mode resume: {why}"));
+            return Err(why);
+        }
+        Ok(())
+    }
+
+    pub fn record(&self, session: SessionId, mode: AskMode) {
+        let snapshot = {
+            let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(&existing) = ledger.entries.get(&session) {
+                if existing != mode {
+                    log::say(&format!(
+                        "ask: keeping recorded mode {existing} for session {} (ignored {mode})",
+                        session.as_str()
+                    ));
+                }
+                return;
+            }
+            ledger.entries.insert(session.clone(), mode);
+            ledger.order.push_back(session);
+            while ledger.order.len() > SESSIONS_MAX {
+                if let Some(evicted) = ledger.order.pop_front() {
+                    ledger.entries.remove(&evicted);
+                }
+            }
+            assert_eq!(
+                ledger.entries.len(),
+                ledger.order.len(),
+                "session ledger map and queue stay in sync"
+            );
+            assert!(
+                ledger.entries.len() <= SESSIONS_MAX,
+                "session ledger stays within SESSIONS_MAX"
+            );
+            ledger
+                .file
+                .clone()
+                .map(|path| (path, serialize_sessions(&ledger.order, &ledger.entries)))
+        };
+        if let Some((path, contents)) = snapshot
+            && let Err(error) = write_sessions(&path, &contents)
+        {
+            log::say(&format!("{}: {error}", path.display()));
+        }
+    }
+}
+
+fn load_sessions(path: &Path) -> (HashMap<SessionId, AskMode>, VecDeque<SessionId>) {
+    let mut entries = HashMap::new();
+    let mut order = VecDeque::new();
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return (entries, order),
+        Err(error) => {
+            log::say(&format!("{}: {error}", path.display()));
+            return (entries, order);
+        }
+    };
+    let limit = u64::try_from(SESSIONS_BYTES_MAX).expect("SESSIONS_BYTES_MAX fits u64") + 1;
+    let mut raw = Vec::new();
+    if let Err(error) = file.take(limit).read_to_end(&mut raw) {
+        log::say(&format!("{}: {error}", path.display()));
+        return (entries, order);
+    }
+    if raw.len() > SESSIONS_BYTES_MAX {
+        log::say(&format!(
+            "{}: exceeds {SESSIONS_BYTES_MAX} bytes, ignoring saved ask session modes",
+            path.display()
+        ));
+        return (entries, order);
+    }
+    let Ok(text) = String::from_utf8(raw) else {
+        log::say(&format!("{}: not valid UTF-8", path.display()));
+        return (entries, order);
+    };
+    for line in text.lines() {
+        let Some((mode_raw, id_raw)) = line.split_once(' ') else {
+            continue;
+        };
+        let (Some(mode), Some(id)) = (AskMode::parse(mode_raw), SessionId::parse(id_raw)) else {
+            continue;
+        };
+        if entries.contains_key(&id) {
+            continue;
+        }
+        entries.insert(id.clone(), mode);
+        order.push_back(id);
+        while order.len() > SESSIONS_MAX {
+            if let Some(evicted) = order.pop_front() {
+                entries.remove(&evicted);
+            }
+        }
+    }
+    assert_eq!(
+        entries.len(),
+        order.len(),
+        "loaded session ledger map and queue stay in sync"
+    );
+    (entries, order)
+}
+
+fn serialize_sessions(
+    order: &VecDeque<SessionId>,
+    entries: &HashMap<SessionId, AskMode>,
+) -> String {
+    let mut out = String::new();
+    for id in order {
+        if let Some(mode) = entries.get(id) {
+            out.push_str(mode.label());
+            out.push(' ');
+            out.push_str(id.as_str());
+            out.push('\n');
+        }
+    }
+    assert!(
+        out.len() <= SESSIONS_BYTES_MAX,
+        "serialized session ledger stays within SESSIONS_BYTES_MAX"
+    );
+    out
+}
+
+fn write_sessions(path: &Path, contents: &str) -> io::Result<()> {
+    let Some(folder) = path.parent() else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "session ledger path has no parent directory",
+        ));
+    };
+    fs::create_dir_all(folder)?;
+    let mut unfinished = tempfile::Builder::new()
+        .prefix(".ask_sessions.")
+        .tempfile_in(folder)?;
+    unfinished.write_all(contents.as_bytes())?;
+    unfinished.as_file().sync_all()?;
+    unfinished.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReviewTurn {
+    Start { context: Said, words: Said },
+    FollowUp { resumed: SessionId, words: Said },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewAsk {
+    cwd: Option<PathBuf>,
+    turn: ReviewTurn,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AskKind {
+    General {
+        words: Said,
+        resumed: Option<SessionId>,
+        highlighted: Option<PromptText>,
+        turn: Turn,
+        marked: Marked,
+    },
+    Review(ReviewTurn),
+    LegacyReview {
+        words: Said,
+        resumed: Option<SessionId>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskWire {
+    General(AskRequest),
+    Review(AskReviewRequest),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
     cwd: Option<PathBuf>,
-    words: String,
-    resumed: Option<SessionId>,
-    highlighted: String,
-    turn: Turn,
-    marked: Marked,
-    review_only: bool,
+    kind: AskKind,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -240,6 +550,106 @@ impl Marked {
     }
 }
 
+fn parse_cwd(cwd: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
+    if let Some(cwd) = cwd.as_ref().filter(|cwd| !cwd.is_absolute()) {
+        return Err(format!("cwd: {} is no absolute path", cwd.display()));
+    }
+    Ok(cwd)
+}
+
+fn parse_trimmed_said(field: &str, raw: &str, empty_message: &str) -> Result<Said, String> {
+    let trimmed = raw.trim();
+    if trimmed.as_bytes().contains(&0) {
+        return Err(format!("{field}: contains a NUL byte"));
+    }
+    Said::new(trimmed.to_owned()).ok_or_else(|| format!("{field}: {empty_message}"))
+}
+
+impl ReviewAsk {
+    pub fn start(cwd: Option<PathBuf>, context: &str, words: &str) -> Result<ReviewAsk, String> {
+        let cwd = parse_cwd(cwd)?;
+        let context = parse_trimmed_said("context", context, "no review context")?;
+        let words = parse_trimmed_said("words", words, "nothing asked")?;
+        Ok(ReviewAsk {
+            cwd,
+            turn: ReviewTurn::Start { context, words },
+        })
+    }
+
+    pub fn follow_up(
+        cwd: Option<PathBuf>,
+        resumed: SessionId,
+        words: &str,
+    ) -> Result<ReviewAsk, String> {
+        let cwd = parse_cwd(cwd)?;
+        let words = parse_trimmed_said("words", words, "nothing asked")?;
+        Ok(ReviewAsk {
+            cwd,
+            turn: ReviewTurn::FollowUp { resumed, words },
+        })
+    }
+
+    pub fn of_api(request: AskReviewRequest) -> Result<(Option<On>, ReviewAsk), String> {
+        let AskReviewRequest { on, cwd, turn } = request;
+        let cwd = cwd.map(PathBuf::from);
+        let asked = match turn {
+            None => return Err("turn: review ask has neither start nor follow_up".to_owned()),
+            Some(ask_review_request::Turn::Start(start)) => {
+                ReviewAsk::start(cwd, &start.context, &start.words)?
+            }
+            Some(ask_review_request::Turn::FollowUp(follow_up)) => {
+                let resumed = SessionId::parse(&follow_up.resumed)
+                    .ok_or_else(|| format!("resumed: {:?} names no session", follow_up.resumed))?;
+                ReviewAsk::follow_up(cwd, resumed, &follow_up.words)?
+            }
+        };
+        Ok((on, asked))
+    }
+
+    #[must_use]
+    pub fn to_api(&self, on: Option<On>) -> AskReviewRequest {
+        let turn = match &self.turn {
+            ReviewTurn::Start { context, words } => {
+                ask_review_request::Turn::Start(ask_review_request::Start {
+                    context: context.as_str().to_owned(),
+                    words: words.as_str().to_owned(),
+                })
+            }
+            ReviewTurn::FollowUp { resumed, words } => {
+                ask_review_request::Turn::FollowUp(ask_review_request::FollowUp {
+                    resumed: resumed.as_str().to_owned(),
+                    words: words.as_str().to_owned(),
+                })
+            }
+        };
+        AskReviewRequest {
+            on,
+            cwd: self
+                .cwd
+                .as_ref()
+                .map(|cwd| cwd.to_string_lossy().into_owned()),
+            turn: Some(turn),
+        }
+    }
+
+    #[must_use]
+    pub fn resumed(&self) -> Option<&SessionId> {
+        match &self.turn {
+            ReviewTurn::Start { .. } => None,
+            ReviewTurn::FollowUp { resumed, .. } => Some(resumed),
+        }
+    }
+}
+
+impl From<ReviewAsk> for Asked {
+    fn from(review: ReviewAsk) -> Asked {
+        Asked {
+            cwd: review.cwd,
+            kind: AskKind::Review(review.turn),
+        }
+    }
+}
+
 impl Asked {
     pub fn new(
         cwd: Option<PathBuf>,
@@ -248,38 +658,60 @@ impl Asked {
         highlighted: String,
         turn: Turn,
     ) -> Result<Asked, String> {
-        if let Some(cwd) = cwd.as_ref().filter(|cwd| !cwd.is_absolute()) {
-            return Err(format!("cwd: {} is no absolute path", cwd.display()));
-        }
-        if highlighted.as_bytes().contains(&0) {
-            return Err("highlighted: contains a NUL byte".to_owned());
-        }
-        let words = words.trim();
-        if words.is_empty() {
-            return Err("words: nothing asked".to_owned());
-        }
-        let marked = Marked::default();
+        Asked::general(cwd, words, resumed, highlighted, turn, Marked::default())
+    }
+
+    pub fn general(
+        cwd: Option<PathBuf>,
+        words: &str,
+        resumed: Option<SessionId>,
+        highlighted: String,
+        turn: Turn,
+        marked: Marked,
+    ) -> Result<Asked, String> {
+        let cwd = parse_cwd(cwd)?;
+        let highlighted = PromptText::parse(highlighted)?;
+        let words = parse_trimmed_said("words", words, "nothing asked")?;
         Ok(Asked {
             cwd,
-            words: words.to_owned(),
-            resumed,
-            highlighted,
-            turn,
-            marked,
-            review_only: false,
+            kind: AskKind::General {
+                words,
+                resumed,
+                highlighted,
+                turn,
+                marked,
+            },
         })
     }
 
-    #[must_use]
-    pub fn marking(self, marked: Marked) -> Asked {
-        Asked { marked, ..self }
+    pub fn review_start(cwd: Option<PathBuf>, context: &str, words: &str) -> Result<Asked, String> {
+        ReviewAsk::start(cwd, context, words).map(Asked::from)
+    }
+
+    pub fn review_follow_up(
+        cwd: Option<PathBuf>,
+        resumed: SessionId,
+        words: &str,
+    ) -> Result<Asked, String> {
+        ReviewAsk::follow_up(cwd, resumed, words).map(Asked::from)
     }
 
     #[must_use]
-    pub fn review_only(self) -> Asked {
-        Asked {
-            review_only: true,
-            ..self
+    pub const fn mode(&self) -> AskMode {
+        match &self.kind {
+            AskKind::General { .. } => AskMode::General,
+            AskKind::Review(_) | AskKind::LegacyReview { .. } => AskMode::Review,
+        }
+    }
+
+    #[must_use]
+    pub fn resumed(&self) -> Option<&SessionId> {
+        match &self.kind {
+            AskKind::General { resumed, .. } | AskKind::LegacyReview { resumed, .. } => {
+                resumed.as_ref()
+            }
+            AskKind::Review(ReviewTurn::Start { .. }) => None,
+            AskKind::Review(ReviewTurn::FollowUp { resumed, .. }) => Some(resumed),
         }
     }
 
@@ -303,44 +735,121 @@ impl Asked {
                     .ok_or_else(|| format!("resumed: {resumed:?} names no session"))?,
             ),
         };
-        let turn = Turn::new(turn, before)?;
         let cwd = cwd.map(PathBuf::from);
+        if review_only {
+            if !marked_issues.is_empty() || !marked_pulls.is_empty() {
+                return Err(
+                    "review_only: marked issues and pull requests are not allowed in review asks"
+                        .to_owned(),
+                );
+            }
+            let cwd = parse_cwd(cwd)?;
+            let words = parse_trimmed_said("words", &words, "nothing asked")?;
+            return Ok((
+                on,
+                Asked {
+                    cwd,
+                    kind: AskKind::LegacyReview { words, resumed },
+                },
+            ));
+        }
+        let turn = Turn::new(turn, before)?;
         let marked = Marked::read(marked_issues, marked_pulls)?;
-        let asked = Asked::new(cwd, &words, resumed, highlighted, turn)?.marking(marked);
-        let asked = if review_only {
-            asked.review_only()
-        } else {
-            asked
-        };
+        let asked = Asked::general(cwd, &words, resumed, highlighted, turn, marked)?;
         Ok((on, asked))
     }
 
     #[must_use]
+    pub fn to_wire(&self, on: Option<On>) -> AskWire {
+        let cwd = self
+            .cwd
+            .as_ref()
+            .map(|cwd| cwd.to_string_lossy().into_owned());
+        match &self.kind {
+            AskKind::General {
+                words,
+                resumed,
+                highlighted,
+                turn,
+                marked,
+            } => AskWire::General(AskRequest {
+                on,
+                cwd,
+                words: words.as_str().to_owned(),
+                resumed: resumed.as_ref().map(|resumed| resumed.as_str().to_owned()),
+                highlighted: highlighted
+                    .as_ref()
+                    .map_or_else(String::new, |text| text.as_str().to_owned()),
+                turn: turn.key(),
+                before: turn.before(),
+                marked_issues: marked.issues().map(NonZeroU32::get).collect(),
+                marked_pulls: marked.pulls().map(NonZeroU32::get).collect(),
+                review_only: false,
+            }),
+            AskKind::Review(turn) => AskWire::Review(
+                ReviewAsk {
+                    cwd: self.cwd.clone(),
+                    turn: turn.clone(),
+                }
+                .to_api(on),
+            ),
+            AskKind::LegacyReview { words, resumed } => AskWire::General(AskRequest {
+                on,
+                cwd,
+                words: words.as_str().to_owned(),
+                resumed: resumed.as_ref().map(|resumed| resumed.as_str().to_owned()),
+                highlighted: String::new(),
+                turn: 0,
+                before: None,
+                marked_issues: Vec::new(),
+                marked_pulls: Vec::new(),
+                review_only: true,
+            }),
+        }
+    }
+
+    #[must_use]
     pub fn asked(&self, on: Option<On>) -> AskRequest {
-        AskRequest {
-            on,
-            cwd: self
-                .cwd
-                .as_ref()
-                .map(|cwd| cwd.to_string_lossy().into_owned()),
-            words: self.words.clone(),
-            resumed: self
-                .resumed
-                .as_ref()
-                .map(|resumed| resumed.as_str().to_owned()),
-            highlighted: self.highlighted.clone(),
-            turn: self.turn.key(),
-            before: self.turn.before(),
-            marked_issues: self.marked.issues().map(NonZeroU32::get).collect(),
-            marked_pulls: self.marked.pulls().map(NonZeroU32::get).collect(),
-            review_only: self.review_only,
+        match self.to_wire(on) {
+            AskWire::General(request) => request,
+            AskWire::Review(request) => {
+                let (words, resumed) = match request.turn {
+                    Some(ask_review_request::Turn::Start(start)) => {
+                        (format!("{}\n\n{}", start.context, start.words), None)
+                    }
+                    Some(ask_review_request::Turn::FollowUp(follow_up)) => {
+                        (follow_up.words, Some(follow_up.resumed))
+                    }
+                    None => unreachable!("ReviewAsk::to_api always sets turn"),
+                };
+                AskRequest {
+                    on: request.on,
+                    cwd: request.cwd,
+                    words,
+                    resumed,
+                    highlighted: String::new(),
+                    turn: 0,
+                    before: None,
+                    marked_issues: Vec::new(),
+                    marked_pulls: Vec::new(),
+                    review_only: true,
+                }
+            }
         }
     }
 
     pub(crate) fn talk(&self, wanted: &Wanted, hear: &dyn Fn(Step)) -> Option<Result<(), String>> {
+        let prompt = match &self.kind {
+            AskKind::General { words, marked, .. } => told(marked, words.as_str()),
+            AskKind::Review(ReviewTurn::Start { context, words }) => {
+                format!("{}\n\n{}", context.as_str(), words.as_str())
+            }
+            AskKind::Review(ReviewTurn::FollowUp { words, .. })
+            | AskKind::LegacyReview { words, .. } => words.as_str().to_owned(),
+        };
         talk(
             self.claude(),
-            &told(&self.marked, &self.words),
+            &prompt,
             TURN,
             LINES_PER_TURN_MAX,
             wanted,
@@ -349,11 +858,6 @@ impl Asked {
     }
 
     fn claude(&self) -> Command {
-        assert!(
-            !self.highlighted.as_bytes().contains(&0),
-            "system prompt highlight contains no NUL bytes"
-        );
-        assert!(!self.words.is_empty(), "asked words are non-empty");
         let mut claude = Command::new("claude");
         claude.args([
             "-p",
@@ -362,29 +866,52 @@ impl Asked {
             "--safe-mode",
             "--setting-sources",
             "user",
+            "--permission-mode",
+            "dontAsk",
         ]);
-        if self.review_only {
-            claude.args(["--permission-mode", "dontAsk", "--tools", ""]);
-            claude.args(["--output-format", "stream-json", "--verbose"]);
-            claude
-                .arg("--system-prompt")
-                .arg(review_system(&self.highlighted));
-        } else {
-            claude.args(["--permission-mode", "dontAsk", "--tools", "Bash"]);
-            claude.args(["--output-format", "stream-json", "--verbose"]);
-            claude
-                .arg("--append-system-prompt")
-                .arg(system(&self.highlighted));
-        }
-        if let Some(session) = &self.resumed {
-            claude.args(["--resume", session.as_str()]);
-        }
-        if !self.review_only {
-            claude.arg("--allowedTools").args(ALLOWED);
+        match &self.kind {
+            AskKind::General {
+                resumed,
+                highlighted,
+                turn,
+                ..
+            } => {
+                claude.args([
+                    "--tools",
+                    "Bash",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                ]);
+                let highlighted = highlighted.as_ref().map_or("", PromptText::as_str);
+                claude
+                    .arg("--append-system-prompt")
+                    .arg(system(highlighted));
+                if let Some(session) = resumed {
+                    claude.args(["--resume", session.as_str()]);
+                }
+                claude.arg("--allowedTools").args(ALLOWED);
+                turn.name_in(&mut claude);
+            }
+            AskKind::Review(ReviewTurn::Start { .. }) => {
+                claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
+                claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
+            }
+            AskKind::Review(ReviewTurn::FollowUp { resumed, .. }) => {
+                claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
+                claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
+                claude.args(["--resume", resumed.as_str()]);
+            }
+            AskKind::LegacyReview { resumed, .. } => {
+                claude.args(["--tools", "", "--output-format", "stream-json", "--verbose"]);
+                claude.arg("--system-prompt").arg(REVIEW_SYSTEM);
+                if let Some(session) = resumed {
+                    claude.args(["--resume", session.as_str()]);
+                }
+            }
         }
         mux::own::in_no_terminal(&mut claude);
         git::local(&mut claude);
-        self.turn.name_in(&mut claude);
         if let Some(path) = env::current_exe().ok().and_then(|exe| path_with(&exe)) {
             claude.env("PATH", path);
         }
@@ -399,14 +926,6 @@ impl Asked {
 
 fn system(highlighted: &str) -> String {
     format!("{SYSTEM}\n\n{highlighted}\n\n{SKILL}")
-}
-
-fn review_system(highlighted: &str) -> String {
-    if highlighted.is_empty() {
-        REVIEW_SYSTEM.to_owned()
-    } else {
-        format!("{REVIEW_SYSTEM}\n\n{highlighted}")
-    }
 }
 
 fn told(marked: &Marked, words: &str) -> String {
@@ -960,7 +1479,10 @@ mod tests {
         let system = format!("{SYSTEM}\n\nThe row highlighted is terminal 4 of lune.\n\n{SKILL}");
         assert_eq!(said[14], system);
         assert_eq!(said[15..], [&["--allowedTools"][..], &ALLOWED[..]].concat());
-        assert_eq!(first.words, "prune it");
+        assert!(matches!(
+            &first.kind,
+            AskKind::General { words, .. } if words.as_str() == "prune it"
+        ));
         let terminal = ["LUNE_MUX_TERMINAL", "LUNE_MUX_TERMINAL_MADE"];
         for name in terminal.into_iter().chain(git::REPOSITORY_VARS) {
             assert_eq!(var(&claude, name), Some(None), "{name}");
@@ -993,22 +1515,19 @@ mod tests {
         );
         assert_eq!(var(&claude, BEFORE_VAR), Some(None));
 
-        let reviewed = Asked::new(
+        let reviewed = ReviewAsk::start(
             Some(PathBuf::from("/w/lune")),
+            "<untrusted-diff-excerpt location=\"src/lib.rs:10\">\n```patch\n+ok\n```\n</untrusted-diff-excerpt>",
             "Explain.",
-            None,
-            "Reviewing src/lib.rs:10".to_owned(),
-            turn(),
         )
-        .unwrap()
-        .review_only();
-        let review_args = args(&reviewed.claude());
-        let review_prompt = format!("{REVIEW_SYSTEM}\n\nReviewing src/lib.rs:10");
+        .unwrap();
+        let review_asked = Asked::from(reviewed.clone());
+        let review_args = args(&review_asked.claude());
         assert!(review_args.windows(2).any(|pair| pair == ["--tools", ""]));
         assert!(
             review_args
                 .windows(2)
-                .any(|pair| pair == ["--system-prompt", &review_prompt])
+                .any(|pair| pair == ["--system-prompt", REVIEW_SYSTEM])
         );
         assert!(
             !review_args
@@ -1016,8 +1535,84 @@ mod tests {
                 .any(|arg| arg == "--append-system-prompt")
         );
         assert!(!review_args.iter().any(|arg| arg == "--allowedTools"));
-        assert_eq!(Asked::of(reviewed.asked(None)), Ok((None, reviewed)));
+        assert!(!review_args.iter().any(|arg| arg == "--resume"));
+        assert_eq!(
+            ReviewAsk::of_api(reviewed.to_api(None)),
+            Ok((None, reviewed))
+        );
+
+        let follow_up =
+            ReviewAsk::follow_up(Some(PathBuf::from("/w/lune")), session("7c22"), "Why?").unwrap();
+        let follow_args = args(&Asked::from(follow_up.clone()).claude());
+        assert!(follow_args.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(
+            follow_args
+                .windows(2)
+                .any(|pair| pair == ["--system-prompt", REVIEW_SYSTEM])
+        );
+        assert!(
+            follow_args
+                .windows(2)
+                .any(|pair| pair == ["--resume", "7c22"])
+        );
+        assert_eq!(
+            ReviewAsk::of_api(follow_up.to_api(None)),
+            Ok((None, follow_up))
+        );
+
         assert!(Asked::new(None, "hi", None, "bad\0text".to_owned(), turn()).is_err());
+        assert!(
+            Asked::new(
+                None,
+                "hi",
+                None,
+                "x".repeat(HIGHLIGHTED_BYTES_MAX + 1),
+                turn(),
+            )
+            .is_err()
+        );
+        assert!(Asked::new(None, "hi\0", None, String::new(), turn()).is_err());
+        assert!(ReviewAsk::start(None, "   ", "Explain.").is_err());
+        assert!(ReviewAsk::start(None, "ctx", "   ").is_err());
+        assert!(ReviewAsk::start(None, "bad\0ctx", "Explain.").is_err());
+        assert!(ReviewAsk::of_api(AskReviewRequest::default()).is_err());
+        assert!(
+            ReviewAsk::of_api(AskReviewRequest {
+                on: None,
+                cwd: None,
+                turn: Some(ask_review_request::Turn::FollowUp(
+                    ask_review_request::FollowUp {
+                        resumed: "../bad".to_owned(),
+                        words: "Why?".to_owned(),
+                    }
+                )),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn session_modes_persist_and_forbid_cross_mode_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSIONS_FILE);
+        let review_id = session("aaaa");
+        let general_id = session("bbbb");
+
+        let modes = SessionModes::at(path.clone());
+        modes.record(review_id.clone(), AskMode::Review);
+        modes.record(general_id.clone(), AskMode::General);
+        modes.record(review_id.clone(), AskMode::General);
+
+        assert!(modes.check_resume(&review_id, AskMode::Review).is_ok());
+        assert!(modes.check_resume(&review_id, AskMode::General).is_err());
+        assert!(modes.check_resume(&general_id, AskMode::General).is_ok());
+        assert!(modes.check_resume(&general_id, AskMode::Review).is_err());
+
+        let reloaded = SessionModes::at(path);
+        assert!(reloaded.check_resume(&review_id, AskMode::Review).is_ok());
+        assert!(reloaded.check_resume(&review_id, AskMode::General).is_err());
+        assert!(reloaded.check_resume(&general_id, AskMode::General).is_ok());
+        assert!(reloaded.check_resume(&general_id, AskMode::Review).is_err());
     }
 
     #[test]
@@ -1110,9 +1705,24 @@ mod tests {
             })
         };
         for (cwd, resumed) in [(Some("/w".into()), None), (None, Some(session("7c22")))] {
-            let asked = Asked::new(cwd, "prune it", resumed, "row".to_owned(), turn()).unwrap();
-            assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked.clone())));
-            let marked = asked.marking(marked(&[12, 14], &[20]));
+            let asked = Asked::new(
+                cwd.clone(),
+                "prune it",
+                resumed.clone(),
+                "row".to_owned(),
+                turn(),
+            )
+            .unwrap();
+            assert_eq!(Asked::of(asked.asked(on())), Ok((on(), asked)));
+            let marked = Asked::general(
+                cwd,
+                "prune it",
+                resumed,
+                "row".to_owned(),
+                turn(),
+                marked(&[12, 14], &[20]),
+            )
+            .unwrap();
             assert_eq!(Asked::of(marked.asked(on())), Ok((on(), marked)));
         }
         let request = || {
@@ -1151,6 +1761,20 @@ mod tests {
             },
             AskRequest {
                 marked_issues: vec![12, 12],
+                ..request()
+            },
+            AskRequest {
+                marked_issues: vec![12],
+                review_only: true,
+                ..request()
+            },
+            AskRequest {
+                marked_pulls: vec![20],
+                review_only: true,
+                ..request()
+            },
+            AskRequest {
+                highlighted: "x".repeat(HIGHLIGHTED_BYTES_MAX + 1),
                 ..request()
             },
         ];

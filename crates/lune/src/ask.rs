@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use lune_diff::SelectionExcerpt;
+use lune_diff::{ExcerptBody, SelectionExcerpt};
 use lune_domain::projects::Dir;
 use luned::asks::{self, Asked, Marked, Step, Turn};
 use luned::transcripts::SessionId;
@@ -62,15 +62,27 @@ enum Works {
     },
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReviewSession {
+    Unstarted { context: String },
+    Started { session: SessionId },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum AskMode {
+    General {
+        highlighted: String,
+        session: Option<SessionId>,
+        turned: Option<u64>,
+    },
+    Review(ReviewSession),
+}
+
 #[derive(Debug)]
 pub struct Ask {
     number: u64,
     works: Works,
-    highlighted: String,
-    context: Option<String>,
-    review_only: bool,
-    session: Option<SessionId>,
-    turned: Option<u64>,
+    mode: AskMode,
     talk: Vec<Said>,
     typed: String,
     turn: Option<Asking>,
@@ -91,11 +103,11 @@ impl Ask {
         Ask {
             number,
             works,
-            highlighted: highlighted(target),
-            context: None,
-            review_only: false,
-            session: None,
-            turned: None,
+            mode: AskMode::General {
+                highlighted: highlighted(target),
+                session: None,
+                turned: None,
+            },
             talk: Vec::new(),
             typed: String::new(),
             turn: None,
@@ -119,11 +131,11 @@ impl Ask {
         Ask {
             number,
             works,
-            highlighted,
-            context: None,
-            review_only: false,
-            session: None,
-            turned: None,
+            mode: AskMode::General {
+                highlighted,
+                session: None,
+                turned: None,
+            },
             talk: Vec::new(),
             typed: String::new(),
             turn: None,
@@ -144,64 +156,47 @@ impl Ask {
                 cwd: Some(Directory::from(dir)),
             },
         };
-        let range = match excerpt.lines() {
-            Some(lines) if lines.start() == lines.end() => {
-                format!("{}:{}", excerpt.path(), lines.start())
+        let safe_path = xml_attr(&plain(excerpt.path().as_str()));
+        let context = match excerpt.body() {
+            ExcerptBody::Selected {
+                lines,
+                snippet,
+                enclosing_hunks,
+            } => {
+                let range = if lines.start() == lines.end() {
+                    format!("{}:{}", excerpt.path(), lines.start())
+                } else {
+                    format!("{}:{}-{}", excerpt.path(), lines.start(), lines.end())
+                };
+                let safe_range = xml_attr(&plain(&range));
+                let excerpt_fence = backtick_fence(snippet.as_str());
+                let excerpt_block = format!(
+                    "<untrusted-diff-excerpt location=\"{safe_range}\">\n{excerpt_fence}patch\n{}\n{excerpt_fence}\n</untrusted-diff-excerpt>",
+                    snippet.as_str()
+                );
+                match enclosing_hunks {
+                    Some(enclosing) => {
+                        let hunk_fence = backtick_fence(enclosing.as_str());
+                        format!(
+                            "<untrusted-diff-hunk path=\"{safe_path}\">\n{hunk_fence}patch\n{}\n{hunk_fence}\n</untrusted-diff-hunk>\n\n{excerpt_block}",
+                            enclosing.as_str()
+                        )
+                    }
+                    None => excerpt_block,
+                }
             }
-            Some(lines) => format!("{}:{}-{}", excerpt.path(), lines.start(), lines.end()),
-            None => excerpt.path().as_str().to_owned(),
-        };
-        let safe_path = plain(excerpt.path().as_str());
-        let safe_range = plain(&range);
-        let safe_dir = plain(dir.as_str());
-        let highlighted = format!("The user is reviewing changes at {safe_range} in {safe_dir}.");
-        let snippet = excerpt.snippet();
-        assert!(!snippet.is_empty(), "review snippet is non-empty");
-        assert!(
-            !snippet.as_bytes().contains(&0),
-            "review snippet contains no NUL bytes"
-        );
-        let excerpt_fence = backtick_fence(snippet);
-        let excerpt_block = format!(
-            "<untrusted-diff-excerpt location=\"{safe_range}\">\n{excerpt_fence}patch\n{snippet}\n{excerpt_fence}\n</untrusted-diff-excerpt>"
-        );
-        let context = match excerpt.enclosing_hunks() {
-            Some(enclosing) => {
-                assert!(
-                    !enclosing.is_empty(),
-                    "review enclosing hunks are non-empty"
-                );
-                assert!(
-                    !enclosing.as_bytes().contains(&0),
-                    "review enclosing hunks contain no NUL bytes"
-                );
-                assert_ne!(
-                    enclosing, snippet,
-                    "review enclosing hunks differ from snippet"
-                );
-                let hunk_fence = backtick_fence(enclosing);
+            ExcerptBody::Expanded(snippet) => {
+                let excerpt_fence = backtick_fence(snippet.as_str());
                 format!(
-                    "<untrusted-diff-hunk path=\"{safe_path}\">\n{hunk_fence}patch\n{enclosing}\n{hunk_fence}\n</untrusted-diff-hunk>\n\n{excerpt_block}"
+                    "<untrusted-diff-excerpt location=\"{safe_path}\">\n{excerpt_fence}patch\n{}\n{excerpt_fence}\n</untrusted-diff-excerpt>",
+                    snippet.as_str()
                 )
             }
-            None => excerpt_block,
         };
-        assert!(
-            !highlighted.as_bytes().contains(&0),
-            "review prompt highlight contains no NUL bytes"
-        );
-        assert!(
-            !context.as_bytes().contains(&0),
-            "review context contains no NUL bytes"
-        );
         Ask {
             number,
             works,
-            highlighted,
-            context: Some(context),
-            review_only: true,
-            session: None,
-            turned: None,
+            mode: AskMode::Review(ReviewSession::Unstarted { context }),
             talk: Vec::new(),
             typed: initial.unwrap_or("").to_owned(),
             turn: None,
@@ -209,19 +204,27 @@ impl Ask {
     }
 
     pub fn rehome(&mut self, on: &Machine, dir: &Dir, project: &str) {
-        if self.session.is_some() {
-            return;
-        }
         if self.turn.is_some() {
             return;
         }
+        let AskMode::General {
+            highlighted: current_highlighted,
+            session: None,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
         let Ask {
-            works, highlighted, ..
-        } = Ask::homed(self.number, on, dir, project);
+            works,
+            mode: AskMode::General { highlighted, .. },
+            ..
+        } = Ask::homed(self.number, on, dir, project)
+        else {
+            unreachable!("Ask::homed always constructs AskMode::General");
+        };
         self.works = works;
-        self.highlighted = highlighted;
-        self.context = None;
-        self.review_only = false;
+        *current_highlighted = highlighted;
     }
 
     pub fn number(&self) -> u64 {
@@ -271,7 +274,6 @@ impl Ask {
         if words.is_empty() {
             return;
         }
-        let turn = Turn::after(self.turned);
         let (on, cwd) = match &self.works {
             Works::Here(cwd) => (Machine::Local, Some(cwd.clone())),
             Works::There { on, cwd } => {
@@ -279,28 +281,38 @@ impl Ask {
                 (Machine::Remote(on.clone()), cwd)
             }
         };
-        let (resumed, highlighted) = (self.session.clone(), self.highlighted.clone());
-        let sent_words = match self.context.as_deref() {
-            Some(context) => format!("{context}\n\n{words}"),
-            None => words.clone(),
+        let (asked, next_turn) = match &self.mode {
+            AskMode::General {
+                highlighted,
+                session,
+                turned,
+            } => {
+                let turn = Turn::after(*turned);
+                let asked = Asked::general(
+                    cwd,
+                    &words,
+                    session.clone(),
+                    highlighted.clone(),
+                    turn,
+                    marked,
+                );
+                (asked, Some(turn.key()))
+            }
+            AskMode::Review(ReviewSession::Unstarted { context }) => {
+                (Asked::review_start(cwd, context, &words), None)
+            }
+            AskMode::Review(ReviewSession::Started { session }) => {
+                (Asked::review_follow_up(cwd, session.clone(), &words), None)
+            }
         };
-        let review_only = self.review_only;
-        let asked = Asked::new(cwd, &sent_words, resumed, highlighted, turn).map(|asked| {
-            let asked = asked.marking(marked);
-            let asked = if review_only {
-                asked.review_only()
-            } else {
-                asked
-            };
-            (on, asked)
-        });
         self.talk.push(Said::You(words));
-        let (on, asked) = match asked {
+        let asked = match asked {
             Ok(asked) => asked,
             Err(why) => return self.talk.push(Said::Wrong(format!("ask: {why}"))),
         };
-        self.context = None;
-        self.turned = Some(turn.key());
+        if let (AskMode::General { turned, .. }, Some(key)) = (&mut self.mode, next_turn) {
+            *turned = Some(key);
+        }
         let (number, events) = (self.number, events.clone());
         let due = Due::new(&events, move |ended: Result<Result<(), String>, String>| {
             let ended = ended
@@ -330,7 +342,10 @@ impl Ask {
 
     pub fn heard(&mut self, heard: Heard) {
         match heard {
-            Heard::Step(Step::Session(session)) => self.session = Some(session),
+            Heard::Step(Step::Session(session)) => match &mut self.mode {
+                AskMode::General { session: slot, .. } => *slot = Some(session),
+                AskMode::Review(review) => *review = ReviewSession::Started { session },
+            },
             Heard::Step(Step::Ran { id, command }) => {
                 self.talk.push(Said::Ran {
                     id,
@@ -369,7 +384,9 @@ impl Ask {
         );
         if self.turn.take().is_some() {
             self.talk.push(Said::Wrong(STOPPED.to_owned()));
-            self.turned = None;
+            if let AskMode::General { turned, .. } = &mut self.mode {
+                *turned = None;
+            }
         }
         self.number = number;
     }
@@ -486,6 +503,20 @@ fn backtick_fence(text: &str) -> String {
         }
     }
     "`".repeat(longest.max(2) + 1)
+}
+
+fn xml_attr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn plain(text: &str) -> String {
@@ -659,7 +690,10 @@ mod tests {
         ask.heard(Heard::Step(Step::Said(
             "This kills bipa and elo.\n\nClose them?".to_owned(),
         )));
-        assert_eq!(ask.session, Some(session));
+        assert!(matches!(
+            &ask.mode,
+            AskMode::General { session: Some(saved), .. } if *saved == session
+        ));
         assert_eq!(ask.key(&key(KeyCode::Char('y'))), Keyed::Nothing);
         assert_eq!(ask.key(&key(KeyCode::Enter)), Keyed::Nothing);
         ask.paste("y");
@@ -752,19 +786,29 @@ mod tests {
 
     #[test]
     fn the_agent_works_on_the_row_s_machine_where_the_row_is() {
+        fn general_highlighted(ask: &Ask) -> &str {
+            match &ask.mode {
+                AskMode::General { highlighted, .. } => highlighted.as_str(),
+                AskMode::Review(_) => panic!("expected general ask"),
+            }
+        }
         let top = |ask: &Ask| shown(ask, 40, 7)[1].clone();
         let view = Ask::new(1, &view_row(), Path::new("/w"));
         assert_eq!(view.works, Works::Here(PathBuf::from("/w/lune/main")));
         let row = "is view lune:4, in /w/lune/main, on branch feat/ask: \"this\"";
-        assert!(view.highlighted.contains(row), "{}", view.highlighted);
+        assert!(
+            general_highlighted(&view).contains(row),
+            "{}",
+            general_highlighted(&view)
+        );
         assert_eq!(top(&view), "┌─ Ask ──────────────────── lune/main ─┐");
         let session = Ask::new(2, &project_on(Machine::Local), Path::new("/w"));
         assert_eq!(session.works, Works::Here(PathBuf::from("/w")));
         let session_row = "is project lune: \"this\"";
         assert!(
-            session.highlighted.contains(session_row),
+            general_highlighted(&session).contains(session_row),
             "{}",
-            session.highlighted
+            general_highlighted(&session)
         );
 
         let there = |cwd: Option<&str>| {
@@ -776,7 +820,11 @@ mod tests {
         };
         let view = Ask::new(3, &view_row_on(nixos()), Path::new("/w"));
         assert_eq!(view.works, there(Some("/w/lune/main")));
-        assert!(view.highlighted.contains(row), "{}", view.highlighted);
+        assert!(
+            general_highlighted(&view).contains(row),
+            "{}",
+            general_highlighted(&view)
+        );
         assert_eq!(top(&view), "┌─ Ask ─────────── lune/main on nixos ─┐");
         let session = Ask::new(4, &project_on(nixos()), Path::new("/w"));
         assert_eq!(session.works, there(None));
@@ -784,7 +832,11 @@ mod tests {
         let header = Ask::new(5, &Target::Machine(nixos()), Path::new("/w"));
         assert_eq!(header.works, there(None));
         let row = "is the header of this machine: \"this\"";
-        assert!(header.highlighted.contains(row), "{}", header.highlighted);
+        assert!(
+            general_highlighted(&header).contains(row),
+            "{}",
+            general_highlighted(&header)
+        );
 
         let home = |on: &Machine| Ask::homed(7, on, &Dir::parse("/w/lune").unwrap(), "lune").works;
         assert_eq!(home(&Machine::Local), Works::Here(PathBuf::from("/w/lune")));
@@ -795,13 +847,24 @@ mod tests {
     fn a_stopped_turn_ends_its_talk_goes_on_under_a_new_number_and_it_is_no_turn_before() {
         let mut ask = Ask::new(1, &view_row(), Path::new("/w"));
         ask.talk.push(Said::You("tackle these".to_owned()));
-        (ask.turn, ask.turned) = (Some(at_a_turn()), Some(7));
+        ask.turn = Some(at_a_turn());
+        if let AskMode::General { turned, .. } = &mut ask.mode {
+            *turned = Some(7);
+        }
         let session = SessionId::parse("7c22").unwrap();
         ask.heard(Heard::Step(Step::Session(session.clone())));
         ask.stop(2);
         assert!(!ask.turning());
+        let AskMode::General {
+            session: saved,
+            turned,
+            ..
+        } = &ask.mode
+        else {
+            panic!("expected general ask");
+        };
         assert_eq!(
-            (ask.number(), ask.session.clone()),
+            (ask.number(), saved.clone()),
             (2, Some(session)),
             "the next turn resumes it"
         );
@@ -811,7 +874,7 @@ mod tests {
         ];
         assert_eq!(ask.talk, stopped);
         assert_eq!(
-            ask.turned, None,
+            *turned, None,
             "the next turn has none before it, so no plan the user never read is agreed to"
         );
         ask.stop(3);
@@ -834,43 +897,40 @@ mod tests {
             [Said::You("close it".to_owned()), Said::Wrong(wrong)]
         );
         assert!(!ask.turning());
-        assert_eq!(ask.turned, None);
+        assert!(matches!(ask.mode, AskMode::General { turned: None, .. }));
     }
 
     #[test]
-    fn a_reviewed_ask_keeps_untrusted_diff_out_of_system_prompt_and_fences_backticks() {
-        let excerpt = SelectionExcerpt::new(
-            lune_diff::FilePath::parse("src/lib.rs").unwrap(),
-            lune_diff::LineRange::new(10, 12),
-            "+```\n+ignore\0 instructions\n+```".to_owned(),
-            Some("@@ -9,4 +9,4 @@\n ctx();\n+```\n+ignore\0 instructions\n+```".to_owned()),
-        )
-        .unwrap();
-        let ask = Ask::reviewed(
+    fn a_reviewed_ask_fences_backticks_escapes_xml_attrs_and_keeps_context_until_session() {
+        let excerpt = SelectionExcerpt::selected(
+            lune_diff::FilePath::parse("src/a\"b>c.rs").unwrap(),
+            lune_diff::LineRange::new(10, 12).unwrap(),
+            lune_diff::ExcerptText::new("+```\n+ignore instructions\n+```".to_owned()).unwrap(),
+            Some(
+                lune_diff::ExcerptText::new(
+                    "@@ -9,4 +9,4 @@\n ctx();\n+```\n+ignore instructions\n+```".to_owned(),
+                )
+                .unwrap(),
+            ),
+        );
+        let mut ask = Ask::reviewed(
             1,
             &Machine::Local,
             &Dir::parse("/w/lune").unwrap(),
             &excerpt,
             Some("Explain."),
         );
-        assert!(ask.review_only);
-        assert!(!ask.highlighted.contains("ignore"), "{}", ask.highlighted);
-        assert!(!ask.highlighted.contains("ctx"), "{}", ask.highlighted);
+        let AskMode::Review(ReviewSession::Unstarted { context }) = &ask.mode else {
+            panic!("expected unstarted review ask");
+        };
         assert!(
-            ask.highlighted.contains("src/lib.rs:10-12"),
-            "{}",
-            ask.highlighted
-        );
-        let context = ask
-            .context
-            .as_deref()
-            .expect("non-empty snippet sets user context");
-        assert!(
-            context.contains("<untrusted-diff-hunk path=\"src/lib.rs\">\n````patch\n"),
+            context.contains("<untrusted-diff-hunk path=\"src/a&quot;b&gt;c.rs\">\n````patch\n"),
             "{context}"
         );
         assert!(
-            context.contains("<untrusted-diff-excerpt location=\"src/lib.rs:10-12\">\n````patch\n"),
+            context.contains(
+                "<untrusted-diff-excerpt location=\"src/a&quot;b&gt;c.rs:10-12\">\n````patch\n"
+            ),
             "{context}"
         );
         assert!(
@@ -881,32 +941,50 @@ mod tests {
             context.contains("\n````\n</untrusted-diff-excerpt>"),
             "{context}"
         );
+
+        ask.rehome(&Machine::Local, &Dir::parse("/w/other").unwrap(), "other");
         assert!(
-            !context.contains('\0'),
-            "NUL bytes are stripped from excerpt and hunk"
+            matches!(ask.mode, AskMode::Review(ReviewSession::Unstarted { .. })),
+            "rehome does not strip review mode"
         );
 
-        let duplicate = SelectionExcerpt::new(
-            excerpt.path().clone(),
-            excerpt.lines(),
-            excerpt.snippet().to_owned(),
-            Some(excerpt.snippet().to_owned()),
-        )
-        .unwrap();
+        ask.turn = Some(at_a_turn());
+        ask.heard(Heard::Ended(Err("ask: timed out".to_owned())));
+        assert!(
+            matches!(ask.mode, AskMode::Review(ReviewSession::Unstarted { .. })),
+            "turn-1 failure before Step::Session keeps diff context for retry"
+        );
+
+        let session = SessionId::parse("7c22").unwrap();
+        ask.heard(Heard::Step(Step::Session(session.clone())));
+        assert_eq!(
+            ask.mode,
+            AskMode::Review(ReviewSession::Started { session })
+        );
+
+        let expanded = SelectionExcerpt::expanded(
+            lune_diff::FilePath::parse("src/lib.rs").unwrap(),
+            lune_diff::ExcerptText::new("Binary file changed".to_owned()).unwrap(),
+        );
         let deduped = Ask::reviewed(
             2,
             &Machine::Local,
             &Dir::parse("/w/lune").unwrap(),
-            &duplicate,
+            &expanded,
             None,
         );
-        let deduped_context = deduped.context.as_deref().unwrap();
+        let AskMode::Review(ReviewSession::Unstarted {
+            context: deduped_context,
+        }) = &deduped.mode
+        else {
+            panic!("expected unstarted review ask");
+        };
         assert!(
             !deduped_context.contains("<untrusted-diff-hunk"),
             "{deduped_context}"
         );
         assert!(
-            deduped_context.contains("<untrusted-diff-excerpt"),
+            deduped_context.contains("<untrusted-diff-excerpt location=\"src/lib.rs\">"),
             "{deduped_context}"
         );
     }
