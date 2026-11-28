@@ -41,7 +41,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::{DefaultTerminal, Frame, Terminal};
 
-use crate::actions::{COLLAPSE, Chord, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP};
+use crate::actions::{COLLAPSE, Chord, DOWN, GROW, LEFT, MENU, RIGHT, SHRINK, SWAP, UP, revives};
 use crate::agents::{self, Kept};
 use crate::alerts::{self, Alerts};
 use crate::aloud::{self, Aloud};
@@ -137,6 +137,8 @@ const RENAME_PANICKED: &str = "lune could not ask luned for the rename: asking p
 
 const CLOSE_PANICKED: &str = "lune could not ask luned for the close: asking panicked";
 
+const REVIVE_PANICKED: &str = "lune could not ask luned to revive the view: asking panicked";
+
 const WORK_PANICKED: &str = "lune could not ask luned for the work: asking panicked";
 
 const DIFF_PANICKED: &str = "lune could not ask luned for the changes: asking panicked";
@@ -185,6 +187,10 @@ pub enum Event {
     },
     Daemon(Result<Host, String>),
     Notice(String),
+    Revived {
+        on: Machine,
+        revived: Result<worktrees::Revived, Unchanged>,
+    },
     Unclosed {
         on: Machine,
         act: Act,
@@ -1552,6 +1558,10 @@ impl App {
                 self.sidebar.notify(notice);
                 true
             }
+            Event::Revived { on, revived } => {
+                self.revived(&on, revived);
+                true
+            }
             Event::Unclosed {
                 on,
                 act,
@@ -2062,7 +2072,7 @@ impl App {
         let chord = (key.code, key.modifiers);
         if key.kind == KeyEventKind::Release
             || (key.kind == KeyEventKind::Repeat
-                && (chord == dictation::KEY || chord == aloud::KEY))
+                && (chord == dictation::KEY || chord == aloud::KEY || revives(chord)))
         {
             return false;
         }
@@ -2210,6 +2220,10 @@ impl App {
             if let Some(right) = self.viewed_mut() {
                 right.grow(change);
             }
+            return true;
+        }
+        if revives(chord) {
+            self.revive_view();
             return true;
         }
         false
@@ -2436,7 +2450,10 @@ impl App {
     }
 
     fn image_not_pasted(&mut self, why: &str) {
-        let note = format!("image not pasted: {why}");
+        self.notify_or_float(format!("image not pasted: {why}"));
+    }
+
+    fn notify_or_float(&mut self, note: String) {
         match (self.holder(), self.focus.side) {
             (Holder::Terminal, Side::Collapsed) => {
                 log::say(&note);
@@ -2445,6 +2462,42 @@ impl App {
             (Holder::Terminal, Side::Session | Side::Sidebar)
             | (Holder::Sidebar(_) | Holder::Box(_), _) => self.sidebar.notify(note),
         }
+    }
+
+    fn revive_machine(&self) -> Machine {
+        if self.focus.side == Side::Sidebar
+            && let Some(on) = self.sidebar.lit_machine()
+        {
+            return on;
+        }
+        match &self.right {
+            Some(Right::Worktree(right)) => right.machine().clone(),
+            Some(Right::Home(shown)) => shown.on.clone(),
+            None => self.sidebar.lit_machine().unwrap_or(Machine::Local),
+        }
+    }
+
+    fn revive_view(&mut self) {
+        let on = self.revive_machine();
+        let (luned, events) = (self.luned.clone(), self.events.clone());
+        self.keep_change(thread::spawn(move || {
+            let revived = doubted(REVIVE_PANICKED, || worktrees::revive_view(&luned, &on));
+            let _ = events.send(Event::Revived { on, revived });
+        }));
+    }
+
+    fn revived(&mut self, on: &Machine, revived: Result<worktrees::Revived, Unchanged>) {
+        let revived = match revived {
+            Ok(revived) => revived,
+            Err(unchanged) => {
+                let note = unchanged.said("no view revived", "a view may be revived");
+                self.notify_or_float(note);
+                return;
+            }
+        };
+        let _ = self.sidebar.clear_notice();
+        self.go_worktree(on, revived.worktree, Some(revived.view));
+        self.give_opened(Opener::LetGo);
     }
 
     fn mouse(&mut self, mouse: MouseEvent, now: Moment) {
@@ -5235,5 +5288,68 @@ mod tests {
         *fail_on_flush.borrow_mut() = None;
         app.draw_due(&mut terminal, retry).unwrap();
         assert_eq!(app.wait(retry), sidebar::SPIN);
+    }
+
+    #[test]
+    fn revive_view_event_navigates_focuses_or_notifies_and_ignores_key_repeat() {
+        let (mut terminal, _written) = test_terminal(80, 20);
+        let (mut app, _inbox, _state) = test_app(80, 20);
+        let now = Moment::now();
+
+        let repeat = KeyEvent::new_with_kind(
+            KeyCode::Char('t'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            KeyEventKind::Repeat,
+        );
+        assert!(
+            !app.key(&repeat, now),
+            "holding Super+Shift+T does not repeatedly revive views"
+        );
+
+        let worktree = WorktreeId::of(100).unwrap();
+        let view = ViewId::of(200).unwrap();
+        assert!(app.right.is_none());
+        assert_eq!(app.focus.side, Side::Sidebar);
+
+        app.handle_at(
+            Event::Revived {
+                on: Machine::Local,
+                revived: Err(Unchanged::Refused("nothing closed to revive".to_owned())),
+            },
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        assert!(app.right.is_none());
+
+        app.handle_at(
+            Event::Revived {
+                on: Machine::Local,
+                revived: Ok(worktrees::Revived { worktree, view }),
+            },
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        assert_eq!(app.viewed().map(Viewed::worktree), Some(worktree));
+        assert_eq!(app.focus.side, Side::Session);
+
+        app.give(Focus::on(Side::Collapsed));
+        app.handle_at(
+            Event::Revived {
+                on: Machine::Local,
+                revived: Err(Unchanged::Refused("nothing closed to revive".to_owned())),
+            },
+            &mut terminal,
+            now,
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                app.sidebar.floating(),
+                Some(Floating::Note(note)) if note == "no view revived: nothing closed to revive"
+            ),
+            "refusal floats when sidebar is collapsed"
+        );
     }
 }

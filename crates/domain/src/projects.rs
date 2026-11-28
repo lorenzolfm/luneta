@@ -489,6 +489,26 @@ impl Project {
             .map(|(folder, _)| folder)
     }
 
+    #[must_use]
+    pub fn subfolder(&self, worktree: WorktreeId) -> Option<&Subfolder> {
+        let Holds::Clone(rows) = &self.holds else {
+            return None;
+        };
+        rows.iter()
+            .find(|(_, it)| it.id == worktree)
+            .map(|(subfolder, _)| subfolder)
+    }
+
+    #[must_use]
+    pub fn worktree_at(&self, subfolder: &Subfolder) -> Option<WorktreeId> {
+        let Holds::Clone(rows) = &self.holds else {
+            return None;
+        };
+        rows.iter()
+            .find(|(it, _)| it == subfolder)
+            .map(|(_, it)| it.id)
+    }
+
     fn alike_but_laid_out(&self, other: &Project) -> bool {
         let Project {
             id,
@@ -774,6 +794,13 @@ pub enum Change {
         spot: Spot,
         url: Option<BrowserUrl>,
     },
+    ReviveWorktree {
+        project: ProjectId,
+        subfolder: Subfolder,
+        name: Option<Name>,
+        arranged: Option<Arranged>,
+        view: View,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -858,6 +885,7 @@ pub enum Ask {
         target: BrowserTarget,
         url: Option<BrowserUrl>,
     },
+    ReviveView,
 }
 
 impl Ask {
@@ -1037,6 +1065,7 @@ impl Ask {
                     .map_err(field("url"))?;
                 return Ok(Ask::OpenBrowser { target, url });
             }
+            Asked::ReviveView(asked::ReviveView {}) => return Ok(Ask::ReviveView),
         };
         Ok(Ask::Change(change))
     }
@@ -1072,7 +1101,8 @@ impl Change {
             | Change::Open { .. }
             | Change::Close { .. }
             | Change::Unopen { .. }
-            | Change::StartBrowser { .. } => true,
+            | Change::StartBrowser { .. }
+            | Change::ReviveWorktree { .. } => true,
             Change::Went { .. }
             | Change::Swap { .. }
             | Change::Arrange { .. }
@@ -1603,6 +1633,47 @@ impl Projects {
                     layout.focused(view);
                 }
                 Some(self.made(worktree))
+            }
+            Change::ReviveWorktree {
+                project,
+                subfolder,
+                name,
+                arranged,
+                view,
+            } => {
+                let id = layout::Leaf::id(&view);
+                if self.holds(id.0) {
+                    return Err(format!("the id {id} is taken"));
+                }
+                if self.view_count() >= VIEWS_MAX {
+                    let many = format!("there are {VIEWS_MAX} views");
+                    return Err(format!("{many}, as many as are kept"));
+                }
+                if changed
+                    .rows(project)?
+                    .iter()
+                    .any(|(it, _)| *it == subfolder)
+                {
+                    return Err(format!(
+                        "project {project} already holds a worktree at {}",
+                        subfolder.as_str()
+                    ));
+                }
+                let made = changed.drawn(&mut draw)?;
+                let mut layout = Layout::first(view);
+                if let Some(arranged) = arranged {
+                    layout.arranged_as(arranged)?;
+                }
+                layout.focused(id);
+                let mut worktree = Worktree::new(made, name);
+                worktree.layout = layout;
+                changed.rows(project)?.push((subfolder, worktree));
+                let count = changed.worktree_count();
+                assert!(
+                    count <= WORKTREES_MAX,
+                    "{count} worktrees are kept, over {WORKTREES_MAX}"
+                );
+                Some(Made::Worktree(made))
             }
         };
         Projects::kept_as(&changed);
@@ -4441,5 +4512,112 @@ mod tests {
             },
         );
         assert_eq!(failed.unwrap_err(), "that project has no open worktree");
+    }
+
+    #[test]
+    fn revive_worktree_reopens_a_closed_clone_worktree_with_its_view_name_and_arrangement() {
+        use api::change_projects_request::{Change as Asked, ReviveView};
+
+        let ask = Ask::of_api(Asked::ReviveView(ReviveView {}), |_| {
+            panic!("spot must not run")
+        })
+        .unwrap();
+        assert!(matches!(ask, Ask::ReviveView));
+
+        let mut projects = Projects::default();
+        let lune = clone(&mut projects, "/w/lune", &["main", "feat"]);
+        let feat = at(&projects, "/w/lune/feat").unwrap();
+        assert_eq!(
+            projects.project_of(lune).unwrap().subfolder(feat),
+            Some(&tree("feat"))
+        );
+        assert_eq!(
+            projects
+                .project_of(lune)
+                .unwrap()
+                .worktree_at(&tree("feat")),
+            Some(feat)
+        );
+        let first_view = layout::Leaf::id(
+            projects
+                .find(feat)
+                .unwrap()
+                .1
+                .layout()
+                .views()
+                .next()
+                .unwrap(),
+        );
+        (projects, _) = change(&projects, Change::Close { view: first_view }).unwrap();
+        assert!(projects.find(feat).is_none());
+        assert_eq!(
+            projects
+                .project_of(lune)
+                .unwrap()
+                .worktree_at(&tree("feat")),
+            None
+        );
+
+        let revived_view = ViewId::of(99).unwrap();
+        let browser = View::Browser(Browser::new(
+            revived_view,
+            Some(BrowserUrl::parse("https://example.com").unwrap()),
+        ));
+        let Made::Worktree(reopened) = add(
+            &mut projects,
+            Change::ReviveWorktree {
+                project: lune,
+                subfolder: tree("feat"),
+                name: Some(name("feature work")),
+                arranged: Some(Arranged::Panes),
+                view: browser,
+            },
+        ) else {
+            panic!("reviving a closed clone worktree makes a worktree");
+        };
+        let (proj, wt) = projects.find(reopened).unwrap();
+        assert_eq!(proj.id(), lune);
+        assert_eq!(proj.subfolder(reopened), Some(&tree("feat")));
+        assert_eq!(proj.worktree_at(&tree("feat")), Some(reopened));
+        assert_eq!(wt.renamed(), Some(&name("feature work")));
+        assert_eq!(wt.layout().arranged(), Some(Arranged::Panes));
+        assert_eq!(wt.layout().last_focus(), Some(revived_view));
+
+        let duplicate = change(
+            &projects,
+            Change::ReviveWorktree {
+                project: lune,
+                subfolder: tree("feat"),
+                name: None,
+                arranged: None,
+                view: View::Review(ViewId::of(100).unwrap()),
+            },
+        );
+        assert!(duplicate.unwrap_err().contains("already holds a worktree"));
+
+        let taken_id = change(
+            &projects,
+            Change::ReviveWorktree {
+                project: lune,
+                subfolder: tree("other"),
+                name: None,
+                arranged: None,
+                view: View::Review(revived_view),
+            },
+        );
+        assert!(taken_id.unwrap_err().contains("is taken"));
+
+        let plain = project(&mut projects, "/w/plain");
+        let in_plain = change(
+            &projects,
+            Change::ReviveWorktree {
+                project: plain,
+                subfolder: tree("sub"),
+                name: None,
+                arranged: None,
+                view: View::Welcome(ViewId::of(101).unwrap()),
+            },
+        );
+        assert!(in_plain.unwrap_err().contains("holds no worktree"));
     }
 }

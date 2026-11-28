@@ -97,6 +97,7 @@ each action by name. When they ask you for one, tell them which:
   start page) beside the view they are on.
 - "close the view", "close the worktree" and "close the project" end the
   shells and agents in their views.
+- "Revive last view" (`Super T`) reopens the most recently closed view.
 - "/thermo-nuclear-review", "/tigerstyle" and
   "/make-illegal-states-unrepresentable" start an agent on that skill beside
   the view they are on. "Search skills" finds any other skill.

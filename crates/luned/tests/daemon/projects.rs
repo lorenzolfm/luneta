@@ -43,7 +43,7 @@ pub fn made(host: &Host, change: Change) -> Result<Option<Made>, Status> {
     answered_on(host, None, change).map(|answered| answered.made)
 }
 
-fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {
+pub fn answered_on(host: &Host, on: Option<&str>, change: Change) -> Result<Answered, Status> {
     let folder = folder_in(host.runtime.path()).expect("no daemon has made its folder");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

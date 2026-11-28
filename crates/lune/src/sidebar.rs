@@ -2796,6 +2796,10 @@ impl Sidebar {
         }
     }
 
+    pub fn lit_machine(&self) -> Option<Machine> {
+        self.lit_spot().map(Spot::machine)
+    }
+
     pub fn listing(&self) -> Listing {
         let here = self.whereabouts();
         let (away, this) = (self.away.clone(), self.this.clone());
@@ -11422,6 +11426,7 @@ mod tests {
             " BS   back a group",
             " Ctrl a       Sidebar or views",
             " Super k      Pick an action",
+            " Super T      Revive last view",
             " Alt Shift u  Stop reading",
         ] {
             assert!(

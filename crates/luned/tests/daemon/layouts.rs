@@ -12,9 +12,9 @@ use lune_waits::{Patience, QUIET, Span, eventually, eventually_showing, shell};
 use luned::Daemon;
 use luned::api::change_projects_request::{
     Bring, Change, CloseProject, CloseView, CloseWorktree, OpenBrowser, RenameTerminal,
-    open_browser,
+    RenameWorktree, ReviveView, open_browser,
 };
-use luned::api::change_projects_response::Made;
+use luned::api::change_projects_response::{Made, Opened};
 use luned::api::projects::Held;
 use luned::api::show_request::{self, Event, Hello, focus, r#move, open, resize};
 use luned::api::show_response::{self, Laid, View, view::Found};
@@ -3904,5 +3904,366 @@ fn show_refuses_non_monotonic_asked_numbers_and_awaited_size_while_stranded() {
             }
             other => panic!("expected refusal for awaited size while stranded, got {other:?}"),
         }
+    });
+}
+
+fn revive_view(host: &Host) -> Result<(Made, u64), Status> {
+    let answered = projects::answered_on(host, None, Change::ReviveView(ReviveView {}))?;
+    let made = answered.made.expect("revive returns a worktree");
+    let Some(Opened::View(view)) = answered.opened else {
+        panic!("revive returns a view id, got {:?}", answered.opened);
+    };
+    Ok((made, view))
+}
+
+#[test]
+fn revive_view_reopens_closed_views_in_lifo_order_preserving_kind_name_and_cwd() {
+    let owned = Owned::new();
+    let folder = work_folder(&owned);
+    let sub = folder.join("nested");
+    fs::create_dir(&sub).unwrap();
+    let worktree = worktree(&owned.host, project(&owned.host, &folder, None), &folder);
+    let mut shown = Shown::new(&owned, worktree, 100, 30);
+
+    let empty = revive_view(&owned.host).unwrap_err();
+    assert_eq!(empty.code(), Code::InvalidArgument);
+    assert!(
+        empty.message().contains("nothing closed to revive"),
+        "{empty}"
+    );
+
+    let keep_open = shown.open();
+
+    let said = r#"printf '\033]7;file://localhost%s\007' "$PWD""#;
+    let line = format!("cd '{}' && {said} && exec sleep 600", sub.display());
+    let terminal_id = shown.open_running(&["sh", "-c", &line]);
+    let terminal_key = shown
+        .until("terminal has a key", |laid| {
+            laid.views
+                .iter()
+                .find(|v| v.id == terminal_id)
+                .and_then(key)
+                .is_some()
+        })
+        .views
+        .into_iter()
+        .find(|v| v.id == terminal_id)
+        .and_then(|v| key(&v))
+        .unwrap();
+    asked(
+        &owned.host,
+        Change::RenameTerminal(RenameTerminal {
+            terminal: terminal_id,
+            to: Some("build logs".to_owned()),
+        }),
+    )
+    .unwrap();
+    eventually("terminal cwd moves into nested folder", || {
+        let watched_list = watched(&owned, worktree);
+        let entry = watched_list.iter().find(|t| t.id == terminal_id)?;
+        (entry.folder == sub.to_str().unwrap()).then_some(())
+    });
+
+    shown.ask(Event::Browser(show_request::Browser {
+        url: Some("https://example.com/docs".to_owned()),
+    }));
+    let browser_id = shown
+        .until("browser opens", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Browser(_))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Browser(_))).then_some(v.id))
+        .unwrap();
+
+    shown.ask(Event::Review(()));
+    let review_id = shown
+        .until("review opens", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Review(()))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Review(()))).then_some(v.id))
+        .unwrap();
+
+    shown.ask(Event::Welcome(()));
+    let welcome_id = shown
+        .until("welcome opens", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Welcome(()))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Welcome(()))).then_some(v.id))
+        .unwrap();
+
+    shown.ask(Event::Close(browser_id));
+    shown.until("browser closed", |laid| {
+        !laid.views.iter().any(|v| v.id == browser_id)
+    });
+    shown.ask(Event::Close(review_id));
+    shown.until("review closed", |laid| {
+        !laid.views.iter().any(|v| v.id == review_id)
+    });
+    shown.ask(Event::Close(welcome_id));
+    shown.until("welcome closed", |laid| {
+        !laid.views.iter().any(|v| v.id == welcome_id)
+    });
+    asked(
+        &owned.host,
+        Change::CloseView(CloseView {
+            terminal: Some(terminal_key),
+        }),
+    )
+    .unwrap();
+    shown.until("terminal closed", |laid| {
+        laid.views.len() == 1 && laid.views[0].id == keep_open
+    });
+
+    let (made_term, revived_term) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_term, Made::Found(worktree));
+    assert_ne!(revived_term, terminal_id);
+    let laid = shown.until("revived terminal is focused with a live key", |laid| {
+        focused_of(laid) == Some(revived_term)
+            && laid
+                .views
+                .iter()
+                .find(|v| v.id == revived_term)
+                .and_then(key)
+                .is_some()
+    });
+    assert!(laid.views.iter().any(|v| v.id == revived_term));
+    eventually("revived terminal keeps its name and nested cwd", || {
+        let watched_list = watched(&owned, worktree);
+        let entry = watched_list.iter().find(|t| t.id == revived_term)?;
+        (entry.name.as_deref() == Some("build logs") && entry.folder == sub.to_str().unwrap())
+            .then_some(())
+    });
+
+    let (made_welcome, revived_welcome) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_welcome, Made::Found(worktree));
+    shown.until("revived welcome is focused", |laid| {
+        focused_of(laid) == Some(revived_welcome)
+            && laid
+                .views
+                .iter()
+                .any(|v| v.id == revived_welcome && matches!(v.found, Some(Found::Welcome(()))))
+    });
+
+    let (made_review, revived_review) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_review, Made::Found(worktree));
+    shown.until("revived review is focused", |laid| {
+        focused_of(laid) == Some(revived_review)
+            && laid
+                .views
+                .iter()
+                .any(|v| v.id == revived_review && matches!(v.found, Some(Found::Review(()))))
+    });
+
+    let (made_browser, revived_browser) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_browser, Made::Found(worktree));
+    shown.until("revived browser keeps its url and is focused", |laid| {
+        focused_of(laid) == Some(revived_browser)
+            && laid.views.iter().any(|v| {
+                v.id == revived_browser
+                    && matches!(
+                        &v.found,
+                        Some(Found::Browser(browser))
+                            if browser.url.as_deref() == Some("https://example.com/docs")
+                    )
+            })
+    });
+
+    let empty_again = revive_view(&owned.host).unwrap_err();
+    assert_eq!(empty_again.code(), Code::InvalidArgument);
+    assert!(
+        empty_again.message().contains("nothing closed to revive"),
+        "{empty_again}"
+    );
+}
+
+#[test]
+fn revive_view_reopens_closed_clone_worktree_and_skips_deleted_worktree() {
+    let owned = Owned::new();
+    let (_, main_wt, two_wt) = two_in_a_clone(&owned, "revive-clone");
+    let home = fs::canonicalize(owned.host.home.path()).unwrap();
+    let two_dir = home.join("revive-clone").join("two");
+
+    asked(
+        &owned.host,
+        Change::RenameWorktree(RenameWorktree {
+            worktree: two_wt,
+            to: Some("task two".to_owned()),
+        }),
+    )
+    .unwrap();
+    let mut shown_two = Shown::new(&owned, two_wt, 100, 30);
+    shown_two.arrange(Arrangement::Panes);
+    let only_view = shown_two.terminals()[0];
+    shown_two.ask(Event::Close(only_view));
+    assert_eq!(
+        shown_two.until_left(),
+        two_wt,
+        "closing the last view removes a clone worktree"
+    );
+    eventually("closed clone worktree is gone from host", || {
+        watched_worktree(&owned, two_wt).is_none().then_some(())
+    });
+
+    let (made, revived_first) = revive_view(&owned.host).unwrap();
+    let Made::Worktree(reopened_wt) = made else {
+        panic!("expected Made::Worktree, got {made:?}");
+    };
+    assert_ne!(reopened_wt, two_wt);
+    let mut shown_reopened = Shown::new(&owned, reopened_wt, 100, 30);
+    shown_reopened.until(
+        "reopened clone worktree holds revived view in panes",
+        |laid| {
+            focused_of(laid) == Some(revived_first)
+                && matches!(laid.shown, Some(show_response::laid::Shown::Tiled(_)))
+                && laid
+                    .views
+                    .iter()
+                    .find(|v| v.id == revived_first)
+                    .and_then(key)
+                    .is_some()
+        },
+    );
+    eventually("reopened clone worktree keeps its rename", || {
+        let wt = watched_worktree(&owned, reopened_wt)?;
+        (wt.name == "task two" && wt.renamed).then_some(())
+    });
+
+    let second_view = shown_reopened.open();
+    asked(
+        &owned.host,
+        Change::CloseWorktree(CloseWorktree {
+            worktree: reopened_wt,
+            seen: vec![revived_first, second_view],
+        }),
+    )
+    .unwrap();
+    assert_eq!(shown_reopened.until_left(), reopened_wt);
+
+    let (made_a, view_a) = revive_view(&owned.host).unwrap();
+    let Made::Worktree(reopened_again) = made_a else {
+        panic!("expected Made::Worktree, got {made_a:?}");
+    };
+    let (made_b, view_b) = revive_view(&owned.host).unwrap();
+    assert_eq!(
+        made_b,
+        Made::Found(reopened_again),
+        "second revive puts the other closed view into the same reopened worktree"
+    );
+    assert_ne!(view_a, view_b);
+
+    let mut shown_main = Shown::new(&owned, main_wt, 100, 30);
+    shown_main.ask(Event::Welcome(()));
+    let main_welcome = shown_main
+        .until("welcome opened in main", |laid| {
+            laid.views
+                .iter()
+                .any(|v| matches!(v.found, Some(Found::Welcome(()))))
+        })
+        .views
+        .into_iter()
+        .find_map(|v| matches!(v.found, Some(Found::Welcome(()))).then_some(v.id))
+        .unwrap();
+    shown_main.ask(Event::Close(main_welcome));
+    shown_main.until("welcome closed in main", |laid| {
+        !laid.views.iter().any(|v| v.id == main_welcome)
+    });
+
+    asked(
+        &owned.host,
+        Change::CloseWorktree(CloseWorktree {
+            worktree: reopened_again,
+            seen: vec![view_a, view_b],
+        }),
+    )
+    .unwrap();
+    eventually("reopened_again worktree is gone", || {
+        watched_worktree(&owned, reopened_again)
+            .is_none()
+            .then_some(())
+    });
+    fs::remove_dir_all(&two_dir).unwrap();
+
+    let (skipped_to, revived_welcome) = revive_view(&owned.host).unwrap();
+    assert_eq!(
+        skipped_to,
+        Made::Found(main_wt),
+        "deleted clone worktree entries are skipped to revive the previous valid view"
+    );
+    shown_main.until(
+        "main welcome view revived after skipping deleted worktree",
+        |laid| {
+            focused_of(laid) == Some(revived_welcome)
+                && laid
+                    .views
+                    .iter()
+                    .any(|v| v.id == revived_welcome && matches!(v.found, Some(Found::Welcome(()))))
+        },
+    );
+}
+
+#[test]
+fn revive_view_reopens_terminals_that_ended_in_mux() {
+    let owned = Owned::new();
+    let worktree = worktree_in_home(&owned);
+    let mut shown = Shown::new(&owned, worktree, 80, 24);
+    let first = shown.open();
+    let second = shown.open();
+    eventually("both terminals are seen running before ending", || {
+        let watched_list = watched(&owned, worktree);
+        [first, second]
+            .iter()
+            .all(|id| {
+                watched_list
+                    .iter()
+                    .any(|t| t.id == *id && matches!(t.state, Some(terminal::State::Running(_))))
+            })
+            .then_some(())
+    });
+    let laid = shown.until("both terminals are laid out", |laid| laid.views.len() == 2);
+    closed_outside(&owned, &laid, second);
+    let laid = shown.until("second ended terminal leaves layout", |laid| {
+        laid.views.len() == 1
+    });
+    closed_outside(&owned, &laid, first);
+    shown.until("last ended terminal empties layout", |laid| {
+        laid.views.is_empty()
+    });
+
+    let (made_first, revived_first) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_first, Made::Found(worktree));
+    assert_ne!(revived_first, first);
+    shown.until("first revived terminal opens and is live", |laid| {
+        focused_of(laid) == Some(revived_first)
+            && laid
+                .views
+                .iter()
+                .find(|v| v.id == revived_first)
+                .and_then(key)
+                .is_some()
+    });
+
+    let (made_second, revived_second) = revive_view(&owned.host).unwrap();
+    assert_eq!(made_second, Made::Found(worktree));
+    assert_ne!(revived_second, second);
+    shown.until("second revived terminal opens and is live", |laid| {
+        laid.views.len() == 2
+            && focused_of(laid) == Some(revived_second)
+            && laid
+                .views
+                .iter()
+                .find(|v| v.id == revived_second)
+                .and_then(key)
+                .is_some()
     });
 }
